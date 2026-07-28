@@ -17,6 +17,8 @@ _log = logging.getLogger(__name__)
 
 _TERMINAL_STATUSES = frozenset({"done", "archived", "failed", "cancelled"})
 CONFLICT_FIXER_FAILED_EVENT = "conflict_fixer_failed"
+LANE_SCOPE_FIXER_FAILED_EVENT = "lane_scope_fixer_failed"
+FIXER_FAILURE_PUBLISH_FAILED_EVENT = "fixer_failure_publish_failed"
 
 
 def _payload_dict(raw: object) -> dict[str, Any]:
@@ -55,25 +57,10 @@ def is_settled_fixer_card(conn: sqlite3.Connection, task_id: str) -> bool:
     status = str(row["status"] or "")
     if status in _TERMINAL_STATUSES:
         return True
-    if status != "blocked":
-        return False
-
-    event_ids = {
-        event["kind"]: int(event["id"])
-        for event in conn.execute(
-            "SELECT kind, MAX(id) AS id FROM task_events "
-            "WHERE task_id = ? AND kind IN ('claimed', 'gave_up') "
-            "GROUP BY kind",
-            (task_id,),
-        ).fetchall()
-    }
-    claimed_id = event_ids.get("claimed")
-    gave_up_id = event_ids.get("gave_up")
-    return (
-        claimed_id is not None
-        and gave_up_id is not None
-        and gave_up_id > claimed_id
-    )
+    # A blocked fixer can no longer make progress, independently of why it was
+    # blocked. Its operator hold remains untouched; this only releases the
+    # one-at-a-time fixer guard so a separately routed replacement may proceed.
+    return status == "blocked"
 
 
 def _matching_conflict_fixer_attempts(
@@ -128,6 +115,119 @@ def _failure_event_exists(
     return False
 
 
+def _lane_failure_event_exists(
+    conn: sqlite3.Connection,
+    *,
+    parent_id: str,
+    fingerprint: str,
+    attempt: int,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? ORDER BY id DESC",
+        (parent_id, LANE_SCOPE_FIXER_FAILED_EVENT),
+    ).fetchall()
+    for row in rows:
+        payload = _payload_dict(row["payload"])
+        try:
+            payload_attempt = int(payload.get("attempt"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            str(payload.get("parent_id") or "") == parent_id
+            and str(payload.get("fingerprint") or "") == fingerprint
+            and payload_attempt == attempt
+        ):
+            return True
+    return False
+
+
+def _record_failure_publish_error(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    exc: Exception,
+) -> bool:
+    """Leave a durable receipt when a fixer wake path itself fails."""
+    from hermes_cli import kanban_db as kb
+
+    payload = {
+        "task_id": task_id,
+        "source": "on_fixer_card_failed",
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, FIXER_FAILURE_PUBLISH_FAILED_EVENT, payload)
+    return True
+
+
+def _on_lane_scope_fixer_failed(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    outcome: str,
+    blocked: bool,
+) -> bool:
+    """Record and wake the bounded replacement path for a lane-scope fixer."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_lane_fixer import (
+        LANE_FIXER_FOR_EVENT,
+        maybe_route_lane_scope_fixer,
+    )
+
+    marker = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = ? ORDER BY id DESC LIMIT 1",
+        (task_id, LANE_FIXER_FOR_EVENT),
+    ).fetchone()
+    if marker is None:
+        return False
+    marker_payload = _payload_dict(marker["payload"])
+    parent_id = str(marker_payload.get("parent_id") or "").strip()
+    fingerprint = str(marker_payload.get("fingerprint") or "").strip()
+    expected_lane = str(marker_payload.get("expected_lane") or "").strip()
+    paths = marker_payload.get("violating_paths")
+    violating_paths = [str(path) for path in paths] if isinstance(paths, list) else []
+    try:
+        attempt = int(marker_payload.get("attempt"))
+    except (TypeError, ValueError):
+        return False
+    if not parent_id or not fingerprint or not expected_lane or attempt < 1:
+        return False
+
+    payload = {
+        "child_id": task_id,
+        "parent_id": parent_id,
+        "fingerprint": fingerprint,
+        "attempt": attempt,
+        "outcome": outcome,
+        "blocked": bool(blocked),
+    }
+    wrote_event = False
+    with kb.write_txn(conn):
+        if not _lane_failure_event_exists(
+            conn,
+            parent_id=parent_id,
+            fingerprint=fingerprint,
+            attempt=attempt,
+        ):
+            kb._append_event(conn, task_id, LANE_SCOPE_FIXER_FAILED_EVENT, payload)
+            kb._append_event(conn, parent_id, LANE_SCOPE_FIXER_FAILED_EVENT, payload)
+            wrote_event = True
+
+    parent = conn.execute("SELECT * FROM tasks WHERE id = ?", (parent_id,)).fetchone()
+    replacement_id = None
+    if parent is not None:
+        replacement_id = maybe_route_lane_scope_fixer(
+            conn,
+            parent,
+            violating_paths=violating_paths,
+            expected_lane=expected_lane,
+        )
+    return wrote_event or replacement_id is not None
+
+
 def on_fixer_card_failed(
     conn: sqlite3.Connection,
     task_id: str,
@@ -135,10 +235,19 @@ def on_fixer_card_failed(
     outcome: str,
     blocked: bool,
 ) -> bool:
-    """Publish one chain-directed failure signal for a conflict fixer."""
+    """Publish and wake bounded fixer failure paths without swallowing errors."""
     from hermes_cli import kanban_db as kb
 
     try:
+        from hermes_cli.kanban_lane_fixer import is_lane_scope_fixer_task
+
+        if is_lane_scope_fixer_task(conn, task_id):
+            return _on_lane_scope_fixer_failed(
+                conn,
+                task_id,
+                outcome=outcome,
+                blocked=blocked,
+            )
         if not kb._is_conflict_fixer_task(conn, task_id):
             return False
         marker = conn.execute(
@@ -217,13 +326,14 @@ def on_fixer_card_failed(
                     now=int(time.time()),
                 )
         return wrote_event or escalated
-    except Exception:
-        _log.warning(
-            "could not publish conflict-fixer failure for %s",
-            task_id,
-            exc_info=True,
-        )
-        return False
+    except Exception as exc:
+        try:
+            return _record_failure_publish_error(conn, task_id=task_id, exc=exc)
+        except Exception:
+            _log.exception(
+                "could not record fixer wake-path failure for %s", task_id
+            )
+            raise
 
 
 def is_integration_park(*, reason: object, block_kind: object) -> bool:

@@ -4914,6 +4914,13 @@ CONFLICT_FIXER_IDEM_PREFIX = "conflict-fixer:"
 CONFLICT_FIXER_MAX_ATTEMPTS = 2
 CONFLICT_FIXER_BACKOFF_SECONDS = 300
 CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
+# Fixer runtime extensions are deliberately confined to conflict/lane-scope
+# fixers.  A fresh heartbeat alone is not sufficient evidence of progress;
+# each extension also needs a newly committed worktree head.
+CONFLICT_FIXER_RUNTIME_HEARTBEAT_WINDOW_SECONDS = 300
+CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS = 300
+CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP = 3600
+FIXER_RUNTIME_EXTENSION_GRANTED_EVENT = "fixer_runtime_extension_granted"
 
 
 def _conflict_fingerprint(reason: str) -> str:
@@ -22404,6 +22411,126 @@ def heartbeat_live_claude_cli_workers(
     return beat
 
 
+def _fixer_runtime_extension_payload(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    now: int,
+    elapsed: int,
+) -> Optional[dict[str, Any]]:
+    """Return auditable extension evidence, or ``None`` when a fixer timed out.
+
+    This is intentionally fail-closed: if the worktree head or its claim-time
+    baseline cannot be proved, the ordinary runtime timeout remains in effect.
+    """
+    task_id = str(row["id"])
+    from hermes_cli.kanban_lane_fixer import is_lane_scope_fixer_task
+
+    if not (
+        _is_conflict_fixer_task(conn, task_id)
+        or is_lane_scope_fixer_task(conn, task_id)
+    ):
+        return None
+
+    heartbeat_at = row["last_heartbeat_at"]
+    run_id = row["current_run_id"]
+    if (
+        heartbeat_at is None
+        or run_id is None
+        or now - int(heartbeat_at) > CONFLICT_FIXER_RUNTIME_HEARTBEAT_WINDOW_SECONDS
+    ):
+        return None
+
+    base_limit = int(row["max_runtime_seconds"])
+    if base_limit >= CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP:
+        return None
+
+    latest_extension = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, int(run_id), FIXER_RUNTIME_EXTENSION_GRANTED_EVENT),
+    ).fetchone()
+    baseline_sha = (row["pre_run_commit_sha"] or "").strip()
+    extension_count = 0
+    if latest_extension is not None:
+        try:
+            baseline_sha = str(json.loads(latest_extension["payload"])["commit_sha"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        extension_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM task_events "
+                "WHERE task_id = ? AND run_id = ? AND kind = ?",
+                (task_id, int(run_id), FIXER_RUNTIME_EXTENSION_GRANTED_EVENT),
+            ).fetchone()[0]
+        )
+    if not baseline_sha:
+        return None
+
+    workspace_path = row["workspace_path"]
+    current_sha = _git_head_sha_for_workspace(workspace_path)
+    if not current_sha or current_sha == baseline_sha:
+        return None
+    try:
+        descendant = subprocess.run(
+            ["git", "-C", str(workspace_path), "merge-base", "--is-ancestor", baseline_sha, current_sha],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not descendant:
+        return None
+
+    prior_limit = min(
+        CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP,
+        base_limit + extension_count * CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS,
+    )
+    new_limit = min(
+        CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP,
+        prior_limit + CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS,
+    )
+    if new_limit <= elapsed:
+        return None
+    return {
+        "reason": "fresh_heartbeat_and_new_commit",
+        "heartbeat_at": int(heartbeat_at),
+        "heartbeat_age_seconds": now - int(heartbeat_at),
+        "commit_sha": current_sha,
+        "prior_limit_seconds": prior_limit,
+        "new_limit_seconds": new_limit,
+        "maximum_limit_seconds": CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP,
+        "extension_seconds": new_limit - prior_limit,
+    }
+
+
+def _fixer_runtime_effective_limit(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> int:
+    """Return this run's persisted fixer deadline without extending it again."""
+    run_id = row["current_run_id"]
+    base_limit = int(row["max_runtime_seconds"])
+    if run_id is None:
+        return base_limit
+    extension_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = ?",
+            (row["id"], int(run_id), FIXER_RUNTIME_EXTENSION_GRANTED_EVENT),
+        ).fetchone()[0]
+    )
+    if not extension_count:
+        return base_limit
+    return min(
+        CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP,
+        base_limit + extension_count * CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS,
+    )
+
+
 def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
@@ -22428,7 +22555,8 @@ def enforce_max_runtime(
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.current_run_id, "
+        "       t.last_heartbeat_at, t.workspace_path, r.pre_run_commit_sha "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -22445,6 +22573,33 @@ def enforce_max_runtime(
         # must be measured from the active task_runs row when present.
         elapsed = now - int(row["active_started_at"])
         if elapsed < int(row["max_runtime_seconds"]):
+            continue
+
+        extension_payload = _fixer_runtime_extension_payload(
+            conn, row, now=now, elapsed=elapsed
+        )
+        if extension_payload is not None:
+            with write_txn(conn):
+                current = conn.execute(
+                    "SELECT status, claim_lock, current_run_id FROM tasks WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+                if (
+                    current is not None
+                    and current["status"] == "running"
+                    and current["claim_lock"] == row["claim_lock"]
+                    and current["current_run_id"] == row["current_run_id"]
+                ):
+                    _append_event(
+                        conn,
+                        row["id"],
+                        FIXER_RUNTIME_EXTENSION_GRANTED_EVENT,
+                        extension_payload,
+                        run_id=int(row["current_run_id"]),
+                    )
+                    continue
+
+        if elapsed < _fixer_runtime_effective_limit(conn, row):
             continue
 
         pid = int(row["worker_pid"])

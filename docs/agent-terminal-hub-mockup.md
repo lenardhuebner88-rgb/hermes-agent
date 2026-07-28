@@ -231,10 +231,10 @@ plans directory. After that, reuse existing PlanSpecHub APIs:
 Relevant commands:
 
 ```bash
-/home/piet/.hermes/hermes-agent/.venv/bin/hermes plan validate <planspec.md>
-/home/piet/.hermes/hermes-agent/.venv/bin/hermes plan ingest <planspec.md> --json
-/home/piet/.hermes/hermes-agent/.venv/bin/hermes kanban create "Title" --body "..." --triage --json
-/home/piet/.hermes/hermes-agent/.venv/bin/hermes kanban dispatch --dry-run --json
+/home/piet/.hermes/hermes-agent/venv/bin/hermes plan validate <planspec.md>
+/home/piet/.hermes/hermes-agent/venv/bin/hermes plan ingest <planspec.md> --json
+/home/piet/.hermes/hermes-agent/venv/bin/hermes kanban create "Title" --body "..." --triage --json
+/home/piet/.hermes/hermes-agent/venv/bin/hermes kanban dispatch --dry-run --json
 ```
 
 Safe defaults:
