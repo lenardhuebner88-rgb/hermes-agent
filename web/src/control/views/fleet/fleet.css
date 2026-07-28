@@ -2429,7 +2429,7 @@ body:has([data-fleet-theme]) [data-control] {
 
 .fleet-boardtab-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--fleet-space-2);
   /* Desktop-Breitenkappe (L3-Spec 3.3): Signalabstand bleibt lesbar statt
    * Kante-zu-Kante-Leere; unter 960px ohne Effekt. */
@@ -2469,6 +2469,7 @@ body:has([data-fleet-theme]) [data-control] {
   margin-top: 4px;
   color: var(--fleet-t1);
   font: 600 18px/1 var(--hc-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .fleet-boardtab-metrics small {
@@ -2490,7 +2491,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-views::-webkit-scrollbar { display: none; }
 
 .fleet-boardtab-register {
-  border-bottom: 1px solid var(--fleet-linie);
+  border-bottom: 0;
   /* Scroll-Affordanz wie .fleet-subtabs (L3-Spec, Befund 8): der rechte Rand
    * fadet aus statt das letzte Register mobil hart abzuschneiden. */
   mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
@@ -2556,46 +2557,27 @@ body:has([data-fleet-theme]) [data-control] {
   color: var(--fleet-t1);
 }
 
-.fleet-boardtab-filter {
-  display: flex;
+.fleet-boardtab-controls {
+  display: grid;
   gap: var(--fleet-space-2);
-  flex-wrap: wrap;
   position: sticky;
   top: 0;
   z-index: 2;
-  /* L3-Spec 3.3 (Befund 1): --fleet-bg war undefiniert → die Leiste war
-   * transparent und Listeninhalt schimmerte durch. Jetzt opaker Surface +
-   * Blur + Bottom-Hairline (transluzente Toolbar nach Vercel-Muster). */
   background: var(--fleet-bg);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--fleet-linie);
   padding-bottom: var(--fleet-space-2);
 }
 
-.fleet-boardtab-more {
-  position: relative;
+.fleet-boardtab-filter {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--fleet-space-2);
 }
-
-.fleet-boardtab-more summary {
-  display: flex;
-  min-height: 32px;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--fleet-linie-stark);
-  border-radius: var(--radius-card);
-  background: var(--fleet-karte-hi);
-  padding: 0 9px;
-  color: var(--fleet-t2);
-  cursor: pointer;
-  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
-  list-style: none;
-}
-
-.fleet-boardtab-more summary::-webkit-details-marker { display: none; }
-.fleet-boardtab-more[open] .fleet-boardtab-select { margin-top: 5px; }
 
 .fleet-boardtab-suche {
-  flex: 1 1 140px;
+  width: 100%;
+  min-height: 38px;
   min-width: 0;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
@@ -2618,8 +2600,9 @@ body:has([data-fleet-theme]) [data-control] {
 }
 
 .fleet-boardtab-select {
-  flex: 0 1 auto;
+  width: 100%;
   min-width: 0;
+  min-height: 38px;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
   border-radius: var(--radius-card);
@@ -3214,33 +3197,46 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-load-more:disabled { cursor: wait; opacity: 0.5; }
 
 .fleet-boardtab-group {
-  border: 1px solid var(--fleet-linie);
-  border-radius: var(--radius-panel);
-  overflow: hidden;
   /* Desktop-Breitenkappe (L3-Spec 3.3, Befund 14). */
   max-width: 960px;
 }
-
+/* BV-2/AC-6 (Vorlage c_ee80d956/e_ca1d1758): Farbmarker-Balken + farbiger
+ * Status + Zähler in Mono. Der Kopf liegt frei über dem Karten-Rahmen und
+ * klebt beim Scrollen unter der Steuerleiste (Offset führt BoardTab per
+ * --fleet-boardtab-controls-h nach; auf Mobile ist die Leiste static → 0). */
 .fleet-boardtab-group-header {
+  position: sticky;
+  top: var(--fleet-boardtab-controls-h, 0px);
+  z-index: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--fleet-karte-hi);
-  border-bottom: 1px solid var(--fleet-linie);
-  font: 600 11px/1 var(--hc-font-sans);
-  color: var(--fleet-t1);
+  gap: 6px;
+  padding: 6px 2px 4px;
+  background: var(--fleet-bg);
+  font: 650 11px/1 var(--hc-font-sans);
 }
-
+.fleet-boardtab-group-mark {
+  width: 3px;
+  height: 11px;
+  border-radius: 1px;
+  background: currentColor;
+  flex-shrink: 0;
+}
 .fleet-boardtab-status {
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.14em;
 }
-
 .fleet-boardtab-count {
   margin-left: auto;
   font: 600 var(--text-micro)/1.3 var(--hc-font-mono);
   color: var(--fleet-t3);
+}
+/* BV-2: der Rahmen wandert an die Karten-Box — der klebende Gruppen-Kopf
+ * darf nicht in einem overflow-Kontext sitzen. */
+.fleet-boardtab-group-cards {
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-card);
+  overflow: hidden;
 }
 
 .fleet-boardtab-card {
@@ -3250,12 +3246,13 @@ body:has([data-fleet-theme]) [data-control] {
 
 .fleet-boardtab-card:last-child { border-bottom: none; }
 
+/* BV-2: die Karte zerlegt die Detail-Fläche in Kopf (Kennung) und Meta,
+ * dazwischen liegt der Ketten-Bezug — Form nach Vorlage e_ca1d1758. */
 .fleet-boardtab-row {
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 8px 44px 8px 12px;
   border: none;
   border-bottom: none;
   background: transparent;
@@ -3263,9 +3260,10 @@ body:has([data-fleet-theme]) [data-control] {
   text-align: left;
   font: 600 var(--text-sec)/1.3 var(--hc-font-sans);
   color: var(--fleet-t1);
-  min-height: 44px;
   transition: background-color 120ms ease-out;
 }
+.fleet-boardtab-row-head { padding: 9px 44px 1px 12px; }
+.fleet-boardtab-row-meta { padding: 1px 44px 8px 12px; min-height: 24px; }
 
 .fleet-boardtab-copy {
   position: absolute;
@@ -3314,17 +3312,9 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-row-readonly { cursor: default; }
 .fleet-boardtab-row-readonly:hover,
 .fleet-boardtab-row-readonly:active { background: transparent; }
-.fleet-boardtab-row-selected {
+.fleet-boardtab-card-selected {
   background: var(--color-surface-3);
   box-shadow: inset 3px 0 var(--color-bronze);
-}
-
-.fleet-boardtab-row-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
 }
 
 .fleet-boardtab-title {
@@ -3355,51 +3345,70 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-priority,
 .fleet-boardtab-comments,
 .fleet-boardtab-parents { color: var(--fleet-t3); }
-.fleet-boardtab-chain { color: var(--fleet-puls); }
-.fleet-boardtab-inchain { color: var(--fleet-t3); opacity: 0.72; }
+.fleet-boardtab-children { color: var(--fleet-t3); }
+.fleet-boardtab-cost { color: var(--fleet-amber); }
+.fleet-boardtab-prog { color: var(--fleet-t2); }
 
-/* KF-5: Ketten-Chip — Kennung + Position unter der Kartenzeile; ersetzt den
- * nackten → t_abcd12-Verweis (AC-2). Form bewusst kein Initialen-Kasten
- * (Pill mit Link-Icon + Mono-Label), damit der Chip nicht mit dem
- * Profil-Avatar verwechselt wird (AC-4). Ruhezustand neutral, Hover/Focus
- * Puls = Interaktionsvokabular; nur bestehende Tokens (AC-5). */
-.fleet-boardtab-chainchip {
+/* ── BV-2: Ketten-Bezug (Vorlage c_ee80d956/e_ca1d1758) ──────────────────────
+ * Kleines Stanzkanten-Motiv in der Bildsprache der Laufkarte (LK-1): je
+ * Station ein Segment — zurückgelegt = matter Stahl (--color-stamp), eigenes
+ * Glied = Live-Bronze (--color-live), offen = ausgestanzte Kontur. Durch Form
+ * klar vom Statuschip und vom Lane-Kürzel unterschieden (AC-2). */
+.fleet-boardtab-kref {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 1px 44px 3px 12px;
+  min-height: 22px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: 500 var(--text-micro)/1.3 var(--hc-font-mono);
+  color: var(--fleet-t2);
+  transition: background-color 120ms ease-out;
+}
+.fleet-boardtab-kref:hover { background: var(--fleet-karte-hi); color: var(--fleet-t1); }
+.fleet-boardtab-kref:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: -2px;
+}
+.fleet-boardtab-kref:disabled { cursor: default; }
+.fleet-boardtab-kref:disabled:hover { background: transparent; color: var(--fleet-t2); }
+.fleet-boardtab-kref-stanz {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: calc(100% - 59px);
-  margin: -2px 12px 6px 47px;
-  padding: 3px 8px;
-  border: 1px solid var(--fleet-linie);
-  border-radius: var(--radius-card);
-  background: var(--fleet-karte-hi);
-  color: var(--fleet-t2);
-  font: 500 11px/1.3 var(--font-data);
-  cursor: pointer;
-  transition: border-color 120ms ease, color 120ms ease;
+  gap: 2px;
+  flex-shrink: 0;
 }
-.fleet-boardtab-chainchip svg { flex-shrink: 0; }
-.fleet-boardtab-chainchip:hover {
-  border-color: var(--fleet-puls);
-  color: var(--fleet-t1);
+.fleet-boardtab-kref-stanz i {
+  width: 3px;
+  height: 10px;
+  border-radius: 1px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-brand) 45%, transparent);
 }
-.fleet-boardtab-chainchip:focus-visible {
-  outline: none;
-  border-color: var(--fleet-puls);
-  box-shadow: 0 0 0 2px var(--fleet-puls);
+.fleet-boardtab-kref-stanz i.is-done { background: var(--color-stamp); box-shadow: none; }
+.fleet-boardtab-kref-stanz i.is-now {
+  background: var(--color-live);
+  box-shadow: 0 0 5px color-mix(in oklab, var(--color-live) 45%, transparent);
 }
-.fleet-boardtab-chainchip-label {
+.fleet-boardtab-kref-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 22ch;
 }
-.fleet-boardtab-chainchip-pos {
-  flex-shrink: 0;
+.fleet-boardtab-kref-label b { font-weight: 600; color: var(--fleet-t1); }
+/* BV-2/AC-4: Karten ohne Kette sagen das ausdrücklich — ruhig, mono,
+ * Datenfarbe gedimmt. */
+.fleet-boardtab-solo {
+  display: block;
+  padding: 0 44px 8px 12px;
+  font: 500 var(--text-micro)/1.3 var(--hc-font-mono);
   color: var(--fleet-t3);
+  opacity: 0.72;
 }
-.fleet-boardtab-cost { color: var(--fleet-amber); }
-.fleet-boardtab-prog { color: var(--fleet-t2); }
 
 .fleet-boardtab-details {
   display: grid;
@@ -3430,19 +3439,28 @@ body:has([data-fleet-theme]) [data-control] {
 /* Mobile: kein horizontaler Overflow bei 390px */
 @media (max-width: 640px) {
   .fleet-boardtab-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+  .fleet-boardtab-controls,
   .fleet-boardtab-filter {
     gap: 6px;
   }
-  .fleet-boardtab-suche { flex-basis: calc(100% - 88px); }
+  .fleet-boardtab-controls { position: static; }
+  .fleet-boardtab-views {
+    flex-wrap: wrap;
+    mask-image: none;
+    -webkit-mask-image: none;
+    overflow-x: visible;
+  }
+  .fleet-boardtab-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fleet-boardtab-select { font-size: var(--text-micro); }
-  .fleet-boardtab-row { padding: 8px 42px 8px 10px; gap: 7px; }
+  .fleet-boardtab-row { gap: 7px; }
+  .fleet-boardtab-row-head { padding: 8px 42px 1px 10px; }
+  .fleet-boardtab-row-meta { padding: 1px 42px 8px 10px; }
+  .fleet-boardtab-kref { padding: 1px 42px 3px 10px; }
+  .fleet-boardtab-solo { padding: 0 42px 8px 10px; }
   .fleet-boardtab-meta { gap: 6px; }
   .fleet-boardtab-id { max-width: 12ch; }
-  /* KF-5: 390px — Chip bleibt in der Karte, lange Kennungen kuerzen (AC-6). */
-  .fleet-boardtab-chainchip { margin-left: 43px; max-width: calc(100% - 53px); }
-  .fleet-boardtab-chainchip-label { max-width: 13ch; }
   .fleet-boardtab-disclosure { padding-right: 10px; padding-left: 44px; }
   .fleet-plan-tools { align-items: stretch; }
   .fleet-plan-new { flex: 0 0 auto; }
@@ -3470,7 +3488,7 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-skel-kpis {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--fleet-space-2);
 }
 .fleet-skel-kpi {
@@ -3501,7 +3519,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-skel-bar { height: 10px; }
 .fleet-skel-bar-short { width: 55%; }
 @media (max-width: 640px) {
-  .fleet-skel-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fleet-skel-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 /* Listen-Einstieg (M8): gestaffelter Rise nur für die ersten 6 Rows, nur bei
@@ -3668,6 +3686,7 @@ body:has([data-fleet-theme]) [data-control] {
   .fleet-detail-tab,
   .fleet-copy-id,
   .fleet-boardtab-copy,
+  .fleet-boardtab-views button,
   .fleet-boardtab-select,
   .fleet-boardtab-suche {
     min-height: 44px;
