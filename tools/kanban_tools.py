@@ -768,9 +768,7 @@ def _handle_complete(args: dict, **kw) -> str:
             task = kb.get_task(conn, tid)
             if task and task.goal_mode:
                 rejection = check_goal_mode_completion(
-                    task_id=tid,
-                    task_title=task.title,
-                    task_body=task.body,
+                    task=task,
                     handoff_text=(summary or result or ""),
                 )
                 if rejection:

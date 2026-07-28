@@ -1012,11 +1012,24 @@ def goal_judge_available() -> bool:
     return client is not None and bool(model)
 
 
+def _uses_native_review_completion_gate(task: Any) -> bool:
+    """Return whether a task's native review chain replaces the aux judge."""
+    if not (
+        getattr(task, "goal_mode", False)
+        and getattr(task, "kind", None) == "code"
+    ):
+        return False
+
+    # Config parsing and defaults live with the native review-chain code, so
+    # ``kanban.review_gate.code_roles`` remains the single role authority.
+    from hermes_cli.kanban_db import _review_gate_config
+
+    return getattr(task, "assignee", None) in _review_gate_config()["code_roles"]
+
+
 def check_goal_mode_completion(
     *,
-    task_id: str,
-    task_title: str,
-    task_body: Optional[str],
+    task: Any,
     handoff_text: str,
 ) -> Optional[str]:
     """Pre-completion judge gate for ``goal_mode`` tasks (Issue #38367).
@@ -1024,17 +1037,22 @@ def check_goal_mode_completion(
     Shared by the two ``kanban_complete`` surfaces so they can't diverge:
     the ``kanban_complete`` model tool (``tools/kanban_tools.py``) and the
     CLI ``hermes kanban complete`` verb (``hermes_cli/kanban.py``, the same
-    path the documented worker completion instructions invoke). Both callers
-    are responsible for deciding WHEN to invoke this (goal_mode task, and for
-    the CLI additionally: only when the caller is the task's own scoped
-    worker, not an operator override) — this function only implements the
-    judge call + verdict handling once both have decided to gate.
+    path the documented worker completion instructions invoke). The callers
+    still decide whether this is a scoped worker completion; this function
+    applies the shared gate policy to the task row once invoked.
 
-    Returns ``None`` when completion may proceed (judge unreachable — fail
-    open, matching ``judge_goal``'s own fail-open contract — or verdict is
-    ``"done"``), or a human-readable rejection message when the judge says
-    the goal isn't satisfied yet.
+    Returns ``None`` when completion may proceed (the task's native review
+    chain applies, the judge is unreachable — fail open, matching
+    ``judge_goal``'s own fail-open contract — or verdict is ``"done"``), or a
+    human-readable rejection message when the judge says the goal isn't
+    satisfied yet.
     """
+    if _uses_native_review_completion_gate(task):
+        return None
+
+    task_id = task.id
+    task_title = task.title
+    task_body = task.body
     if not goal_judge_available():
         return None
     verdict = "done"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -264,6 +265,17 @@ class TestCheckGoalModeCompletion:
     regression in either caller shows up here even if a caller-specific test
     happens to monkeypatch judge_goal/goal_judge_available away."""
 
+    @staticmethod
+    def _task(*, kind="research", assignee="worker"):
+        return SimpleNamespace(
+            id="t_abc123",
+            title="ship the thing",
+            body="do X",
+            goal_mode=True,
+            kind=kind,
+            assignee=assignee,
+        )
+
     def test_fail_open_when_no_aux_client(self):
         from hermes_cli import goals
 
@@ -272,9 +284,7 @@ class TestCheckGoalModeCompletion:
             return_value=(None, None),
         ):
             rejection = goals.check_goal_mode_completion(
-                task_id="t_abc123",
-                task_title="ship the thing",
-                task_body="do X",
+                task=self._task(),
                 handoff_text="did some stuff",
             )
         assert rejection is None
@@ -298,13 +308,12 @@ class TestCheckGoalModeCompletion:
         ), patch(
             "agent.auxiliary_client.call_llm",
             return_value=fake_client.chat.completions.create.return_value,
-        ):
+        ) as call_llm:
             rejection = goals.check_goal_mode_completion(
-                task_id="t_abc123",
-                task_title="ship the thing",
-                task_body="do X",
+                task=self._task(),
                 handoff_text="did some stuff but not X",
             )
+        call_llm.assert_called_once()
         assert rejection is not None
         assert "Goal completion rejected by judge" in rejection
         assert "missing evidence" in rejection
@@ -329,12 +338,31 @@ class TestCheckGoalModeCompletion:
             return_value=fake_client.chat.completions.create.return_value,
         ):
             rejection = goals.check_goal_mode_completion(
-                task_id="t_abc123",
-                task_title="ship the thing",
-                task_body="do X",
+                task=self._task(),
                 handoff_text="did X with verified evidence",
             )
         assert rejection is None
+
+    def test_skips_judge_for_review_gated_code_task(self, monkeypatch):
+        from hermes_cli import goals
+        from hermes_cli import kanban_db as kb
+
+        monkeypatch.setattr(
+            kb,
+            "_review_gate_config",
+            lambda: {"code_roles": frozenset({"coder"})},
+        )
+        monkeypatch.setattr(goals, "goal_judge_available", lambda: True)
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("judge_goal must not run for review-gated code tasks")
+
+        monkeypatch.setattr(goals, "judge_goal", fail_if_called)
+
+        assert goals.check_goal_mode_completion(
+            task=self._task(kind="code", assignee="coder"),
+            handoff_text="implemented and verified",
+        ) is None
 
 
 # ──────────────────────────────────────────────────────────────────────
