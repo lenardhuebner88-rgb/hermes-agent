@@ -974,6 +974,85 @@ def test_lane_scope_sibling_block_names_only_own_violating_paths(repo, kanban_ho
     assert _git(repo, "rev-parse", info["branch"])
 
 
+def test_lane_scope_ignores_paths_that_only_arrived_by_merging_base(
+    repo, kanban_home,
+):
+    # The live 2026-07-28 pattern: a backend `coder` card runs for hours while
+    # other lanes land frontend work on main, then its chain branch merges main
+    # to catch up. Those foreign web/src/control paths sit inside the two-dot
+    # `pre_run_sha..branch` range, so without the net-vs-base intersection the
+    # card parks on files it never touched (control probe: revert the
+    # intersection and this test goes RED with a lane-scope violation naming
+    # web/src/control/Foreign.tsx).
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="backend slice that catches up with main",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        claimed, materialized, prepared = _claim_and_materialize(conn, task_id)
+        assert prepared is None
+        # The card's own work stays strictly inside the backend lane.
+        _commit_in(
+            materialized.path, "hermes_cli/own.py", "OWN = 1\n",
+            msg="kanban(t_ls_merge): backend slice",
+        )
+        # A foreign lane lands frontend work on main; the card merges it in.
+        _commit_in(
+            repo, "web/src/control/Foreign.tsx",
+            "export const Foreign = 1\n",
+            msg="foreign frontend work landed on main",
+        )
+        _git(materialized.path, "merge", "main", "--no-edit")
+
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged", out
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "own.py").exists()
+
+
+def test_lane_scope_still_blocks_own_frontend_change_after_merging_base(
+    repo, kanban_home,
+):
+    # Guard against the intersection fixing the false park by disarming the
+    # gate: the same merge-main flow, but the card really does touch a
+    # frontend file. It must still park, and name only its own path.
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="backend slice that strays into the frontend",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        _claimed, materialized, _prepared = _claim_and_materialize(conn, task_id)
+        _commit_in(
+            materialized.path, "hermes_cli/own.py", "OWN = 1\n",
+            msg="kanban(t_ls_merge_bad): backend slice",
+        )
+        _commit_in(
+            materialized.path, "web/src/control/Own.tsx",
+            "export const Own = 1\n",
+            msg="kanban(t_ls_merge_bad): stray frontend edit",
+        )
+        _commit_in(
+            repo, "web/src/control/Foreign.tsx",
+            "export const Foreign = 1\n",
+            msg="foreign frontend work landed on main",
+        )
+        _git(materialized.path, "merge", "main", "--no-edit")
+
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked", out
+        assert "lane-scope violation" in out["reason"]
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == ["web/src/control/Own.tsx"]
+        assert "web/src/control/Foreign.tsx" not in blocked[0]["changed_files"]
+
+
 def test_lane_scope_retry_keeps_first_run_basis(repo, kanban_home):
     with kb.connect() as conn:
         task_id = kb.create_task(
