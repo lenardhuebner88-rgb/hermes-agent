@@ -376,3 +376,48 @@ def test_registry_dispatches_task_bound_ui_shot_to_gate_backend(repo, monkeypatc
     assert [(root, route, scenario) for root, _artifact_dir, route, scenario in calls] == [
         (repo.resolve(), "agent-terminals", "terminal_bridge"),
     ]
+
+
+def test_safe_workspace_rejects_plain_dir_with_valueerror(tmp_path):
+    """A directory without .git must fail with ValueError from the
+    worktree guard itself — not with git's CalledProcessError a step
+    later; callers rely on ValueError to refuse the workspace."""
+    from tools import verification_gate_tool as tool
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(ValueError):
+        tool._safe_workspace(plain)
+
+
+def test_safe_workspace_rejects_garbage_gitfile(tmp_path):
+    """A stray .git FILE that git itself does not recognise must be
+    rejected by the rev-parse check — accepting it would run gates in a
+    directory that is not actually a checkout."""
+    from tools import verification_gate_tool as tool
+
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / ".git").write_text("garbage\n", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError):
+        tool._safe_workspace(fake)
+
+
+def test_artifact_dir_requires_both_kanban_ids_to_be_safe(monkeypatch):
+    """The dispatcher fallback needs BOTH task id and run id matching the
+    safe pattern — an empty run id must raise, not build a dangling
+    'verification-t1-' artifact directory."""
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t1")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "")
+    with pytest.raises(ValueError):
+        tool._artifact_dir(None, None)
+
+
+def test_capabilities_advertise_record_only_default():
+    """The capability announcement must keep record_only_default True —
+    flipping it would silently opt every caller into execution."""
+    from tools import verification_gate_tool as tool
+
+    assert tool.capabilities()["record_only_default"] is True
