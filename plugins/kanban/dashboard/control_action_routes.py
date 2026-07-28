@@ -69,13 +69,15 @@ def worker_action_endpoint(
         task_id = run.task_id
 
         if action == "nudge":
-            kanban_db.add_comment(
+            from hermes_cli import kanban_comment_delivery
+            delivery = kanban_comment_delivery.write_comment(
                 conn, task_id, author="control-dashboard",
                 body=(payload.reason or "Operator-Nudge: bitte Status prüfen / weitermachen."),
             )
             log.info("control worker-action=nudge run=%s task=%s", run_id, task_id)
             return {"ok": True, "action": action, "run_id": run_id, "task_id": task_id,
-                    "detail": "Nudge als Kommentar gesetzt (kein Kill)."}
+                    "detail": f"Nudge als Kommentar gesetzt (kein Kill). {delivery.message}",
+                    "delivery": delivery.as_dict()}
 
         if action == "unlock":
             ok = kanban_db.reclaim_task(conn, task_id, reason=(payload.reason or "control unlock"))

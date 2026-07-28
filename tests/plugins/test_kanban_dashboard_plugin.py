@@ -3336,6 +3336,10 @@ def test_add_comment(client):
         json={"body": "how's progress?", "author": "teknium"},
     )
     assert r.status_code == 200
+    delivery = r.json()["delivery"]
+    assert delivery["reaches_current_worker"] is False
+    assert delivery["effective_from"] == "next_worker_brief"
+    assert "nächsten Worker-Brief" in delivery["message"]
 
     r = client.get(f"/api/plugins/kanban/tasks/{t['id']}")
     comments = r.json()["comments"]
