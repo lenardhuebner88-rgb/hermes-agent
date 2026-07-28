@@ -2797,6 +2797,61 @@ def test_autoland_deny_prefix_blocks_allowed_parent_scope(
     assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
 
 
+def test_autoland_deny_prefix_blocks_root_package_lockfile(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch, name="hermes-feature-forge"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "package-lock.json", "denied-root-lockfile")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Deny-Präfix" in ledger
+    assert "package-lock.json" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
+
+
+def test_operator_autoland_deny_prefix_blocks_root_package_lockfile(
+    tmp_path, fake_engine
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    name = "operator-root-lockfile"
+    write_pack(packs_dir, name, "pipeline", repo)
+    state_root = tmp_path / "state"
+    pack_state = state_root / name
+    pack_state.mkdir(parents=True)
+    (pack_state / "overrides.env").write_text(
+        f"AUTOLAND=1\nAUTOLAND_ACK={name}\n", encoding="utf-8"
+    )
+    runner = LoopRunner(load_pack(packs_dir, name), state_root=state_root)
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "package-lock.json", "denied-root-lockfile")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Deny-Präfix" in ledger
+    assert "package-lock.json" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
+
+
 def test_if_web_touched_backend_only_autolands_without_visual_attestation(
     tmp_path, fake_engine, monkeypatch
 ):
