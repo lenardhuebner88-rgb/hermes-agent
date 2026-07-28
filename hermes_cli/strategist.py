@@ -255,11 +255,13 @@ _DIRECTIONLESS: frozenset[str] = frozenset({
     # conflict_fixer (CONFLICT-FIXER-OUTCOME-HONESTY-S1): raw episode buckets
     # behind success_rate_pct, which alone carries the direction. `episodes` is
     # the denominator; `in_flight` is undecided work (it shrinks by finishing
-    # EITHER way, so no direction is defensible); `resolved`/`exhausted`/
-    # `unresolved_by_fixer` are cumulative Bestandszähler over all history.
+    # EITHER way, so no direction is defensible); `resolved`/`failed`/
+    # `exhausted`/`unresolved_by_fixer` are cumulative Bestandszähler over all
+    # history.
     # Fully qualified — bare "resolved"/"episodes" would be over-broad basenames.
     "conflict_fixer.episodes",
     "conflict_fixer.resolved",
+    "conflict_fixer.failed",
     "conflict_fixer.exhausted",
     "conflict_fixer.unresolved_by_fixer",
     "conflict_fixer.in_flight",
