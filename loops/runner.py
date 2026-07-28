@@ -1,11 +1,12 @@
-"""Loop-Runner — führt Loop-Packs aus (Archetypen: pipeline | sweep).
+"""Loop-Runner — führt Loop-Packs aus (Archetypen: pipeline | sweep | deterministic).
 
 CLI:
     python -m loops.runner --pack <name> --cmd plan|run|night|status
                            [--state-root PFAD] [--fresh] [--skip-plan]
 
-Ein Pack (loops/packs/<name>/) beschreibt in pack.yaml WAS läuft (Phasen mit
-Engine/Modell/Timeout/Prompt, Stop-Kriterien); der Runner liefert das WIE:
+Ein Pack (loops/packs/<name>/) beschreibt in pack.yaml WAS läuft (LLM-Phasen
+mit Engine/Modell/Timeout/Prompt oder eine deterministische Kommando-Phase);
+der Runner liefert das WIE:
 Worktree-Isolation, Datei-Queue, Ledger, deterministische Disposition
 (Retry/Revert/Bounce), Locks, Usage-Limit-Stop, Discord-Notify.
 
@@ -241,7 +242,11 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
     ),
 }
 
-PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
+PHASES_BY_TYPE = {
+    "pipeline": ("plan", "build", "verify"),
+    "sweep": ("round",),
+    "deterministic": ("run",),
+}
 
 RETRY_RE = re.compile(r"^retry:\s*(\d+)", re.MULTILINE)
 PLAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -269,12 +274,37 @@ class PhaseCfg:
 
 
 @dataclass
+class DeterministicPhaseCfg:
+    command: tuple[str, ...]
+    timeout: int
+
+    # Read-only compatibility projection for existing pack catalog consumers.
+    # These are display sentinels, never accepted from pack.yaml and never
+    # resolved through an LLM engine.
+    @property
+    def engine(self) -> str:
+        return "deterministic"
+
+    @property
+    def model(self) -> str:
+        return "command"
+
+    @property
+    def prompt(self) -> str:
+        return "pack.yaml"
+
+    @property
+    def effort(self) -> None:
+        return None
+
+
+@dataclass
 class Pack:
     name: str
     type: str
     repo: Path
     pack_dir: Path
-    phases: dict[str, PhaseCfg]
+    phases: dict[str, PhaseCfg | DeterministicPhaseCfg]
     stop: dict[str, int]
     description: str = ""
     stability: str = "experimental"
@@ -330,7 +360,9 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         raise ManifestError(f"Pack {name!r}: name-Feld ({raw.get('name')!r}) muss dem Ordnernamen entsprechen")
     ptype = raw.get("type")
     if ptype not in PHASES_BY_TYPE:
-        raise ManifestError(f"Pack {name!r}: type muss pipeline|sweep sein, ist {ptype!r}")
+        raise ManifestError(
+            f"Pack {name!r}: type muss pipeline|sweep|deterministic sein, ist {ptype!r}"
+        )
     repo = raw.get("repo")
     if not isinstance(repo, str) or not repo.strip():
         raise ManifestError(f"Pack {name!r}: repo (Pfad zum Git-Repo) fehlt")
@@ -342,10 +374,53 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
             f"Pack {name!r}: type={ptype} braucht genau die Phasen {sorted(required)}, "
             f"hat {sorted(phases_raw) if isinstance(phases_raw, dict) else phases_raw!r}"
         )
-    phases: dict[str, PhaseCfg] = {}
+    phases: dict[str, PhaseCfg | DeterministicPhaseCfg] = {}
     for pname, pcfg in phases_raw.items():
         if not isinstance(pcfg, dict):
             raise ManifestError(f"Pack {name!r}: Phase {pname} muss ein Mapping sein")
+        if ptype == "deterministic":
+            missing = {"command", "timeout"} - set(pcfg)
+            extra = set(pcfg) - {"command", "timeout"}
+            if missing or extra:
+                detail = []
+                if missing:
+                    detail.append(f"fehlt {sorted(missing)}")
+                if extra:
+                    detail.append(f"kennt nicht {sorted(extra)}")
+                raise ManifestError(
+                    f"Pack {name!r}: deterministische Phase {pname} "
+                    + ", ".join(detail)
+                )
+            command_raw = pcfg["command"]
+            if not isinstance(command_raw, str) or not command_raw.strip():
+                raise ManifestError(
+                    f"Pack {name!r}: Phase {pname}: command muss "
+                    "ein nicht-leerer String sein"
+                )
+            try:
+                command = tuple(shlex.split(command_raw))
+            except ValueError as exc:
+                raise ManifestError(
+                    f"Pack {name!r}: Phase {pname}: command ungültig: {exc}"
+                ) from exc
+            if not command:
+                raise ManifestError(
+                    f"Pack {name!r}: Phase {pname}: command ist leer"
+                )
+            if (
+                not isinstance(pcfg["timeout"], int)
+                or isinstance(pcfg["timeout"], bool)
+                or pcfg["timeout"] <= 0
+            ):
+                raise ManifestError(
+                    f"Pack {name!r}: Phase {pname}: timeout muss "
+                    "positive Ganzzahl sein"
+                )
+            phases[pname] = DeterministicPhaseCfg(
+                command=command,
+                timeout=pcfg["timeout"],
+            )
+            continue
         missing = {"engine", "model", "timeout", "prompt"} - set(pcfg)
         if missing:
             raise ManifestError(f"Pack {name!r}: Phase {pname} fehlt {sorted(missing)}")
@@ -651,6 +726,114 @@ def select_test_python(repo: Path) -> tuple[Path | None, str]:
     return Path(picked), ""
 
 
+def _land_gates(
+    repo: Path,
+    base: str,
+    land_gates: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Shared post-merge landing proof.
+
+    This is the single gate implementation used by both ``LoopRunner`` and the
+    deterministic landing loop. Keeping it outside ``LoopRunner`` makes the
+    proven gate sequence reusable without constructing a model-driven runner.
+    """
+    if land_gates is not None:
+        for command in land_gates:
+            argv = shlex.split(command)
+            try:
+                res = subprocess.run(
+                    argv,
+                    cwd=str(repo),
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2400,
+                    check=False,
+                )
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                return False, f"{command}: {exc}"
+            if res.returncode != 0:
+                tail = "\n".join(
+                    ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
+                )
+                return False, f"{command} rot (rc={res.returncode}):\n{tail}"
+        return True, "land_gates grün (" + ", ".join(land_gates) + ")"
+
+    py, why = select_test_python(repo)
+    if py is None:
+        return False, f"kein Test-Python fuer den Collection-Sweep:\n{why}"
+    steps: list[tuple[str, list[str], Path]] = [
+        (
+            "collection",
+            [
+                str(py),
+                "-m",
+                "pytest",
+                "--co",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "tests/",
+            ],
+            repo,
+        ),
+        (
+            "affected",
+            ["bash", str(repo / "scripts" / "run-affected.sh"), base],
+            repo,
+        ),
+    ]
+    touched = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "--name-only",
+            f"{base}..HEAD",
+            "--",
+            "web/",
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    touched_web = bool(touched.stdout.strip())
+    if touched_web:
+        steps.append(
+            (
+                "frontend",
+                ["bash", str(repo / "scripts" / "gate-frontend.sh")],
+                repo,
+            )
+        )
+    for label, command, cwd in steps:
+        try:
+            res = subprocess.run(
+                command,
+                cwd=str(cwd),
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2400,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return False, f"{label}: {exc}"
+        if res.returncode != 0:
+            tail = "\n".join(
+                ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
+            )
+            if label == "affected" and res.returncode == 3:
+                return False, f"affected nicht gelaufen (rc=3):\n{tail}"
+            if label == "affected" and res.returncode == 4:
+                return False, f"affected unmapped (rc=4):\n{tail}"
+            return False, f"{label} rot (rc={res.returncode}):\n{tail}"
+    suffix = " + frontend" if touched_web else ""
+    return True, f"collection + affected{suffix} grün"
+
+
 # Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht
 # konsumiert). Präzedenz: One-Shot (overrides.env) > Night (night-overrides.env)
 # > pack.yaml. EFFORT gehört in dieselbe Klasse wie ENGINE/MODEL: er beschreibt
@@ -918,14 +1101,32 @@ class LoopRunner:
         (self.state / "logs").mkdir(parents=True, exist_ok=True)
 
     @contextmanager
-    def locked(self):
-        """Pack-Lock + globaler Repo-Lock: nie zwei Loops aufs selbe Repo."""
+    def locked(self, *, blocking: bool = False, timeout: float = 0.0):
+        """Pack-Lock + globaler Repo-Lock: nie zwei Loops aufs selbe Repo.
+
+        Normale Packs behalten den bisherigen fail-fast-Vertrag. Deterministische
+        Sammelläufe können denselben ``flock`` mit einem begrenzten Wartefenster
+        nehmen, damit sie einem noch laufenden Nacht-Pack nicht dazwischenfahren.
+        """
         self.state.mkdir(parents=True, exist_ok=True)
         repo_key = hashlib.md5(str(self.pack.repo.resolve()).encode("utf-8")).hexdigest()[:8]
         repo_lock_path = self.state.parent / f".repo-{repo_key}.lock"
         with self.state.joinpath(".lock").open("w", encoding="utf-8") as pack_fh, \
                 repo_lock_path.open("w", encoding="utf-8") as repo_fh:
             for fh, what in ((pack_fh, "Pack"), (repo_fh, "Repo")):
+                if blocking:
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        try:
+                            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError(
+                                    f"{what}-Lock nach {timeout:g}s weiter belegt"
+                                ) from None
+                            time.sleep(0.05)
+                    continue
                 # Einmal-Retry: die Dashboard-Running-Probe hält das Lock für µs —
                 # ein Start exakt in dem Fenster soll nicht die Nacht kosten.
                 for attempt in (1, 2):
@@ -1010,6 +1211,11 @@ class LoopRunner:
     def phase_cfg(self, name: str) -> PhaseCfg:
         """Phase-Config: One-Shot > Night > pack.yaml (ENGINE/MODEL); TIMEOUT nur One-Shot."""
         cfg = self.pack.phases[name]
+        if not isinstance(cfg, PhaseCfg):
+            raise RuntimeError(
+                f"Pack {self.pack.name}: Phase {name} ist deterministisch "
+                "und hat keine Engine-/Modell-Konfiguration"
+            )
         up = name.upper()
         eng_key = f"PHASE_{up}_ENGINE"
         mod_key = f"PHASE_{up}_MODEL"
@@ -1338,7 +1544,9 @@ class LoopRunner:
         from loops.model_catalog import catalog_with_dynamic_models
 
         catalog = catalog_with_dynamic_models(catalog_data.get("engines", {}))
-        for phase in self.pack.phases:
+        for phase, raw_cfg in self.pack.phases.items():
+            if isinstance(raw_cfg, DeterministicPhaseCfg):
+                continue
             cfg = self.phase_cfg(phase)
             engine_entry = catalog.get(cfg.engine)
             if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
@@ -1586,17 +1794,81 @@ class LoopRunner:
         self.notify(f"🌀 {self.pack.name} PLAN: {n} Pläne in der Queue (status={status})")
         return True
 
-    def cmd_run(self, fresh: bool = False) -> None:
+    def _run_deterministic(self) -> int:
+        cfg = self.pack.phases["run"]
+        if not isinstance(cfg, DeterministicPhaseCfg):
+            raise RuntimeError(
+                f"Pack {self.pack.name}: deterministische run-Phase fehlt"
+            )
+        self.say(
+            f"── Phase run (command={shlex.join(cfg.command)}, "
+            f"timeout={cfg.timeout}s)"
+        )
+        started = time.time()
+        try:
+            result = subprocess.run(
+                list(cfg.command),
+                cwd=str(self.wt),
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=cfg.timeout,
+                check=False,
+            )
+            rc = result.returncode
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            rc = 124
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            stderr += f"\nTimeout nach {cfg.timeout}s"
+        except OSError as exc:
+            rc = 126
+            stdout = ""
+            stderr = str(exc)
+
+        secs = int(time.time() - started)
+        self.phase_secs["run"] = secs
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        (self.state / "logs" / f"{stamp}-run.log").write_text(
+            stdout + stderr,
+            encoding="utf-8",
+        )
+        lines = stdout.splitlines()
+        if lines:
+            for line in lines:
+                self.ledger(f"RUN stdout: {line}")
+        else:
+            self.ledger("RUN stdout: (leer)")
+        self.ledger(f"RUN exit={rc} [{secs}s]")
+        self.ledger_event(
+            event="phase_usage",
+            phase="run",
+            secs=secs,
+            rc=rc,
+            billing="deterministic",
+            metered_cost_eur=0.0,
+        )
+        self.say(f"Phase run fertig in {secs}s (rc={rc})")
+        if stderr.strip():
+            self.say("stderr:\n" + "\n".join(stderr.splitlines()[-15:]))
+        return rc
+
+    def cmd_run(self, fresh: bool = False) -> int:
         self._validate_autoland_runtime()
         self.consume_overrides()
         self.stop_path.unlink(missing_ok=True)
         self.ensure_dirs()
         self.ensure_wt(fresh=fresh)
+        if self.pack.type == "deterministic":
+            return self._run_deterministic()
         if self.pack.type == "pipeline":
             self._run_pipeline()
         else:
             self._run_sweep()
         self.report()
+        return 0
 
     def _deadline(self) -> float:
         return time.time() + self.stop_cfg("max_hours") * 3600
@@ -2244,52 +2516,7 @@ class LoopRunner:
     def _land_gates(self, repo: Path, base: str) -> tuple[bool, str]:
         """Beweis nach dem ff-Merge: Collection-Sweep + affected Tests (+ Frontend,
         wenn web/ berührt). Seam für Tests."""
-        if self.pack.land_gates is not None:
-            for cmd in self.pack.land_gates:
-                argv = shlex.split(cmd)
-                try:
-                    res = subprocess.run(
-                        argv, cwd=str(repo), capture_output=True,
-                        encoding="utf-8", errors="replace", timeout=2400, check=False,
-                    )
-                except (subprocess.TimeoutExpired, OSError) as exc:
-                    return False, f"{cmd}: {exc}"
-                if res.returncode != 0:
-                    tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
-                    return False, f"{cmd} rot (rc={res.returncode}):\n{tail}"
-            return True, "land_gates grün (" + ", ".join(self.pack.land_gates) + ")"
-        py, why = select_test_python(repo)
-        if py is None:
-            return False, f"kein Test-Python fuer den Collection-Sweep:\n{why}"
-        steps: list[tuple[str, list[str], Path]] = [
-            ("collection", [str(py), "-m", "pytest", "--co", "-q", "-p", "no:cacheprovider", "tests/"], repo),
-            ("affected", ["bash", str(repo / "scripts" / "run-affected.sh"), base], repo),
-        ]
-        touched_web = bool(
-            self.git("diff", "--name-only", f"{base}..HEAD", "--", "web/", cwd=repo).stdout.strip()
-        )
-        if touched_web:
-            steps += [
-                ("lint:control", ["npm", "run", "lint:control"], repo / "web"),
-                ("tsc", ["npx", "tsc", "-b", "--noEmit"], repo / "web"),
-                ("vitest", ["npx", "vitest", "run"], repo / "web"),
-            ]
-        for label, cmd, cwd in steps:
-            try:
-                res = subprocess.run(
-                    cmd, cwd=str(cwd), capture_output=True,
-                    encoding="utf-8", errors="replace", timeout=2400, check=False,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                return False, f"{label}: {exc}"
-            if res.returncode != 0:
-                tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
-                if label == "affected" and res.returncode == 3:
-                    return False, f"affected nicht gelaufen (rc=3):\n{tail}"
-                if label == "affected" and res.returncode == 4:
-                    return False, f"affected unmapped (rc=4):\n{tail}"
-                return False, f"{label} rot (rc={res.returncode}):\n{tail}"
-        return True, "collection + affected" + (" + frontend" if touched_web else "") + " grün"
+        return _land_gates(repo, base, self.pack.land_gates)
 
     def _push(self, repo: Path) -> tuple[bool, str]:
         """Push NUR piet-fork, nur ff (kein --force). Seam für Tests."""
@@ -2729,7 +2956,9 @@ def _reexec_into_own_scope() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Loop-Runner (pipeline|sweep Packs)")
+    parser = argparse.ArgumentParser(
+        description="Loop-Runner (pipeline|sweep|deterministic Packs)"
+    )
     parser.add_argument("--pack", required=True)
     parser.add_argument("--cmd", required=True, choices=["plan", "run", "night", "status", "land"])
     parser.add_argument("--no-push", action="store_true", help="land: nur lokal mergen, nicht piet-fork pushen")
@@ -2753,7 +2982,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         runner._validate_repo()
-        with runner.locked():
+        deterministic = pack.type == "deterministic"
+        lock_timeout = 0.0
+        if deterministic:
+            run_cfg = pack.phases["run"]
+            if not isinstance(run_cfg, DeterministicPhaseCfg):
+                raise RuntimeError(
+                    f"Pack {pack.name}: deterministische run-Phase fehlt"
+                )
+            lock_timeout = float(run_cfg.timeout)
+        with runner.locked(blocking=deterministic, timeout=lock_timeout):
             runner.say(f"START cmd={args.cmd} {datetime.now().strftime('%F %H:%M:%S')}")
             rc = 0
             if args.cmd == "plan":
@@ -2763,9 +3001,11 @@ def main(argv: list[str] | None = None) -> int:
                 # meldete Erfolg. Gleiche Konvention wie `land` darunter.
                 rc = 0 if runner.cmd_plan(fresh=args.fresh) else 4
             elif args.cmd == "run":
-                runner.cmd_run(fresh=args.fresh)
+                rc = runner.cmd_run(fresh=args.fresh)
             elif args.cmd == "land":
                 rc = 0 if runner.cmd_land(push=not args.no_push) else 4
+            elif deterministic:
+                rc = runner.cmd_run(fresh=args.fresh)
             else:
                 night_ok = runner.cmd_night(fresh=args.fresh, skip_plan=args.skip_plan)
                 # Bestehende Review-only-Packs behalten ihre bisherigen Service-
