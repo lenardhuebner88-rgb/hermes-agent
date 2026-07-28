@@ -126,6 +126,35 @@ def test_rule_non_executable_script_is_detected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_false_positive_sourced_library_needs_no_exec_bit(tmp_path: Path) -> None:
+    """A sourced bash library must not be demanded to be executable.
+
+    ``scripts/lib/select_test_python.sh`` is the real case: its header says
+    "Sourced, not executed", it only defines a function, and callers reach it
+    via ``. <path>``. An earlier revision of this gate flagged it and the file
+    was chmod'd to 700 — a mode change on a tracked file that buys nothing and
+    invites someone to execute a no-op. A shebang tells commands from libraries.
+    """
+    _seed_minimal_tree(tmp_path)
+    lib_dir = tmp_path / "scripts" / "lib"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    library = lib_dir / "select_test_python.sh"
+    library.write_text(
+        "# shellcheck shell=bash\n"
+        "# Sourced, not executed.\n"
+        "select_test_python() { printf '%s\\n' python3; }\n",
+        encoding="utf-8",
+    )
+    library.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600 — deliberately not +x
+    _write_skill(
+        tmp_path,
+        "---\nname: x\ndescription: x\n---\n"
+        "The interpreter is resolved through `scripts/lib/select_test_python.sh`.\n",
+    )
+    findings = hygiene.scan_tree(tmp_path)
+    assert not [f for f in findings if f.rule == "script-executable"], findings
+
+
 def test_false_positive_german_web_beruehrende(tmp_path: Path) -> None:
     """``web/-berührende`` must not be parsed as a path."""
     _seed_minimal_tree(tmp_path)

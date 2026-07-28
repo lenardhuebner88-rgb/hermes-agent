@@ -295,6 +295,19 @@ def check_repo_paths(repo_root: Path, rel: Path, text: str) -> list[Finding]:
 
 # ---- rule 4 ----
 
+def _has_shebang(target: Path) -> bool:
+    """True when the file starts with ``#!`` — i.e. it is meant to be executed.
+
+    Files without one are sourced libraries; see the call site for why that
+    distinction has to exist.
+    """
+    try:
+        with target.open("rb") as handle:
+            return handle.read(2) == b"#!"
+    except OSError:
+        return False
+
+
 def check_script_executable(repo_root: Path, rel: Path, text: str) -> list[Finding]:
     findings: list[Finding] = []
     seen: set[tuple[int, str]] = set()
@@ -321,6 +334,14 @@ def check_script_executable(repo_root: Path, rel: Path, text: str) -> list[Findi
                     f"script does not exist: {script}",
                 )
             )
+            continue
+        if not _has_shebang(target):
+            # A sourced library, not a command. `scripts/lib/select_test_python.sh`
+            # is the live example: its own header says "Sourced, not executed", it
+            # only defines a function, and callers reach it via `. <path>`. Demanding
+            # +x there invites someone to run it, which silently does nothing — and
+            # it churns the file mode of a tracked file for no functional reason.
+            # A shebang is the discriminator: commands have one, libraries do not.
             continue
         mode = target.stat().st_mode
         if not (mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)):
