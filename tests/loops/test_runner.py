@@ -359,12 +359,17 @@ def fake_engine(monkeypatch):
     calls: list[str] = []
     behaviors: dict = {}
 
-    def run(model, prompt, cwd, timeout_s):
+    def run(model, prompt, cwd, timeout_s, effort=None):
         kv = parse_kv(prompt)
         calls.append(kv["PHASE"])
         return behaviors[kv["PHASE"]](kv, Path(cwd))
 
     monkeypatch.setitem(engines.ENGINES, "fake", run)
+    # Die Fake-Engine transportiert dieselben Stufen wie claude, damit
+    # Effort-Pfade ohne echtes CLI getestet werden können.
+    monkeypatch.setitem(
+        engines.ENGINE_EFFORT_LEVELS, "fake", ("low", "medium", "high", "xhigh", "max")
+    )
     # Runner validiert effektive Engine/Model-Paare fail-closed gegen models.yaml.
     # Hermetischer Testkatalog, damit Fake-Packs nicht den Prod-Katalog brauchen.
     test_catalog = {
@@ -1332,7 +1337,7 @@ def test_dedicated_pack_live_e2e_night_one_shot_then_night_again(
 ):
     seen_models: list[str] = []
 
-    def bounded_engine(model, prompt, cwd, timeout_s):
+    def bounded_engine(model, prompt, cwd, timeout_s, effort=None):
         seen_models.append(model)
         return engines.EngineResult(rc=0, output="bounded-ok", usage_limit=False)
 

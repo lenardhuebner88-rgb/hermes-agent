@@ -50,9 +50,25 @@ from . import EngineResult, detect_usage_limit, register
 CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 _TOKENS_USED_RE = re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE)
 
+# `codex exec` hat KEIN eigenes --effort-Flag; der Reasoning-Effort geht über den
+# generischen Config-Override `-c key=value`. Belegte Werte (opensrc
+# `openai/codex@main`, codex-rs/protocol/src/openai_models.rs:40-64, enum
+# ReasoningEffort + as_str): none | minimal | low | medium | high | xhigh.
+# Das ist auch der Grund, warum dieser Override überhaupt gebraucht wird: der
+# Host setzt in ~/.codex/config.toml global `model_reasoning_effort = "xhigh"`,
+# d.h. OHNE dieses Flag lief JEDE Codex-Phase auf xhigh — unabhängig davon, was
+# Pack oder Dashboard anzeigten.
+CODEX_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
 
-@register("codex")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+
+@register("codex", effort_levels=CODEX_EFFORT_LEVELS)
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,
+) -> EngineResult:
     cmd = [
         CODEX_BIN,
         "exec",
@@ -60,8 +76,10 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
         model,
         "--sandbox",
         "danger-full-access",
-        prompt,
     ]
+    if effort:
+        cmd += ["-c", f"model_reasoning_effort={effort}"]
+    cmd.append(prompt)
     try:
         proc = subprocess.run(
             cmd,

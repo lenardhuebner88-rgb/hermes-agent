@@ -156,9 +156,17 @@ function ageFromIso(iso: string, nowMs: number): string {
 }
 
 /** Pro Phase gebaute overrides — nur Felder, die vom Manifest-Default abweichen. */
+/** Effort-Stufen, die eine Engine transportieren kann ([] = kein Control).
+ *  Quelle ist der Backend-Katalog (`effort_levels`), der ihn seinerseits aus
+ *  der Engine-Registrierung zieht — nicht aus einer Liste im Frontend, sonst
+ *  böte das UI Stufen an, die das CLI ablehnt. */
+function effortLevelsFor(models: LoopModelsResponse | null, engine: string): string[] {
+  return models?.engines?.[engine]?.effort_levels ?? [];
+}
+
 function buildPhaseOverrides(
   pack: LoopPackSummary,
-  phaseValues: Record<string, { engine: string; model: string }>,
+  phaseValues: Record<string, PhaseRoute>,
 ): Record<string, string> {
   const overrides: Record<string, string> = {};
   for (const phase of Object.keys(pack.phases)) {
@@ -167,6 +175,8 @@ function buildPhaseOverrides(
     const upper = phase.toUpperCase();
     overrides[`PHASE_${upper}_ENGINE`] = current.engine;
     overrides[`PHASE_${upper}_MODEL`] = current.model;
+    // Leerer Effort = "Standard": kein Override, der CLI-Default gilt.
+    if (current.effort) overrides[`PHASE_${upper}_EFFORT`] = current.effort;
   }
   return overrides;
 }
@@ -687,6 +697,78 @@ interface LoopModelChoice {
   model: string;
 }
 
+/** Route einer Phase im Startdialog: Engine + Modell + optionaler Effort. */
+type PhaseRoute = { engine: string; model: string; effort: string | null };
+
+/** Effort-Strip pro Phase — dieselbe Mechanik wie das Reasoning-Control im
+ *  Lanes-Tab: nur die Stufen, die die gewählte Engine wirklich transportiert;
+ *  leeres Set = gar kein Control statt eines toten Knopfs. */
+function LoopEffortPicker({
+  phase,
+  levels,
+  value,
+  busy,
+  onChange,
+}: {
+  phase: string;
+  levels: string[];
+  value: string | null;
+  busy: boolean;
+  onChange: (next: string | null) => void;
+}) {
+  if (levels.length === 0) {
+    return (
+      <p className="text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
+        {t.effortUnsupported}
+      </p>
+    );
+  }
+  const options: Array<{ value: string | null; label: string; title: string }> = [
+    { value: null, label: t.effortDefault, title: t.effortDefaultTitle },
+    ...levels.map((level) => ({
+      value: level,
+      label: level.slice(0, 3).toUpperCase(),
+      title: level,
+    })),
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label={t.effortLabel(phase)}
+      className="inline-flex items-stretch overflow-hidden rounded-md border"
+      style={{ borderColor: "var(--ln-line)", background: "var(--ln-raised)" }}
+    >
+      {options.map((option, index) => {
+        const on = value === option.value;
+        return (
+          <button
+            key={option.title}
+            type="button"
+            role="radio"
+            aria-checked={on}
+            tabIndex={on ? 0 : -1}
+            disabled={busy}
+            title={option.title}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "min-h-11 px-2 font-data text-[11px] uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 sm:min-h-8",
+              NIGHT_FOCUS,
+            )}
+            style={{
+              borderLeft: index > 0 ? "1px solid var(--ln-line)" : undefined,
+              background: on ? "color-mix(in srgb, var(--ln-sodium) 18%, transparent)" : undefined,
+              color: on ? "var(--ln-sodium)" : "var(--ln-ink-soft)",
+              fontWeight: on ? 600 : 400,
+            }}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function LoopModelPicker({
   phase,
   value,
@@ -841,9 +923,24 @@ function LoopStartForm({
   onCancel: () => void;
 }) {
   const phaseNames = useMemo(() => Object.keys(pack.phases), [pack]);
-  const [phaseValues, setPhaseValues] = useState<Record<string, { engine: string; model: string }>>(() =>
-    Object.fromEntries(phaseNames.map((name) => [name, { ...pack.phases[name] }])),
+  const [phaseValues, setPhaseValues] = useState<Record<string, PhaseRoute>>(() =>
+    Object.fromEntries(
+      phaseNames.map((name) => [
+        name,
+        {
+          engine: pack.phases[name]!.engine,
+          model: pack.phases[name]!.model,
+          effort: pack.phases[name]!.effort ?? null,
+        },
+      ]),
+    ),
   );
+  // Autoland pro Lauf (Operator-Schalter). Das Einschalten verlangt den
+  // Zweitschlüssel: den Pack-Namen ausschreiben. Ein Klick allein reicht nicht
+  // — sonst wäre nicht unterscheidbar, ob die Landung Absicht war.
+  const [autoland, setAutoland] = useState(false);
+  const [autolandAck, setAutolandAck] = useState("");
+  const autolandArmed = autoland && autolandAck.trim() === pack.name;
   const defaultMaxRounds = String(pack.stop.max_rounds ?? "");
   const defaultMaxHours = String(pack.stop.max_hours ?? "");
   const [maxRounds, setMaxRounds] = useState(defaultMaxRounds);
@@ -860,6 +957,12 @@ function LoopStartForm({
     if (maxRounds.trim() && maxRounds !== defaultMaxRounds) overrides.MAX_ROUNDS = maxRounds.trim();
     if (maxHours.trim() && maxHours !== defaultMaxHours) overrides.MAX_HOURS = maxHours.trim();
     if (!pack.autoland && skipPlan) overrides.SKIP_PLAN = "1";
+    // Vertrags-Autoland (Manifest) braucht den Schalter nicht; für alle anderen
+    // pipeline-Packs geht er samt Zweitschlüssel als Override mit.
+    if (!pack.autoland && autolandArmed) {
+      overrides.AUTOLAND = "1";
+      overrides.AUTOLAND_ACK = pack.name;
+    }
     if (!pack.autoland) {
       for (const name of paramNames) {
         const value = (paramValues[name] ?? "").trim();
@@ -890,7 +993,31 @@ function LoopStartForm({
               value={value}
               models={models}
               busy={busy}
-              onChange={(next) => setPhaseValues((prev) => ({ ...prev, [phase]: next }))}
+              onChange={(next) =>
+                setPhaseValues((prev) => {
+                  const before = prev[phase];
+                  return {
+                    ...prev,
+                    [phase]: {
+                      ...next,
+                      // Engine-Wechsel verwirft den Effort: es gilt das Set der
+                      // NEUEN Engine (`claude: max` gibt es auf xai nicht). Das
+                      // spiegelt exakt, was der Runner beim Auflösen tut.
+                      effort: before && before.engine === next.engine ? before.effort : null,
+                    },
+                  };
+                })
+              }
+            />
+            <span aria-hidden className="hidden sm:block" />
+            <LoopEffortPicker
+              phase={phase}
+              levels={effortLevelsFor(models, value.engine)}
+              value={value.effort}
+              busy={busy}
+              onChange={(effort) =>
+                setPhaseValues((prev) => ({ ...prev, [phase]: { ...prev[phase]!, effort } }))
+              }
             />
           </div>
         );
@@ -938,6 +1065,55 @@ function LoopStartForm({
           />
           {t.skipPlanLabel}
         </label>
+      ) : null}
+      {!pack.autoland && pack.autoland_capable ? (
+        <div
+          className="rounded-xl border p-3"
+          style={{ borderColor: autolandArmed ? "var(--ln-sodium)" : "var(--ln-line)" }}
+        >
+          <label className="inline-flex min-h-9 items-center gap-2 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
+            <input
+              type="checkbox"
+              checked={autoland}
+              disabled={busy}
+              aria-label={t.autolandToggleLabel}
+              onChange={(e) => {
+                setAutoland(e.target.checked);
+                if (!e.target.checked) setAutolandAck("");
+              }}
+              className={cn("size-12 shrink-0 accent-[var(--ln-sodium)]", NIGHT_FOCUS)}
+            />
+            {t.autolandToggleLabel}
+          </label>
+          {autoland ? (
+            <div className="mt-2 space-y-2">
+              <label className="block min-w-0">
+                <span className="text-[11px] uppercase tracking-[0.08em]" style={captionStyle}>
+                  {t.autolandConfirmLabel(pack.name)}
+                </span>
+                <input
+                  type="text"
+                  value={autolandAck}
+                  disabled={busy}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label={t.autolandConfirmLabel(pack.name)}
+                  onChange={(e) => setAutolandAck(e.target.value)}
+                  className={cn(NIGHT_FIELD_CLASS, "mt-1")}
+                  style={nightFieldStyle}
+                />
+              </label>
+              {!autolandArmed ? (
+                <p className="text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
+                  {t.autolandConfirmMismatch}
+                </p>
+              ) : null}
+              <p className="text-[11px] leading-relaxed" style={{ color: "var(--ln-ink-soft)" }}>
+                {t.autolandOperatorHint}
+              </p>
+            </div>
+          ) : null}
+        </div>
       ) : null}
       {failStreak != null && dryRounds != null ? (
         <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>

@@ -37,7 +37,13 @@ HERMES_BIN = os.environ.get(
 
 
 @register("neuralwatt")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,  # noqa: ARG001 - kein Effort-Transport (s. register)
+) -> EngineResult:
     cmd = [HERMES_BIN, "-m", model, "--provider", "neuralwatt", "-z", prompt]
     env = dict(os.environ)
     env["HERMES_SANDBOX_MODE"] = "1"  # Kanban-Writes des Laufs nie aufs Live-Board

@@ -62,13 +62,14 @@ _PACK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 # gegen das Manifest validiert (siehe start_loop) — so funktioniert jeder Pack-
 # Parameter (focus/fokus/services/…) statt eines hartkodierten FOCUS-Felds.
 _OVERRIDE_KEY_RE = re.compile(
-    r"(PHASE_[A-Z]+_(MODEL|ENGINE|TIMEOUT)"
-    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL|SKIP_PLAN)"
+    r"(PHASE_[A-Z]+_(MODEL|ENGINE|TIMEOUT|EFFORT)"
+    r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL|SKIP_PLAN"
+    r"|AUTOLAND|AUTOLAND_ACK)"
 )
 _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
 # Night-Overrides speichern Engine/Model-IDs — enger als One-Shot (kein Shell-Metachar).
 _NIGHT_OVERRIDE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
-_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
+_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT)$")
 NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
 
 
@@ -174,12 +175,22 @@ def _read_night_overrides(name: str) -> dict[str, str]:
 
 
 def _load_models_catalog() -> dict[str, Any]:
+    """Engine-Katalog inklusive der dynamisch ermittelten Modelle.
+
+    Muss durch dieselbe Erweiterung laufen wie das Dropdown und der Runner —
+    sonst wiese die Night-Override-Validierung genau die Modelle ab, die das
+    UI anbietet.
+    """
     path = _models_path()
     if not path.is_file():
         return {}
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     engines = data.get("engines")
-    return engines if isinstance(engines, dict) else {}
+    if not isinstance(engines, dict):
+        return {}
+    from loops.model_catalog import catalog_with_dynamic_models
+
+    return catalog_with_dynamic_models(engines)
 
 
 def _validate_night_overrides(
@@ -196,7 +207,7 @@ def _validate_night_overrides(
                 status_code=400,
                 detail=(
                     f"Night-Override-Key nicht erlaubt: {key!r} "
-                    "(nur PHASE_[A-Z]+_(ENGINE|MODEL))"
+                    "(nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT))"
                 ),
             )
         sval = str(val).strip()
@@ -245,7 +256,87 @@ def _validate_night_overrides(
                     f"(Phase {phase_name!r}) nicht freigegeben"
                 ),
             )
+        # Effort gegen die EFFEKTIVE Engine prüfen (nach einem Engine-Override
+        # gilt deren Set). Die Wahrheit kommt aus der Engine selbst, damit
+        # Dashboard-Angebot und CLI-Transport nicht auseinanderlaufen können.
+        eff_key = f"PHASE_{phase_up}_EFFORT"
+        if eff_key in cleaned:
+            try:
+                loop_engines.validate_effort(engine, cleaned[eff_key])
+            except loop_engines.EffortUnsupported as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Phase {phase_name!r}: {exc}",
+                ) from None
     return cleaned
+
+
+def _loop_engines():
+    """Engine-Registry lazy — der Import zieht die CLI-Adapter nach."""
+    from loops import engines as loop_engines
+
+    return loop_engines
+
+
+def _validate_start_overrides(
+    pack: loop_runner.Pack,
+    raw: dict[str, Any],
+) -> None:
+    """One-Shot-Overrides prüfen, BEVOR die Unit startet.
+
+    Ohne das würde ein falscher Effort oder ein fehlender Autoland-Zweitschlüssel
+    erst im Runner auffallen — der Operator sähe im Dashboard nur ein generisches
+    "Loop-Unit sofort gescheitert" statt zu erfahren, was er falsch gesetzt hat.
+    """
+    from loops import engines as loop_engines
+
+    cleaned = {str(k): str(v).strip() for k, v in raw.items()}
+
+    autoland_raw = cleaned.get(loop_runner.AUTOLAND_RUNTIME_KEY, "").lower()
+    if autoland_raw not in ("", "0", "false", "no"):
+        if autoland_raw not in ("1", "true", "yes"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{loop_runner.AUTOLAND_RUNTIME_KEY} muss 1 oder 0 sein "
+                    f"(erhalten: {autoland_raw!r})"
+                ),
+            )
+        if pack.type != "pipeline":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Autoland braucht type=pipeline (Pack {pack.name!r} ist {pack.type})",
+            )
+        ack = cleaned.get(loop_runner.AUTOLAND_RUNTIME_ACK_KEY, "")
+        if ack != pack.name:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Autoland braucht den Zweitschlüssel "
+                    f"{loop_runner.AUTOLAND_RUNTIME_ACK_KEY}={pack.name!r} "
+                    f"(erhalten: {ack!r})"
+                ),
+            )
+
+    phase_names = {name.upper(): name for name in pack.phases}
+    for key, val in cleaned.items():
+        if not key.endswith("_EFFORT") or not key.startswith("PHASE_"):
+            continue
+        phase_up = key[len("PHASE_") : -len("_EFFORT")]
+        phase_name = phase_names.get(phase_up)
+        if phase_name is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unbekannte Phase in Override: {key}"
+            )
+        # Gegen die EFFEKTIVE Engine prüfen — ein gleichzeitiger Engine-Override
+        # entscheidet, welches Effort-Set gilt.
+        engine = cleaned.get(f"PHASE_{phase_up}_ENGINE") or pack.phases[phase_name].engine
+        try:
+            loop_engines.validate_effort(engine, val)
+        except loop_engines.EffortUnsupported as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Phase {phase_name!r}: {exc}"
+            ) from None
 
 
 def _write_night_overrides(name: str, overrides: dict[str, str]) -> None:
@@ -635,9 +726,20 @@ def _pack_summary(
         "description": pack.description,
         "stability": pack.stability,
         "phases": {
-            pname: {"engine": ph.engine, "model": ph.model, "timeout": ph.timeout}
+            pname: {
+                "engine": ph.engine,
+                "model": ph.model,
+                "timeout": ph.timeout,
+                "effort": ph.effort,
+                # Was die aktuelle Engine dieser Phase transportieren kann;
+                # [] = kein Effort-Control (gleiche Konvention wie Lanes).
+                "effort_support": list(_loop_engines().effort_levels_for(ph.engine)),
+            }
             for pname, ph in pack.phases.items()
         },
+        # Autoland ist pro Lauf schaltbar, sobald das Pack eine Pipeline ist —
+        # `autoland` oben bleibt der Manifest-Zustand (Vertrags-Autoland).
+        "autoland_capable": pack.type == "pipeline",
         "stop": pack.stop,
         "params": pack.params,
         "autoland": pack.autoland,
@@ -696,7 +798,24 @@ def register_loops_routes(app: FastAPI) -> None:
         if not path.is_file():
             return {"engines": {}}
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        return {"engines": data.get("engines", {})}
+        # Voller, dynamischer Katalog wie im Lanes-Tab: kuratierte Defaults
+        # zuerst, dann alles, was Hermes an Providern/Modellen kennt.
+        from loops.model_catalog import catalog_with_dynamic_models
+
+        engines_out = dict(catalog_with_dynamic_models(data.get("engines", {})))
+        # `effort_levels` kommt aus der Engine-Registrierung, NICHT aus
+        # models.yaml: die Engine ist die einzige Stelle, die weiß, welches
+        # Flag ihr CLI wirklich akzeptiert. Leere Liste = kein Control (gleiche
+        # Konvention wie `reasoning_support: []` im Lanes-Tab).
+        from loops import engines as loop_engines
+
+        for engine_name, entry in engines_out.items():
+            if isinstance(entry, dict):
+                engines_out[engine_name] = {
+                    **entry,
+                    "effort_levels": list(loop_engines.effort_levels_for(engine_name)),
+                }
+        return {"engines": engines_out}
 
     @app.get("/api/loops/{pack}/detail")
     def loop_detail(pack: str) -> dict[str, Any]:
@@ -745,6 +864,7 @@ def register_loops_routes(app: FastAPI) -> None:
                 raise HTTPException(status_code=400, detail=f"Override-Wert ungültig für {key}")
             if sval:
                 lines.append(f"{key}={sval}")
+        _validate_start_overrides(loaded, body.overrides)
         state.mkdir(parents=True, exist_ok=True)
         (state / "overrides.env").write_text(
             "# geschrieben vom /control-Dashboard\n" + "\n".join(lines) + "\n",

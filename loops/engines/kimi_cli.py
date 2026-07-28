@@ -53,7 +53,13 @@ KIMI_LIMIT_RE = re.compile(
 
 
 @register("kimi")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,  # noqa: ARG001 - kein Effort-Transport (s. register)
+) -> EngineResult:
     effective_model = KIMI_MODEL_ALIASES.get(model, model)
     cmd = [
         KIMI_BIN,

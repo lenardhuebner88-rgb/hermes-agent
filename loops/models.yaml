@@ -34,6 +34,10 @@ engines:
     models: [kimi-code/kimi-for-coding, k3]
   codex:
     label: "Codex (ChatGPT-Abo)"
+    # Der Provider-Slug ist mit dem Engine-Namen nicht namensverwandt
+    # (codex ↔ openai-codex), deshalb hier als Daten deklariert. Alle anderen
+    # Engines finden ihre Provider über die Namensverwandtschaft von selbst.
+    inventory_providers: [openai-codex]
     models: [gpt-5.6-sol, gpt-5.5, gpt-5.3-codex]
   hermes:
     # "Modell" = Hermes-PROFIL; das Profil trägt die Provider-/Modell-Bindung.

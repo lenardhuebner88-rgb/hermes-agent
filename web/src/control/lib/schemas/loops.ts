@@ -5,6 +5,11 @@ export const LoopPhaseSchema = z.object({
   engine: z.string().catch(""),
   model: z.string().catch(""),
   timeout: z.coerce.number().catch(0),
+  // Reasoning-Effort dieser Phase; null = Engine-Default (kein CLI-Flag).
+  effort: z.string().nullable().catch(null),
+  // Stufen, die die Engine dieser Phase transportieren kann; [] = kein
+  // Control (dieselbe Konvention wie `reasoning_support` im Lanes-Tab).
+  effort_support: z.array(z.string()).catch([]),
 });
 
 // ManifestError-Fall: Backend liefert nur {name, error} statt der vollen Summary.
@@ -52,7 +57,10 @@ export const LoopPackSummarySchema = z.object({
   land_remote: z.string().catch("piet-fork"),
   land_push: z.boolean().catch(true),
   land_gates: z.array(z.string()).nullable().catch(null),
+  // Manifest-Zustand (Vertrags-Autoland, Allowlist + SHA).
   autoland: z.boolean().catch(false),
+  // Darf der Operator Autoland für einen Lauf einschalten? = pipeline-Pack.
+  autoland_capable: z.boolean().catch(false),
   description: z.string().catch(""),
   stability: z.string().catch("experimental"),
   phases: z.record(z.string(), LoopPhaseSchema).catch({}),
@@ -84,6 +92,8 @@ export const LoopsResponseSchema = z.object({
 export const LoopEngineCatalogSchema = z.object({
   label: z.string().catch(""),
   models: z.array(z.string()).catch([]),
+  // Aus der Engine-Registrierung, nicht aus models.yaml — [] = kein Control.
+  effort_levels: z.array(z.string()).catch([]),
 });
 
 export const LoopModelsResponseSchema = z.object({

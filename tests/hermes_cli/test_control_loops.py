@@ -47,6 +47,24 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
     (d / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def hermetic_model_catalog(monkeypatch):
+    """Kein Live-Provider-Probe in den Dashboard-Tests.
+
+    Der Loops-Katalog ist seit 2026-07-28 dynamisch (voller Provider-Katalog wie
+    im Lanes-Tab). Ungepatcht hinge jede Assertion über Modelllisten davon ab,
+    welche Abos auf dem Testhost konfiguriert sind.
+    """
+    from loops import model_catalog
+
+    monkeypatch.setattr(model_catalog, "_build_inventory_payload", lambda: {})
+    monkeypatch.setattr(model_catalog, "_claude_cli_models", list)
+    monkeypatch.setattr(model_catalog, "_hermes_profiles", list)
+    model_catalog.reset_inventory_cache()
+    yield
+    model_catalog.reset_inventory_cache()
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     packs = tmp_path / "packs"
@@ -935,3 +953,114 @@ def test_models_catalog_exposes_kimi_k3_and_alibaba(api):
     assert "k3" in data["engines"]["kimi"]["models"]
     assert "alibaba-token-plan" in data["engines"]
     assert data["engines"]["alibaba-token-plan"]["models"] == ["qwen3.8-max-preview"]
+
+
+# --- Reasoning-Effort + Operator-Autoland (2026-07-28) -------------------
+
+
+def test_models_route_exposes_effort_levels_per_engine(api):
+    """Das UI baut sein Effort-Control aus dieser Liste. Die Wahrheit kommt aus
+    der Engine-Registrierung, NICHT aus models.yaml — sonst könnte das Angebot
+    vom tatsächlichen CLI-Transport abdriften."""
+    client, _calls, _tmp = api
+    engines = client.get("/api/loops/models").json()["engines"]
+    assert engines["claude"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    # Kimi transportiert keinen Effort → leere Liste → kein Control im UI.
+    assert engines["kimi"]["effort_levels"] == []
+    assert engines["alibaba-token-plan"]["effort_levels"] == []
+
+
+def test_pack_payload_carries_effort_and_autoland_capability(api):
+    client, _calls, _tmp = api
+    packs = {p["name"]: p for p in client.get("/api/loops").json()["packs"]}
+    pipeline, sweep = packs["fliessband"], packs["nacht"]
+    plan = pipeline["phases"]["plan"]
+    assert plan["effort"] is None  # Testpack setzt keinen → Engine-Default
+    assert plan["effort_support"] == ["low", "medium", "high", "xhigh", "max"]
+    assert pipeline["autoland_capable"] is True
+    assert sweep["autoland_capable"] is False
+
+
+def test_start_rejects_an_effort_the_engine_cannot_transport(api):
+    client, _calls, _tmp = api
+    res = client.post(
+        "/api/loops/fliessband/start", json={"overrides": {"PHASE_PLAN_EFFORT": "turbo"}}
+    )
+    assert res.status_code == 400
+    assert "turbo" in res.json()["detail"]
+
+
+def test_start_validates_effort_against_a_simultaneously_swapped_engine(api):
+    """PHASE_*_ENGINE und PHASE_*_EFFORT im selben Start: es gilt das Set der
+    NEUEN Engine."""
+    client, _calls, _tmp = api
+    res = client.post(
+        "/api/loops/fliessband/start",
+        json={"overrides": {"PHASE_PLAN_ENGINE": "kimi", "PHASE_PLAN_EFFORT": "high"}},
+    )
+    assert res.status_code == 400
+    assert "transportiert keinen" in res.json()["detail"]
+
+
+def test_start_accepts_a_valid_effort_and_writes_it_to_overrides(api):
+    client, _calls, tmp = api
+    res = client.post(
+        "/api/loops/fliessband/start", json={"overrides": {"PHASE_PLAN_EFFORT": "xhigh"}}
+    )
+    assert res.status_code == 200, res.json()
+    written = (tmp / "state" / "fliessband" / "overrides.env").read_text(encoding="utf-8")
+    assert "PHASE_PLAN_EFFORT=xhigh" in written
+
+
+def test_start_refuses_autoland_without_the_second_key(api):
+    """Fehler im Dashboard statt generischem 'Unit sofort gescheitert'."""
+    client, _calls, _tmp = api
+    res = client.post("/api/loops/fliessband/start", json={"overrides": {"AUTOLAND": "1"}})
+    assert res.status_code == 400
+    assert "AUTOLAND_ACK" in res.json()["detail"]
+
+
+def test_start_refuses_a_second_key_for_a_different_pack(api):
+    client, _calls, _tmp = api
+    res = client.post(
+        "/api/loops/fliessband/start",
+        json={"overrides": {"AUTOLAND": "1", "AUTOLAND_ACK": "nacht"}},
+    )
+    assert res.status_code == 400
+
+
+def test_start_accepts_autoland_with_the_matching_second_key(api):
+    client, _calls, tmp = api
+    res = client.post(
+        "/api/loops/fliessband/start",
+        json={"overrides": {"AUTOLAND": "1", "AUTOLAND_ACK": "fliessband"}},
+    )
+    assert res.status_code == 200, res.json()
+    written = (tmp / "state" / "fliessband" / "overrides.env").read_text(encoding="utf-8")
+    assert "AUTOLAND=1" in written
+    assert "AUTOLAND_ACK=fliessband" in written
+
+
+def test_start_refuses_autoland_for_a_sweep_pack(api):
+    client, _calls, _tmp = api
+    res = client.post(
+        "/api/loops/nacht/start",
+        json={"overrides": {"AUTOLAND": "1", "AUTOLAND_ACK": "nacht"}},
+    )
+    assert res.status_code == 400
+    assert "pipeline" in res.json()["detail"]
+
+
+def test_night_overrides_accept_effort_and_reject_an_invalid_one(api):
+    client, _calls, _tmp = api
+    ok = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_BUILD_EFFORT": "high"}},
+    )
+    assert ok.status_code == 200, ok.json()
+    bad = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_BUILD_EFFORT": "turbo"}},
+    )
+    assert bad.status_code == 400
+    assert "turbo" in bad.json()["detail"]

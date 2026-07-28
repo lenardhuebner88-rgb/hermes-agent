@@ -22,8 +22,20 @@ GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 _CLI_MODEL_ALIASES: dict[str, str] = {}
 
 
-@register("xai")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+# `grok --reasoning-effort <l>` (Alias `--effort`). Das Set stammt vom CLI
+# selbst — ein ungültiger Wert antwortet mit "unknown effort level 'BOGUS';
+# use one of: high, medium, low" (live geprüft 2026-07-28).
+GROK_EFFORT_LEVELS = ("low", "medium", "high")
+
+
+@register("xai", effort_levels=GROK_EFFORT_LEVELS)
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,
+) -> EngineResult:
     cli_model = _CLI_MODEL_ALIASES.get(model, model)
     cmd = [
         GROK_BIN,
@@ -33,6 +45,10 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
         "--always-approve",
         "--model",
         cli_model,
+    ]
+    if effort:
+        cmd += ["--reasoning-effort", effort]
+    cmd += [
         "--single",
         prompt,
         "--output-format",

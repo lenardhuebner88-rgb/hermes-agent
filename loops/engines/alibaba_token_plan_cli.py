@@ -19,7 +19,13 @@ QWEN_BIN = os.environ.get("QWEN_BIN", "qwen")
 
 
 @register("alibaba-token-plan")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,  # noqa: ARG001 - kein Effort-Transport (s. register)
+) -> EngineResult:
     cmd = [
         QWEN_BIN,
         "-m",

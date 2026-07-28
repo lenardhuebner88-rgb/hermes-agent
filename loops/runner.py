@@ -148,6 +148,40 @@ def _autoland_safety_hash(raw: dict) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+# --- Operator-Autoland (2026-07-28) --------------------------------------
+# Zwei Klassen von Autoland, bewusst getrennt:
+#
+#   1. VERTRAGS-Autoland  — `autoland: true` im Manifest, Allowlist + Safety-/
+#      Prompt-SHA. Das ist die Autorität für UNBEAUFSICHTIGTE Läufe (Timer,
+#      Cron, Nachtlauf): niemand schaut zu, also muss der Vertrag halten.
+#      Unverändert.
+#   2. OPERATOR-Autoland  — pro Lauf im Startdialog eingeschaltet, für JEDES
+#      pipeline-Pack, ohne SHA-Vertrag. Der Operator startet den Lauf selbst
+#      und trägt ihn; der Zweitschlüssel (AUTOLAND_ACK = exakter Pack-Name)
+#      belegt, dass das Einschalten Absicht war und kein Durchklicken.
+#
+# Was in BEIDEN Fällen unverändert hart bleibt: Verify-PASS, Visual-Gate,
+# land_gates (Collection-Sweep + run-affected + Frontend-Gate), exact-one-commit,
+# sauberer Worktree, ff-only und das Push-Ziel (nie origin).
+AUTOLAND_RUNTIME_KEY = "AUTOLAND"
+AUTOLAND_RUNTIME_ACK_KEY = "AUTOLAND_ACK"
+
+# Pfad-Vertrag für Packs OHNE kuratierten Eintrag. Bewusst weit im Erlauben
+# (ein beliebiges Pack weiß der Runner nicht vorher, was es anfasst), aber
+# gleich streng im Verbieten wie die kuratierten Verträge: Auth, Board-Spine
+# und die Lockfiles landen nie unbeaufsichtigt.
+OPERATOR_AUTOLAND_DENY_PREFIXES = (
+    "hermes_cli/auth.py",
+    "hermes_cli/dashboard_auth/",
+    "hermes_cli/kanban_db.py",
+    "web/package.json",
+    "web/package-lock.json",
+    "loops/runner.py",
+    ".github/",
+    "scripts/deploy_dashboard.sh",
+)
+
+
 @dataclass(frozen=True)
 class AutolandContract:
     path_prefixes: tuple[str, ...]
@@ -157,6 +191,11 @@ class AutolandContract:
     safety_sha256: str | None
     prompt_sha256: dict[str, str] | None
     require_visual: Literal["always", "if_web_touched"]
+    # NUR für Operator-Autoland: der Pfad-Scope eines beliebigen Packs ist nicht
+    # vorab kuratierbar, also tritt an die Stelle der Allow-Liste die Deny-Liste.
+    # Muss explizit sein: ein leeres ``path_prefixes`` heißt weiterhin "NICHTS
+    # erlaubt" (fail-closed) und darf nie als "alles erlaubt" durchgehen.
+    allow_any_path: bool = False
 
 
 _HERMES_REPO_PREFIXES = ("web/src/control/", "hermes_cli/", "tests/")
@@ -219,6 +258,10 @@ class PhaseCfg:
     model: str
     timeout: int
     prompt: str  # Dateiname relativ zum Pack-Ordner
+    # Reasoning-Effort dieser Phase; None = Engine-Default (kein CLI-Flag).
+    # Gültige Stufen kommen aus der Engine selbst (engines.effort_levels_for),
+    # nicht aus einer zweiten Liste hier.
+    effort: str | None = None
 
 
 @dataclass
@@ -316,9 +359,19 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         prompt_file = pack_dir / str(pcfg["prompt"])
         if not prompt_file.is_file():
             raise ManifestError(f"Pack {name!r}: Phase {pname}: Prompt-Datei fehlt: {prompt_file}")
+        # `effort` ist optional. Gesetzt wird er fail-closed gegen das
+        # Transport-Set der Engine geprüft — ein Effort, den das CLI nicht
+        # annimmt, darf nicht bis zum Lauf durchrutschen.
+        try:
+            phase_effort = engines.validate_effort(
+                str(pcfg["engine"]), pcfg.get("effort")
+            )
+        except engines.EffortUnsupported as exc:
+            raise ManifestError(f"Pack {name!r}: Phase {pname}: {exc}") from None
         phases[pname] = PhaseCfg(
             engine=pcfg["engine"], model=str(pcfg["model"]),
             timeout=pcfg["timeout"], prompt=str(pcfg["prompt"]),
+            effort=phase_effort,
         )
 
     for section in ("stop", "params", "notify"):
@@ -557,9 +610,12 @@ def parse_worktree_paths(porcelain: str) -> list[str]:
     return [line[len("worktree "):] for line in porcelain.splitlines() if line.startswith("worktree ")]
 
 
-# Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL). Persistent (nicht konsumiert).
-# Präzedenz: One-Shot (overrides.env) > Night (night-overrides.env) > pack.yaml.
-_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
+# Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht
+# konsumiert). Präzedenz: One-Shot (overrides.env) > Night (night-overrides.env)
+# > pack.yaml. EFFORT gehört in dieselbe Klasse wie ENGINE/MODEL: er beschreibt
+# die Route, nicht den Auftrag, und dreht deshalb auch den Autoland-Safety-Hash
+# nicht (der projiziert je Phase nur den Prompt).
+_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT)$")
 NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
 
 
@@ -704,6 +760,42 @@ class LoopRunner:
         self.phase_secs: dict[str, int] = {}
         self._overrides_consumed = False
         self._repo_validated = False
+        self.autoland_runtime = self._read_runtime_autoland()
+
+    def _read_runtime_autoland(self) -> bool:
+        """Operator-Autoland aus den One-Shot-Overrides — mit Zweitschlüssel.
+
+        ``AUTOLAND=1`` allein reicht NICHT: ``AUTOLAND_ACK`` muss den exakten
+        Pack-Namen wiederholen. Ein fehlender/falscher ACK ist ein harter
+        Fehler, kein stilles Ignorieren — sonst startete ein Lauf, den der
+        Operator als landend gemeint hat, still als nicht-landend (oder
+        umgekehrt), und genau diese Zweideutigkeit soll der Schlüssel killen.
+        """
+        raw = str(self.overrides.get(AUTOLAND_RUNTIME_KEY, "")).strip().lower()
+        if raw in ("", "0", "false", "no"):
+            return False
+        if raw not in ("1", "true", "yes"):
+            raise RuntimeError(
+                f"Pack {self.pack.name}: {AUTOLAND_RUNTIME_KEY}={raw!r} ungültig "
+                "(erlaubt: 1/0)"
+            )
+        ack = str(self.overrides.get(AUTOLAND_RUNTIME_ACK_KEY, "")).strip()
+        if ack != self.pack.name:
+            raise RuntimeError(
+                f"Pack {self.pack.name}: Operator-Autoland braucht den Zweitschlüssel "
+                f"{AUTOLAND_RUNTIME_ACK_KEY}=<Pack-Name>; erhalten: {ack!r}"
+            )
+        if self.pack.type != "pipeline":
+            raise RuntimeError(
+                f"Pack {self.pack.name}: Autoland braucht type=pipeline "
+                f"(ist {self.pack.type})"
+            )
+        return True
+
+    @property
+    def autoland_active(self) -> bool:
+        """Landet dieser LAUF? Manifest-Vertrag ODER Operator-Zweitschlüssel."""
+        return bool(self.pack.autoland or self.autoland_runtime)
 
     def _validate_repo(self) -> None:
         """Fail fast when the configured pack repo is missing or not a Git repo.
@@ -892,11 +984,22 @@ class LoopRunner:
             model = self.night_overrides[mod_key]
         else:
             model = cfg.model
+        # Effort folgt derselben Präzedenz wie Engine/Modell (One-Shot > Night >
+        # pack.yaml) und wird gegen die EFFEKTIVE Engine validiert — nach einem
+        # Engine-Swap gilt das Set der neuen Engine, nicht das der alten.
+        eff_key = f"PHASE_{up}_EFFORT"
+        if eff_key in self.overrides:
+            effort_raw = self.overrides[eff_key]
+        elif eff_key in self.night_overrides:
+            effort_raw = self.night_overrides[eff_key]
+        else:
+            effort_raw = cfg.effort if engine == cfg.engine else None
         return PhaseCfg(
             engine=engine,
             model=model,
             timeout=self._int_override(f"PHASE_{up}_TIMEOUT", cfg.timeout),
             prompt=cfg.prompt,
+            effort=engines.validate_effort(engine, effort_raw),
         )
 
     def stop_cfg(self, key: str) -> int:
@@ -1047,20 +1150,28 @@ class LoopRunner:
         self, phase: str, *, round_: int | None = None, **extra: str
     ) -> engines.EngineResult:
         cfg = self.phase_cfg(phase)
-        self.say(f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}, timeout={cfg.timeout}s)")
+        effort_note = f", effort={cfg.effort}" if cfg.effort else ""
+        self.say(
+            f"── Phase {phase} (engine={cfg.engine}, model={cfg.model}"
+            f"{effort_note}, timeout={cfg.timeout}s)"
+        )
         self.status_path.write_text("", encoding="utf-8")
         prompt = self.render_prompt(phase, **extra)
         started = time.time()
         started_iso = _utc_iso()
         current = {"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                   "effort": cfg.effort,
                    "started_at": started_iso, "timeout": cfg.timeout}
         if round_ is not None:
             current["round"] = round_
         self._heartbeat(current)
         with self._worker_environment(phase):
-            result = engines.get_engine(cfg.engine)(cfg.model, prompt, self.wt, cfg.timeout)
+            result = engines.get_engine(cfg.engine)(
+                cfg.model, prompt, self.wt, cfg.timeout, cfg.effort
+            )
         self.phase_secs[phase] = int(time.time() - started)
         done = {"phase": phase, "engine": cfg.engine, "model": cfg.model,
+                "effort": cfg.effort,
                 "secs": self.phase_secs[phase], "rc": result.rc,
                 "at": started_iso}
         if round_ is not None:
@@ -1181,7 +1292,11 @@ class LoopRunner:
         Gilt für alle Packs (nicht nur Autoland).
         """
         catalog_data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8")) or {}
-        catalog = catalog_data.get("engines", {})
+        # Dieselbe Funktion, aus der das Dashboard sein Dropdown baut — sonst
+        # böte das UI Modelle an, die der Start hier ablehnt.
+        from loops.model_catalog import catalog_with_dynamic_models
+
+        catalog = catalog_with_dynamic_models(catalog_data.get("engines", {}))
         for phase in self.pack.phases:
             cfg = self.phase_cfg(phase)
             engine_entry = catalog.get(cfg.engine)
@@ -1194,12 +1309,16 @@ class LoopRunner:
                     f"Pack {self.pack.name}: Phase {phase}: Modell {cfg.model!r} "
                     "ist nicht im UI-Katalog erlaubt"
                 )
+            # phase_cfg validiert den Effort bereits gegen die effektive Engine;
+            # hier bleibt der Aufruf als expliziter fail-closed-Punkt stehen,
+            # damit ein künftiger Pfad an phase_cfg vorbei nicht still durchläuft.
+            engines.validate_effort(cfg.engine, cfg.effort)
 
     def _validate_autoland_runtime(self, *, skip_plan: bool = False) -> None:
         """Validiert effektive Phase-Paare; Autoland zusätzlich den sichtbaren Laufvertrag."""
         # Effektive Engine/Model-Paarung gilt fail-closed für alle Packs.
         self._validate_effective_phase_catalog()
-        if not self.pack.autoland:
+        if not self.autoland_active:
             return
         if skip_plan:
             raise RuntimeError(
@@ -1208,15 +1327,23 @@ class LoopRunner:
 
         # SKIP_BASE_REFRESH only skips the pre-night rebase — it does not
         # alter the land contract, so it stays allowed under autoland.
-        allowed = {"MAX_ROUNDS", "MAX_HOURS", "SKIP_BASE_REFRESH"}
+        allowed = {
+            "MAX_ROUNDS", "MAX_HOURS", "SKIP_BASE_REFRESH",
+            # Der Operator-Schalter und sein Zweitschlüssel sind selbst Overrides
+            # und müssen sich hier nicht als "unerlaubt" wiederfinden.
+            AUTOLAND_RUNTIME_KEY, AUTOLAND_RUNTIME_ACK_KEY,
+        }
         for phase in self.pack.phases:
             prefix = f"PHASE_{phase.upper()}_"
-            allowed.update({f"{prefix}ENGINE", f"{prefix}MODEL"})
+            # EFFORT floatet wie ENGINE/MODEL: er ist Teil der Route, nicht der
+            # Landungsautorität. Stünde er nicht hier, würde jede Effort-Wahl im
+            # Startdialog das Autoland eines Packs abschießen.
+            allowed.update({f"{prefix}ENGINE", f"{prefix}MODEL", f"{prefix}EFFORT"})
         rejected = sorted(set(self.overrides) - allowed)
         if rejected:
             raise RuntimeError(
                 f"Pack {self.pack.name}: nicht erlaubte Runtime-Overrides: {rejected}; "
-                "Autoland akzeptiert nur Engine, Modell, MAX_ROUNDS und MAX_HOURS"
+                "Autoland akzeptiert nur Engine, Modell, Effort, MAX_ROUNDS und MAX_HOURS"
             )
 
         limits = {"max_rounds": 50, "max_hours": 24}
@@ -1243,15 +1370,25 @@ class LoopRunner:
         validierten Manifest-Vertrag (Prompts, Pack-Quelle, Live-Repo,
         Landungsziel) sowie an Verify-PASS, Visual-Gate und den land_gates.
         """
-        return bool(self.pack.autoland)
+        return bool(self.autoland_active)
 
     @property
     def manual_land_marker(self) -> Path:
         return self.state / "AUTOLAND_MANUAL"
 
     def _prepare_runtime_land_mode(self) -> None:
-        if not self.pack.autoland:
+        if not self.autoland_active:
             return
+        if self.autoland_runtime and not self.pack.autoland:
+            # Zweitschlüssel-Autoland ist eine Operator-Entscheidung pro Lauf und
+            # steht deshalb nachweisbar im Ledger — sonst wäre hinterher nicht
+            # unterscheidbar, ob ein Pack laut Manifest landet oder weil jemand
+            # den Schalter umgelegt hat.
+            self.ledger(
+                f"AUTOLAND per Operator-Zweitschlüssel aktiviert "
+                f"({AUTOLAND_RUNTIME_ACK_KEY}={self.pack.name}); "
+                "Deny-Präfixe + Gates unverändert bindend"
+            )
         if self._runtime_autoland_authorized():
             self.manual_land_marker.unlink(missing_ok=True)
             return
@@ -1271,8 +1408,25 @@ class LoopRunner:
         return True
 
     def _autoland_contract(self) -> AutolandContract:
-        """Return the already loader-validated per-pack landing contract."""
+        """Return the already loader-validated per-pack landing contract.
+
+        Operator-Autoland (Zweitschlüssel, kein kuratierter Vertrag) bekommt
+        einen Default: Pfade offen — der Runner kann für ein beliebiges Pack
+        nicht vorher wissen, was es anfasst — aber dieselbe Deny-Liste wie die
+        kuratierten Verträge, plus Visual-Pflicht sobald `web/src/control/`
+        berührt ist. Die SHA-Felder bleiben None: sie gehören zum
+        Manifest-Vertrag, den dieser Pfad bewusst nicht führt.
+        """
         contract = AUTOLAND_CONTRACTS.get(self.pack.name)
+        if contract is None and self.autoland_runtime:
+            return AutolandContract(
+                path_prefixes=(),
+                deny_prefixes=OPERATOR_AUTOLAND_DENY_PREFIXES,
+                safety_sha256=None,
+                prompt_sha256=None,
+                require_visual="if_web_touched",
+                allow_any_path=True,
+            )
         if contract is None:
             raise RuntimeError(
                 f"Pack {self.pack.name}: kein per-Pack-Autoland-Vertrag vorhanden"
@@ -1584,7 +1738,7 @@ class LoopRunner:
             plan.rename(building)
             self.say(f"═══ Runde {rnd}: {building.name} ═══")
             prehead = self.rev_parse()
-            if self.pack.autoland:
+            if self.autoland_active:
                 self.visual_attestation_path.unlink(missing_ok=True)
 
             build = self.run_phase("build", round_=rnd, PLAN_PATH=str(building))
@@ -1709,12 +1863,12 @@ class LoopRunner:
                 plan_text = ""
             pass_matches = pass_status_matches_plan(status, plan_text, building)
             visual_required = (
-                self.pack.autoland and self._autoland_visual_required()
+                self.autoland_active and self._autoland_visual_required()
             )
             visual_ok = not visual_required
             visual_report = (
                 "für Review-only-Pack nicht erforderlich"
-                if not self.pack.autoland
+                if not self.autoland_active
                 else "für Backend-only-Diff nicht erforderlich"
             )
             if verify.rc == 0 and pass_matches and visual_required:
@@ -1838,7 +1992,7 @@ class LoopRunner:
         ]
         if denied:
             return False, "Commit-Scope trifft Deny-Präfix: " + ", ".join(denied)
-        outside = [
+        outside = [] if contract.allow_any_path else [
             path
             for path in touched
             if not any(path.startswith(prefix) for prefix in contract.path_prefixes)
@@ -1911,7 +2065,7 @@ class LoopRunner:
     def cmd_night(self, fresh: bool = False, skip_plan: bool = False) -> bool:
         # STOP ist auch beim Resume bindend: ein bereits verifizierter Commit darf
         # nicht an einer expliziten Operator-Sperre vorbei automatisch pushen.
-        if self.pack.autoland and self.stop_requested():
+        if self.autoland_active and self.stop_requested():
             self.say("STOP-Datei — Auto-Land/Resume bleibt angehalten.")
             self.ledger("AUTOLAND angehalten: STOP-Datei gesetzt")
             return True
@@ -1925,7 +2079,7 @@ class LoopRunner:
         # _autoland_pending() geloest (Netto-Diff statt Commitzahl → netto-leerer
         # Branch ist nicht mehr "pending", cmd_night faellt in den Round-Loop und
         # arbeitet den Retry ab). Hier braucht es KEINEN zusaetzlichen Guard.
-        if self.pack.autoland and self._autoland_pending():
+        if self.autoland_active and self._autoland_pending():
             if self._manual_land_required("resume"):
                 return True
             return self._try_autoland("resume")
@@ -2014,7 +2168,7 @@ class LoopRunner:
         # Sweep-DRY in cmd_run bleibt unberührt (kein _note_dry_end dort).
         self._reset_dry_streak()
         self.cmd_run(fresh=fresh)
-        if self.pack.autoland and self._autoland_pending():
+        if self.autoland_active and self._autoland_pending():
             if self._manual_land_required("night"):
                 return True
             if self.stop_requested():
@@ -2028,9 +2182,9 @@ class LoopRunner:
         commits = self.git("log", "--oneline", f"main..{self.pack.branch}").stdout.strip()
         counts = " · ".join(f"{self.qcount(s)} {s[3:]}" for s in QUEUE_STAGES) \
             if self.pack.type == "pipeline" else "(sweep)"
-        if self.pack.autoland and self.manual_land_marker.exists():
+        if self.autoland_active and self.manual_land_marker.exists():
             landing = "Landung: manuell — UI-Phasenvertrag weicht vom Auto-Land-Vertrag ab."
-        elif self.pack.autoland:
+        elif self.autoland_active:
             landing = "Landung: automatisch nach unabhaengigem PASS (allowlist + Schienen)."
         else:
             landing = "Landung: Morgen-Review (Design-Doc → Landung)."
@@ -2574,7 +2728,7 @@ def main(argv: list[str] | None = None) -> int:
                 # Bestehende Review-only-Packs behalten ihre bisherigen Service-
                 # Exitcodes. Nur die autorisierte Auto-Land-Pipeline meldet einen
                 # unvollständigen Landungsversuch als harte Unit-Fehlfunktion.
-                rc = 0 if night_ok or not pack.autoland else 4
+                rc = 0 if night_ok or not runner.autoland_active else 4
             runner.say(f"ENDE cmd={args.cmd}")
             if rc:
                 return rc

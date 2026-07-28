@@ -10,6 +10,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from hermes_cli.kanban_worker_runtime import CLAUDE_CLI_EFFORT_LEVELS
+
 from . import EngineResult, detect_usage_limit, register
 
 CLAUDE_BIN = os.environ.get(
@@ -17,8 +19,17 @@ CLAUDE_BIN = os.environ.get(
 )
 
 
-@register("claude")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+# Effort-Set aus derselben Konstante, die der Kanban-Spawn auf `--effort` mappt
+# — EINE Quelle für Lanes-Tab, Kanban-Spawn und Loop-Runner, damit das
+# Dashboard-Angebot nicht vom Transport abdriften kann.
+@register("claude", effort_levels=CLAUDE_CLI_EFFORT_LEVELS)
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,
+) -> EngineResult:
     cmd = [
         CLAUDE_BIN,
         "-p",
@@ -26,8 +37,13 @@ def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
         model,
         "--permission-mode",
         "bypassPermissions",
-        prompt,
     ]
+    # `claude --effort <level>` — live geprüft 2026-07-25 (`claude -p --model
+    # claude-opus-5 --effort xhigh` → exit 0). Ohne Effort bleibt das Flag weg,
+    # dann gilt der CLI-Default.
+    if effort:
+        cmd += ["--effort", effort]
+    cmd.append(prompt)
     try:
         proc = subprocess.run(
             cmd,

@@ -62,7 +62,13 @@ HERMES_BIN = _resolve_hermes_bin()
 
 
 @register("hermes")
-def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+def run(
+    model: str,
+    prompt: str,
+    cwd: Path,
+    timeout_s: int,
+    effort: str | None = None,  # noqa: ARG001 - kein Effort-Transport (s. register)
+) -> EngineResult:
     # model = Hermes-Profilname (siehe Modul-Docstring).
     cmd = [HERMES_BIN, "-p", model, "-z", prompt]
     env = dict(os.environ)
