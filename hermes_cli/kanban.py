@@ -2429,14 +2429,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
             # a newly provisioned worktree, not a shared directory path.
             branch_name = None
         scope_contract = None
-        if args.evidence_commit or args.evidence_recorded_at or args.evidence_test_file:
-            if not args.evidence_commit or not args.evidence_recorded_at:
+        evidence_commit = getattr(args, "evidence_commit", None)
+        evidence_recorded_at = getattr(args, "evidence_recorded_at", None)
+        evidence_test_files = getattr(args, "evidence_test_file", None)
+        if evidence_commit or evidence_recorded_at or evidence_test_files:
+            if not evidence_commit or not evidence_recorded_at:
                 print("--evidence-commit and --evidence-recorded-at must be supplied together", file=sys.stderr)
                 return 2
             scope_contract = {"evidence_freshness": {
-                "commit": args.evidence_commit,
-                "recorded_at": args.evidence_recorded_at,
-                "test_files": args.evidence_test_file,
+                "commit": evidence_commit,
+                "recorded_at": evidence_recorded_at,
+                "test_files": evidence_test_files,
             }}
         task_id = kb.create_task(
             conn,
