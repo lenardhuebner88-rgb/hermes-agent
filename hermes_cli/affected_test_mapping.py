@@ -814,7 +814,9 @@ def classify_changed_paths(
             test_index = build_test_index(repo_root)
         imported = test_index.imports.get(module_import, ())
         uncovered_symbols: tuple[str, ...] = ()
+        uncovered_without_net = False
         if imported:
+            broad_imported = imported
             narrowing = narrow_imported_tests(
                 repo_root=repo_root,
                 source_path=source_path,
@@ -828,9 +830,19 @@ def classify_changed_paths(
                 git_timeout_error_type=GitTimeoutError,
             )
             imported = narrowing.tests
-            strategies.append("import→symbol" if narrowing.applied else "import")
             if narrowing.reason == "no_symbol_test_matches":
                 uncovered_symbols = narrowing.changed_symbols
+                # Dropping the module-level set on an untested symbol is only safe
+                # where a curated or direct test still covers the path. Measured
+                # 2026-07-28: of the 14 modules above the fan-out threshold, 6 have
+                # neither (gateway/run.py, gateway/platforms/base.py, run_agent.py,
+                # cli.py, hermes_cli/main.py, hermes_cli/auth.py) — zeroing there
+                # would select no test at all and still report green.
+                if not direct and not explicit:
+                    imported = broad_imported
+                    uncovered_without_net = True
+            narrowed = narrowing.applied and not uncovered_without_net
+            strategies.append("import→symbol" if narrowed else "import")
         prioritized_tests: list[str] = []
         seen_tests: set[str] = set()
         for evidence in (direct, explicit, imported):
@@ -843,10 +855,20 @@ def classify_changed_paths(
         )
         if uncovered_symbols:
             symbol_label = "symbol" if len(uncovered_symbols) == 1 else "symbols"
+            if uncovered_without_net:
+                coverage_note = (
+                    "no curated or direct test covers this path, so all "
+                    f"{len(prioritized_tests)} module-level import matches still run"
+                )
+            else:
+                coverage_note = (
+                    f"the {len(prioritized_tests)} curated/direct test files for "
+                    "this path ran instead of the module-level import set"
+                )
             selected_warnings.append(
                 f"symbol coverage gap for {source_path}: changed {symbol_label} "
-                f"without test references: {', '.join(uncovered_symbols)}; curated "
-                "EXPLICIT_TEST_PATTERNS ran and the affected-test gate intentionally "
+                f"without test references: {', '.join(uncovered_symbols)}; "
+                f"{coverage_note} and the affected-test gate intentionally "
                 "remains non-red"
             )
         if (

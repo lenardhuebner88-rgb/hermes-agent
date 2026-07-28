@@ -495,9 +495,9 @@ def test_real_uncovered_symbol_selects_curated_tests_and_warns(
     assert set(record.tests) == expected_tests
     assert record.warnings == (
         "symbol coverage gap for hermes_cli/kanban_db.py: changed symbol without "
-        "test references: _run_evidence_freshness_preflight; curated "
-        "EXPLICIT_TEST_PATTERNS ran and the affected-test gate intentionally remains "
-        "non-red",
+        "test references: _run_evidence_freshness_preflight; the 29 curated/direct "
+        "test files for this path ran instead of the module-level import set and "
+        "the affected-test gate intentionally remains non-red",
     )
     assert plan.unmapped_paths == []
     assert UNMAPPED_EXIT_CODE == 4
@@ -561,6 +561,68 @@ def test_mixed_referenced_and_unreferenced_symbols_do_not_warn(
     assert record.strategies == ("import→symbol",)
     assert len(record.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
     assert record.warnings == ()
+
+
+def test_uncovered_symbol_without_curated_or_direct_net_keeps_module_imports(
+    tmp_path: Path,
+) -> None:
+    """A named gap must never turn into a green run over zero test files.
+
+    Freigabe 3 ("run the curated EXPLICIT_TEST_PATTERNS plus a loud warning")
+    presumes a curated net exists. Measured 2026-07-28: 6 of the 14 modules above
+    the fan-out threshold have neither a curated pattern nor a direct test
+    (gateway/run.py, gateway/platforms/base.py, run_agent.py, cli.py,
+    hermes_cli/main.py, hermes_cli/auth.py). Without the fallback below, a change
+    to an untested symbol in those selects nothing at all and still passes.
+    """
+    source = tmp_path / "pkg" / "runtime.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    # No tests/pkg/test_runtime.py => no `direct` hit; pkg/runtime.py has no
+    # EXPLICIT_TEST_PATTERNS entry => no curated hit. Only the import fan-out.
+    for index in range(SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1):
+        (tests / f"test_runtime_{index:03d}.py").write_text(
+            "from pkg import runtime\n\n"
+            f"def test_runtime_{index:03d}():\n"
+            "    assert runtime.covered() == 1\n",
+            encoding="utf-8",
+        )
+    _init_repo(tmp_path)
+    # Change ONLY the symbol no test references.
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    record = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="integration",
+        diff_spec=SymbolDiffSpec(ref="HEAD"),
+    ).records[0]
+
+    assert record.state == "selected"
+    # The module-level set survives instead of collapsing to zero files.
+    assert len(record.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
+    assert record.strategies == ("import",)
+    assert len(record.warnings) == 1
+    warning = record.warnings[0]
+    assert "symbol coverage gap for pkg/runtime.py" in warning
+    assert "uncovered" in warning
+    # The message must not claim a curated net that does not exist.
+    assert "no curated or direct test covers this path" in warning
+    assert "EXPLICIT_TEST_PATTERNS ran" not in warning
 
 
 def test_real_gateway_config_commit_does_not_warn(
