@@ -13,7 +13,7 @@ als ein zu Unrecht abgelehnter.
 ## Schritte
 1. **Diff lesen**: `git show --stat HEAD` + vollständigen Diff der Range {{RANGE}}.
    Scope-Check: nur Dateien unter `web/src/control/**`? `anti_scope` respektiert?
-   Verbotenes berührt (Upstream-Dateien, `web/package-lock.json`, Schema/Migration,
+   Verbotenes berührt (Upstream-Dateien, `package-lock.json`, Schema/Migration,
    Auth/Secrets, kanban.db)? → sofort FAIL.
 2. **Gates SELBST ausführen** (Exit-Codes zählen, nicht Builder-Behauptungen) — aus
    `{{WT}}/web`:

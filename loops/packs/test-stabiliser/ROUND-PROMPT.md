@@ -52,4 +52,4 @@ Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 NIE: push, merge, deploy, Vollsuite, Produktions-Code ändern um einen Test grün zu
 bekommen (nur echte Bugfixes mit Regressionstest sind erlaubt — im Zweifel BLOCKED),
 Schema-Migrationen, Auth-/Secret-Pfade, kanban.db-Schreibzugriff, Upstream-Dateien,
-`web/package-lock.json`, `tests/conftest.py`-Invarianten aufweichen.
+`package-lock.json`, `tests/conftest.py`-Invarianten aufweichen.

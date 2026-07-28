@@ -24,7 +24,7 @@ Nichts erneut planen, was schon lief:
 
 ## Schritt 2 — Grounding (nur `web/src/control`)
 Dein Analyse-Raum ist ausschließlich `web/src/control/**` — NICHT Upstream-Dateien
-(`web/src/App.tsx` u. ä.), NICHT `web/package-lock.json`. Pflicht-Minimum:
+(`web/src/App.tsx` u. ä.), NICHT `package-lock.json`. Pflicht-Minimum:
 - {{STATE_DIR}}/SEED.md — optionale Operator-Saat (kann fehlen/leer sein).
 - `git log --oneline -30 -- web/src/control` — was zuletzt gebaut wurde.
 - **hc-*-Token-Konsistenz**: `rg -n "hc-[a-z-]+" web/src/control` — inkonsistente
@@ -70,7 +70,7 @@ files_hint: web/src/control/<pfad>
 
 ## Globale Verbote (gelten für dich UND jeden Plan — in anti_scope mitdenken)
 - Pläne betreffen ausschließlich `web/src/control/**` — NIEMALS Upstream-Dateien
-  (`web/src/App.tsx` u. ä.), NIEMALS `web/package-lock.json`.
+  (`web/src/App.tsx` u. ä.), NIEMALS `package-lock.json`.
 - KEINE DB-Schema-Änderungen/Migrationen, keine DROP/ALTER-Pfade.
 - KEINE Auth-/Secret-/Credential-Pfade, kein Exfil.
 - KEIN push/deploy/merge; keine Gateway-/Service-Restarts.

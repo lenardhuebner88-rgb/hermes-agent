@@ -76,7 +76,7 @@ unbaubar, Build-Slot verloren).
 - KEINE DB-Schema-Änderungen/Migrationen, keine DROP/ALTER-Pfade.
 - KEINE Auth-/Secret-/Credential-Pfade, kein Exfil.
 - KEIN push/deploy/merge; keine Gateway-/Service-Restarts.
-- KEINE Upstream-Dateien (`web/src/App.tsx` u.ä.), KEINE `web/package-lock.json`.
+- KEINE Upstream-Dateien (`web/src/App.tsx` u.ä.), KEINE `package-lock.json`.
 - web/-berührende Pläne NUR wenn HAS_WEB=1 (sonst gar nicht planen).
 - Änderungen an DB-**Schreibpfaden** (kanban_db.py-Writes, Dispatch) nur mit
   Regressionstest gegen echtes Datenformat und kleinem Diff — im Zweifel P-runter

@@ -20,7 +20,7 @@ dann beende den Turn.
    Match Stil/Naming der Umgebung (bestehende `hc-*`-Tokens nutzen, kein neues
    Ad-hoc-Styling). Kein Refactor, kein Drive-by-Aufräumen, nichts außerhalb des
    `files_hint`-Umfelds ohne Not. NIE Upstream-Dateien (`web/src/App.tsx`) oder
-   `web/package-lock.json` anfassen.
+   `package-lock.json` anfassen.
 4. **Gates** (Exit-Code ist die Wahrheit, nie Prosa) — aus `{{WT}}/web`:
    ```bash
    npm run lint:control && npx tsc -b --noEmit && npx vitest run <betroffene Testpfade aus tests:>
@@ -49,7 +49,7 @@ dann beende den Turn.
 
 ## Verbote
 - NIE: push, merge, deploy, Service-Restart, DB-Schreibzugriff auf `~/.hermes/kanban.db`,
-  Secrets/Auth-Dateien, `web/package-lock.json`, Schema-Migrationen, Upstream-Dateien
+  Secrets/Auth-Dateien, `package-lock.json`, Schema-Migrationen, Upstream-Dateien
   (`web/src/App.tsx`), Vollsuite (pytest wie vitest).
 - Kein zweites Item „mitnehmen". Kein Scope-Creep. Lieber ehrliches BUILD_FAIL
   als ein Commit, der das done_when nur behauptet.

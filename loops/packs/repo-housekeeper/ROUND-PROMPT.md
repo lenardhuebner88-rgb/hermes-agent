@@ -41,5 +41,5 @@ Die Morgen-Review liest diese Datei.
 
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, Schema-Migrationen, Auth-/Secret-
-Pfade, kanban.db-Schreibzugriff, Upstream-Dateien (`web/src/App.tsx`), `web/package-lock.json`,
+Pfade, kanban.db-Schreibzugriff, Upstream-Dateien (`web/src/App.tsx`), `package-lock.json`,
 Dateien löschen, Branches löschen (auch nicht „nur ein offensichtlich totes Skript").

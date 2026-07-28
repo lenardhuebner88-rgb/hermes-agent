@@ -44,4 +44,4 @@ Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, DB-Schreibpfade/Dispatch/Auth
 anfassen (→ BLOCKED + Ledger), Schema-Migrationen, kanban.db-Schreibzugriff, Secrets,
-Upstream-Dateien (`web/src/App.tsx`), `web/package-lock.json`, Test-Assertions aufweichen.
+Upstream-Dateien (`web/src/App.tsx`), `package-lock.json`, Test-Assertions aufweichen.

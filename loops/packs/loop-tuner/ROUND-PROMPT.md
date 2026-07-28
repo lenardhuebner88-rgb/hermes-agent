@@ -47,4 +47,4 @@ unabhängige Belege ist Meinung, keine Optimierung → dann lieber DRY.
 NIE: Dateien außerhalb `loops/packs/**` + `loops/README.md` ändern (runner.py/engines/
 gate.sh/systemd sind tabu — dafür gibt es PlanSpecs), Verbote/Schienen abschwächen,
 mehr als ein Pack pro Runde, push/merge/deploy, Vollsuite, kanban.db-Writes, Secrets,
-Upstream-Dateien, `web/package-lock.json`.
+Upstream-Dateien, `package-lock.json`.

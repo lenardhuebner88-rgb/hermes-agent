@@ -56,6 +56,6 @@ dann beende den Turn.
 
 ## Verbote
 - NIE: push, merge, deploy, Service-Restart, DB-Schreibzugriff auf `~/.hermes/kanban.db`,
-  Secrets/Auth-Dateien, `web/package-lock.json`, Schema-Migrationen.
+  Secrets/Auth-Dateien, `package-lock.json`, Schema-Migrationen.
 - Kein zweites Item „mitnehmen". Kein Scope-Creep. Lieber ehrliches BUILD_FAIL
   als ein Commit, der das done_when nur behauptet.

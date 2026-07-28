@@ -73,7 +73,7 @@ recent `backup/*` and any branch checked out in a worktree (`git worktree list`)
   naming, delete the duplicate (verify with `tsc`).
 - A test file where both sides appended **different** sections at one spot → keep **both**, just remove
   the `<<<<<<< / ======= / >>>>>>>` markers.
-- `web/package-lock.json` → don't hand-merge: `git checkout --theirs web/package-lock.json && npm install --package-lock-only --prefix web`.
+- `package-lock.json` → don't hand-merge: `git checkout --theirs package-lock.json && npm install --package-lock-only --prefix web`.
 - `modify/delete` on an upstream-removed component → if `git grep` finds no remaining refs, accept the deletion (`git rm`).
 - **Silent auto-merge damage:** a clean auto-merge can still *drop an import* (seen: `import pytest` vanished) → the collection sweep in step C catches it.
 - **Silent side-taking during conflict resolution (the worst failure class):** the v0.18 merge
