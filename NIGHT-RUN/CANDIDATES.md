@@ -14,15 +14,15 @@ Fork-owned = present in HEAD, absent from `origin/main`. Reproduce with:
 
 ## Band A — 120-900 LoC (start here)
 
-- [ ] `hermes_cli/autoresearch_reconcile.py` (879 LoC) — `tests/test_autoresearch_reconcile.py`
-- [ ] `hermes_cli/pa_graph.py` (874 LoC) — `tests/hermes_cli/test_pa_graph.py`
-- [ ] `hermes_cli/plan_compiler.py` (859 LoC) — `tests/hermes_cli/test_plan_compiler.py`
-- [ ] `hermes_cli/operator_inventory.py` (771 LoC) — `tests/hermes_cli/test_operator_inventory.py`
-- [ ] `hermes_cli/usage_facts_db.py` (747 LoC) — `tests/hermes_cli/test_usage_facts_db.py`
-- [ ] `hermes_cli/autoresearch_budget.py` (702 LoC) — `tests/test_autoresearch_budget.py`
-- [ ] `hermes_cli/pa_planspec.py` (689 LoC) — `tests/hermes_cli/test_pa_planspec.py`
-- [ ] `hermes_cli/active_provider_facts.py` (677 LoC) — `tests/hermes_cli/test_active_provider_facts.py`
-- [ ] `hermes_cli/voice_spar_session.py` (676 LoC) — `tests/hermes_cli/test_voice_spar_session.py`
+- [x] `hermes_cli/autoresearch_reconcile.py` (879 LoC) — `tests/test_autoresearch_reconcile.py`
+- [x] `hermes_cli/pa_graph.py` (874 LoC) — `tests/hermes_cli/test_pa_graph.py`
+- [x] `hermes_cli/plan_compiler.py` (859 LoC) — `tests/hermes_cli/test_plan_compiler.py`
+- [x] `hermes_cli/operator_inventory.py` (771 LoC) — `tests/hermes_cli/test_operator_inventory.py`
+- [x] `hermes_cli/usage_facts_db.py` (747 LoC) — `tests/hermes_cli/test_usage_facts_db.py`
+- [x] `hermes_cli/autoresearch_budget.py` (702 LoC) — `tests/test_autoresearch_budget.py`
+- [x] `hermes_cli/pa_planspec.py` (689 LoC) — `tests/hermes_cli/test_pa_planspec.py`
+- [x] `hermes_cli/active_provider_facts.py` (677 LoC) — `tests/hermes_cli/test_active_provider_facts.py`
+- [x] `hermes_cli/voice_spar_session.py` (676 LoC) — `tests/hermes_cli/test_voice_spar_session.py`
 - [ ] `hermes_cli/subcommands/vision.py` (658 LoC) — `tests/hermes_cli/subcommands/test_vision.py`
 - [ ] `hermes_cli/pa_brief.py` (643 LoC) — `tests/hermes_cli/test_pa_brief.py`
 - [ ] `hermes_cli/kanban_landed.py` (627 LoC) — `tests/hermes_cli/test_kanban_landed.py`
