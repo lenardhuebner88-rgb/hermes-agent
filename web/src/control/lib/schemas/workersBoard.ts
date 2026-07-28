@@ -204,6 +204,34 @@ export const RunTimelineResponseSchema = z.object({
 export type RunTimelineItem = z.infer<typeof RunTimelineItemSchema>;
 export type RunTimelineResponse = z.infer<typeof RunTimelineResponseSchema>;
 
+// ─── 24h-Outcome-Übersicht (Worker-Tab, „Letzte 24 Stunden") ─────────────────
+// GET /runs/outcomes?hours=24 — Outcome-Verteilung + kompakte Runs-Liste
+// (plugins/kanban/dashboard/outcome_routes.py). Tolerant: outcome ist offenes
+// Vokabular (laufende Runs kommen als "running").
+export const RunsOutcomeEntrySchema = z.object({
+  run_id: z.coerce.string(),
+  task_id: z.string().catch(""),
+  task_title: z.string().catch(""),
+  profile: z.string().nullable().catch(null),
+  outcome: z.string().catch("unknown"),
+  verdict: z.string().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
+  input_tokens: z.coerce.number().nullable().catch(null),
+  output_tokens: z.coerce.number().nullable().catch(null),
+  cost_usd: z.coerce.number().nullable().catch(null),
+  error: z.string().nullable().catch(null),
+});
+export const RunsOutcomesResponseSchema = z.object({
+  hours: z.coerce.number().catch(24),
+  now: epochSeconds,
+  total: z.coerce.number().catch(0),
+  outcomes: z.record(z.string(), z.coerce.number()).catch({}),
+  runs: z.array(RunsOutcomeEntrySchema).catch([]),
+});
+export type RunsOutcomeEntry = z.infer<typeof RunsOutcomeEntrySchema>;
+export type RunsOutcomesResponse = z.infer<typeof RunsOutcomesResponseSchema>;
+
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),
   source: z.string().catch("unknown"),

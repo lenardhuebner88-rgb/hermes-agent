@@ -8,10 +8,11 @@ import {
   BoardResponseSchema,
   RunDetailResponseSchema,
   RunTimelineResponseSchema,
+  RunsOutcomesResponseSchema,
   TaskDetailResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { WorkerActivityResponse, RunDetailResponse, RunTimelineResponse, TaskDetailResponse } from "../lib/schemas";
+import type { WorkerActivityResponse, RunDetailResponse, RunTimelineResponse, RunsOutcomesResponse, TaskDetailResponse } from "../lib/schemas";
 import { nowSec } from "../lib/derive";
 import { mergeLiveEvents } from "../lib/fleetHub";
 import { mergeBoardWorkers, withBoardParam, type BoardsResponse } from "../lib/multiBoard";
@@ -249,12 +250,14 @@ export function useRunLiveEvents(
 
 // F1: Aktivitäts-Timeline — pollt Task-Events nur wenn Cockpit expandiert (taskId != null).
 // Interval ~8000ms; pausiert automatisch wenn taskId null.
+// F7: limit 40 statt 12 — der Dedupe-×N soll den echten Wall-of-Text-Fall
+// (40× „receiving stream response") voll abdecken; der Endpoint deckelt bei 50.
 export function useWorkerActivity(taskId: string | null, board: string | null = null) {
   const key = taskId ? `worker-activity/${taskId}:${board ?? "current"}` : "worker-activity/__none__";
   const loader = useCallback(async (): Promise<WorkerActivityResponse> => {
     if (!taskId) return { task_id: "", events: [] };
     const url = withBoardParam(
-      `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activity?limit=12`,
+      `/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}/activity?limit=40`,
       board,
     );
     return parseOrThrow(
@@ -365,12 +368,33 @@ export function useRunDetail(runId: string | null, board: string | null = null) 
 
 export function useRunTimeline(runId: string | null, board: string | null = null) {
   const key = runId ? `runs/timeline/${runId}:${board ?? "current"}` : "runs/timeline/__none__";
+  // A5c (analog useRunDetail/F14): ein terminaler Run (ended_at != null)
+  // ändert seine Timeline nicht mehr — danach nur noch sehr seltener Takt.
+  const [terminal, setTerminal] = useState(false);
+  useEffect(() => { setTerminal(false); }, [runId, board]);
   const loader = useCallback(async (): Promise<RunTimelineResponse | null> => {
     if (!runId) return null;
     const url = withBoardParam(`/api/plugins/kanban/runs/${encodeURIComponent(runId)}/timeline`, board);
-    return parseOrThrow(RunTimelineResponseSchema, await fetchJSON<unknown>(url), `runs/timeline/${runId}`);
+    const parsed = parseOrThrow(RunTimelineResponseSchema, await fetchJSON<unknown>(url), `runs/timeline/${runId}`);
+    if (parsed.run.ended_at != null) setTerminal(true);
+    return parsed;
   }, [runId, board]);
-  const result = usePolling<RunTimelineResponse | null>(key, loader, runId ? 15000 : 600_000);
+  const result = usePolling<RunTimelineResponse | null>(key, loader, runId ? (terminal ? 300_000 : 15000) : 600_000);
   if (!runId) return { ...result, data: null };
   return result;
+}
+
+
+// 24h-Outcome-Übersicht (Worker-Tab-Sektion „Letzte 24 Stunden") — 60-s-Takt
+// wie die übrigen Aggregate; board-Param wie bei den Geschwister-Endpunkten.
+export function useRunsOutcomes(hours = 24, board: string | null = null) {
+  return usePolling<RunsOutcomesResponse>(
+    `runs/outcomes:${hours}:${board ?? "current"}`,
+    async () => parseOrThrow(
+      RunsOutcomesResponseSchema,
+      await fetchJSON<unknown>(withBoardParam(`/api/plugins/kanban/runs/outcomes?hours=${hours}`, board)),
+      `runs/outcomes:${hours}`,
+    ),
+    60000,
+  );
 }

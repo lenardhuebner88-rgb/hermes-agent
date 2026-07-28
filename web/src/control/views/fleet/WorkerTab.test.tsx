@@ -13,7 +13,7 @@
 // list_active_workers: r.id AS run_id, straight off task_runs — an integer the
 // SPA's WorkerSchema z.coerce.string()s).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
 
@@ -45,6 +45,7 @@ const EMPTY_TASK_DETAIL = {
   deliverables: [],
   links: { parents: [], children: [], parent_states: [], child_states: [] },
 };
+const EMPTY_OUTCOMES = { hours: 24, now: 1782500300, total: 0, outcomes: {}, runs: [] };
 
 type FetchOpts = { body?: string; method?: string };
 
@@ -55,6 +56,8 @@ interface ExtraRoutes {
   runDetail?: (url: string) => Promise<unknown>;
   /** GET /runs/live-events (Ticker-Inhalt). */
   liveEvents?: (url: string) => Promise<unknown>;
+  /** GET /runs/outcomes (24h-Sektion). */
+  outcomes?: (url: string) => Promise<unknown>;
 }
 
 // Route fetchJSON by URL: Ticker/Activity/Timeline/Task-Detail liefern leere
@@ -65,6 +68,9 @@ function routeFetch(actionImpl: (url: string, opts?: FetchOpts) => Promise<unkno
     if (typeof url === "string") {
       if (url.includes("/runs/live-events")) {
         return extras.liveEvents ? extras.liveEvents(url) : Promise.resolve(EMPTY_LIVE_EVENTS);
+      }
+      if (url.includes("/runs/outcomes")) {
+        return extras.outcomes ? extras.outcomes(url) : Promise.resolve(EMPTY_OUTCOMES);
       }
       if (url.includes("/activity")) return Promise.resolve(EMPTY_ACTIVITY);
       if (url.includes("/timeline")) return Promise.resolve(EMPTY_TIMELINE);
@@ -202,8 +208,11 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
     expect(screen.getByText("Slots")).toBeTruthy();
     expect(screen.getByText("Heute fertig")).toBeTruthy();
     expect(screen.getByText("Token")).toBeTruthy();
-    // 1 laufender Worker von Cap 3; 11 heute fertig; Token-Summe 1200+80=1280 → 1,3k.
-    expect(container.textContent).toContain("1/3");
+    // 1 laufender Worker, Cap 3 (Board); 11 heute fertig; Token-Summe 1200+80=1280 → 1,3k.
+    // F5: „N aktiv · Cap X (Board)" statt Bruch, plus Scope-Micro-Labels.
+    expect(container.textContent).toContain("1 aktiv");
+    expect(container.textContent).toContain("Cap 3 (Board)");
+    expect(screen.getAllByText("alle Boards").length).toBeGreaterThan(0);
     expect(container.textContent).toContain("11");
     expect(container.textContent).toContain("1,3k");
   });
@@ -223,7 +232,7 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
     );
     expect(screen.getAllByText("Slot frei").length).toBe(3);
     expect(screen.getByText("Verlaufsspur · letzte Ereignisse")).toBeTruthy();
-    expect(screen.getByText("0/3")).toBeTruthy();
+    expect(screen.getByText(/0 aktiv/)).toBeTruthy();
   });
 
   it("Tap auf eine Swimlane öffnet den Fokus-Drawer", async () => {
@@ -238,7 +247,7 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "Schließen" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen: Fix flaky test" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Schließen" })).toBeTruthy());
   });
 
@@ -277,7 +286,7 @@ describe("Puls-Leitstand — Pulse-Strip, Swimlanes, Leerzustand", () => {
       const urls = fetchJSONMock.mock.calls.map(([url]) => String(url));
       expect(urls.some((url) => url === "/api/plugins/kanban/runs/live-events?board=default")).toBe(true);
       expect(urls.some((url) => url === "/api/plugins/kanban/runs/live-events?board=health-track")).toBe(true);
-      expect(urls.some((url) => url.includes("/activity?limit=12&board=health-track"))).toBe(true);
+      expect(urls.some((url) => url.includes("/activity?limit=40&board=health-track"))).toBe(true);
     });
 
     expect(screen.queryByRole("button", { name: "Anstoßen" })).toBeNull();
@@ -321,7 +330,7 @@ describe("Worker-Drawer-Steuerung (Gap 1)", () => {
     expect(JSON.parse(opts.body!)).toEqual({ action: "nudge", confirm: true });
   });
 
-  it("zeigt bei verschwundenem Task den Beendet-Zustand und keine Worker-Aktionsbuttons", () => {
+  it("zeigt bei verschwundenem Task den Beendet-Zustand und keine Worker-Aktionsbuttons", async () => {
     const onOpenChain = vi.fn();
     const { rerender } = renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN, onOpenChain);
 
@@ -337,7 +346,11 @@ describe("Worker-Drawer-Steuerung (Gap 1)", () => {
     );
 
     expect(screen.getAllByText("Worker beendet").length).toBeGreaterThan(0);
-    expect(screen.getByText(/nicht mehr in den aktiven Workern/)).toBeTruthy();
+    // A5b/A5d: Run-Identität bleibt im Endzustand sichtbar; der Outcome-
+    // Platzhalter heißt „Run-Ausgang" (kein Ausgang lesbar), kein zweites
+    // „Worker beendet".
+    expect(document.body.textContent).toContain("Run 482");
+    await waitFor(() => expect(screen.getByText(/Kein Ausgang lesbar/)).toBeTruthy());
     expect(screen.queryByRole("button", { name: "Anstoßen" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Entsperren" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Anhalten" })).toBeNull();
@@ -675,7 +688,7 @@ describe("Worker-Tab V2 — Liveness, Drawer-Anreicherung, Outcome, Re-Poll", ()
       />,
     );
 
-    await waitFor(() => expect(screen.getByText("Run-Ausgang")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Run-Ausgang · #" + "482")).toBeTruthy());
     expect(document.body.textContent).toContain("completed");
     expect(document.body.textContent).toContain("APPROVED");
     expect(document.body.textContent).toContain("Alles erledigt und verifiziert.");
@@ -759,6 +772,7 @@ describe("Review-Fixes — F1: beendeter Worker zeigt keine Live-Werte mehr", ()
     // Vor dem Umschlag: Live-Werte sichtbar.
     expect(document.body.textContent).toContain("läuft seit");
     expect(screen.getByText("Liveness")).toBeTruthy();
+    expect(screen.getByText("Claim läuft ab")).toBeTruthy();
 
     rerender(
       <WorkerTab
@@ -776,6 +790,8 @@ describe("Review-Fixes — F1: beendeter Worker zeigt keine Live-Werte mehr", ()
     expect(screen.queryByText("Liveness")).toBeNull();
     expect(screen.queryByText("Heartbeat")).toBeNull();
     expect(screen.queryByText("Laufzeit")).toBeNull();
+    // A5a: Claim-Countdown gehört zur selben Live-Klasse und ist ebenfalls weg.
+    expect(screen.queryByText("Claim läuft ab")).toBeNull();
     expect(document.querySelector('[role="img"][aria-label^="Liveness:"]')).toBeNull();
     // Der Beendet-Zustand ist sichtbar (Kopf + Outcome-Platzhalter), die
     // Claim-/Task-Identität bleibt als Datenzeile stehen.
@@ -849,7 +865,7 @@ describe("Review-Fixes — F2: Queue-Vorschau trennt ready von scheduled", () =>
 describe("Review-Fixes — F3/F4: Fenster-Beschriftung folgt der Herkunft", () => {
   it("Runtime-Cap-Fenster wird als Cap beschriftet, nicht als p90", () => {
     // FIXTURE_WORKER: eta_p50/p90 = null, max_runtime_seconds = 1800 → source cap.
-    const { container } = render(
+    render(
       <WorkerTab
         activeWorkers={[FIXTURE_WORKER]}
         board={BOARD_WITH_CHAIN}
@@ -859,8 +875,8 @@ describe("Review-Fixes — F3/F4: Fenster-Beschriftung folgt der Herkunft", () =
         onOpenChain={() => {}}
       />,
     );
-    expect(container.textContent).toContain("Cap");
-    expect(container.textContent).not.toContain("p90");
+    expect(screen.getByText("Cap")).toBeTruthy();
+    expect(screen.queryByText("p90")).toBeNull();
     // F4: ohne echtes Perzentil zeichnet der Ring keinen Füllbogen für ein
     // ungeerdetes Fenster — hier grounded via cap, Bogen erlaubt; der
     // ungeerdete Fall (kein eta, kein cap) ist per fleetHub-Test gedeckt.
@@ -872,7 +888,7 @@ describe("Review-Fixes — F3/F4: Fenster-Beschriftung folgt der Herkunft", () =
       eta_p50_seconds: 400,
       eta_p90_seconds: 1200,
     };
-    const { container } = render(
+    render(
       <WorkerTab
         activeWorkers={[worker]}
         board={BOARD_WITH_CHAIN}
@@ -882,7 +898,217 @@ describe("Review-Fixes — F3/F4: Fenster-Beschriftung folgt der Herkunft", () =
         onOpenChain={() => {}}
       />,
     );
-    expect(container.textContent).toContain("p90");
-    expect(container.textContent).not.toContain("Cap");
+    expect(screen.getByText("p90")).toBeTruthy();
+    expect(screen.queryByText("Cap")).toBeNull();
+  });
+});
+
+// ─── Folge-Slice 2026-07-28: 24h-Outcomes, Karten-×N (F8), aria (F10), F7 ────
+
+describe("24h-Outcome-Übersicht (Sektion Letzte 24 Stunden)", () => {
+  const OUTCOMES_PAYLOAD = {
+    hours: 24,
+    now: 1782500300,
+    total: 3,
+    outcomes: { completed: 2, timed_out: 1 },
+    runs: [
+      {
+        run_id: 901, task_id: "t_a", task_title: "Fix A", profile: "coder",
+        outcome: "completed", verdict: "APPROVED",
+        started_at: 1782499000, ended_at: 1782499900,
+        input_tokens: 5000, output_tokens: 900, cost_usd: 0.12, error: null,
+      },
+      {
+        run_id: 902, task_id: "t_b", task_title: "Fix B", profile: "verifier",
+        outcome: "timed_out", verdict: "REQUEST_CHANGES",
+        started_at: 1782498000, ended_at: 1782498600,
+        input_tokens: null, output_tokens: null, cost_usd: null,
+        error: "watchdog: max runtime exceeded",
+      },
+      {
+        run_id: 903, task_id: "t_c", task_title: "Fix C", profile: "coder",
+        outcome: "completed", verdict: null,
+        started_at: 1782497000, ended_at: 1782497200,
+        input_tokens: 100, output_tokens: 50, cost_usd: null, error: null,
+      },
+    ],
+  };
+
+  it("rendert Balken-Anteile, Legende, Verdict-Chips, Tokens und Fehlerzeile", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      outcomes: () => Promise.resolve(OUTCOMES_PAYLOAD),
+    });
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText(/3 Runs · Board/)).toBeTruthy());
+    // Legende + Outcome-Chips in der Runs-Liste (completed: 1 Legende + 2 Runs).
+    expect(screen.getAllByText("completed").length).toBe(3);
+    expect(screen.getAllByText("timed_out").length).toBe(2);
+    // Balken: zwei Segmente (2/3 + 1/3).
+    const segments = document.querySelectorAll(".fleet-obar-seg");
+    expect(segments.length).toBe(2);
+    // Verdict-Chips.
+    expect(screen.getByText("APPROVED")).toBeTruthy();
+    expect(screen.getByText("REQUEST_CHANGES")).toBeTruthy();
+    // Runs-Liste: Titel, Dauer, Tokens, Fehlerzeile.
+    expect(screen.getByText("Fix A")).toBeTruthy();
+    expect(document.body.textContent).toContain("5,0k↓ 900↑");
+    expect(screen.getByText("watchdog: max runtime exceeded")).toBeTruthy();
+    // Fehlerfreie Zeilen ohne Tokens zeigen ehrlich „—" statt 0.
+    expect(document.body.textContent).toContain("—");
+  });
+
+  it("Leerzustand: ehrlicher Hinweis statt leerer Balken", async () => {
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("Keine Runs im Fenster.")).toBeTruthy());
+    expect(document.querySelectorAll(".fleet-obar-seg").length).toBe(0);
+  });
+
+  it("T3: Fetch-Fehler ist ein eigener Zustand, nicht der Leerzustand", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      outcomes: () => Promise.reject(new Error("500: boom")),
+    });
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    // Im Panel selbst (nicht nur im Freshness-Badge oben).
+    const section = document.querySelector('section[aria-label="Letzte 24 Stunden"]');
+    expect(section).toBeTruthy();
+    await waitFor(() =>
+      expect(within(section as HTMLElement).getByRole("alert").textContent).toContain("Quelle meldet Fehler"),
+    );
+    expect(screen.queryByText("Keine Runs im Fenster.")).toBeNull();
+  });
+
+  it("T4: gekappte Liste weist +N-weitere gegen die Gesamtzahl aus", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      outcomes: () =>
+        Promise.resolve({
+          ...OUTCOMES_PAYLOAD,
+          total: 20,
+        }),
+    });
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText(/20 Runs · Board/)).toBeTruthy());
+    // 20 gesamt, 3 in der Liste → +17 weitere.
+    expect(screen.getByText("+17 weitere")).toBeTruthy();
+  });
+});
+
+describe("Folge-Slice — Karten-×N (F8), aria-Zusammenfassung (F10), Notiz-Kappung (F7)", () => {
+  it("Karte zeigt ×N an der aktuellen Notiz, abgeleitet aus den Ticker-Events", async () => {
+    const worker: Worker = {
+      ...FIXTURE_WORKER,
+      last_heartbeat_note: "receiving stream response",
+      last_heartbeat_note_at: 1782500290,
+    };
+    const hb = (id: number, at: number) => ({
+      id, board_slug: null, run_id: 482, task_id: "t_abc123",
+      task_title: "Fix flaky test", profile: "coder",
+      kind: "heartbeat", note: "receiving stream response", at,
+    });
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      liveEvents: () =>
+        Promise.resolve({
+          events: [hb(3, 1782500290), hb(2, 1782500280), hb(1, 1782500270)],
+          count: 3,
+          latest_id: 3,
+          checked_at: 1782500300,
+        }),
+    });
+    render(
+      <WorkerTab
+        activeWorkers={[worker]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    // Karte UND Ticker zeigen je ein ×3-Badge.
+    await waitFor(() => expect(screen.getAllByText("×3").length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("Karte trägt aria-describedby mit Liveness, Laufzeit und Fenster-Position", () => {
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    const summary = document.getElementById("wcard-desc-current-482");
+    expect(summary).toBeTruthy();
+    // FIXTURE: Heartbeat aktuell (ok → „läuft"), 5 min gelaufen, Cap-Fenster 1800 s.
+    expect(summary!.textContent).toContain("läuft");
+    expect(summary!.textContent).toContain("5m00s");
+    expect(summary!.textContent).toContain("von Cap");
+    const card = screen.getByRole("button", { name: "Worker coder öffnen: Fix flaky test" });
+    expect(card.getAttribute("aria-describedby")).toBe("wcard-desc-current-482");
+  });
+
+  it("Notiz-Historie kappt nach 12 deduplizierten Zeilen mit +N-weitere-Hinweis", async () => {
+    const events = Array.from({ length: 15 }, (_, i) => ({
+      id: i + 1,
+      run_id: 482,
+      kind: "heartbeat",
+      note: `notiz ${i + 1}`,
+      at: 1782500300 - i * 30,
+    }));
+    routeFetch(() => Promise.resolve({ ok: true }), {});
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (typeof url === "string") {
+        if (url.includes("/runs/live-events")) return Promise.resolve(EMPTY_LIVE_EVENTS);
+        if (url.includes("/runs/outcomes")) return Promise.resolve(EMPTY_OUTCOMES);
+        if (url.includes("/activity")) return Promise.resolve({ task_id: "t_abc123", events });
+        if (url.includes("/timeline")) return Promise.resolve(EMPTY_TIMELINE);
+        if (/\/tasks\/[^/?]+(\?|$)/.test(url)) return Promise.resolve(EMPTY_TASK_DETAIL);
+      }
+      return Promise.resolve({ ok: true });
+    });
+    renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    await waitFor(() => expect(screen.getByText("▸ notiz 1")).toBeTruthy());
+    // 15 deduplizierte Zeilen → 12 sichtbar + Kappungszeile.
+    expect(screen.getByText("notiz 12")).toBeTruthy();
+    expect(screen.queryByText("notiz 13")).toBeNull();
+    expect(screen.getByText("+3 weitere")).toBeTruthy();
   });
 });

@@ -44,6 +44,10 @@ import {
   heartbeatBars,
   claimCountdownSeconds,
   eventKindLabel,
+  noteRepeatCount,
+  outcomeTone,
+  verdictTone,
+  outcomeLegend,
   type ChainChipState,
 } from "./fleetHub";
 import type { Worker, ChainGraphResponse, ChainSummary } from "./types";
@@ -1523,5 +1527,91 @@ describe("claimCountdownSeconds + eventKindLabel (V2)", () => {
     expect(eventKindLabel("model_confirmed", labels)).toBe("Modell");
     expect(eventKindLabel("closeout_summary", labels)).toBe("Closeout");
     expect(eventKindLabel("irgendwas_neues", labels)).toBe("irgendwas_neues");
+  });
+});
+
+describe("noteRepeatCount (F8/T2)", () => {
+  const ev = (id: number, run: number, note: string, board: string | null = null) => ({
+    id,
+    board_slug: board,
+    run_id: run,
+    task_id: "t_x",
+    kind: "heartbeat",
+    note,
+    at: id,
+  });
+  it("zählt konsekutive Wiederholungen der aktuellen Notiz aus den Ticker-Events", () => {
+    const events = [ev(3, 482, "receiving"), ev(2, 482, "receiving"), ev(1, 482, "receiving")];
+    expect(noteRepeatCount(events, "482", "receiving")).toBe(3);
+  });
+  it("T2: zählt trotz interleavter zweiter Lane (gemischter Live-Ticker)", () => {
+    // Zwei aktive Worker, Events wechseln sich ab — im gemischten Stream gibt
+    // es keine Adjazenz; die Zählung muss erst auf den Run filtern.
+    const events = [
+      ev(6, 482, "receiving"),
+      ev(5, 999, "receiving"),
+      ev(4, 482, "receiving"),
+      ev(3, 999, "receiving"),
+      ev(2, 482, "receiving"),
+      ev(1, 999, "receiving"),
+    ];
+    expect(noteRepeatCount(events, "482", "receiving")).toBe(3);
+    expect(noteRepeatCount(events, "999", "receiving")).toBe(3);
+  });
+  it("T2: gleiche run_id auf verschiedenen Boards kollidiert nicht", () => {
+    const events = [
+      ev(4, 482, "receiving", "default"),
+      ev(3, 482, "receiving", "health-track"),
+      ev(2, 482, "receiving", "default"),
+      ev(1, 482, "receiving", "health-track"),
+    ];
+    expect(noteRepeatCount(events, "482", "receiving", "default")).toBe(2);
+    expect(noteRepeatCount(events, "482", "receiving", "health-track")).toBe(2);
+  });
+  it("1 bei fehlender Notiz, anderem Run oder Event außerhalb des Fensters", () => {
+    const events = [ev(2, 999, "receiving"), ev(1, 482, "andere notiz")];
+    expect(noteRepeatCount(events, "482", "receiving")).toBe(1);
+    expect(noteRepeatCount(events, "482", null)).toBe(1);
+    expect(noteRepeatCount([], "482", "receiving")).toBe(1);
+  });
+  it("Sonder-Kinds unterbrechen die Zählung (gleiche Dedupe wie der Ticker)", () => {
+    const events = [
+      ev(4, 482, "n"),
+      { ...ev(3, 482, "n"), kind: "claimed", note: null },
+      ev(2, 482, "n"),
+      ev(1, 482, "n"),
+    ];
+    // Die neueste Gruppe mit dieser Notiz (hinter dem claimed-Marker) zählt 1 —
+    // die ältere Gruppe (×2) wird nicht dazugerechnet.
+    expect(noteRepeatCount(events, "482", "n")).toBe(1);
+  });
+});
+
+describe("outcomeTone / verdictTone / outcomeLegend (24h-Sektion)", () => {
+  it("outcomeTone mappt das Vokabular aufs Status-Trio + live", () => {
+    expect(outcomeTone("completed")).toBe("ok");
+    expect(outcomeTone("blocked")).toBe("warn");
+    expect(outcomeTone("integration_parked")).toBe("warn");
+    expect(outcomeTone("timed_out")).toBe("alert");
+    expect(outcomeTone("gave_up")).toBe("alert");
+    expect(outcomeTone("crashed")).toBe("alert");
+    expect(outcomeTone("running")).toBe("live");
+    expect(outcomeTone("scheduled")).toBe("neutral");
+    expect(outcomeTone("irgendwas")).toBe("neutral");
+  });
+  it("verdictTone: APPROVED ok, andere belegte Verdicts warn, leer null", () => {
+    expect(verdictTone("APPROVED")).toBe("ok");
+    expect(verdictTone("REQUEST_CHANGES")).toBe("warn");
+    expect(verdictTone(null)).toBeNull();
+    expect(verdictTone("")).toBeNull();
+  });
+  it("outcomeLegend: Anteile, Sortierung ok→warn→alert→neutral→live, leer → []", () => {
+    expect(outcomeLegend({})).toEqual([]);
+    const legend = outcomeLegend({ timed_out: 1, completed: 2, running: 1, scheduled: 1 });
+    expect(legend.map((r) => r.outcome)).toEqual(["completed", "timed_out", "scheduled", "running"]);
+    expect(legend[0].fraction).toBeCloseTo(2 / 5);
+    expect(legend[1].fraction).toBeCloseTo(1 / 5);
+    const total = legend.reduce((sum, r) => sum + r.fraction, 0);
+    expect(total).toBeCloseTo(1);
   });
 });

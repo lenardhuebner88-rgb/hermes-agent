@@ -1188,3 +1188,120 @@ export function eventKindLabel(kind: string, labels: Record<string, string>): st
   if (kind.startsWith("closeout_")) return "Closeout";
   return kind;
 }
+
+/**
+ * noteRepeatCount (F8/T2): wie oft die aktuelle Heartbeat-Notiz eines Runs
+ * hintereinander auftrat — abgeleitet aus den bereits vorhandenen
+ * Live-Ticker-Events (heartbeat_ticks tragen keine Notizen).
+ *
+ * T2: der Ticker interleavt die Events aller Worker — eine Dedupe über den
+ * gemischten Stream findet nie Adjazenz. Deshalb wird erst auf den Run
+ * gefiltert (plus board_slug, denn run_id ist nur board-lokal eindeutig) und
+ * erst DANN konsekutiv dedupliziert. 1 = keine belegte Wiederholung (auch:
+ * Event nicht (mehr) im Ticker-Fenster).
+ */
+export function noteRepeatCount<T extends {
+  run_id?: number | null;
+  task_id?: string | null;
+  board_slug?: string | null;
+  kind: string;
+  note?: string | null;
+}>(
+  events: readonly T[],
+  runId: string | number,
+  note: string | null | undefined,
+  boardSlug?: string | null,
+): number {
+  const text = (note ?? "").trim();
+  if (!text) return 1;
+  const runKey = String(runId);
+  const own = events.filter(
+    (e) =>
+      String(e.run_id ?? "") === runKey &&
+      // Board-Match nur wenn BEIDE Seiten einen Slug tragen — einseitig
+      // unbekannt (Single-Board-Worker ohne Slug / Cursor-Poll ohne Board)
+      // darf die Zählung nicht still töten; verschiedene Slugs nie matchen.
+      (boardSlug == null || e.board_slug == null || e.board_slug === boardSlug),
+  );
+  if (own.length === 0) return 1;
+  const rows = dedupeLiveEvents(own);
+  const row = rows.find((r) => (r.item.note ?? "").trim() === text);
+  return row?.count ?? 1;
+}
+
+// ─── 24h-Outcome-Übersicht: Töne + Legende ───────────────────────────────────
+
+/** „23:59" — Uhrzeit ohne Sekunden (Europe/Berlin), für kompakte Listen. */
+export function fmtClockHM(epochSec: number | null | undefined): string {
+  if (!inspectEpochSeconds(epochSec).valid || epochSec == null) return "Zeit ungültig";
+  return new Date(epochSec * 1000).toLocaleTimeString("de-DE", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Europe/Berlin",
+  });
+}
+
+export type OutcomeTone = "ok" | "warn" | "alert" | "neutral" | "live";
+
+/**
+ * outcomeTone: Outcome-Vokabular → Status-Trio (+ live für laufende Runs,
+ * neutral für Sonstiges). Deckt sich mit der Chip-Semantik des Mockups:
+ * completed=ok, blocked/geparkt/reclaimed=warn, timeout/gave_up/crash=alert.
+ */
+export function outcomeTone(outcome: string): OutcomeTone {
+  const o = outcome.toLowerCase();
+  if (o === "completed") return "ok";
+  if (o === "blocked" || o === "integration_parked" || o === "reclaimed") return "warn";
+  if (
+    o === "timed_out" ||
+    o === "gave_up" ||
+    o === "iteration_budget_exhausted" ||
+    o === "crashed" ||
+    o === "failed" ||
+    o === "spawn_failed"
+  ) {
+    return "alert";
+  }
+  if (o === "running") return "live";
+  return "neutral";
+}
+
+/** Verdict-Chip-Ton: APPROVED=ok, alles andere belegte Verdicts=warn. */
+export function verdictTone(verdict: string | null | undefined): "ok" | "warn" | null {
+  if (!verdict || !verdict.trim()) return null;
+  return verdict.trim().toUpperCase() === "APPROVED" ? "ok" : "warn";
+}
+
+export interface OutcomeLegendRow {
+  outcome: string;
+  count: number;
+  /** Anteil 0..1 an der Gesamtzahl der Runs im Fenster. */
+  fraction: number;
+  tone: OutcomeTone;
+}
+
+/**
+ * outcomeLegend: sortierte Legende + Balken-Anteile für den gestapelten
+ * Outcome-Balken. Sortierung: ok, warn, alert, neutral, live; innerhalb
+ * desselben Tons nach Anzahl absteigend. Leere Verteilung → [].
+ */
+export function outcomeLegend(outcomes: Record<string, number>): OutcomeLegendRow[] {
+  const total = Object.values(outcomes).reduce((sum, n) => sum + n, 0);
+  if (total <= 0) return [];
+  const toneOrder: Record<OutcomeTone, number> = { ok: 0, warn: 1, alert: 2, neutral: 3, live: 4 };
+  return Object.entries(outcomes)
+    .filter(([, count]) => count > 0)
+    .map(([outcome, count]) => ({
+      outcome,
+      count,
+      fraction: count / total,
+      tone: outcomeTone(outcome),
+    }))
+    .sort(
+      (a, b) =>
+        toneOrder[a.tone] - toneOrder[b.tone] ||
+        b.count - a.count ||
+        a.outcome.localeCompare(b.outcome),
+    );
+}

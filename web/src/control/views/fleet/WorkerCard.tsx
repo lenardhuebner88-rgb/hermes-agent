@@ -185,16 +185,27 @@ function PercentileScale({ worker, now }: { worker: Worker; now: number }) {
 
 // ─── Worker-Karte ────────────────────────────────────────────────────────────
 
+/** F10: menschenlesbare Fenster-Position für die aria-Zusammenfassung. */
+function windowPositionText(geo: ReturnType<typeof elapsedRingGeometry>): string {
+  if (!geo.grounded) return de.fleet.windowNone;
+  const label = windowSourceLabel(geo.source);
+  if (geo.overP90) return de.fleet.windowOver(label);
+  return de.fleet.windowWithin(Math.round(geo.fillFraction * 100), label);
+}
+
 export function WorkerCard({
   worker: w,
   now,
   branchName = null,
+  noteRepeats = 1,
   onOpen,
 }: {
   worker: Worker;
   now: number;
   /** Branch aus dem Board-Payload (nur aktuelles Board) — null wenn unbekannt. */
   branchName?: string | null;
+  /** F8: Wiederholungszähler der aktuellen Notiz (aus den Ticker-Events). */
+  noteRepeats?: number;
   onOpen: () => void;
 }) {
   const hbAge = heartbeatAge(w.last_heartbeat_at, now);
@@ -204,13 +215,29 @@ export function WorkerCard({
   const hasTokens = workerHasLiveTokenSample(w);
   const note = (w.last_heartbeat_note ?? "").trim();
 
+  // F10: der Name trägt Profil + Task-Titel; eine visually-hidden Zusammenfassung
+  // (aria-describedby) liefert Liveness, Laufzeit und Fenster-Position — die
+  // Sparkline/Skala bleiben aria-hidden, ihre Information steckt hier.
+  // T6: run_id ist nur board-lokal eindeutig — die ID trägt den Board-Slug.
+  const descId = `wcard-desc-${w.board_slug ?? "current"}-${w.run_id}`;
+  const livenessTone = workerLivenessTone(w, now);
+  const geo = elapsedRingGeometry(w, now);
+  const elapsed = elapsedSeconds(w.started_at, now) ?? Number.NaN;
+  const summary = [
+    livenessLabel(livenessTone),
+    `${de.fleet.chainStateRunning} ${fmtDurationClock(elapsed)}`,
+    windowPositionText(geo),
+  ].join(" · ");
+
   return (
     <button
       type="button"
       className="fleet-wcard"
       onClick={onOpen}
-      aria-label={de.fleet.workerOpenAria(w.profile)}
+      aria-label={`${de.fleet.workerOpenAria(w.profile)}: ${w.task_title}`}
+      aria-describedby={descId}
     >
+      <span className="fleet-sr-only" id={descId}>{summary}</span>
       <span className="fleet-wcard-head">
         <LivenessOrb worker={w} now={now} />
         <span className="fleet-wcard-title" title={w.task_title}>{w.task_title}</span>
@@ -235,6 +262,9 @@ export function WorkerCard({
           {note ? (
             <span className="fleet-wstat">
               <span className="fleet-wstat-note" title={note}>{note}</span>
+              {noteRepeats > 1 ? (
+                <span className="fleet-xbadge" aria-label={de.fleet.tickerRepeated(noteRepeats)}>×{noteRepeats}</span>
+              ) : null}
             </span>
           ) : null}
           <span className="fleet-wstat">

@@ -10028,3 +10028,240 @@ def test_assignees_endpoint_includes_profiles_without_tasks(client):
     assert response.status_code == 200
     names = {entry["name"] for entry in response.json()["assignees"]}
     assert {"coder", "research"} <= names
+
+
+# ---------------------------------------------------------------------------
+# GET /runs/outcomes — 24h-Outcome-Übersicht (Worker-Tab V2, outcome_routes.py)
+# ---------------------------------------------------------------------------
+
+
+def _insert_outcome_run(
+    conn,
+    task_id,
+    *,
+    profile="coder",
+    status="done",
+    outcome="completed",
+    started_at,
+    ended_at=None,
+    input_tokens=None,
+    output_tokens=None,
+    cost_usd=None,
+    error=None,
+    metadata=None,
+    verdict=None,
+):
+    """Insert a run row for the outcomes endpoint; does NOT commit."""
+    import json as _json
+
+    meta_str = _json.dumps(metadata) if metadata is not None else None
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, outcome, started_at, ended_at, "
+        "input_tokens, output_tokens, cost_usd, error, metadata, verdict) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            task_id,
+            profile,
+            status,
+            outcome,
+            started_at,
+            ended_at,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            error,
+            meta_str,
+            verdict,
+        ),
+    )
+    return cur.lastrowid
+
+
+def test_runs_outcomes_shape_counts_and_window(client, kanban_home):
+    """Verteilung zählt outcomes (running inkl.), Liste trägt die kompakten
+    Felder inkl. verdict aus metadata; Runs außerhalb des Fensters fehlen."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="outcome target", assignee="coder")
+        with kb.write_txn(conn):
+            done_id = _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 7200,
+                ended_at=now - 6600,
+                input_tokens=5000,
+                output_tokens=900,
+                cost_usd=0.12,
+                verdict="APPROVED",
+            )
+            fail_id = _insert_outcome_run(
+                conn,
+                task,
+                profile="verifier",
+                status="timed_out",
+                outcome="timed_out",
+                started_at=now - 1800,
+                ended_at=now - 1200,
+                error="watchdog: max runtime exceeded",
+            )
+            running_id = _insert_outcome_run(
+                conn,
+                task,
+                status="running",
+                outcome=None,
+                started_at=now - 600,
+            )
+            # Altbestand außerhalb des 24h-Fensters — darf nicht zählen.
+            _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 3 * 86400,
+                ended_at=now - 3 * 86400 + 60,
+            )
+
+    response = client.get("/api/plugins/kanban/runs/outcomes?hours=24")
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    assert data["hours"] == 24
+    assert data["total"] == 3
+    assert data["outcomes"] == {"completed": 1, "timed_out": 1, "running": 1}
+
+    runs = {r["run_id"]: r for r in data["runs"]}
+    assert set(runs) == {done_id, fail_id, running_id}
+    # Neueste zuerst.
+    assert data["runs"][0]["run_id"] == running_id
+
+    done = runs[done_id]
+    assert done["task_id"] == task
+    assert done["task_title"] == "outcome target"
+    assert done["outcome"] == "completed"
+    assert done["verdict"] == "APPROVED"
+    assert done["input_tokens"] == 5000
+    assert done["output_tokens"] == 900
+    assert done["cost_usd"] == pytest.approx(0.12)
+    assert done["error"] is None
+
+    failed = runs[fail_id]
+    assert failed["outcome"] == "timed_out"
+    assert failed["verdict"] is None
+    assert failed["error"] == "watchdog: max runtime exceeded"
+
+    running = runs[running_id]
+    assert running["outcome"] == "running"
+    assert running["ended_at"] is None
+
+    # Strenger Fenster-Check: mit hours=1 bleiben fail + running (done liegt
+    # 2 h zurück, der Altbestand 3 d — beide außerhalb).
+    narrow = client.get("/api/plugins/kanban/runs/outcomes?hours=1").json()
+    assert narrow["total"] == 2
+    assert narrow["runs"][0]["run_id"] == running_id
+
+
+def test_runs_outcomes_empty_window_is_honest(client, kanban_home):
+    response = client.get("/api/plugins/kanban/runs/outcomes?hours=24")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["total"] == 0
+    assert data["outcomes"] == {}
+    assert data["runs"] == []
+
+
+def test_runs_outcomes_error_preview_is_capped(client, kanban_home):
+    now = int(time.time())
+    long_error = "x" * 500
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="noisy failure", assignee="coder")
+        with kb.write_txn(conn):
+            _insert_outcome_run(
+                conn,
+                task,
+                status="failed",
+                outcome="gave_up",
+                started_at=now - 100,
+                ended_at=now - 50,
+                error=long_error,
+            )
+
+    data = client.get("/api/plugins/kanban/runs/outcomes?hours=24").json()
+    assert data["total"] == 1
+    error = data["runs"][0]["error"]
+    assert len(error) <= 201  # 200 Zeichen + „…"
+    assert error.endswith("…")
+
+
+def test_runs_outcomes_limit_param(client, kanban_home):
+    now = int(time.time())
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="bulk", assignee="coder")
+        with kb.write_txn(conn):
+            for i in range(5):
+                _insert_outcome_run(
+                    conn,
+                    task,
+                    outcome="completed",
+                    started_at=now - 1000 + i,
+                    ended_at=now - 900 + i,
+                )
+
+    data = client.get("/api/plugins/kanban/runs/outcomes?hours=24&limit=2").json()
+    assert data["total"] == 5
+    assert data["outcomes"] == {"completed": 5}
+    assert len(data["runs"]) == 2  # Verteilung zählt alle, Liste kappt
+
+
+def test_runs_outcomes_verdict_column_wins_over_metadata(client, kanban_home):
+    """T1: Die Spalte task_runs.verdict ist die Quelle; metadata.review_verdict
+    ist der dokumentierte Fallback; metadata.verdict und Nicht-Vokabular-Werte
+    erzeugen KEINE Chips."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        task = kb.create_task(conn, title="verdict sources", assignee="coder")
+        with kb.write_txn(conn):
+            # 1. Spalten-Verdict gewinnt, auch wenn metadata etwas anderes sagt.
+            column_id = _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 300,
+                ended_at=now - 200,
+                verdict="REQUEST_CHANGES",
+                metadata={"review_verdict": "APPROVED", "verdict": "APPROVED"},
+            )
+            # 2. Fallback: metadata.review_verdict ohne Spalten-Verdict.
+            fallback_id = _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 400,
+                ended_at=now - 300,
+                metadata={"review_verdict": "APPROVED"},
+            )
+            # 3. metadata.verdict ist KEIN Review-Urteil → null.
+            legacy_id = _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 500,
+                ended_at=now - 400,
+                metadata={"verdict": "APPROVED"},
+            )
+            # 4. Nicht-Vokabular (z. B. 'uphold' aus anderen Subsystemen) → null.
+            junk_id = _insert_outcome_run(
+                conn,
+                task,
+                outcome="completed",
+                started_at=now - 600,
+                ended_at=now - 500,
+                verdict="uphold",
+            )
+
+    data = client.get("/api/plugins/kanban/runs/outcomes?hours=24").json()
+    runs = {r["run_id"]: r for r in data["runs"]}
+    assert runs[column_id]["verdict"] == "REQUEST_CHANGES"
+    assert runs[fallback_id]["verdict"] == "APPROVED"
+    assert runs[legacy_id]["verdict"] is None
+    assert runs[junk_id]["verdict"] is None

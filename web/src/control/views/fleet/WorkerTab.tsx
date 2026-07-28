@@ -25,6 +25,7 @@ import {
   fmtUsd,
   heartbeatAge,
   isPinnedEventKind,
+  noteRepeatCount,
   profileColorClass,
   profileInitial,
   premiumLaneMarker,
@@ -37,12 +38,13 @@ import type { ReliabilityResponse, RunTimelineItem } from "../../lib/schemas";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { useWorkerLifecycle } from "../../hooks/taskActions";
-import { useWorkerActivity, useRunLiveEvents, useWorkerTaskDetail, useRunDetail, useRunTimeline } from "../../hooks/workersBoard";
+import { useWorkerActivity, useRunLiveEvents, useWorkerTaskDetail, useRunDetail, useRunTimeline, useRunsOutcomes } from "../../hooks/workersBoard";
 import { WorkerBand } from "./WorkerBand";
 import { WorkerCard, LivenessOrb, livenessLabel } from "./WorkerCard";
 import { FreeSlotLane, MiniLane, nextQueueTasks } from "./SlotLane";
 import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
+import { OutcomesPanel } from "./OutcomesPanel";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
 import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
@@ -67,6 +69,9 @@ interface WorkerTabProps {
   /** Nach einer Lifecycle-Aktion (Nudge/Hold/Restart/Terminate) sofort neu
    * pollen statt bis zum nächsten 5-s-Takt zu warten. */
   onWorkersChanged?: () => void;
+  /** T5a: false, wenn die Worker-Quelle (Fehler/Erstladung) aufs aktuelle
+   * Board zurückgefallen ist — Scope-Labels müssen das ehrlich spiegeln. */
+  workersScopeAllBoards?: boolean;
   currentBoard?: string;
   eventBoards?: string[];
 }
@@ -98,6 +103,7 @@ export function WorkerTab({
   doneToday = null,
   tokensToday = null,
   onWorkersChanged,
+  workersScopeAllBoards = true,
   currentBoard = "default",
   eventBoards = [currentBoard],
 }: WorkerTabProps) {
@@ -105,6 +111,7 @@ export function WorkerTab({
     () => (initialOpen ? { key: workerIdentity(initialOpen), snapshot: initialOpen } : null),
   );
   const liveEvents = useRunLiveEvents(true, 40, eventBoards);
+  const outcomes = useRunsOutcomes(24);
 
   const selectedWorker = selection ? activeWorkers.find((w) => workerIdentity(w) === selection.key) ?? null : null;
   const drawerWorker = selectedWorker ?? selection?.snapshot ?? null;
@@ -147,8 +154,11 @@ export function WorkerTab({
 
   return (
     <div className="fleet-worker-tab">
-      <FleetSourceFreshness sources={[{ label: de.fleet.liveEventsSource, ...liveEvents }]} />
-      <PulseStrip pulse={pulse} tokensToday={tokensToday} />
+      <FleetSourceFreshness sources={[
+        { label: de.fleet.liveEventsSource, ...liveEvents },
+        { label: de.fleet.outcomesTitle, pollIntervalMs: 60000, ...outcomes },
+      ]} />
+      <PulseStrip pulse={pulse} tokensToday={tokensToday} workersScopeAllBoards={workersScopeAllBoards} />
 
       {activeWorkers.length > 0 ? (
         <>
@@ -159,6 +169,7 @@ export function WorkerTab({
                 worker={w}
                 now={now}
                 branchName={branchByTaskId.get(w.task_id) ?? null}
+                noteRepeats={noteRepeatCount(liveEvents.events, w.run_id, w.last_heartbeat_note, w.board_slug ?? null)}
                 onOpen={() => select(w)}
               />
             ))}
@@ -190,6 +201,8 @@ export function WorkerTab({
           />
         </>
       )}
+
+      <OutcomesPanel data={outcomes.data} loading={outcomes.loading} error={outcomes.error} now={now} />
 
       {drawer}
     </div>
@@ -370,6 +383,10 @@ function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string |
     (e) => `${e.kind}:${(e.note ?? "").trim()}`,
     (e) => !isPinnedEventKind(e.kind) && (e.note ?? "").trim().length > 0,
   );
+  // F7: das Fenster holt jetzt bis zu 40 Events — die Anzeige kappt nach
+  // NOTES_DISPLAY_LIMIT deduplizierten Zeilen mit „+N weitere".
+  const shown = rows.slice(0, NOTES_DISPLAY_LIMIT);
+  const moreCount = rows.length - shown.length;
 
   return (
     <div className="fleet-fx-notes-wrap">
@@ -380,7 +397,7 @@ function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string |
         </div>
       ) : (
         <div className="fleet-fx-notes">
-          {rows.map(({ item: e, count }, i) => {
+          {shown.map(({ item: e, count }, i) => {
             const pinned = isPinnedEventKind(e.kind);
             const text = (e.note ?? "").trim() || eventKindLabel(e.kind, de.fleet.eventKindLabels);
             return (
@@ -395,6 +412,7 @@ function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string |
               </div>
             );
           })}
+          {moreCount > 0 ? <div className="fleet-fx-note fleet-fx-note-empty">{de.fleet.notesMore(moreCount)}</div> : null}
         </div>
       )}
     </div>
@@ -407,6 +425,7 @@ function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string |
 // Run schließt eine „jetzt"-Marke ab.
 
 const TIMELINE_DISPLAY_LIMIT = 12;
+const NOTES_DISPLAY_LIMIT = 12;
 
 function timelineItemText(item: RunTimelineItem): string {
   const label = eventKindLabel(item.kind, de.fleet.eventKindLabels);
@@ -458,6 +477,9 @@ function WorkerRunTimeline({ runId, board, active, now }: { runId: string; board
 // ─── Run-Ausgang (Drawer, wenn der Worker nicht mehr läuft) ──────────────────
 // Statt nur „Worker beendet" wird GET /runs/{run_id} nachgeladen: outcome,
 // ended_at, error, summary, verdict (best-effort aus metadata), Tokens/Kosten.
+// A5d: der Platzhalter heißt „Run-Ausgang" (lädt / nicht lesbar) — das doppelte
+// „Worker beendet" aus Kopf + Platzhalter ist entdoppelt; der Kopf trägt den
+// Zustand. A5b: die Run-Identität (#run_id) bleibt im Endzustand sichtbar.
 
 function WorkerOutcomeBlock({ runId, board }: { runId: string; board: string | null }) {
   const detail = useRunDetail(runId, board);
@@ -466,10 +488,9 @@ function WorkerOutcomeBlock({ runId, board }: { runId: string; board: string | n
   if (!run) {
     return (
       <div className="fleet-kv" role="status">
-        <div className="fleet-kv-k">{de.fleet.workerEndedTitle}</div>
+        <div className="fleet-kv-k">{de.fleet.outcomeTitle}</div>
         <div className="fleet-kv-v">
-          {de.fleet.workerEndedDesc}
-          {detail.loading ? <span className="fleet-dim"> · {de.fleet.outcomeLoading}</span> : null}
+          {detail.loading ? de.fleet.outcomeLoading : de.fleet.outcomeNotFound}
         </div>
       </div>
     );
@@ -478,7 +499,7 @@ function WorkerOutcomeBlock({ runId, board }: { runId: string; board: string | n
   const verdict = run.metadata && typeof run.metadata.verdict === "string" ? run.metadata.verdict : null;
   return (
     <div className="fleet-outcome" role="status">
-      <div className="fleet-fx-notes-head">{de.fleet.outcomeTitle}</div>
+      <div className="fleet-fx-notes-head">{de.fleet.outcomeTitle} · #{runId}</div>
       <div className="fleet-grid2">
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.outcomeState}</div>
@@ -587,7 +608,9 @@ function WorkerDrawer({
     : de.worker.tokenNoLiveSample;
 
   const livenessTone = active ? workerLivenessTone(w, now) : null;
-  const claimIn = claimCountdownSeconds(w.claim_expires, now);
+  // A5a: Claim-Countdown ist ein Live-Wert (gleiche Klasse wie F1) — im
+  // Snapshot-Modus nicht weiter gegen das tickende now rechnen.
+  const claimIn = active ? claimCountdownSeconds(w.claim_expires, now) : null;
   const inspect = active && w.inspect && w.inspect.alive ? w.inspect : null;
 
   // Drawer via shared Overlay: garantiert zentriert ab sm, Escape-Handling,
@@ -619,7 +642,8 @@ function WorkerDrawer({
         {/* Task: title + task_id + branch_name (Requirement: title + task_id + branch) */}
         <div className="fleet-dr-task">
           {w.task_title}
-          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{active ? de.fleet.drawerRunSuffix(w.run_id) : ""}</code>
+          {/* A5b: Run-Identität bleibt auch im beendeten Zustand sichtbar. */}
+          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{de.fleet.drawerRunSuffix(w.run_id)}</code>
         </div>
 
         {/* Vergrößertes Zeitachsen-Band (AC-3) — nur solange der Worker läuft. */}

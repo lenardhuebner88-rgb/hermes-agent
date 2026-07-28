@@ -2759,6 +2759,15 @@ for _extension_name in _operations_routes_module.__all__:
     globals()[_extension_name] = getattr(_operations_routes_module, _extension_name)
 
 
+_outcome_routes_module = load_api_extension(
+    Path(__file__).with_name("outcome_routes.py"),
+    globals(),
+    extension_name="outcome_routes",
+)
+for _extension_name in _outcome_routes_module.__all__:
+    globals()[_extension_name] = getattr(_outcome_routes_module, _extension_name)
+
+
 @core_routes.get("/runs/{run_id}")
 def get_run_endpoint(
     run_id: int,

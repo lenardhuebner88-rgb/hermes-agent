@@ -738,7 +738,7 @@ describe("FleetView PlanSpec detail drawer", () => {
 
     renderFleetView();
     fireEvent.click(screen.getByRole("button", { name: "Subtab Worker" }));
-    fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen" }));
+    fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen: Default alter Worker-Task" }));
     fireEvent.click(screen.getByRole("button", { name: de.fleet.drawerKetteOeffnen }));
     await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(DEFAULT_OLD_ROOT.id, null));
 

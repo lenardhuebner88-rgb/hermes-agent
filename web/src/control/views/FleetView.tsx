@@ -574,6 +574,7 @@ export function FleetView() {
                     void fleetWorkers.reload();
                     void workers.reload();
                   }}
+                  workersScopeAllBoards={fleetWorkers.data != null}
                   currentBoard={boardCatalog.data?.current ?? "default"}
                   eventBoards={(boardCatalog.data?.boards ?? [])
                     .filter((catalogBoard) => !catalogBoard.archived)
