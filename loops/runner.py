@@ -801,13 +801,19 @@ def _land_gates(
     )
     touched_web = bool(touched.stdout.strip())
     if touched_web:
-        steps.append(
-            (
-                "frontend",
-                ["bash", str(repo / "scripts" / "gate-frontend.sh")],
-                repo,
-            )
-        )
+        # WORTGLEICH wie vor der Herausloesung aus LoopRunner. Diese drei
+        # Schritte sind der Landungsbeweis JEDES Nacht-Packs, nicht nur des
+        # Landing-Loops -- ein Wechsel auf scripts/gate-frontend.sh aendert
+        # ihn still mit: das Skript bringt einen check-branch-age-Preflight
+        # (Exit 3) und einen Build mit, also koennte eine Landung rot werden,
+        # die heute gruen ist. Dieser Slice loest die Funktion nur heraus; ob
+        # der kanonische Gate hier der bessere ist, ist eine eigene
+        # Entscheidung mit eigener Messung.
+        steps += [
+            ("lint:control", ["npm", "run", "lint:control"], repo / "web"),
+            ("tsc", ["npx", "tsc", "-b", "--noEmit"], repo / "web"),
+            ("vitest", ["npx", "vitest", "run"], repo / "web"),
+        ]
     for label, command, cwd in steps:
         try:
             res = subprocess.run(

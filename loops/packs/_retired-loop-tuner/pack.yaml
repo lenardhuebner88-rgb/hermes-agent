@@ -3,7 +3,7 @@
 # Schwäche pro Runde, belegt aus Ledger/Logs/Bounces, Fix = Prompt-/Manifest-Edit
 # in loops/packs/** IM WORKTREE → Commit → landet über die normale Morgen-Review.
 # Schutz: Verbote/Schienen dürfen nur SCHÄRFER werden, nie schwächer.
-name: loop-tuner
+name: _retired-loop-tuner
 type: sweep
 description: Pro Runde EINE belegte Pack-Schwäche fixen (Prompts/Manifeste, nie Runner-Code)
 stability: experimental

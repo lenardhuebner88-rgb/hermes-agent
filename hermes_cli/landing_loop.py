@@ -182,6 +182,20 @@ class LandingLoop:
             return self._park(item, f"Loop-Worktree fehlt: {item.worktree}")
         if status:
             return self._park(item, self._dirty_reason(status))
+        # Dritte Bedingung: der Worktree muss auch WIRKLICH auf item.branch
+        # stehen. "reset --hard" bewegt den ausgecheckten Branch, nicht den
+        # gemeinten -- steht dort ein anderer, vernichtet der Reset dessen
+        # Commits, und die Nachpruefung unten meldet trotzdem Erfolg, weil sie
+        # nur item.branch gegen base vergleicht. Fail-closed: ein detached HEAD
+        # oder ein unlesbarer Ref parkt ebenfalls.
+        head = self._git("symbolic-ref", "--quiet", "--short", "HEAD", cwd=item.worktree)
+        checked_out = head.stdout.strip()
+        if head.returncode != 0 or checked_out != item.branch:
+            return self._park(
+                item,
+                f"Loop-Worktree steht auf {checked_out or 'detached HEAD'}, "
+                f"erwartet {item.branch}; Reset ausgesetzt",
+            )
         if self.dry_run:
             return BranchOutcome(
                 item.branch,

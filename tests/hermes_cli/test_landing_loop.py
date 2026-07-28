@@ -352,3 +352,28 @@ def test_discord_lists_only_parked_branches_and_never_exceeds_ten_lines(git_worl
     assert len(lines) <= 10
     assert lines[0].endswith("0 gelandet · 0 bereinigt · 1 geparkt")
     assert lines[1].startswith("- loop/park-me:")
+
+
+def test_worktree_on_a_foreign_branch_is_parked_without_reset(git_world):
+    """Der Reset bewegt den AUSGECHECKTEN Branch, nicht den gemeinten.
+
+    Steht im Loop-Worktree ein fremder Branch mit eigenen Commits, wuerde
+    ``reset --hard`` dessen Arbeit vernichten -- und die Nachpruefung meldete
+    trotzdem Erfolg, weil sie nur ``item.branch`` gegen ``base`` vergleicht.
+    """
+    repo, loops_root, ledger_dir, add_loop, commit_main, commit_loop = git_world
+    worktree = add_loop("foo")
+    commit_main("advance")
+
+    # Fremder Branch mit eigener Arbeit, im Loop-Worktree ausgecheckt.
+    git(worktree, "checkout", "-b", "bar")
+    fremd = commit_loop(worktree, "fremde-arbeit")
+
+    loop = make_loop(repo, loops_root, ledger_dir)
+    result = loop.run()
+
+    outcome = next(o for o in result.outcomes if o.branch == "loop/foo")
+    assert outcome.action == "parked", outcome
+    assert "bar" in outcome.reason and "erwartet loop/foo" in outcome.reason
+    # Entscheidend: die fremde Arbeit lebt noch.
+    assert git(worktree, "rev-parse", "HEAD").stdout.strip() == fremd

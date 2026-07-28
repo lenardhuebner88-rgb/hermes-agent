@@ -1393,9 +1393,16 @@ def test_land_gates_runs_collection_with_the_selected_interpreter(
     assert collection[0][0] == str(chosen)
 
 
-def test_land_gates_reuses_the_canonical_frontend_gate_script(
+def test_land_gates_frontend_steps_are_unchanged_by_the_extraction(
     tmp_path, fake_engine, monkeypatch
 ):
+    """Die Herausloesung aus LoopRunner darf den Landungsbeweis nicht aendern.
+
+    Diese drei Schritte gelten fuer JEDES Nacht-Pack. Wer sie auf
+    scripts/gate-frontend.sh umstellt, aendert still mit, wann eine naechtliche
+    Landung rot wird (Preflight Exit 3, Build) -- das ist eine eigene
+    Entscheidung und gehoert nicht in einen Extraktions-Slice.
+    """
     repo = init_repo(tmp_path / "repo")
     write_pack(tmp_path / "packs", "web-gates", "pipeline", repo)
     pack = load_pack(tmp_path / "packs", "web-gates")
@@ -1419,11 +1426,12 @@ def test_land_gates_reuses_the_canonical_frontend_gate_script(
 
     assert ok is True
     assert "frontend" in report
-    assert [
-        "bash",
-        str(repo / "scripts" / "gate-frontend.sh"),
-    ] in seen
-    assert not any(command[0] in {"npm", "npx"} for command in seen)
+    assert ["npm", "run", "lint:control"] in seen
+    assert ["npx", "tsc", "-b", "--noEmit"] in seen
+    assert ["npx", "vitest", "run"] in seen
+    assert not any(
+        str(repo / "scripts" / "gate-frontend.sh") in command for command in seen
+    )
 
 
 def test_land_gates_aborts_with_repair_hint_when_no_test_python(
@@ -2398,7 +2406,7 @@ def test_all_shipped_packs_load_and_validate():
     names = sorted(
         p.name
         for p in PACKS_DIR.iterdir()
-        if p.is_dir() and not p.name.startswith("_retired-")
+        if p.is_dir()
     )
     assert "builder-reviewer" in names and "_blank" in names
     for name in names:
