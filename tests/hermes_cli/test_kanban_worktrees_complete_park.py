@@ -430,6 +430,107 @@ def test_complete_task_closes_already_integrated_branch_visibly(
     assert not ws.exists()
 
 
+def test_complete_task_ff_integrated_web_branch_creates_release_gate(
+    kanban_home, repo, monkeypatch,
+):
+    """A manual fast-forward must still enqueue the web release gate."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
+        _commit_in(
+            ws,
+            "web/src/control/AlreadyIntegrated.tsx",
+            "export const alreadyIntegrated = true\n",
+            msg=f"kanban({tid}): manually integrated web work",
+        )
+        _commit_in(
+            ws,
+            "web/src/control/ReleaseGate.tsx",
+            "export const releaseGate = true\n",
+            msg=f"kanban({tid}): second manually integrated web work",
+        )
+
+    _git(repo, "merge", "--ff-only", f"kanban/{tid}")
+
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, tid, result="done")
+        clean_events = _events(conn, tid, "integration_clean")
+        release_events = _events(conn, tid, "release_gate_created")
+
+    assert clean_events[0]["already_integrated"] is True
+    assert clean_events[0]["changed_files"] == [
+        "web/src/control/AlreadyIntegrated.tsx",
+        "web/src/control/ReleaseGate.tsx",
+    ]
+    assert len(release_events) == 1
+    with kb.connect() as conn:
+        child = kb.get_task(conn, release_events[0]["child_id"])
+    assert child is not None and child.status == "blocked"
+
+
+def test_complete_task_ff_integrated_non_web_branch_skips_release_gate(
+    kanban_home, repo, monkeypatch,
+):
+    """A clean manual fast-forward without web files remains gate-free."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        _commit_in(
+            ws,
+            "feature.py",
+            "VALUE = 23\n",
+            msg=f"kanban({tid}): manually integrated non-web work",
+        )
+
+    _git(repo, "merge", "--ff-only", f"kanban/{tid}")
+
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, tid, result="done")
+        clean_events = _events(conn, tid, "integration_clean")
+        release_events = _events(conn, tid, "release_gate_created")
+
+    assert clean_events[0]["already_integrated"] is True
+    assert clean_events[0]["changed_files"] == ["feature.py"]
+    assert release_events == []
+
+
+def test_auto_complete_decompose_root_receipt_marks_already_integrated(
+    kanban_home,
+):
+    """Root receipts must not call an operator integration a system merge."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "completed child", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        (child,) = child_ids
+        kb.claim_task(conn, child)
+        assert kb.complete_task(conn, child, result="done")
+
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=child,
+            outcome={"branch": "kanban/manual", "merge_commit": None},
+        )
+        root_task = kb.get_task(conn, root)
+        auto_events = _events(conn, root, "decompose_root_auto_completed")
+
+    assert root_task is not None
+    assert root_task.result == (
+        "auto-completed decomposed root after all children completed; "
+        "`kanban/manual` was already integrated"
+    )
+    assert len(auto_events) == 1
+
+
 def test_complete_task_rebase_conflict_returns_to_coder(kanban_home, repo, monkeypatch):
     # B1: a conflicting integration is caught by the pre-merge rebase and routed
     # back to the coder as a REQUEST_CHANGES fix-run (NOT a dead park). The chain
