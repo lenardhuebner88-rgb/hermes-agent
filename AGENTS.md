@@ -175,6 +175,15 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   **`docs/refactor/UPSTREAM-STRATEGY.md`**.
 - Treat load-sensitive `waitFor` flakes as scoped test-timeout problems only
   after reproducing in the relevant loaded gate.
+- **A lane-scope park names files; verify them before believing it.** Five
+  consecutive parks on 2026-07-27/28 were false positives that named paths the
+  card never touched. A card's real contribution is
+  `git diff --name-only $(git merge-base main <branch>)..<branch>`, and
+  `branch_name` for a chain slice is the *chain* branch (`kanban/<root>`), not
+  `kanban/<task-id>` — guessing it yields an empty diff and a wrong conclusion.
+  Two distinct causes: the chain branch merging `main` mid-flight (fixed), and an
+  attribution basis orphaned by a rebase (open). Never answer a park with another
+  lane-scope fixer before measuring; the second bounce means diagnose, not retry.
 
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
