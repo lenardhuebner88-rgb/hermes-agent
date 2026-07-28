@@ -614,6 +614,43 @@ def parse_worktree_paths(porcelain: str) -> list[str]:
     return [line[len("worktree "):] for line in porcelain.splitlines() if line.startswith("worktree ")]
 
 
+def select_test_python(repo: Path) -> tuple[Path | None, str]:
+    """Interpreter fuer den Collection-Sweep — dieselbe Wahrheit wie die Testskripte.
+
+    Bis 2026-07-28 stand hier hart ``repo/venv/bin/python``. Nach dem venv-Split
+    traegt ``venv`` kein pytest mehr (Release-Env ohne [dev]), es liegt in
+    ``.venv`` — der Sweep starb mit "No module named pytest" und damit rollte
+    JEDE default-gegatete Landung in diesem Repo zurueck, unabhaengig davon, wie
+    gut der Diff war (live belegt beim Landeversuch hermes-hardening,
+    2026-07-28 20:17, rc=1 nach sauberem ff-Merge).
+
+    Die Auswahl gehoert deshalb an ``scripts/lib/select_test_python.sh``: der
+    Helper beantwortet dieselbe Frage schon fuer run_tests.sh/collect_check.sh
+    und sortiert dabei den leeren ``uv venv`` und den Hermes-Release-Env aus.
+    Eine zweite Regel hier waere genau die Drift, gegen die dieser Helper
+    ueberhaupt angelegt wurde.
+
+    Rueckgabe ``(pfad, "")`` bei Erfolg, ``(None, grund)`` sonst — der Grund
+    kommt vom Helper und nennt das Reparaturkommando woertlich. Fehlt der Helper
+    (fremdes Pack-Repo ohne die Fork-Skripte), bleibt es beim alten Pfad.
+    """
+    helper = repo / "scripts" / "lib" / "select_test_python.sh"
+    if not helper.is_file():
+        return repo / "venv" / "bin" / "python", ""
+    try:
+        res = subprocess.run(
+            ["bash", "-c", '. "$1"; select_test_python "$2"', "_", str(helper), str(repo)],
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=120, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return None, f"{helper}: {exc}"
+    picked = (res.stdout or "").strip()
+    if res.returncode != 0 or not picked:
+        return None, (res.stderr or "").strip() or f"{helper}: rc={res.returncode}"
+    return Path(picked), ""
+
+
 # Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht
 # konsumiert). Präzedenz: One-Shot (overrides.env) > Night (night-overrides.env)
 # > pack.yaml. EFFORT gehört in dieselbe Klasse wie ENGINE/MODEL: er beschreibt
@@ -2221,7 +2258,9 @@ class LoopRunner:
                     tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
                     return False, f"{cmd} rot (rc={res.returncode}):\n{tail}"
             return True, "land_gates grün (" + ", ".join(self.pack.land_gates) + ")"
-        py = repo / "venv" / "bin" / "python"
+        py, why = select_test_python(repo)
+        if py is None:
+            return False, f"kein Test-Python fuer den Collection-Sweep:\n{why}"
         steps: list[tuple[str, list[str], Path]] = [
             ("collection", [str(py), "-m", "pytest", "--co", "-q", "-p", "no:cacheprovider", "tests/"], repo),
             ("affected", ["bash", str(repo / "scripts" / "run-affected.sh"), base], repo),

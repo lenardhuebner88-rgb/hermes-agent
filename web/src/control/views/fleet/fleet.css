@@ -2032,6 +2032,7 @@ body:has([data-fleet-theme]) [data-control] {
   color: var(--fleet-t3);
   cursor: pointer;
   padding: 2px 4px;
+  min-height: 24px;
   border-radius: 4px;
   border: 1px solid var(--fleet-linie);
   background: var(--fleet-karte);
@@ -3504,7 +3505,7 @@ body:has([data-fleet-theme]) [data-control] {
   gap: 5px;
   width: 100%;
   padding: 1px 44px 3px 12px;
-  min-height: 22px;
+  min-height: 24px;
   border: none;
   background: transparent;
   cursor: pointer;
@@ -4485,8 +4486,12 @@ body:has([data-fleet-theme]) [data-control] {
   border: 1px solid var(--fleet-linie);
   border-radius: 4px;
   padding: 3px 7px;
+  min-height: 24px;
   cursor: pointer;
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .fleet-copy:hover { color: var(--fleet-t1); background: var(--fleet-karte-hi); }
 .fleet-copy:focus-visible { outline: 2px solid var(--fleet-puls); outline-offset: 1px; }
