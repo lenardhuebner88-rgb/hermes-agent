@@ -21512,6 +21512,8 @@ class DispatchResult:
     are no chain siblings or all chains are idle."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
+    directive_redelivered: list[str] = field(default_factory=list)
+    """Task ids restarted so newly received operator directives reach a worker."""
     auto_blocked: list[str] = field(default_factory=list)
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
@@ -23444,6 +23446,139 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
     detect_crashed_workers._last_transient_recovered = transient_recovered  # type: ignore[attr-defined]
     return crashed
+
+
+def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
+    """Restart locally owned live workers once for newly-added directives.
+
+    A worker has no stdin control channel, so a directive can only be delivered
+    deterministically by ending the owned worker group and returning the task
+    to the dispatcher.  The ``directive_redelivered`` event stores the highest
+    consumed comment id, making retries idempotent and batching directives that
+    arrive before the next sweep.
+    """
+
+    local_host = _claimer_id().split(":", 1)[0]
+    candidates = conn.execute(
+        """
+        SELECT id, worker_pid, claim_lock, current_run_id
+          FROM tasks
+         WHERE status = 'running'
+           AND worker_pid IS NOT NULL
+           AND current_run_id IS NOT NULL
+           AND claim_lock LIKE ?
+         ORDER BY id
+        """,
+        (f"{local_host}:%",),
+    ).fetchall()
+    redelivered: list[str] = []
+    for candidate in candidates:
+        task_id = str(candidate["id"])
+        worker_pid = int(candidate["worker_pid"])
+        claim_lock = str(candidate["claim_lock"])
+        run_id = int(candidate["current_run_id"])
+        if not _pid_alive(worker_pid):
+            continue
+
+        watermark = 0
+        prior_events = conn.execute(
+            """
+            SELECT payload
+              FROM task_events
+             WHERE task_id = ? AND kind = 'directive_redelivered'
+             ORDER BY id DESC
+            """,
+            (task_id,),
+        ).fetchall()
+        for event in prior_events:
+            try:
+                payload = json.loads(event["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            watermark = _validated_comment_id_watermark(payload) or 0
+            if watermark:
+                break
+
+        directives = conn.execute(
+            """
+            SELECT id
+              FROM task_comments
+             WHERE task_id = ? AND kind = 'directive' AND id > ?
+             ORDER BY id
+            """,
+            (task_id, watermark),
+        ).fetchall()
+        if not directives:
+            continue
+        directive_ids = [int(row["id"]) for row in directives]
+        next_watermark = directive_ids[-1]
+
+        termination = _terminate_reclaimed_worker(worker_pid, claim_lock)
+        if _worker_survived_termination(termination):
+            continue
+
+        with write_txn(conn):
+            current = conn.execute(
+                """
+                SELECT status, worker_pid, claim_lock, current_run_id
+                  FROM tasks
+                 WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if current is None or (
+                current["status"] != "running"
+                or current["worker_pid"] != worker_pid
+                or current["claim_lock"] != claim_lock
+                or current["current_run_id"] != run_id
+            ):
+                continue
+            target_status = (
+                "review" if _run_originated_from_review(conn, task_id, run_id) else "ready"
+            )
+            updated = conn.execute(
+                """
+                UPDATE tasks
+                   SET status = ?, claim_lock = NULL, claim_expires = NULL,
+                       worker_pid = NULL
+                 WHERE id = ? AND status = 'running'
+                   AND worker_pid = ? AND claim_lock IS ?
+                """,
+                (target_status, task_id, worker_pid, claim_lock),
+            )
+            if updated.rowcount != 1:
+                continue
+            closed_run_id = _end_run(
+                conn,
+                task_id,
+                outcome="directive_redelivered",
+                status="restarted",
+                summary=(
+                    "Worker restarted to deliver operator directive(s): "
+                    + ", ".join(str(comment_id) for comment_id in directive_ids)
+                ),
+                metadata={
+                    "reason": "operator_directive",
+                    "directive_ids": directive_ids,
+                    "comment_id_watermark": next_watermark,
+                },
+            )
+            _append_event(
+                conn,
+                task_id,
+                "directive_redelivered",
+                {
+                    "reason": "operator_directive",
+                    "directive_ids": directive_ids,
+                    "comment_id_watermark": next_watermark,
+                    "ended_run_id": closed_run_id,
+                    "worker_pid": worker_pid,
+                    "claim_lock": claim_lock,
+                },
+                run_id=closed_run_id,
+            )
+            redelivered.append(task_id)
+    return redelivered
 
 
 def repair_deliverable_posted_not_completed(
@@ -30092,6 +30227,7 @@ def _dispatch_once_locked(
         )
         result.reaped_worktree_writer_leases = _reap_worktree_writer_leases(conn)
         result.crashed = detect_crashed_workers(conn)
+        result.directive_redelivered = redeliver_live_worker_directives(conn)
         _crash_auto_blocked = getattr(
             detect_crashed_workers, "_last_auto_blocked", []
         )
