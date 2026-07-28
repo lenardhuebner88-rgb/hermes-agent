@@ -38,11 +38,18 @@ if [ -z "${FILES// /}" ]; then
   exit 0
 fi
 run_output=$(mktemp)
-trap 'rm -f "$run_output"' EXIT
+stamp_state=$(mktemp)
+trap 'rm -f "$run_output" "$stamp_state"' EXIT
+# Observability only (A5): load + serial-duration stamp. Must never influence exit.
+# Both calls are hardened: script exits 0 on any internal error, shell uses || true
+# so a missing interpreter/script cannot trip set -e.
+python3 "$DIR/gate_load_stamp.py" start --state "$stamp_state" -- $FILES || true
 set +e
 "$DIR/run_tests.sh" $FILES | tee "$run_output"   # intentionally unquoted: word-split paths into args
 first_status=${PIPESTATUS[0]}
 set -e
+# Stamp AFTER PIPESTATUS capture — never insert anything between runner and PIPESTATUS[0].
+python3 "$DIR/gate_load_stamp.py" finish --state "$stamp_state" || true
 if [ "$first_status" -eq 0 ]; then
   exit 0
 fi
