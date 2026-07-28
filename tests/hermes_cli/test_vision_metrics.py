@@ -324,6 +324,44 @@ def test_conflict_fixer_metric_empty_without_any_dispatch(conn):
     assert cf["counter"]["value"] == 0
 
 
+def test_conflict_fixer_failed_count_deduplicates_child_and_parent_events(conn):
+    """One failed attempt is emitted on child and parent, but counts once.
+
+    The failure counter must be additive: its arrival cannot alter the existing
+    episode-based outcome fields (in particular the successful ``resolved``
+    count and rate).
+    """
+    now = 100 * DAY
+    _add_task(conn, "P", status="done", completed_at=now - DAY)
+    _add_task(conn, "F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F", root="R")
+    _resume_parent_via_real_emitter(conn, "P", "F")
+    before = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["conflict_fixer"]
+
+    failure_payload = {
+        "child_id": "FAILED-F",
+        "parent_id": "P",
+        "root_id": "R",
+        "attempt": 2,
+        "outcome": "gave_up",
+        "blocked": False,
+        "conflict_fingerprint": _park_reason_fingerprint(),
+    }
+    _add_event(conn, "FAILED-F", "conflict_fixer_failed", payload=failure_payload)
+    _add_event(conn, "P", "conflict_fixer_failed", payload=failure_payload)
+
+    after = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["conflict_fixer"]
+
+    assert after["failed"] == 1
+    assert after["resolved"] == 1
+    assert after["success_rate_pct"] == 100.0
+    existing_values = {key: value for key, value in before.items() if key != "failed"}
+    assert {key: after[key] for key in existing_values} == existing_values
+    assert "failed=1" in vm.render_snapshot_summary(
+        {"metrics": {"conflict_fixer": after}}
+    )
+
+
 def test_conflict_fixer_exhaustion_via_escalation_evidence(conn):
     """The budget is ROOT-keyed, so a cascade can spend it while one parent shows
     a single card. The fixer's own ``fixer_exhausted`` escalation evidence is

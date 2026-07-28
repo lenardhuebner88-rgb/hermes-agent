@@ -1288,6 +1288,7 @@ def _tasks_with_failed_run(conn: sqlite3.Connection) -> set[str]:
 # real emitter instead of hand-writing the row, so a rename breaks the test
 # rather than silently zeroing this metric.
 CONFLICT_FIXER_RESUMED_EVENT = "conflict_fixer_parent_resumed"
+CONFLICT_FIXER_FAILED_EVENT = "conflict_fixer_failed"
 
 # One *episode* = one bounded fixer budget. Keyed EXACTLY like the budget in
 # ``_maybe_route_conflict_park_fixer`` (root_id + conflict_fingerprint) so the
@@ -1450,6 +1451,35 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def _conflict_fixer_failed_count(conn: sqlite3.Connection) -> int:
+    """Count distinct fixer-failure signals emitted to a child and its parent.
+
+    ``on_fixer_card_failed`` deliberately writes the same payload twice so both
+    the fixer card and its chain can observe it.  A failure is uniquely keyed by
+    its child card, attempt and conflict fingerprint; count that key rather than
+    event rows to preserve the one-failure/one-count contract.
+    """
+    failures: set[tuple[str, int, str]] = set()
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (CONFLICT_FIXER_FAILED_EVENT,),
+    ).fetchall()
+    for row in rows:
+        payload = _event_payload(row["payload"])
+        child_id = str(payload.get("child_id") or "").strip()
+        fingerprint = str(payload.get("conflict_fingerprint") or "").strip()
+        raw_attempt = payload.get("attempt")
+        if raw_attempt is None:
+            continue
+        try:
+            attempt = int(raw_attempt)
+        except (TypeError, ValueError):
+            continue
+        if child_id and fingerprint and attempt >= 1:
+            failures.add((child_id, attempt, fingerprint))
+    return len(failures)
+
+
 def _conflict_outcome_by_task(episodes: list[dict]) -> dict[str, str]:
     """Collapse episodes into ONE verdict per parked parent task.
 
@@ -1477,7 +1507,7 @@ def _conflict_outcome_by_task(episodes: list[dict]) -> dict[str, str]:
     return verdicts
 
 
-def _conflict_fixer_metric(episodes: list[dict]) -> dict:
+def _conflict_fixer_metric(episodes: list[dict], *, failed: int = 0) -> dict:
     """Konflikt-Fixer-Erfolgsquote ↔ counter 'conflict_parks_closed_by_hand'.
 
     Headline = ``resolved / (resolved + exhausted)`` over decided episodes.
@@ -1504,6 +1534,7 @@ def _conflict_fixer_metric(episodes: list[dict]) -> dict:
         ),
         "episodes": len(episodes),
         "resolved": resolved,
+        "failed": failed,
         "exhausted": exhausted,
         "unresolved_by_fixer": by_outcome[CONFLICT_EPISODE_UNRESOLVED],
         "in_flight": by_outcome[CONFLICT_EPISODE_IN_FLIGHT],
@@ -2166,7 +2197,10 @@ def compute_metrics_snapshot(
             "autonomy": _autonomy_metric(
                 conn, conflict_episodes=conflict_episodes
             ),
-            "conflict_fixer": _conflict_fixer_metric(conflict_episodes),
+            "conflict_fixer": _conflict_fixer_metric(
+                conflict_episodes,
+                failed=_conflict_fixer_failed_count(conn),
+            ),
             "cost_per_task": _cost_per_task_metric(
                 conn, now=ts, window_days=window_days
             ),
@@ -2239,6 +2273,7 @@ def render_snapshot_summary(snapshot: dict) -> str:
         (
             f"  conflict fixer:  {cf.get('success_rate_pct')}%  "
             f"(resolved={cf.get('resolved')}, "
+            f"failed={cf.get('failed')}, "
             f"exhausted={cf.get('exhausted')}, "
             f"in-flight={cf.get('in_flight')})  "
             f"↔ {cf.get('counter', {}).get('name')}="
