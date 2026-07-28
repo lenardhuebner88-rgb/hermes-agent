@@ -464,3 +464,54 @@ def test_start_finish_roundtrip_wall_clock(tmp_path: Path) -> None:
     assert "2 files" in line
     # wall should be at least the sleep
     assert "actual wall" in line
+
+
+# ---------------------------------------------------------------------------
+# Pure-helper boundaries
+# ---------------------------------------------------------------------------
+
+def test_filter_duration_map_keeps_zero_second_entries() -> None:
+    """A measured 0.0s run is HISTORY, not junk — dropping the boundary
+    would make fast files 'no-hist' forever and bloat the prediction."""
+    assert gls.filter_duration_map({"tests/a.py": 0}) == {"tests/a.py": 0.0}
+    assert gls.filter_duration_map({"tests/a.py": -1}) == {}
+
+
+def test_predict_serial_empty_selection_is_unknown_without_cache() -> None:
+    """No files + no cache must predict None (unknown), not 0.0 — a zero
+    prediction would print a bogus 'zero serial-pred' dilation line."""
+    assert gls.predict_serial([], None) == (None, 0, 0)
+    assert gls.predict_serial([], {}) == (0.0, 0, 0)
+
+
+def test_workers_default_never_returns_zero(monkeypatch) -> None:
+    """0 workers would deadlock the runner — the default must kick in for
+    every non-positive value, zero included."""
+    monkeypatch.setenv("HERMES_TEST_WORKERS", "0")
+    assert gls.workers_default() == 8
+
+
+def test_fmt_seconds_boundary_formats() -> None:
+    """The format steps down exactly AT 100 and 10 — the boundary values
+    keep the coarser format."""
+    assert gls._fmt_seconds(100.0) == "100s"
+    assert gls._fmt_seconds(99.9) == "99.9s"
+    assert gls._fmt_seconds(10.0) == "10.0s"
+    assert gls._fmt_seconds(9.99) == "9.99s"
+
+
+def test_zero_serial_prediction_does_not_divide() -> None:
+    """A zero serial prediction must render the 'zero serial-pred' branch,
+    never a wall/0 division — the stamp is observability and may not
+    crash the gate."""
+    line = gls.format_stamp_line(
+        file_count=1,
+        predicted_serial=0.0,
+        missing_count=0,
+        actual_wall=5.0,
+        load_before=1.0,
+        load_after=1.0,
+        cores=4,
+        workers=8,
+    )
+    assert "zero serial-pred" in line
