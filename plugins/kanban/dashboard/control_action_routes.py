@@ -69,7 +69,8 @@ def worker_action_endpoint(
         task_id = run.task_id
 
         if action == "nudge":
-            delivery = kanban_db.add_comment(
+            from hermes_cli import kanban_comment_delivery
+            delivery = kanban_comment_delivery.write_comment(
                 conn, task_id, author="control-dashboard",
                 body=(payload.reason or "Operator-Nudge: bitte Status prüfen / weitermachen."),
             )

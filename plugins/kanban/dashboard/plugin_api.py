@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field
 
 from hermes_cli import funnel as kanban_funnel
 from hermes_cli import kanban_db
+from hermes_cli import kanban_comment_delivery
 from hermes_cli import projects_db
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli import strategist_surface
@@ -2268,7 +2269,7 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
     try:
         if kanban_db.get_task(conn, task_id) is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        delivery = kanban_db.add_comment(
+        delivery = kanban_comment_delivery.write_comment(
             conn, task_id, author=payload.author or "dashboard", body=payload.body,
         )
         return {"ok": True, "delivery": delivery.as_dict()}

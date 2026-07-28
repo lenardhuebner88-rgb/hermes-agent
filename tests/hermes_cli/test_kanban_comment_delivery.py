@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from argparse import Namespace
 
+from hermes_cli import kanban_comment_delivery
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import _cmd_comment
 
@@ -13,6 +14,23 @@ def _claimed_task(conn) -> str:
     task_id = kb.create_task(conn, title="comment delivery", assignee="coder")
     assert kb.claim_task(conn, task_id, claimer="test-claimer") is not None
     return task_id
+
+
+def test_default_return_is_the_int_comment_id(kanban_home):
+    """The shared write path keeps its ``int`` contract unless delivery is asked.
+
+    Callers such as ``kanban_close_sprint`` and ``pa_actions`` rely on the bare
+    comment id; opting into delivery must stay strictly additive.
+    """
+    conn = kb.connect()
+    try:
+        task_id = _claimed_task(conn)
+        comment_id = kb.add_comment(conn, task_id, "operator", "Plain note.")
+        assert isinstance(comment_id, int)
+        assert comment_id > 0
+        assert len(kb.list_comments(conn, task_id)) == 1
+    finally:
+        conn.close()
 
 
 def test_expired_claim_and_dead_pid_are_not_reported_as_live_worker(
@@ -29,7 +47,9 @@ def test_expired_claim_and_dead_pid_are_not_reported_as_live_worker(
                 (int(time.time()) - 1, 424242, task_id),
             )
 
-        result = kb.add_comment(conn, task_id, "operator", "Please continue.")
+        result = kanban_comment_delivery.write_comment(
+            conn, task_id, "operator", "Please continue.",
+        )
 
         assert result.reaches_current_worker is False
         assert result.effective_from == "next_worker_brief"
@@ -53,7 +73,9 @@ def test_live_claim_and_pid_still_explain_that_next_brief_applies(
                 (424243, task_id),
             )
 
-        result = kb.add_comment(conn, task_id, "operator", "Priority changed.", kind="directive")
+        result = kanban_comment_delivery.write_comment(
+            conn, task_id, "operator", "Priority changed.", kind="directive",
+        )
 
         assert result.reaches_current_worker is False
         assert result.effective_from == "next_worker_brief"
