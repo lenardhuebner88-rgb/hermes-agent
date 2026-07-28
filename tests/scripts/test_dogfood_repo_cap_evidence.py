@@ -206,3 +206,85 @@ def test_collect_git_log_default_branch_main(tmp_path):
     repo = _seed_repo(tmp_path, branch="main")
     lines = mod.collect_git_log(str(repo))
     assert any("seed commit" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer — URL validation, 2xx window, login contract
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, body: str, status: int):
+        self._body = body
+        self.status = status
+
+    def read(self) -> bytes:
+        return self._body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, body: str, status: int = 200):
+        self._body = body
+        self._status = status
+
+    def open(self, request, timeout=None):
+        return _FakeResponse(self._body, self._status)
+
+
+def test_base_url_rejects_scheme_without_netloc():
+    """A scheme alone is not a dashboard URL — 'http://' must be rejected
+    or every later request would go nowhere with a confusing error."""
+    mod = _load_module()
+    try:
+        mod._base_url("http://")
+    except mod.CollectorError:
+        pass
+    else:
+        raise AssertionError("scheme-only URL must be rejected")
+    assert mod._base_url("https://h:9119/") == "https://h:9119"
+
+
+def test_json_request_enforces_2xx_status_window():
+    """Only 200..299 may pass; 199 and 300 (the window edges) must raise,
+    and the inclusive boundaries (200, 299) must succeed."""
+    mod = _load_module()
+    for status, ok in ((199, False), (200, True), (299, True), (300, False)):
+        opener = _FakeOpener('{"ok": true}', status=status)
+        if ok:
+            assert mod._json_request(opener, "GET", "https://h/x", timeout=1) == {"ok": True}
+        else:
+            try:
+                mod._json_request(opener, "GET", "https://h/x", timeout=1)
+            except mod.CollectorError:
+                pass
+            else:
+                raise AssertionError(f"status {status} must be rejected")
+
+
+def test_authenticate_requires_literal_ok_true(monkeypatch):
+    """The login response must carry ok=true literally — any other shape
+    (ok=false, missing) is a failed login and must raise."""
+    mod = _load_module()
+    kwargs = {"provider": "local", "username": "u", "password": "p", "timeout": 1}
+
+    monkeypatch.setattr(
+        mod, "_json_request",
+        lambda opener, method, url, *, payload=None, timeout: {"ok": True},
+    )
+    assert mod._authenticate("https://h", **kwargs) is not None
+
+    monkeypatch.setattr(
+        mod, "_json_request",
+        lambda opener, method, url, *, payload=None, timeout: {"ok": False},
+    )
+    try:
+        mod._authenticate("https://h", **kwargs)
+    except mod.CollectorError:
+        pass
+    else:
+        raise AssertionError("login without ok=true must be rejected")
