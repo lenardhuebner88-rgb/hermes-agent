@@ -149,6 +149,63 @@ def test_complete_task_integrates_then_done(kanban_home, repo, monkeypatch):
     assert receipt and merged_events[0]["merge_commit"][:12] in receipt[0]["body"]
 
 
+def test_complete_task_records_unresolved_commit_after_merge(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    real_git = kwt._git
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo)
+        branch = f"kanban/{tid}"
+        _commit_in(ws, "feature.py", "VALUE = 2\n", msg=f"kanban({tid}): work")
+
+        def fail_fallback_commit_resolution(path, *args, **kwargs):
+            if args == ("rev-parse", f"{branch}^{{commit}}"):
+                raise kwt.WorktreeError("forced unresolved approved commit")
+            return real_git(path, *args, **kwargs)
+
+        monkeypatch.setattr(kwt, "_git", fail_fallback_commit_resolution)
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        incomplete = _events(
+            conn, tid, "integration_merged_verification_incomplete",
+        )
+        verified = _events(conn, tid, "INTEGRATOR_VERIFIED")
+
+    assert task is not None and task.status == "done"
+    assert len(incomplete) == 1
+    assert incomplete[0]["action"] == "merged"
+    assert incomplete[0]["verification"] == "incomplete"
+    assert "cannot resolve approved completion commit" in incomplete[0]["verification_reason"]
+    assert verified == []
+    assert (repo / "feature.py").read_text() == "VALUE = 2\n"
+
+
+def test_complete_task_parks_unresolved_commit_without_merge(
+    kanban_home, repo, monkeypatch,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    real_git = kwt._git
+    with kb.connect() as conn:
+        tid, _ws = _provisioned_task(conn, repo)
+        branch = f"kanban/{tid}"
+
+        def fail_fallback_commit_resolution(path, *args, **kwargs):
+            if args == ("rev-parse", f"{branch}^{{commit}}"):
+                raise kwt.WorktreeError("forced unresolved approved commit")
+            return real_git(path, *args, **kwargs)
+
+        monkeypatch.setattr(kwt, "_git", fail_fallback_commit_resolution)
+        assert kb.complete_task(conn, tid, result="done")
+        task = kb.get_task(conn, tid)
+        parked = _events(conn, tid, "integration_parked")
+
+    assert task is not None and task.status == "blocked"
+    assert len(parked) == 1
+    assert parked[0]["action"] == "parked"
+    assert "cannot resolve approved completion commit" in parked[0]["reason"]
+
+
 def test_complete_task_records_artifact_preserve_receipt(
     kanban_home, repo, tmp_path, monkeypatch,
 ):
