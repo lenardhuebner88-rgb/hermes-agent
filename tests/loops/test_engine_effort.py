@@ -117,9 +117,10 @@ def test_engine_effort_sets_match_the_documented_cli_truth():
     """Die Sets stammen aus den CLIs selbst (siehe Modul-Kommentare). Ein
     stiller Drift hier macht das Dashboard-Angebot unwahr."""
     assert engines.effort_levels_for("claude") == ("low", "medium", "high", "xhigh", "max")
-    assert engines.effort_levels_for("codex") == (
-        "none", "minimal", "low", "medium", "high", "xhigh",
-    )
+    # `minimal` steht im Codex-Rust-Enum, wird vom Endpoint aber mit HTTP 400
+    # abgelehnt (live 2026-07-28). Maßgeblich ist, was der Endpoint ANNIMMT.
+    assert engines.effort_levels_for("codex") == ("none", "low", "medium", "high", "xhigh")
+    assert "minimal" not in engines.effort_levels_for("codex")
     assert engines.effort_levels_for("xai") == ("low", "medium", "high")
     for without in ("kimi", "hermes", "neuralwatt", "alibaba-token-plan"):
         assert engines.effort_levels_for(without) == ()
@@ -241,9 +242,9 @@ def test_runner_hands_the_effective_effort_to_the_engine(tmp_path):
     state_root = tmp_path / "state"
     state = state_root / pack.name
     state.mkdir(parents=True)
-    (state / "overrides.env").write_text("PHASE_BUILD_EFFORT=minimal\n", encoding="utf-8")
+    (state / "overrides.env").write_text("PHASE_BUILD_EFFORT=low\n", encoding="utf-8")
     runner = runner_module.LoopRunner(pack, state_root=state_root)
-    assert runner.phase_cfg("build").effort == "minimal"
+    assert runner.phase_cfg("build").effort == "low"
 
     cmd = _capture_cmd(
         "codex",
@@ -253,7 +254,7 @@ def test_runner_hands_the_effective_effort_to_the_engine(tmp_path):
         60,
         runner.phase_cfg("build").effort,
     )
-    assert "model_reasoning_effort=minimal" in cmd
+    assert "model_reasoning_effort=low" in cmd
 
 
 # --- Autoland-Autorität bleibt effort-blind -------------------------------

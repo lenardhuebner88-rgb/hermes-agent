@@ -1291,6 +1291,13 @@ export interface LoopPhase {
   engine: string;
   model: string;
   timeout: number;
+  /** Reasoning-Effort dieser Phase; null/fehlt = Engine-Default (kein CLI-Flag).
+   *  Optional wie `autoland`: ein Dashboard, das kurz gegen ein älteres Backend
+   *  läuft, soll an einem fehlenden Feld nicht scheitern. */
+  effort?: string | null;
+  /** Stufen, die die Engine dieser Phase transportieren kann; [] = kein Control
+   *  (dieselbe Konvention wie `reasoning_support` im Lanes-Tab). */
+  effort_support?: string[];
 }
 
 /** Pack-Manifest ist kaputt (ManifestError) — Backend gibt nur name+error zurück. */
@@ -1362,8 +1369,13 @@ export interface LoopPackSummary {
   land_push: boolean;
   /** null = Default-Gates; sonst die Land-Gate-Kommandos aus dem Pack-Manifest. */
   land_gates: string[] | null;
-  /** true = genau ein verifizierter PASS-Commit darf nach den Gates automatisch landen. */
+  /** Manifest-Zustand: Vertrags-Autoland (Allowlist + Safety-/Prompt-SHA) für
+   *  unbeaufsichtigte Läufe. true = genau ein verifizierter PASS-Commit darf
+   *  nach den Gates automatisch landen. */
   autoland?: boolean;
+  /** Darf der Operator Autoland für einen Lauf einschalten (= pipeline-Pack)?
+   *  Das Einschalten verlangt zusätzlich den Zweitschlüssel AUTOLAND_ACK. */
+  autoland_capable?: boolean;
   description: string;
   stability: string;
   phases: Record<string, LoopPhase>;
@@ -1407,6 +1419,8 @@ export interface LoopsResponse {
 export interface LoopEngineCatalog {
   label: string;
   models: string[];
+  /** Aus der Engine-Registrierung, nicht aus models.yaml — []/fehlt = kein Control. */
+  effort_levels?: string[];
 }
 
 export interface LoopModelsResponse {

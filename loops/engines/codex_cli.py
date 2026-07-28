@@ -51,14 +51,22 @@ CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
 _TOKENS_USED_RE = re.compile(r"tokens used\s*\n\s*([\d,]+)", re.IGNORECASE)
 
 # `codex exec` hat KEIN eigenes --effort-Flag; der Reasoning-Effort geht über den
-# generischen Config-Override `-c key=value`. Belegte Werte (opensrc
-# `openai/codex@main`, codex-rs/protocol/src/openai_models.rs:40-64, enum
-# ReasoningEffort + as_str): none | minimal | low | medium | high | xhigh.
-# Das ist auch der Grund, warum dieser Override überhaupt gebraucht wird: der
-# Host setzt in ~/.codex/config.toml global `model_reasoning_effort = "xhigh"`,
-# d.h. OHNE dieses Flag lief JEDE Codex-Phase auf xhigh — unabhängig davon, was
-# Pack oder Dashboard anzeigten.
-CODEX_EFFORT_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh")
+# generischen Config-Override `-c key=value`.
+#
+# Das Set stammt vom ENDPOINT, nicht aus dem Rust-Enum. Das Enum in
+# codex-rs/protocol/src/openai_models.rs:40-64 führt zusätzlich `minimal` —
+# aber der Codex-Endpoint lehnt das für die aktuellen Modelle ab (live geprüft
+# 2026-07-28, `-c model_reasoning_effort=minimal` → HTTP 400):
+#   "Unsupported value: 'minimal' is not supported with the 'gpt-5.6-sol-…'
+#    model. Supported values are: 'none', 'low', 'medium', 'high', and 'xhigh'."
+# Das Enum beschreibt, was der Client SERIALISIEREN kann; maßgeblich ist, was
+# der Endpoint ANNIMMT. Wer `minimal` wieder aufnimmt, baut ein UI-Angebot,
+# das zur Laufzeit mit 400 stirbt.
+#
+# Dieser Override ist überhaupt nötig, weil der Host in ~/.codex/config.toml
+# global `model_reasoning_effort = "xhigh"` setzt: OHNE das Flag lief JEDE
+# Codex-Phase auf xhigh — unabhängig davon, was Pack oder Dashboard anzeigten.
+CODEX_EFFORT_LEVELS = ("none", "low", "medium", "high", "xhigh")
 
 
 @register("codex", effort_levels=CODEX_EFFORT_LEVELS)

@@ -42,6 +42,14 @@ import { formatLoopTimestamp, loopElapsedSeconds, parseLoopTimestamp, useLoopNow
 import type { LoopRingSegment, LoopRingTicks } from "../lib/loopRing";
 import { fmtAge, fmtDur, nowSec } from "../lib/derive";
 
+import {
+  autolandArmed as isAutolandArmed,
+  buildPhaseOverrides,
+  effortLevelsFor,
+  routeAfterEngineChange,
+  type PhaseRoute,
+} from "./loops/routeOverrides";
+
 const t = de.loops;
 
 /**
@@ -156,30 +164,6 @@ function ageFromIso(iso: string, nowMs: number): string {
 }
 
 /** Pro Phase gebaute overrides — nur Felder, die vom Manifest-Default abweichen. */
-/** Effort-Stufen, die eine Engine transportieren kann ([] = kein Control).
- *  Quelle ist der Backend-Katalog (`effort_levels`), der ihn seinerseits aus
- *  der Engine-Registrierung zieht — nicht aus einer Liste im Frontend, sonst
- *  böte das UI Stufen an, die das CLI ablehnt. */
-function effortLevelsFor(models: LoopModelsResponse | null, engine: string): string[] {
-  return models?.engines?.[engine]?.effort_levels ?? [];
-}
-
-function buildPhaseOverrides(
-  pack: LoopPackSummary,
-  phaseValues: Record<string, PhaseRoute>,
-): Record<string, string> {
-  const overrides: Record<string, string> = {};
-  for (const phase of Object.keys(pack.phases)) {
-    const current = phaseValues[phase];
-    if (!current) continue;
-    const upper = phase.toUpperCase();
-    overrides[`PHASE_${upper}_ENGINE`] = current.engine;
-    overrides[`PHASE_${upper}_MODEL`] = current.model;
-    // Leerer Effort = "Standard": kein Override, der CLI-Default gilt.
-    if (current.effort) overrides[`PHASE_${upper}_EFFORT`] = current.effort;
-  }
-  return overrides;
-}
 
 // ── Der Loop-Ring — Signatur-Element ────────────────────────────────────────
 // Pipeline: 3 Bogensegmente (PLAN→BUILD→VERIFY). Sweep: Runden-Ticks (≤24).
@@ -697,9 +681,6 @@ interface LoopModelChoice {
   model: string;
 }
 
-/** Route einer Phase im Startdialog: Engine + Modell + optionaler Effort. */
-type PhaseRoute = { engine: string; model: string; effort: string | null };
-
 /** Effort-Strip pro Phase — dieselbe Mechanik wie das Reasoning-Control im
  *  Lanes-Tab: nur die Stufen, die die gewählte Engine wirklich transportiert;
  *  leeres Set = gar kein Control statt eines toten Knopfs. */
@@ -940,7 +921,7 @@ function LoopStartForm({
   // — sonst wäre nicht unterscheidbar, ob die Landung Absicht war.
   const [autoland, setAutoland] = useState(false);
   const [autolandAck, setAutolandAck] = useState("");
-  const autolandArmed = autoland && autolandAck.trim() === pack.name;
+  const autolandArmed = isAutolandArmed(pack, autoland, autolandAck);
   const defaultMaxRounds = String(pack.stop.max_rounds ?? "");
   const defaultMaxHours = String(pack.stop.max_hours ?? "");
   const [maxRounds, setMaxRounds] = useState(defaultMaxRounds);
@@ -994,19 +975,10 @@ function LoopStartForm({
               models={models}
               busy={busy}
               onChange={(next) =>
-                setPhaseValues((prev) => {
-                  const before = prev[phase];
-                  return {
-                    ...prev,
-                    [phase]: {
-                      ...next,
-                      // Engine-Wechsel verwirft den Effort: es gilt das Set der
-                      // NEUEN Engine (`claude: max` gibt es auf xai nicht). Das
-                      // spiegelt exakt, was der Runner beim Auflösen tut.
-                      effort: before && before.engine === next.engine ? before.effort : null,
-                    },
-                  };
-                })
+                setPhaseValues((prev) => ({
+                  ...prev,
+                  [phase]: routeAfterEngineChange(prev[phase], next),
+                }))
               }
             />
             <span aria-hidden className="hidden sm:block" />
