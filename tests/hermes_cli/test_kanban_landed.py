@@ -354,3 +354,51 @@ def test_sweep_reclassifies_after_revert(tmp_path, board):
         if row["task_id"] == task_id
     }
     assert transitions[task_id] == (kl.LANDED_ACTIVE, kl.LANDED_DRIFTED)
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_is_ancestor_true_for_base_commit(tmp_path):
+    """Kill boolean_flip L160: == 0 -> != 0 in _is_ancestor."""
+    repo = _make_repo(tmp_path)
+    base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _feature_branch(repo)
+    merge = _merge_no_ff(repo)
+    # base is an ancestor of the merge commit
+    assert kl._is_ancestor(repo, base, merge) is True
+    # the merge commit is NOT an ancestor of base
+    assert kl._is_ancestor(repo, merge, base) is False
+
+
+def test_ahead_count_returns_int(tmp_path):
+    """Kill boolean_flip L165: is not None -> is None in _ahead_count."""
+    repo = _make_repo(tmp_path)
+    _feature_branch(repo)
+    _merge_no_ff(repo)
+    count = kl._ahead_count(repo, "main", "work")
+    assert isinstance(count, int)
+    assert count >= 0
+
+
+def test_witness_info_preserves_target_and_park_reason(board):
+    """Kill bool_op_swap L285 and L297: or None -> and None."""
+    task_id = _done_task(board, branch="work")
+    kb._append_event(
+        board,
+        task_id,
+        "integration_merged",
+        {"merge_commit": "abc123", "target": "main"},
+    )
+    kb._append_event(
+        board,
+        task_id,
+        "integration_parked",
+        {"merge_commit": "def456", "reason": "gate red"},
+    )
+    board.commit()
+
+    info = kl._witness_info(board, task_id)
+    assert info["positive_target"] == "main"
+    assert info["park_reason"] == "gate red"
+    assert info["park_commit"] == "def456"
