@@ -19,7 +19,7 @@ from hermes_cli import kanban_db as kb
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_DECISION_STATUSES = frozenset({"vetoed", "archived", "done"})
+TERMINAL_DECISION_STATUSES = frozenset({"vetoed", "released", "archived", "done"})
 _DECISION_SUFFIX = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
 
 

@@ -112,11 +112,12 @@ def test_reconcile_proposed_specs_dry_run_maps_board_and_never_ingested(
     assert _frontmatter(unplayed)["status"] == "vorgeschlagen"
 
 
-def test_terminal_decision_dedup_uses_lever_not_random_hash(tmp_path: Path):
+@pytest.mark.parametrize("status", ["vetoed", "released"])
+def test_terminal_decision_dedup_uses_lever_not_random_hash(tmp_path: Path, status: str):
     plans_root = tmp_path / "specs"
     plans_root.mkdir()
     (plans_root / "gate-triage-python-oldhash.md").write_text(
-        "---\nstatus: vetoed\nslice: GATE-TRIAGE-PYTHON-a1b2c3d4\n---\n",
+        f"---\nstatus: {status}\nslice: GATE-TRIAGE-PYTHON-a1b2c3d4\n---\n",
         encoding="utf-8",
     )
 
