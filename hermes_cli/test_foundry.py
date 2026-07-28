@@ -708,7 +708,15 @@ def run_test_foundry(
 
         wt_target = worktree / rel_target
         source = wt_target.read_text(encoding="utf-8")
-        mutants = generate_mutants(source, max_mutants=max(1, min(int(max_mutants or 30), _MAX_MUTANTS_HARD_CAP)))
+        mutation_skip_reasons: list[str] = []
+        mutants = generate_mutants(
+            source,
+            max_mutants=max(1, min(int(max_mutants or 30), _MAX_MUTANTS_HARD_CAP)),
+            source_name=rel_target,
+            on_skip=mutation_skip_reasons.append,
+        )
+        if mutation_skip_reasons:
+            return finish(_empty_result(rel_target, reason=mutation_skip_reasons[-1]))
         generated_test_rel = _foundry_test_relpath(rel_target)
         kept_test_blocks: list[tuple[str, str]] = []
         second_mutation_skipped = 0

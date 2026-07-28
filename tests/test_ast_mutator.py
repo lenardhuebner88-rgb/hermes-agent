@@ -566,8 +566,8 @@ def test_curated_foundry_target_stays_bounded(monkeypatch):
     """The real triggering artefact: the day-rotated Test-Foundry target.
 
     ``hermes_cli/kanban_db.py`` is entry 0 of ``test_foundry._TARGETS`` and the
-    file the nightly hung on. Mutating it must cost a handful of builds, not one
-    per site.
+    file the nightly hung on. It must now be named and rejected before even one
+    full-tree mutation build starts.
     """
     target = Path(__file__).resolve().parents[1] / "hermes_cli" / "kanban_db.py"
     assert target.exists(), f"curated Test-Foundry target missing: {target}"
@@ -577,16 +577,44 @@ def test_curated_foundry_target_stays_bounded(monkeypatch):
     sites = _ast_mutator._discover_sites(ast.parse(source))
     assert len(sites) > 1000, f"expected thousands of sites, found {len(sites)}"
 
-    attempts = _budget_build_attempts(monkeypatch, budget=8)
+    attempts = _budget_build_attempts(monkeypatch, budget=0)
     started = time.perf_counter()
-    mutants = generate_mutants(source, max_mutants=2)
+    with pytest.warns(
+        _ast_mutator.MutationSkippedWarning,
+        match="hermes_cli/kanban_db.py",
+    ):
+        mutants = generate_mutants(
+            source,
+            max_mutants=2,
+            source_name="hermes_cli/kanban_db.py",
+        )
     elapsed = time.perf_counter() - started
 
-    assert len(mutants) == 2
-    assert len(attempts) <= 8
-    assert elapsed < 60.0, f"generate_mutants took {elapsed:.1f}s for 2 mutants"
-    for m in mutants:
-        ast.parse(m.mutated_source)
+    assert mutants == []
+    assert attempts == []
+    assert elapsed < 10.0, f"generate_mutants took {elapsed:.1f}s to reject the large AST"
+
+
+def test_oversized_ast_returns_before_mutation_and_names_skipped_source(monkeypatch):
+    """The pre-build guard must reject a large tree visibly and cheaply."""
+    source_name = "generated/oversized_target.py"
+    source = "\n".join(f"value_{idx} = {idx}" for idx in range(13_000))
+    assert sum(1 for _ in ast.walk(ast.parse(source))) > _ast_mutator._MAX_AST_NODES
+
+    def must_not_discover(_tree):
+        raise AssertionError("site discovery must not run above the AST-node boundary")
+
+    monkeypatch.setattr(_ast_mutator, "_discover_sites", must_not_discover)
+    started = time.perf_counter()
+    with pytest.warns(
+        _ast_mutator.MutationSkippedWarning,
+        match="generated/oversized_target.py",
+    ):
+        mutants = generate_mutants(source, source_name=source_name)
+    elapsed = time.perf_counter() - started
+
+    assert mutants == []
+    assert elapsed < 5.0
 
 
 def test_max_mutants_zero_or_negative():

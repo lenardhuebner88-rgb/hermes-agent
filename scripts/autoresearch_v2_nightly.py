@@ -25,7 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
+import tempfile
 import time
 import traceback
 from datetime import date as date_cls
@@ -49,6 +51,7 @@ from hermes_cli.autoresearch_lane_contracts import (  # noqa: E402
     load_lane_specs,
     nightly_exit_code,
 )
+from hermes_cli.autoresearch_lane_runner import run_bounded_process  # noqa: E402
 
 # Operator-assigned report channel (override with --channel-id / env at the unit).
 DEFAULT_CHANNEL_ID = "1495737862522405088"
@@ -123,9 +126,9 @@ def _env_float(name: str, default: float = 0.0) -> float:
         return default
 
 
-# Watchdog fires at this multiple of the soft wall-clock budget: the budget
-# itself is enforced cooperatively between lane steps; the watchdog only
-# catches a lane that is stuck INSIDE a blocking call.
+# Watchdog fires at this multiple of the total hard lane budgets. Each lane is
+# separately process-bounded below; this remains the last-resort guard for a
+# stuck supervisor or post-lane hygiene/reporting work.
 _WATCHDOG_BUDGET_FACTOR = 1.5
 _WATCHDOG_POLL_SECONDS = 30.0
 _WATCHDOG_EXIT_CODE = 70  # EX_SOFTWARE — distinguishable from lane failures
@@ -149,9 +152,10 @@ def _install_hang_forensics(
       printed, not at process exit;
     * dump all thread stacks on SIGTERM (the unit's kill signal) so the
       journal shows exactly WHERE the sweep hung;
-    * when a soft budget is configured, a daemon watchdog thread hard-aborts
-      (with a full traceback dump) at 1.5x that budget — a bounded,
-      self-diagnosing failure instead of 40 silent minutes.
+    * when aggregate lane budgets are configured, a daemon watchdog thread
+      hard-aborts (with a full traceback dump) at 1.5x their sum. Per-lane
+      worker processes should fire first; this catches a stuck supervisor or
+      post-lane reporting path instead of allowing another silent 40 minutes.
     """
     import faulthandler
 
@@ -204,6 +208,144 @@ def _circuit_open(failures: int, threshold: int) -> bool:
 
 def _lane_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+class _LaneExecution:
+    __slots__ = ("result", "error", "timed_out", "elapsed_seconds")
+
+    def __init__(
+        self,
+        *,
+        result: Any = None,
+        error: str | None = None,
+        timed_out: bool = False,
+        elapsed_seconds: float = 0.0,
+    ) -> None:
+        self.result = result
+        self.error = error
+        self.timed_out = timed_out
+        self.elapsed_seconds = elapsed_seconds
+
+
+class _LaneTermination(Exception):
+    """Raised in a lane worker on SIGTERM to unwind cleanup where possible."""
+
+
+def _execute_lane_worker(lane: str, payload: dict[str, Any]) -> Any:
+    if lane == "deep-audit":
+        return run_deep_audit_lane(
+            str(payload["subsystem"]),
+            max_files=int(payload["max_files"]),
+        )
+    if lane == "test-foundry":
+        budget_seconds = float(payload["budget_seconds"])
+        return run_test_foundry_lane(
+            [str(target) for target in payload["targets"]],
+            max_mutants=int(payload["max_mutants"]),
+            started=time.monotonic(),
+            budget_seconds=budget_seconds,
+        )
+    raise ValueError(f"unknown lane worker: {lane}")
+
+
+def _lane_worker_main(
+    lane: str,
+    request_path: Path,
+    result_path: Path,
+) -> int:
+    def _terminate(_signum, _frame) -> None:
+        raise _LaneTermination("lane worker received SIGTERM")
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        result = _execute_lane_worker(lane, payload)
+        envelope = {"ok": True, "result": result}
+        returncode = 0
+    except Exception as exc:
+        traceback.print_exc()
+        envelope = {"ok": False, "error": _lane_error(exc)}
+        returncode = 1
+    result_path.write_text(
+        json.dumps(envelope, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return returncode
+
+
+def _run_lane_process(
+    lane: str,
+    payload: dict[str, Any],
+    budget_seconds: float,
+) -> _LaneExecution:
+    with tempfile.TemporaryDirectory(prefix=f"hermes-autoresearch-{lane}-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        request_path = tmp / "request.json"
+        result_path = tmp / "result.json"
+        request_path.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--lane-worker",
+            lane,
+            "--lane-request",
+            str(request_path),
+            "--lane-result",
+            str(result_path),
+        ]
+        try:
+            process = run_bounded_process(
+                command,
+                budget_seconds=budget_seconds,
+                cwd=_REPO,
+                env=env,
+            )
+        except Exception as exc:
+            return _LaneExecution(error=f"lane worker could not start: {_lane_error(exc)}")
+        if process.timed_out:
+            return _LaneExecution(
+                error=(
+                    f"lane budget exhausted after {budget_seconds:.1f}s; "
+                    "worker process group terminated"
+                ),
+                timed_out=True,
+                elapsed_seconds=process.elapsed_seconds,
+            )
+        if not result_path.exists():
+            return _LaneExecution(
+                error=f"lane worker exited {process.returncode} without a result",
+                elapsed_seconds=process.elapsed_seconds,
+            )
+        try:
+            envelope = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return _LaneExecution(
+                error=f"lane worker result unreadable: {_lane_error(exc)}",
+                elapsed_seconds=process.elapsed_seconds,
+            )
+        if not envelope.get("ok"):
+            return _LaneExecution(
+                error=str(envelope.get("error") or f"lane worker exited {process.returncode}"),
+                elapsed_seconds=process.elapsed_seconds,
+            )
+        return _LaneExecution(
+            result=envelope.get("result"),
+            elapsed_seconds=process.elapsed_seconds,
+        )
+
+
+def _lane_worker_cli(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--lane-worker", choices=("deep-audit", "test-foundry"), required=True)
+    parser.add_argument("--lane-request", type=Path, required=True)
+    parser.add_argument("--lane-result", type=Path, required=True)
+    args = parser.parse_args(argv)
+    return _lane_worker_main(args.lane_worker, args.lane_request, args.lane_result)
 
 
 def day_of_year(when: date_cls | None = None) -> int:
@@ -465,6 +607,10 @@ def _parse_date(raw: str | None) -> date_cls:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    effective_argv = list(argv) if argv is not None else sys.argv[1:]
+    if "--lane-worker" in effective_argv:
+        return _lane_worker_cli(effective_argv)
+
     parser = argparse.ArgumentParser(description="Nightly sweep for the Autoresearch-v2 lanes.")
     parser.add_argument("--send", dest="send", action="store_true", default=True, help="Post the summary to Discord (default).")
     parser.add_argument("--no-send", dest="send", action="store_false", help="Print the summary instead of posting.")
@@ -482,7 +628,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--ignore-cooldown", action="store_true",
                         help="operator override: run lanes despite an active zero-yield cooldown")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective_argv)
 
     when = _parse_date(args.date)
     day = day_of_year(when)
@@ -534,9 +680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if "deep-audit" in lanes:
         subsystem = select_subsystem(list(deep_audit.SUBSYSTEM_GLOBS.keys()), day)
-        if _budget_exhausted(started, total_budget):
-            da_summary = {"subsystem": subsystem, "error": "Wall-clock budget exhausted before Deep-Audit"}
-        elif (skip := _quota_gate("deep-audit") or _cooldown_gate("deep-audit")):
+        if (skip := _quota_gate("deep-audit") or _cooldown_gate("deep-audit")):
             da_summary = {
                 "subsystem": subsystem, "ok": True, "findings": 0, "tokens": 0,
                 "model": None, "reason": skip, "scanned": 0, "errors": 0,
@@ -544,23 +688,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
             print(f"[autoresearch-v2-nightly] deep-audit skipped: {skip}", flush=True)
         else:
-            try:
-                da_summary = run_deep_audit_lane(subsystem, max_files=da_max_files)
-            except Exception as exc:  # one lane must never kill the other / the report
-                traceback.print_exc()
-                circuit_failures += 1
+            execution = _run_lane_process(
+                "deep-audit",
+                {"subsystem": subsystem, "max_files": da_max_files},
+                da_budget,
+            )
+            if execution.error:
+                if not execution.timed_out:
+                    circuit_failures += 1
                 da_summary = {
-                    "subsystem": subsystem, "error": _lane_error(exc), "ok": False,
+                    "subsystem": subsystem, "error": execution.error, "ok": False,
                     "findings": 0, "tokens": 0, "scanned": 0, "errors": 1,
                 }
                 da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
+            elif not isinstance(execution.result, dict):
+                circuit_failures += 1
+                da_summary = {
+                    "subsystem": subsystem,
+                    "error": "lane worker returned a non-object result",
+                    "ok": False,
+                    "findings": 0,
+                    "tokens": 0,
+                    "scanned": 0,
+                    "errors": 1,
+                }
+                da_summary["outcome"] = _classify_deep_audit(da_summary).outcome
+            else:
+                da_summary = execution.result
             _record_lane_cooldown("deep-audit", _classify_deep_audit(da_summary), da_summary)
 
     if "test-foundry" in lanes:
         if _circuit_open(circuit_failures, args.circuit_breaker_threshold):
             tf_error = "Circuit breaker open before Test-Foundry"
-        elif _budget_exhausted(started, total_budget):
-            tf_error = "Wall-clock budget exhausted before Test-Foundry"
         # A fresh quota decision between lanes: session >= 60% stops the next
         # lane of the same night window.
         elif (skip := _quota_gate("test-foundry") or _cooldown_gate("test-foundry")):
@@ -568,18 +727,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"[autoresearch-v2-nightly] test-foundry skipped: {skip}", flush=True)
         else:
             targets = select_targets(test_foundry.curated_targets(), day, tf_targets_n)
-            tf_started = time.monotonic()
-            try:
-                tf_summary = run_test_foundry_lane(
-                    targets,
-                    max_mutants=tf_mutants,
-                    started=tf_started,
-                    budget_seconds=tf_budget,
-                )
-            except Exception as exc:
-                traceback.print_exc()
+            execution = _run_lane_process(
+                "test-foundry",
+                {
+                    "targets": targets,
+                    "max_mutants": tf_mutants,
+                    "budget_seconds": tf_budget,
+                },
+                tf_budget,
+            )
+            if execution.error:
+                if not execution.timed_out:
+                    circuit_failures += 1
+                tf_error = execution.error
+            elif not isinstance(execution.result, list):
                 circuit_failures += 1
-                tf_error = _lane_error(exc)
+                tf_error = "lane worker returned a non-list result"
+            else:
+                tf_summary = execution.result
             for item in tf_summary or []:
                 _record_lane_cooldown("test-foundry", _classify_test_foundry(item), item)
 

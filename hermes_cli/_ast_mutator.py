@@ -32,9 +32,21 @@ the number of sites in the file.
 from __future__ import annotations
 
 import ast
+import warnings
 from dataclasses import dataclass
+from typing import Callable
 
-__all__ = ["Mutant", "generate_mutants"]
+__all__ = ["Mutant", "MutationSkippedWarning", "generate_mutants"]
+
+
+# Mutation construction reparses, transforms, fixes locations, and unparses the
+# complete module once per candidate. Keep that repeated whole-tree work away
+# from inputs whose AST is far outside the normal curated-target envelope.
+_MAX_AST_NODES = 50_000
+
+
+class MutationSkippedWarning(RuntimeWarning):
+    """A source was deliberately skipped before expensive mutation work."""
 
 
 @dataclass
@@ -440,6 +452,8 @@ def generate_mutants(
     *,
     target: str | None = None,
     max_mutants: int = 40,
+    source_name: str = "<source>",
+    on_skip: Callable[[str], None] | None = None,
 ) -> list[Mutant]:
     """Generate up to ``max_mutants`` single-point mutations of ``source``.
 
@@ -450,6 +464,10 @@ def generate_mutants(
             empty list is returned.
         max_mutants: Upper bound on the number of returned mutants (applied
             after deterministic sorting).
+        source_name: Human-readable file name used when a size guard skips the
+            source.
+        on_skip: Optional observer for the same visible skip message emitted as
+            :class:`MutationSkippedWarning`.
 
     Returns:
         A deterministic list of :class:`Mutant`. Empty if ``source`` cannot be
@@ -464,6 +482,22 @@ def generate_mutants(
         tree = ast.parse(source)
     except SyntaxError:
         return []
+
+    # Count only until the boundary is crossed. This single O(n) parse/walk is
+    # cheap compared with the repeated whole-module mutation loop below and
+    # rejects pathological trees before discovery, fix_missing_locations, or
+    # unparse runs even once.
+    node_count = 0
+    for node_count, _node in enumerate(ast.walk(tree), start=1):
+        if node_count > _MAX_AST_NODES:
+            reason = (
+                f"skipped mutation generation for {source_name}: AST exceeds "
+                f"{_MAX_AST_NODES:,} nodes"
+            )
+            if on_skip is not None:
+                on_skip(reason)
+            warnings.warn(reason, MutationSkippedWarning, stacklevel=2)
+            return []
 
     # Determine the subtree within which sites are discovered.
     if target is not None:
