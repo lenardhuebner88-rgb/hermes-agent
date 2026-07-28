@@ -81,7 +81,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--mode",
         choices=("worker", "integration"),
         default="integration",
-        help="worker applies fallback cap 200; integration applies 800",
+        help=(
+            "worker caps package fallback at 200 and focused unions at 217; "
+            "integration applies only the package-fallback cap 800"
+        ),
     )
     parser.add_argument(
         "--format",
@@ -121,16 +124,16 @@ def main(argv: list[str]) -> int:
     else:
         print(" ".join(plan.selected_tests))
 
+    for record in plan.records:
+        for warning in record.warnings:
+            print(f"affected-tests: {record.path}: {warning}", file=sys.stderr)
+
     if plan.unmapped_paths:
         print(
             "affected-tests: unmapped production Python paths: "
             + ", ".join(plan.unmapped_paths),
             file=sys.stderr,
         )
-        for record in plan.records:
-            if record.state == "unmapped":
-                for warning in record.warnings:
-                    print(f"affected-tests: {record.path}: {warning}", file=sys.stderr)
         return UNMAPPED_EXIT_CODE
     return 0
 

@@ -202,3 +202,33 @@ def test_repository_inventory_has_zero_unmapped_production_sources():
 
     assert worker.unmapped_paths == []
     assert integration.unmapped_paths == []
+
+
+def test_worker_union_cap_warning_is_printed_to_stderr(monkeypatch, capsys):
+    mod = _load_module()
+    integration_count = len(
+        mod.classify_changed_paths(
+            REPO_ROOT,
+            ["hermes_cli/__init__.py"],
+            mode="integration",
+        ).selected_tests
+    )
+    monkeypatch.setattr(mod, "_repo_root", lambda: REPO_ROOT)
+    monkeypatch.setattr(
+        mod,
+        "changed_paths",
+        lambda repo_root, ref: ["hermes_cli/__init__.py"],
+    )
+
+    rc = mod.main(["affected_tests.py", "--mode", "worker"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert len(captured.out.split()) == 217
+    assert "affected-tests: hermes_cli/__init__.py:" in captured.err
+    assert (
+        f"selected 217 of {integration_count} tests and discarded "
+        f"{integration_count - 217}"
+    ) in captured.err
+    assert "integration mode runs the full selection" in captured.err
+    assert "nightly full suite remains the backstop" in captured.err

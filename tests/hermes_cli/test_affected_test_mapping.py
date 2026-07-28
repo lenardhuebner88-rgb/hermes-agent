@@ -12,6 +12,7 @@ from hermes_cli.affected_test_mapping import (
     MappingError,
     UNMAPPED_EXIT_CODE,
     WORKER_FALLBACK_MAX_TEST_FILES,
+    WORKER_UNION_MAX_TEST_FILES,
     affected_pytest_modules,
     build_test_index,
     changed_paths,
@@ -447,17 +448,95 @@ def test_explicit_direct_and_import_strategies_are_unioned(tmp_path: Path) -> No
     }
 
 
-def test_real_package_init_import_scope_is_not_package_fallback_capped() -> None:
-    record = classify_changed_paths(
+def test_worker_union_cap_is_deterministic_and_integration_is_complete() -> None:
+    first_worker = classify_changed_paths(
         REPO_ROOT,
         ["hermes_cli/__init__.py"],
         mode="worker",
     ).records[0]
+    second_worker = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/__init__.py"],
+        mode="worker",
+    ).records[0]
+    integration = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/__init__.py"],
+        mode="integration",
+    ).records[0]
 
-    assert record.state == "selected"
-    assert record.strategies == ("explicit", "import")
-    assert len(record.tests) > WORKER_FALLBACK_MAX_TEST_FILES
-    assert "package_fallback" not in record.strategies
+    assert WORKER_UNION_MAX_TEST_FILES == 217
+    assert first_worker.state == "selected"
+    assert first_worker.strategies == ("explicit", "import")
+    assert first_worker.tests == second_worker.tests
+    assert len(first_worker.tests) == WORKER_UNION_MAX_TEST_FILES
+    assert len(integration.tests) > WORKER_UNION_MAX_TEST_FILES
+    assert set(first_worker.tests) < set(integration.tests)
+    assert (
+        f"selected 217 of {len(integration.tests)} tests and discarded "
+        f"{len(integration.tests) - 217}"
+    ) in first_worker.warnings[0]
+    assert integration.warnings == ()
+    assert "package_fallback" not in first_worker.strategies
+
+
+def test_worker_union_cap_prioritizes_direct_then_explicit_then_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "pkg" / "runtime.py"
+    source.parent.mkdir()
+    source.write_text("VALUE = 1\n")
+    tests = tmp_path / "tests"
+    (tests / "pkg").mkdir(parents=True)
+    (tests / "pkg" / "test_runtime.py").write_text(
+        "def test_direct():\n    assert True\n"
+    )
+    (tests / "test_explicit.py").write_text(
+        "def test_explicit():\n    assert True\n"
+    )
+    (tests / "test_importer.py").write_text(
+        "from pkg import runtime\n\n"
+        "def test_import():\n    assert runtime.VALUE\n"
+    )
+    _init_repo(tmp_path)
+    monkeypatch.setitem(
+        EXPLICIT_TEST_PATTERNS,
+        "pkg/runtime.py",
+        ("tests/test_explicit.py",),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.affected_test_mapping.WORKER_UNION_MAX_TEST_FILES",
+        2,
+    )
+
+    worker = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="worker",
+    ).records[0]
+    repeated = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="worker",
+    ).records[0]
+    integration = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="integration",
+    ).records[0]
+
+    assert worker.tests == repeated.tests
+    assert set(worker.tests) == {
+        "tests/pkg/test_runtime.py",
+        "tests/test_explicit.py",
+    }
+    assert integration.tests == (
+        "tests/pkg/test_runtime.py",
+        "tests/test_explicit.py",
+        "tests/test_importer.py",
+    )
+    assert "selected 2 of 3 tests and discarded 1" in worker.warnings[0]
 
 
 def test_stress_registry_files_are_not_pytest_import_evidence() -> None:

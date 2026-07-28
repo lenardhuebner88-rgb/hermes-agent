@@ -22,12 +22,23 @@ exit 0 without pytest is allowed only when every changed path is
 pytest, but are reported as errors rather than as `unmapped`.
 
 One pure-stdlib classifier is shared by the standalone script and the
-post-merge integrator. The interactive worker mode applies a package-fallback
-cap of 200; integration applies 800. The cap is part of classification, so an
-oversized fallback that leaves no focused test is `unmapped` instead of being
-discarded after a successful classification. These are deliberately fallback
-caps, not caps on direct, explicit, or import-index evidence; truncating real
-evidence would recreate a false-green coverage filter.
+post-merge integrator. Package fallbacks retain their existing caps: 200 in the
+interactive worker mode and 800 in integration. An oversized fallback that
+leaves no focused test is `unmapped` instead of being discarded after a
+successful classification.
+
+The worker additionally caps each focused `direct ∪ explicit ∪ import` union at
+217 test files. That number is the smallest cap which preserves the measured
+217-file `hermes_cli/kanban_db.py` core case without truncation; the same run
+used 982.51 seconds of the 1200-second worker budget, leaving 217.49 seconds
+(18.1 percent) of observed reserve. Oversized unions are deterministically
+truncated by evidence strength—direct first, explicit second, import third,
+stable-sorted within each tier—and remain `selected`, not `unmapped`. The
+standalone worker prints the selected/discarded counts and source path to
+stderr. Integration never applies this union cap and therefore runs the full
+evidence set; the nightly full suite remains the final backstop. This is an
+explicit tempo/coverage trade at the interactive edge, not a reversal of the
+additive mapping contract.
 
 Explicit patterns are additive precision hints, not coverage filters. For a
 production Python path their existing targets are unioned with mirrored direct

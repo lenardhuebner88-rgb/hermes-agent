@@ -20,6 +20,7 @@ from typing import Iterable, Mapping, Sequence
 
 WORKER_FALLBACK_MAX_TEST_FILES = 200
 INTEGRATION_FALLBACK_MAX_TEST_FILES = 800
+WORKER_UNION_MAX_TEST_FILES = 217
 UNMAPPED_EXIT_CODE = 4
 EXCEPTIONS_PATH = Path("config/affected-test-exceptions.json")
 
@@ -761,20 +762,39 @@ def classify_changed_paths(
             module_import = source.parent.as_posix().replace("/", ".")
         else:
             module_import = source_path[:-3].replace("/", ".")
-        tests: set[str] = set(explicit)
         strategies: list[str] = ["explicit"] if explicit else []
         direct = _direct_tests(repo_root, source_path)
         if direct:
-            tests.update(direct)
             strategies.append("direct")
         if test_index is None:
             test_index = build_test_index(repo_root)
         imported = test_index.imports.get(module_import, ())
         if imported:
-            tests.update(imported)
             strategies.append("import")
+        prioritized_tests: list[str] = []
+        seen_tests: set[str] = set()
+        for evidence in (direct, explicit, imported):
+            for test in sorted(evidence):
+                if test not in seen_tests:
+                    seen_tests.add(test)
+                    prioritized_tests.append(test)
+        selected_warnings = (
+            [rejected_warning] if rejected_warning is not None else []
+        )
+        if (
+            mode == "worker"
+            and len(prioritized_tests) > WORKER_UNION_MAX_TEST_FILES
+        ):
+            original_count = len(prioritized_tests)
+            prioritized_tests = prioritized_tests[:WORKER_UNION_MAX_TEST_FILES]
+            selected_warnings.append(
+                "worker union cap selected "
+                f"{len(prioritized_tests)} of {original_count} tests and discarded "
+                f"{original_count - len(prioritized_tests)}; integration mode runs "
+                "the full selection and the nightly full suite remains the backstop"
+            )
 
-        if tests:
+        if prioritized_tests:
             if source_path in exceptions:
                 raise MappingError(
                     f"mapped path must not remain allowlisted: {source_path}"
@@ -785,8 +805,8 @@ def classify_changed_paths(
                     state="selected",
                     scope="production_python",
                     strategies=tuple(strategies),
-                    tests=tuple(sorted(tests)),
-                    warnings=(rejected_warning,) if rejected_warning else (),
+                    tests=tuple(sorted(prioritized_tests)),
+                    warnings=tuple(selected_warnings),
                 )
             )
             continue

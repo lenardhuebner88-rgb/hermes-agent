@@ -255,9 +255,9 @@ respawn guard or per-profile stats.
 
 ### Chain semantics: only the last task merges
 
-[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7595) only
+[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7522) only
 integrates when this completion closes the **last open task** of a provisioned
-chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6808)
+chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6735)
 ORs two signals conservatively: `task_links` membership from the chain root, and
 any task whose `workspace_path` lives under the same worktree. Consequence: an
 ordinary mid-chain slice goes `done` with **nothing merged**, and the merge
@@ -338,9 +338,9 @@ own profile config must not be able to disable the gate it is subject to.
 | Worker exits without terminal lifecycle call | subprocess exits zero while task is still running | [`detect_crashed_workers`](../../hermes_cli/kanban_db.py#L22830) | `protocol_violation` or `deliverable_posted_not_completed`; bounded repeats end in `gave_up` | recover posted evidence or rerun with the required complete/block call; operator unblocks after breaker trip |
 | Spawn/config failure breaker | model route, executable, workspace, or repeated spawn fails | [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24411) | failure counter and spawn events accumulate; terminal attempt becomes blocked/auto-blocked | repair deterministic config; allow bounded transient retry, then explicitly unblock after correction |
 | Sticky worker/operator block | latest block or active escalation requires a decision | [`_has_sticky_block`](../../hermes_cli/kanban_db.py#L11567) | card stays `blocked` even when every parent is done | [`unblock_task`](../../hermes_cli/kanban_db.py#L19104) after resolving the stated cause |
-| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6236) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17722) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
-| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6122) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
-| Integration retry exhausted | a `transient`-classed park kept failing | [`_integration_park_class`](../../hermes_cli/kanban_worktrees.py#L485) | bounded `integration_retry` events; re-park once reclassified non-transient | resolve the underlying dirt/lock; the retry counter is separate from the failure breaker |
+| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6153) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17722) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
+| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6039) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
+| Integration retry exhausted | a `transient`-classed park kept failing | [`_integration_park_class`](../../hermes_cli/kanban_worktrees.py#L422) | bounded `integration_retry` events; re-park once reclassified non-transient | resolve the underlying dirt/lock; the retry counter is separate from the failure breaker |
 
 ## Traps
 
@@ -390,7 +390,7 @@ The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5728
 enforces the same hold. Its compatibility mapper,
 [`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4824), and
 the standalone script both delegate to the shared
-[`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L655).
+[`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L656).
 The repository census is contract-tested at zero unmapped production paths in
 both modes; a synthetic new production path must still become `unmapped`.
 The compatibility mappers also throw on `unmapped`; they never collapse that
@@ -400,7 +400,7 @@ Deleted production paths retain surviving direct/import coverage and otherwise
 become `not_applicable`; deletion never silently removes a still-importing test
 from the gate.
 
-**The two fallback caps differ on purpose, but live in one classifier.**
+**The two fallback caps and worker union cap live in one classifier.**
 [`WORKER_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L21)
 is 200 for the interactive worker gate, while
 [`INTEGRATION_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L22)
@@ -408,8 +408,19 @@ is 800 for the post-merge integration gate. The selected mode applies its cap
 before assigning the path state. An oversized fallback without a focused test
 is therefore `unmapped`, not a successful mapping whose test directory is
 silently removed afterward. Do not move the cap back into a shell post-filter
-or duplicate the mapping tables across consumers. The limits cap package and
-fallbacks only; direct, explicit, and import-index evidence is not truncated.
+or duplicate the mapping tables across consumers.
+
+The interactive worker also caps each focused direct/explicit/import union at
+217 files: direct evidence first, then explicit, then import, stable-sorted
+inside each tier. This preserves the measured 217-file `kanban_db.py` core case
+while keeping observed reserve under the 1200-second worker timeout. An
+oversized union stays `selected` and emits a stderr warning naming the path and
+selected/discarded counts; turning it into `unmapped` would create a gate
+deadlock without an escape. Integration is deliberately uncapped and runs the
+full union, while the nightly suite remains the backstop. Thus only the
+interactive tempo gate is truncated; the merge gate retains complete additive
+evidence.
+
 Stress-registry scenarios are excluded from that pytest import evidence.
 Non-`test_*.py` support files under `tests/` are intentionally
 `not_applicable` in both modes. This accepted boundary means a support-only
