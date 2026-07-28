@@ -439,3 +439,41 @@ def test_smoke_against_real_history_terminates_with_wellformed_json(tmp_path):
     assert report["risk_surface"]["scanned"] <= 5
     assert isinstance(report["findings"], list)
     assert set(report["counts"]) == set(flc.SEVERITY)
+
+
+# ---------------------------------------------------------------------------
+# Parser/classifier units
+# ---------------------------------------------------------------------------
+
+def test_parse_diff_ignores_files_outside_the_tracked_set():
+    """A diff hunk for a path not in `into` must be dropped silently —
+    the batch diff can carry neighbours, and a KeyError here would kill
+    the whole loss scan."""
+    diff = textwrap.dedent("""\
+        diff --git a/other.py b/other.py
+        --- a/other.py
+        +++ b/other.py
+        @@ -1,0 +2,1 @@
+        +stray = 1
+    """)
+    into = {"tracked.py": []}
+    flc._parse_diff(diff, into)
+    assert into == {"tracked.py": []}
+
+
+def test_parse_diff_needs_a_file_header_before_added_lines():
+    """A stray '+++' line outside a 'diff --git' header block is not a
+    file header — it must not become the owner of later hunks, or losses
+    would be fabricated for an accidental path."""
+    diff = "+++ b/x.py\n@@ -0,0 +1,1 @@\n+hello\n"
+    into = {"x.py": []}
+    flc._parse_diff(diff, into)
+    assert into == {"x.py": []}
+
+
+def test_is_noise_flags_imports_but_not_from_prose():
+    """Both import forms are noise; a prose line that merely STARTS with
+    'from' (no ' import ') is content and must survive the filter."""
+    assert flc.is_noise(flc.normalise("import os")) is True
+    assert flc.is_noise(flc.normalise("from hermes_cli import kanban_db")) is True
+    assert flc.is_noise(flc.normalise("from the merge base onward we track")) is False
