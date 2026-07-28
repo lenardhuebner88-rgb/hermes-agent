@@ -214,6 +214,35 @@ def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
     assert repeat == []
 
 
+def test_operator_escalation_falls_back_to_task_row_when_payload_sparse(
+    kanban_home,
+):
+    """A sparse escalation payload (no task block, no why_now) must render
+    the board task's title/id and the default why — the operator still has
+    to find the task, and 'None'/'(ohne Titel)' would hide it."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Sparse payload task")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                kb.OPERATOR_ESCALATION_EVENT,
+                {
+                    "attempts_already_made": 1,
+                    "evidence": {},
+                    "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
+                },
+            )
+        alerts = evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW)
+
+    assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
+    text = alerts[0]["text"]
+    assert "Sparse payload task" in text
+    assert tid in text
+    assert "retry ladder exhausted" in text
+
+
 # ---------------------------------------------------------------------------
 # Rule (d): auto_release attention outcomes (Subsystem C3)
 # ---------------------------------------------------------------------------
@@ -247,6 +276,34 @@ def test_auto_release_rolled_back_alerts_with_task_id_and_detail(kanban_home):
     # tell the operator/next agent to return it to main.
     assert "DETACHED" in text
     assert "git checkout main" in text
+
+
+def test_auto_release_rolled_back_without_rollback_ok_omits_detached_warning(
+    kanban_home,
+):
+    """The DETACHED-checkout warning only applies to a SUCCESSFUL rollback.
+    A failed rollback left the checkout where it was — warning anyway would
+    send the operator on a pointless `git checkout main` detour."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Rollback failed chain")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "auto_release",
+                {
+                    "outcome": "rolled_back",
+                    "detail": "restore failed halfway",
+                    "rollback_ok": False,
+                },
+            )
+        alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
+    assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    text = alerts[0]["text"]
+    assert "rolled_back" in text
+    assert tid in text
+    assert "DETACHED" not in text
 
 
 def test_auto_release_deployed_outcome_stays_silent(kanban_home):
@@ -747,6 +804,15 @@ def test_load_alerts_config_defaults_off_and_falls_back_to_reporting_channel():
     })
     assert cfg2["channel_id"] == "123"
     assert cfg2["escalation_channel_id"] == "999"
+
+
+def test_load_alerts_config_normalizes_blank_thread_id_to_none():
+    """Missing and whitespace-only thread_id must both collapse to None —
+    a literal 'None' string or an empty string would post alerts into a
+    dead thread."""
+    assert _acfg()["thread_id"] is None
+    assert _acfg(thread_id="   ")["thread_id"] is None
+    assert _acfg(thread_id=" 111 ")["thread_id"] == "111"
 
 
 # ---------------------------------------------------------------------------
