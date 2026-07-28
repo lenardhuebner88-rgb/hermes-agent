@@ -224,3 +224,106 @@ def test_cli_deflake_check_dry_run_lists_flaky_file(tmp_path, monkeypatch, state
     assert len(out["candidates"]) == 1
     assert out["candidates"][0]["file"] == "tests/agent/test_delegate.py"
     assert out["filed"][0]["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# strategist rendering (run_* patched — no model, no board)
+# ---------------------------------------------------------------------------
+
+def _patch_strategist(monkeypatch, **fns):
+    import hermes_cli.subcommands.vision as vision_mod
+
+    for name, fn in fns.items():
+        monkeypatch.setattr(vision_mod.strategist, name, fn)
+
+
+def test_cli_strategist_mode_is_required(tmp_path, monkeypatch, state_dir):
+    """'vision strategist' without --mode must be a usage error — silently
+    falling through would run REFLECT when the operator meant PROPOSE."""
+    from hermes_cli.subcommands.vision import build_vision_parser
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command")
+    build_vision_parser(sub)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vision", "strategist"])
+
+
+def test_cli_strategist_reflect_json_emits_raw_utf8(tmp_path, monkeypatch, state_dir, capsys):
+    """--json must print the result as JSON verbatim (ensure_ascii=False):
+    the cron parses this line, and escaped Umlauts would still parse but a
+    missing JSON line (human rendering instead) breaks the pipeline."""
+    result = {
+        "mode": "reflect",
+        "note": {"approved": 1, "vetoed": 0, "shipped": 2, "vetoed_levers": [],
+                 "comment": "Überblick geschafft"},
+    }
+    _patch_strategist(monkeypatch, run_reflect=lambda args: result)
+    rc = _run_cli(
+        ["vision", "strategist", "--mode", "reflect", "--json"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    raw = capsys.readouterr().out.strip()
+    assert "Überblick geschafft" in raw
+    assert json.loads(raw) == result
+
+
+def test_cli_strategist_reflect_names_suppressed_levers_none(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """An empty vetoed_levers list must render as the literal word 'none' —
+    an empty tail reads like a truncated line in the cron journal."""
+    result = {
+        "mode": "reflect",
+        "note": {"approved": 3, "vetoed": 0, "shipped": 1, "vetoed_levers": []},
+    }
+    _patch_strategist(monkeypatch, run_reflect=lambda args: result)
+    rc = _run_cli(
+        ["vision", "strategist", "--mode", "reflect"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "3 approved" in out
+    assert "suppressed levers: none" in out
+
+
+def test_cli_strategist_harvest_watch_triggered_without_harvest_block(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """A triggered watch result may carry no harvest payload — the summary
+    must still render (0 candidates) instead of crashing the heartbeat."""
+    result = {
+        "mode": "harvest-watch",
+        "triggered": True,
+        "open_disposition_items": 3,
+        "threshold": 2,
+        "rearm": "2026-07-30",
+    }
+    _patch_strategist(monkeypatch, run_harvest_watch=lambda args: result)
+    rc = _run_cli(
+        ["vision", "strategist", "--mode", "harvest-watch"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "harvest-watch: triggered at 3 open disposition item(s)" in out
+    assert "0 candidate(s)" in out
+
+
+def test_cli_gate_fix_check_triggered_without_ingested_block(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """A triggered gate-fix result may omit the ingested payload — the
+    summary must still render (key None) instead of crashing the cron."""
+    result = {"triggered": True, "gate": "python", "red_nights": 3}
+    _patch_strategist(monkeypatch, run_gate_fix=lambda args: result)
+    rc = _run_cli(
+        ["vision", "gate-fix-check"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "gate-fix-check: gate 'python' red 3 nights" in out
+    assert "ingested HELD" in out
