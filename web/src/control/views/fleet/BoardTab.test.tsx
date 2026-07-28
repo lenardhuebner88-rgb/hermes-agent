@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { BoardArchiveResponse, BoardResponse, BoardTask, ChainSummary } from "../../lib/types";
+import type { BoardArchiveResponse, BoardResponse, BoardTask, ChainSummary, ChainSummaryState } from "../../lib/types";
 import { BoardSwitcher } from "../../components/fleet/BoardIdentity";
 import { BoardTab } from "./BoardTab";
 
@@ -426,5 +426,66 @@ describe("BoardTab BV-2 Ketten-Bezug", () => {
     const header = document.querySelector(".fleet-boardtab-group-header");
     expect(header?.querySelector(".fleet-boardtab-group-mark")).not.toBeNull();
     expect(header?.querySelector(".fleet-boardtab-count")?.textContent).toBe("1");
+  });
+});
+
+describe("BoardTab KZ-1 Ketten-Chip-Zustand", () => {
+  // Realistischer Board-Payload: Kette mit Stationen und chain_summaries[].state
+  // (vom Payload bereits geliefert, bisher im Board nicht ausgewertet).
+  const stations = [
+    { id: "t_ch0", kennung: null, title: "Station eins", state: "fertig", lane: "coder", runtime_seconds: null, cost_usd: null, started_at: null, completed_at: null, wait_reason: null },
+    { id: "t_ch1", kennung: null, title: "Station zwei", state: "laeuft", lane: "coder", runtime_seconds: null, cost_usd: null, started_at: null, completed_at: null, wait_reason: null },
+  ];
+  const member = () =>
+    task({ id: "t_ch1", title: "Chain member one", status: "running", root_id: "t_root1", link_counts: { parents: 1, children: 0 } });
+  const boardWithChainState = (state: ChainSummaryState): BoardResponse => ({
+    ...board([member()]),
+    chain_summaries: [
+      chainSummary({
+        root_id: "t_root1",
+        kennung: "Kettenweite",
+        total: 5,
+        stations_total: 5,
+        done: 1,
+        state,
+        stations,
+      }),
+    ],
+  });
+
+  it("zeigt 'läuft' für eine laufende Kette (fleet-status-running)", () => {
+    render(<BoardTab board={boardWithChainState("laeuft")} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenweite · Position 2/5 · läuft — Laufkarte öffnen" });
+    const stateEl = kref.querySelector(".fleet-boardtab-kref-label .fleet-status-running");
+    expect(stateEl).not.toBeNull();
+    expect(stateEl?.textContent).toBe("läuft");
+  });
+
+  it("zeigt 'angebrochen' für eine angebrochene Kette (fleet-status-scheduled)", () => {
+    render(<BoardTab board={boardWithChainState("angebrochen")} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenweite · Position 2/5 · angebrochen — Laufkarte öffnen" });
+    const stateEl = kref.querySelector(".fleet-boardtab-kref-label .fleet-status-scheduled");
+    expect(stateEl).not.toBeNull();
+    expect(stateEl?.textContent).toBe("angebrochen");
+  });
+
+  it("zeigt 'gehalten' für eine gehaltene Kette (fleet-status-blocked)", () => {
+    render(<BoardTab board={boardWithChainState("gehalten")} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenweite · Position 2/5 · gehalten — Laufkarte öffnen" });
+    const stateEl = kref.querySelector(".fleet-boardtab-kref-label .fleet-status-blocked");
+    expect(stateEl).not.toBeNull();
+    expect(stateEl?.textContent).toBe("gehalten");
+  });
+
+  it("zeigt 'fertig' für eine fertige Kette (fleet-status-done)", () => {
+    render(<BoardTab board={boardWithChainState("fertig")} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenweite · Position 2/5 · fertig — Laufkarte öffnen" });
+    const stateEl = kref.querySelector(".fleet-boardtab-kref-label .fleet-status-done");
+    expect(stateEl).not.toBeNull();
+    expect(stateEl?.textContent).toBe("fertig");
   });
 });
