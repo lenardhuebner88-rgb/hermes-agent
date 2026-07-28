@@ -37,13 +37,74 @@ if [ -z "${FILES// /}" ]; then
   echo "run-affected: no applicable Python production paths for this diff — skipping pytest (targeted scope; full suite is nightly only)"
   exit 0
 fi
+run_output=$(mktemp)
+trap 'rm -f "$run_output"' EXIT
 set +e
-"$DIR/run_tests.sh" $FILES   # intentionally unquoted: word-split paths into args
-first_status=$?
+"$DIR/run_tests.sh" $FILES | tee "$run_output"   # intentionally unquoted: word-split paths into args
+first_status=${PIPESTATUS[0]}
 set -e
 if [ "$first_status" -eq 0 ]; then
   exit 0
 fi
 
-echo "run-affected: first affected-test run failed with exit ${first_status}; rerunning once to require reproduced red before hold"
+mapfile -t failed_files < <(
+  awk '
+    /^=== [0-9]+ files? with test failures \([0-9]+ tests? failed\) ===$/ {
+      in_failure_list = 1
+      next
+    }
+    /^=== [0-9]+ files? with pytest setup\/teardown\/collection errors \([0-9]+ errors?\) ===$/ {
+      in_failure_list = 1
+      next
+    }
+    /^=== [0-9]+ files? where all tests passed but pytest exited non-zero \(warnings-as-errors, hook failures, etc\.\) ===$/ {
+      in_failure_list = 1
+      next
+    }
+    /^=== [0-9]+ files? where no tests ran \(collection\/import error, timeout before collection, etc\.\) ===$/ {
+      in_failure_list = 1
+      next
+    }
+    /^=== / {
+      in_failure_list = 0
+      next
+    }
+    in_failure_list && /^  [^[:space:]]/ {
+      file = $0
+      sub(/^  /, "", file)
+      sub(/  \([^)]*\)$/, "", file)
+      if (!seen[file]++) {
+        print file
+      }
+      next
+    }
+    in_failure_list {
+      in_failure_list = 0
+    }
+  ' "$run_output"
+)
+
+if [ "${#failed_files[@]}" -gt 0 ]; then
+  failed_file_noun="files"
+  if [ "${#failed_files[@]}" -eq 1 ]; then
+    failed_file_noun="file"
+  fi
+  echo "run-affected: first affected-test run failed with exit ${first_status}; rerunning once (${#failed_files[@]} failed ${failed_file_noun}) to require reproduced red before hold"
+  set +e
+  "$DIR/run_tests.sh" "${failed_files[@]}"
+  rerun_status=$?
+  set -e
+  exit "$rerun_status"
+fi
+
+full_file_count=0
+for _file in $FILES; do
+  full_file_count=$((full_file_count + 1))
+done
+full_file_noun="files"
+if [ "$full_file_count" -eq 1 ]; then
+  full_file_noun="file"
+fi
+echo "run-affected: runner produced no failure list — rerunning the full selection" >&2
+echo "run-affected: first affected-test run failed with exit ${first_status}; rerunning once (${full_file_count} ${full_file_noun}, full selection) to require reproduced red before hold"
 "$DIR/run_tests.sh" $FILES
