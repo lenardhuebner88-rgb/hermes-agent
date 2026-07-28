@@ -33729,19 +33729,21 @@ def _worker_brief_input(
     phase: str,
     profile: str,
 ) -> _kanban_context.WorkerBriefInput:
-    now = int(time.time())
+    now, comments_for_brief = int(time.time()), list_comments(conn, task.id)
     workflow_identity = _resolved_review_workflow_identity(task)
     workflow_header = (
-        f"Workflow identity ({workflow_identity[1]}): workflow_id={workflow_identity[0]}"
-        if workflow_identity
+        f"Workflow identity ({workflow_identity[1]}): workflow_id={workflow_identity[0]}" if workflow_identity
         else "Workflow identity: unavailable (fail-closed)"
     )
+    comment_id_watermark = max((comment.id for comment in comments_for_brief), default=0)
     header = [
         f"# Kanban task {task.id}: {task.title}",
         "",
         workflow_header,
         f"Assignee: {task.assignee or '(unassigned)'}",
         f"Status:   {task.status}",
+        f"Comment checkpoint: comment_id_watermark={comment_id_watermark}",
+        "Completion checkpoint: Before completing, re-read this task's comments and act on records with an id greater than comment_id_watermark.",
     ]
     if task.tenant:
         header.append(f"Tenant:   {task.tenant}")
@@ -33756,7 +33758,6 @@ def _worker_brief_input(
             header.append(f"Terminal timeout: {terminal_timeout}s")
     if task.branch_name:
         header.append(f"Branch:   {task.branch_name}")
-
     assignment: list[_kanban_context.BriefRecord] = []
     evidence_context = _evidence_freshness_context(task, task.workspace_path)
     if evidence_context is not None:
@@ -33813,7 +33814,6 @@ def _worker_brief_input(
                 key="continuation",
             ),
         )
-
     extraction_caps = _kanban_context.context_caps(profile)
     parent_and_recent = _render_parent_results_and_role_history(
         conn,
@@ -33829,7 +33829,7 @@ def _worker_brief_input(
     parent_lines = parent_and_recent[:split_at]
     recent_lines = parent_and_recent[split_at:]
     comments = _render_comment_thread(
-        list_comments(conn, task.id),
+        comments_for_brief,
         max_comments=int(extraction_caps["comments"]),
         comment_bytes=int(extraction_caps["comment_bytes"]),
     )

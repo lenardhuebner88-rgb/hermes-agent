@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from argparse import Namespace
 
@@ -109,3 +110,43 @@ def test_cli_makes_directive_effective_from_next_brief_visible(
     assert result == 0
     assert "Directive added" in output
     assert "nächsten Worker-Brief" in output
+
+
+def test_worker_brief_declares_the_latest_comment_checkpoint(kanban_home):
+    """The rendered brief exposes the precise comment state it includes."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="comment checkpoint", assignee="coder")
+        kb.add_comment(conn, task_id, "operator", "First note.")
+        latest_comment_id = kb.add_comment(conn, task_id, "operator", "Second note.")
+
+        payload = kb.build_worker_context(conn, task_id, audience="operator")
+
+        assert f"Comment checkpoint: comment_id_watermark={latest_comment_id}" in payload
+        assert "Completion checkpoint: Before completing, re-read this task's comments" in payload
+        assert "Second note." in payload
+        assert (
+            payload.index("Completion checkpoint:")
+            < payload.index("## Assignment, acceptance criteria, and scope")
+            < payload.index("## Relevant comments")
+        )
+    finally:
+        conn.close()
+
+
+def test_comments_after_worker_brief_checkpoint_are_identifiable(kanban_home):
+    """Comment ids greater than the rendered watermark are newly arrived work."""
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="new comments", assignee="coder")
+        known_comment_id = kb.add_comment(conn, task_id, "operator", "Known note.")
+        payload = kb.build_worker_context(conn, task_id, audience="operator")
+        watermark_match = re.search(r"comment_id_watermark=(\d+)", payload)
+        assert watermark_match is not None
+        watermark = int(watermark_match.group(1))
+        new_comment_id = kb.add_comment(conn, task_id, "operator", "New note.")
+
+        assert watermark == known_comment_id
+        assert [comment.id for comment in kb.list_comments(conn, task_id) if comment.id > watermark] == [new_comment_id]
+    finally:
+        conn.close()
