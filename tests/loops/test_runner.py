@@ -36,6 +36,7 @@ from loops.runner import (
     read_all_ledger_stats,
     read_ledger_stats,
     resolve_packs_dir,
+    select_test_python,
     build_scope_command,
     should_reexec_into_scope,
     user_bus_socket_path,
@@ -1170,6 +1171,93 @@ def test_land_gates_distinguishes_affected_test_failure_from_preflight_abort(
     assert expected_phrase in report
     if affected_exit_code in {3, 4}:
         assert "rot" not in report
+
+
+def _write_select_helper(repo: Path, body: str) -> None:
+    """Legt scripts/lib/select_test_python.sh mit dem gegebenen Funktionskoerper an."""
+    lib = repo / "scripts" / "lib"
+    lib.mkdir(parents=True, exist_ok=True)
+    (lib / "select_test_python.sh").write_text(
+        "select_test_python() {\n" + body + "\n}\n", encoding="utf-8"
+    )
+
+
+def test_select_test_python_uses_the_repo_helper(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    _write_select_helper(repo, '  printf "%s\\n" "$1/.venv/bin/python"\n  return 0')
+
+    picked, why = select_test_python(repo)
+
+    assert picked == repo / ".venv" / "bin" / "python"
+    assert why == ""
+
+
+def test_select_test_python_reports_the_repair_command(tmp_path):
+    repo = init_repo(tmp_path / "repo")
+    _write_select_helper(repo, '  echo "error: no test Python; run: uv sync --extra dev" >&2\n  return 1')
+
+    picked, why = select_test_python(repo)
+
+    assert picked is None
+    assert "uv sync --extra dev" in why
+
+
+def test_select_test_python_falls_back_without_helper(tmp_path):
+    """Fremdes Pack-Repo ohne die Fork-Skripte behaelt das alte Verhalten."""
+    repo = init_repo(tmp_path / "repo")
+
+    picked, why = select_test_python(repo)
+
+    assert picked == repo / "venv" / "bin" / "python"
+    assert why == ""
+
+
+def test_land_gates_runs_collection_with_the_selected_interpreter(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Regression 2026-07-28: der Collection-Sweep lief hart ueber venv/bin/python.
+
+    Nach dem venv-Split liegt dort kein pytest — die Landung von hermes-hardening
+    rollte um 20:17 mit "No module named pytest" zurueck, obwohl der ff-Merge
+    sauber war. Ohne diesen Test bliebe die Interpreter-Wahl ungeprueft.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "sel", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "sel")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    chosen = tmp_path / "anderes-venv" / "bin" / "python"
+    monkeypatch.setattr(runner_module, "select_test_python", lambda r: (chosen, ""))
+    seen: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        seen.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, _report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is True
+    collection = [c for c in seen if "pytest" in c]
+    assert collection, "kein pytest-Aufruf im Collection-Sweep"
+    assert collection[0][0] == str(chosen)
+
+
+def test_land_gates_aborts_with_repair_hint_when_no_test_python(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "sel-none", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "sel-none")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    monkeypatch.setattr(
+        runner_module, "select_test_python", lambda r: (None, "run: uv sync --extra dev")
+    )
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is False
+    assert "uv sync --extra dev" in report
 
 
 def test_parse_worktree_paths():

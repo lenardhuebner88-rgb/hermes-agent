@@ -1,6 +1,7 @@
 """FastAPI routes for the /control Design Board."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -21,6 +22,25 @@ _CHUNK = 1024 * 1024
 _MAX_BYTES = 100 * 1024 * 1024
 # HTML mockups are text; keep them well below the image ceiling.
 _MAX_HTML_BYTES = 5 * 1024 * 1024
+
+
+async def _request_json(request: Request) -> dict:
+    try:
+        return await request.json()
+    except ValueError:
+        raise HTTPException(400, {
+            "error": "invalid_json",
+            "message": "Request body is not valid JSON",
+        }) from None
+
+
+def _require_fields(body: dict, *fields: str) -> None:
+    for field in fields:
+        if field not in body:
+            raise HTTPException(400, {
+                "error": "missing_field",
+                "message": field,
+            })
 
 
 def _safe_batch_facets(task_ids: list[str]) -> tuple[dict, bool]:
@@ -56,7 +76,8 @@ def register_design_board_routes(app: FastAPI) -> None:
 
     @app.post("/api/design-board/cards")
     async def _create(request: Request):
-        body = await request.json()
+        body = await _request_json(request)
+        _require_fields(body, "kind", "title")
         cid = store.create_card(
             kind=body["kind"], title=body["title"],
             target=body.get("target"), created_by=body.get("created_by", "piet"),
@@ -77,7 +98,7 @@ def register_design_board_routes(app: FastAPI) -> None:
 
     @app.patch("/api/design-board/cards/{card_id}")
     async def _patch(card_id: str, request: Request):
-        body = await request.json()
+        body = await _request_json(request)
         card = store.get_card(card_id)
         if card is None:
             raise HTTPException(404, "card not found")
@@ -120,7 +141,8 @@ def register_design_board_routes(app: FastAPI) -> None:
 
     @app.post("/api/design-board/cards/{card_id}/entries")
     async def _add_entry(card_id: str, request: Request):
-        body = await request.json()
+        body = await _request_json(request)
+        _require_fields(body, "author", "kind")
         try:
             eid = store.add_entry(
                 card_id, author=body["author"], kind=body["kind"],
@@ -181,7 +203,14 @@ def register_design_board_routes(app: FastAPI) -> None:
             with open(html_path, "wb") as fh:
                 fh.write(bytes(buf))
             try:
-                eid = design_board_cli.add_mockup(card_id, html_path, note=note)
+                eid = await asyncio.to_thread(
+                    design_board_cli.add_mockup, card_id, html_path, note=note
+                )
+            except UnicodeDecodeError:
+                raise HTTPException(400, {
+                    "error": "invalid_encoding",
+                    "message": "HTML mockup is not valid UTF-8",
+                }) from None
             except FileNotFoundError as exc:
                 logger.warning("design-board mockup renderer missing: %s", exc)
                 raise HTTPException(502, {
@@ -210,4 +239,5 @@ def register_design_board_routes(app: FastAPI) -> None:
         if not path.is_file():
             raise HTTPException(404, "asset not found")
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return Response(content=path.read_bytes(), media_type=ctype)
+        data = await asyncio.to_thread(path.read_bytes)
+        return Response(content=data, media_type=ctype)
