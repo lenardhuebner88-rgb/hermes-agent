@@ -64,6 +64,7 @@ from hermes_cli.affected_test_mapping import (
     affected_pytest_modules as _shared_affected_pytest_modules,
     changed_paths as _shared_changed_paths,
 )
+from hermes_cli.kanban_chain_status import is_settled_fixer_card
 
 # Compatibility aliases for existing callers/tests.  The implementation and
 # maintained mapping table live in the fork-owned shared classifier.
@@ -3977,8 +3978,10 @@ def spawn_release_gate_activation(
     }
 
 
-def _terminal_status(status: str) -> bool:
-    return status in {"done", "archived", "failed", "cancelled"}
+def _terminal_status(conn: sqlite3.Connection, task_id: str, status: str) -> bool:
+    return status in {"done", "archived", "failed", "cancelled"} or is_settled_fixer_card(
+        conn, task_id
+    )
 
 
 _REAL_COMPLETION_STATUSES = frozenset({"done", "running", "ready", "blocked"})
@@ -4108,7 +4111,8 @@ def _pending_root_finalizer_id(
         ).fetchall()
     open_ids = [
         r["id"] for r in rows
-        if r["id"] != task_id and not _terminal_status(r["status"])
+        if r["id"] != task_id
+        and not _terminal_status(conn, r["id"], r["status"])
     ]
     if len(open_ids) != 1:
         return None
@@ -7966,7 +7970,9 @@ def maybe_retrigger_integration_after_archive(
         if not rows:
             return None
         open_ids = [
-            r["id"] for r in rows if not _terminal_status(r["status"])
+            r["id"]
+            for r in rows
+            if not _terminal_status(conn, r["id"], r["status"])
         ]
         # Ready for retrigger when every *non-root* member is terminal and at
         # most the root (finalizer) remains open — the exact stranded shape

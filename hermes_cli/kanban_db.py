@@ -100,6 +100,12 @@ from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
 from hermes_cli import kanban_review_policy as _review_policy
+from hermes_cli.kanban_chain_status import (
+    blocked_event_kind,
+    is_integration_park,
+    is_settled_fixer_card,
+    on_fixer_card_failed,
+)
 from hermes_cli.kanban_scores_digest import scores_digest as _fork_scores_digest
 from hermes_cli import kanban_templates
 from hermes_cli import kanban_worker_runtime as _worker_runtime
@@ -24403,6 +24409,7 @@ def _record_task_failure(
             ),
             run_id=run_id,
         )
+    on_fixer_card_failed(conn, task_id, outcome=outcome, blocked=blocked)
     return blocked
 
 
@@ -26002,12 +26009,15 @@ def _maybe_route_conflict_park_fixer(
             child_ids.append(cid)
     if child_ids:
         placeholders = ",".join("?" for _ in child_ids)
-        if conn.execute(
-            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
-            "AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
-            "LIMIT 1",
+        open_children = conn.execute(
+            f"SELECT id FROM tasks WHERE id IN ({placeholders}) "
+            "AND status NOT IN ('done', 'archived', 'failed', 'cancelled')",
             child_ids,
-        ).fetchone():
+        ).fetchall()
+        if any(
+            not is_settled_fixer_card(conn, child["id"])
+            for child in open_children
+        ):
             return
 
     # Backoff floor so a tight sweep cadence can't redispatch the instant a
@@ -26336,7 +26346,13 @@ def no_silent_stall_sweep(
             _decision_event_reason(blocked_event["payload"] if blocked_event else None)
             or ""
         )
-        if not reason.startswith("integration parked:"):
+        if not is_integration_park(
+            reason=reason,
+            block_kind=blocked_event_kind(
+                blocked_event["payload"] if blocked_event else None,
+                fallback=row["block_kind"],
+            ),
+        ):
             continue
         if _operator_escalation_is_active(conn, task_id):
             # Explicit operator hold: no integration self-heal sweep may retry
@@ -35852,7 +35868,8 @@ def decision_queue(
     last_deliverable_miss: dict[str, tuple] = {}  # task_id -> (payload, created_at)
     try:
         blocked_tasks = conn.execute(
-            "SELECT id, title, created_by FROM tasks WHERE status = 'blocked'"
+            "SELECT id, title, created_by, block_kind "
+            "FROM tasks WHERE status = 'blocked'"
         ).fetchall()
     except Exception:
         blocked_tasks = []
@@ -35916,7 +35933,13 @@ def decision_queue(
                 continue
             lb = last_blocked.get(row["id"])
             reason = _decision_event_reason(lb[0] if lb else None) or ""
-            if not reason.startswith("integration parked:"):
+            if not is_integration_park(
+                reason=reason,
+                block_kind=blocked_event_kind(
+                    lb[0] if lb else None,
+                    fallback=row["block_kind"],
+                ),
+            ):
                 continue
             _add(
                 "integration_parked",

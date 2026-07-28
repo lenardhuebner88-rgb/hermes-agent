@@ -16,6 +16,7 @@ import time
 from collections.abc import Iterable
 from typing import Any, Optional
 
+from hermes_cli.kanban_chain_status import is_settled_fixer_card
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
 
@@ -62,7 +63,11 @@ def _is_open_task(conn: sqlite3.Connection, task_id: object) -> bool:
     if not task_id:
         return False
     row = conn.execute("SELECT status FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
-    return row is not None and row["status"] not in {"done", "archived", "failed", "cancelled"}
+    return (
+        row is not None
+        and row["status"] not in {"done", "archived", "failed", "cancelled"}
+        and not is_settled_fixer_card(conn, str(task_id))
+    )
 
 
 def is_lane_scope_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
