@@ -312,3 +312,25 @@ def test_ui_shot_allocates_non_live_preview_port(tmp_path, monkeypatch):
 
     preview = calls[0]
     assert preview[preview.index("--port") + 1] != "9119"
+
+
+def test_handler_tolerates_runtime_injected_task_id_kwarg():
+    """The runtime injects ``task_id`` as a keyword — the handler must accept it.
+
+    Live symptom 2026-07-28 on t_94bb1ac0 (ui-real acceptance of the Lanes tab):
+    every attempt died three times identically with
+    ``TypeError: _handle_verification_gate() got an unexpected keyword argument
+    'task_id'``, which made the only sanctioned server-side live-evidence action
+    unreachable and blocked the acceptance itself. 34 of the 35 tool handlers
+    already carry ``**kw``; this one was the lone outlier.
+
+    ``agent_cli_capabilities`` is the one closed action that needs no Kanban
+    workspace, so this stays hermetic.
+    """
+    from tools import verification_gate_tool as tool
+
+    result = tool._handle_verification_gate(
+        {"action": "agent_cli_capabilities"}, task_id="t_deadbeef",
+    )
+
+    assert result

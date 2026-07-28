@@ -430,7 +430,7 @@ def _check_requirements() -> tuple[bool, str]:
     return False, "verification_gate is available only in a Kanban workspace"
 
 
-def _handle_verification_gate(args: Mapping[str, Any]) -> Any:
+def _handle_verification_gate(args: Mapping[str, Any], **_kw: Any) -> Any:
     try:
         action = str(args.get("action", ""))
         if action == "agent_cli_capabilities":
