@@ -314,7 +314,7 @@ def test_unparseable_after_ast_does_not_narrow(tmp_path: Path) -> None:
     assert len(result.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
 
 
-def test_resolved_symbol_without_test_match_defers_a4_narrowing(
+def test_resolved_symbol_without_test_match_returns_empty_selection(
     tmp_path: Path,
 ) -> None:
     _create_fanout_repo(tmp_path)
@@ -334,10 +334,10 @@ def test_resolved_symbol_without_test_match_defers_a4_narrowing(
         ),
     )
 
-    assert result.applied is False
+    assert result.applied is True
     assert result.reason == "no_symbol_test_matches"
     assert result.changed_symbols == ("unreferenced",)
-    assert len(result.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
+    assert result.tests == ()
 
 
 def test_unreadable_test_ast_keeps_the_full_import_set(tmp_path: Path) -> None:

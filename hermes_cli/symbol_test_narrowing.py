@@ -327,7 +327,7 @@ def narrow_imported_tests(
     git_error_type: type[Exception],
     git_timeout_error_type: type[Exception],
 ) -> SymbolNarrowingResult:
-    """Narrow a broad import match, always falling back to the input on doubt."""
+    """Narrow a broad import match, falling back only when evidence is uncertain."""
 
     imported = tuple(sorted(set(imported_tests)))
     if len(imported) <= threshold:
@@ -424,7 +424,12 @@ def narrow_imported_tests(
     }
     narrowed = tuple(sorted(set(imported) & matched))
     if not narrowed:
-        return _broad(imported, "no_symbol_test_matches", changed_symbols)
+        return SymbolNarrowingResult(
+            tests=(),
+            applied=True,
+            reason="no_symbol_test_matches",
+            changed_symbols=tuple(sorted(changed_symbols)),
+        )
 
     return SymbolNarrowingResult(
         tests=narrowed,

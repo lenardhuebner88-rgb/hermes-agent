@@ -813,6 +813,7 @@ def classify_changed_paths(
         if test_index is None:
             test_index = build_test_index(repo_root)
         imported = test_index.imports.get(module_import, ())
+        uncovered_symbols: tuple[str, ...] = ()
         if imported:
             narrowing = narrow_imported_tests(
                 repo_root=repo_root,
@@ -828,6 +829,8 @@ def classify_changed_paths(
             )
             imported = narrowing.tests
             strategies.append("import→symbol" if narrowing.applied else "import")
+            if narrowing.reason == "no_symbol_test_matches":
+                uncovered_symbols = narrowing.changed_symbols
         prioritized_tests: list[str] = []
         seen_tests: set[str] = set()
         for evidence in (direct, explicit, imported):
@@ -838,6 +841,14 @@ def classify_changed_paths(
         selected_warnings = (
             [rejected_warning] if rejected_warning is not None else []
         )
+        if uncovered_symbols:
+            symbol_label = "symbol" if len(uncovered_symbols) == 1 else "symbols"
+            selected_warnings.append(
+                f"symbol coverage gap for {source_path}: changed {symbol_label} "
+                f"without test references: {', '.join(uncovered_symbols)}; curated "
+                "EXPLICIT_TEST_PATTERNS ran and the affected-test gate intentionally "
+                "remains non-red"
+            )
         if (
             mode == "worker"
             and len(prioritized_tests) > WORKER_UNION_MAX_TEST_FILES
@@ -851,7 +862,7 @@ def classify_changed_paths(
                 "the full selection and the nightly full suite remains the backstop"
             )
 
-        if prioritized_tests:
+        if prioritized_tests or uncovered_symbols:
             if source_path in exceptions:
                 raise MappingError(
                     f"mapped path must not remain allowlisted: {source_path}"

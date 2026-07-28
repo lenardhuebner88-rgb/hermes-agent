@@ -26,6 +26,11 @@ from hermes_cli.symbol_test_narrowing import SymbolDiffSpec
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(scope="module")
+def real_test_index():
+    return build_test_index(REPO_ROOT)
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
@@ -465,6 +470,114 @@ def test_real_historical_diff_exposes_symbol_narrowing_strategy() -> None:
     assert "import→symbol" in record.strategies
     assert "import" not in record.strategies
     assert record.state == "selected"
+
+
+def test_real_uncovered_symbol_selects_curated_tests_and_warns(
+    real_test_index,
+) -> None:
+    plan = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="7f5e4f848^", right="7f5e4f848"),
+    )
+    record = plan.records[0]
+    expected_tests = {
+        str(path.relative_to(REPO_ROOT))
+        for pattern in EXPLICIT_TEST_PATTERNS["hermes_cli/kanban_db.py"]
+        for path in REPO_ROOT.glob(pattern)
+        if path.is_file()
+    }
+
+    assert len(expected_tests) == 29
+    assert record.state == "selected"
+    assert set(record.tests) == expected_tests
+    assert record.warnings == (
+        "symbol coverage gap for hermes_cli/kanban_db.py: changed symbol without "
+        "test references: _run_evidence_freshness_preflight; curated "
+        "EXPLICIT_TEST_PATTERNS ran and the affected-test gate intentionally remains "
+        "non-red",
+    )
+    assert plan.unmapped_paths == []
+    assert UNMAPPED_EXIT_CODE == 4
+
+
+def test_real_diff_outside_symbols_keeps_module_imports_without_a4_warning(
+    real_test_index,
+) -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="c1f623fcc^", right="c1f623fcc"),
+    ).records[0]
+
+    assert "import" in record.strategies
+    assert "import→symbol" not in record.strategies
+    assert set(real_test_index.imports["hermes_cli.kanban_db"]).issubset(record.tests)
+    assert record.warnings == ()
+
+
+def test_mixed_referenced_and_unreferenced_symbols_do_not_warn(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "pkg" / "runtime.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for index in range(SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1):
+        (tests / f"test_runtime_{index:03d}.py").write_text(
+            "from pkg import runtime\n\n"
+            f"def test_runtime_{index:03d}():\n"
+            "    assert runtime.covered() == 1\n",
+            encoding="utf-8",
+        )
+    _init_repo(tmp_path)
+    source.write_text(
+        "def covered():\n"
+        "    return 2\n\n"
+        "def uncovered():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    record = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="integration",
+        diff_spec=SymbolDiffSpec(ref="HEAD"),
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.strategies == ("import→symbol",)
+    assert len(record.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
+    assert record.warnings == ()
+
+
+def test_real_gateway_config_commit_does_not_warn(
+    real_test_index,
+) -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["gateway/config.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="9cd729684^", right="9cd729684"),
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.tests
+    assert "import→symbol" in record.strategies
+    assert record.warnings == ()
 
 
 def test_worker_union_cap_is_deterministic_and_integration_is_complete() -> None:
