@@ -152,23 +152,64 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).not.toContain("Im Terminal öffnen");
   });
 
-  it("beschriftet Task-Lane und Laufprofil getrennt", () => {
-    const html = renderToStaticMarkup(
+  /** Row-local KV assertion: label and value must share the same .fleet-kv group. */
+  function kvValue(label: string): string {
+    const key = screen.getByText(label, { exact: true });
+    expect(key.className).toContain("fleet-kv-k");
+    const row = key.closest(".fleet-kv");
+    expect(row).toBeTruthy();
+    const value = row!.querySelector(".fleet-kv-v");
+    expect(value).toBeTruthy();
+    return (value!.textContent ?? "").trim();
+  }
+
+  it("beschriftet Task-Lane, Laufprofil und Modell als getrennte KV-Zeilen", () => {
+    // Assignee ≠ profile ≠ active_model, damit vertauschtes Mapping sichtbar wird.
+    render(
       <UebersichtTab
         now={1782508100}
         task={{ id: "t1", title: "T", status: "running", assignee: "premium", body: null }}
-        latestRun={{ profile: "premium", status: "running", runtime_seconds: 60, active_model: "claude-sonnet" }}
+        latestRun={{
+          profile: "coder-frontend",
+          status: "running",
+          runtime_seconds: 60,
+          active_model: "anthropic/claude-opus-5",
+        }}
         elapsedSec={60}
         deliverables={[]}
       />,
     );
 
-    expect(html).toContain("Task-Lane");
-    expect(html).toContain("Laufprofil");
-    expect(html).toContain("premium");
-    expect(html).toContain("Modell");
-    expect(html).toContain("claude-sonnet");
-    expect(html).toContain("Modell unbekannt – Telemetrie fehlt");
+    expect(kvValue("Task-Lane")).toBe("premium");
+    expect(kvValue("Laufprofil")).toBe("coder-frontend");
+    expect(kvValue("Modell")).toBe("anthropic/claude-opus-5");
+    // Modellroute bleibt eigenes Feld (Telemetrie-Warnung, kein Ersatz für Modell-KV).
+    expect(screen.getByText("Modell unbekannt – Telemetrie fehlt")).toBeTruthy();
+  });
+
+  it("zeigt Modell als — wenn keine Modelltelemetrie vorliegt und mischt keine Lane/Profil-Werte ein", () => {
+    render(
+      <UebersichtTab
+        now={1782508100}
+        task={{ id: "t2", title: "T2", status: "running", assignee: "premium", body: null, model_override: null }}
+        latestRun={{
+          profile: "coder-frontend",
+          status: "running",
+          runtime_seconds: 30,
+          active_model: null,
+          requested_model: null,
+        }}
+        elapsedSec={30}
+        deliverables={[]}
+      />,
+    );
+
+    expect(kvValue("Task-Lane")).toBe("premium");
+    expect(kvValue("Laufprofil")).toBe("coder-frontend");
+    const modelVal = kvValue("Modell");
+    expect(modelVal).toBe("—");
+    expect(modelVal).not.toContain("premium");
+    expect(modelVal).not.toContain("coder-frontend");
   });
 
   it("rendert lange Taskbeschreibungen mit Wortumbruch im einzigen Sheet-Scroller", () => {
