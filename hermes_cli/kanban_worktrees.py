@@ -7608,6 +7608,22 @@ def _branch_has_patch_equivalent_commit(
     return any(line.startswith("- ") for line in lines)
 
 
+def _is_merge_commit(repo_root: Path, commit: str) -> bool:
+    """Return whether *commit* has more than one parent.
+
+    Completion metadata records the worker-supplied commit verbatim.  A merge
+    of the target branch into a worktree is transport history rather than a
+    card's approved output; unlike ordinary commits it has no patch-id for the
+    rebase-equivalence check below.  Keep a Git lookup failure fail-closed by
+    retaining the candidate instead of silently discarding it.
+    """
+    try:
+        parents = _git(repo_root, "show", "-s", "--format=%P", commit).split()
+    except WorktreeError:
+        return False
+    return len(parents) > 1
+
+
 def _select_override_source(
     repo_root: Path,
     default_branch: str,
@@ -7643,6 +7659,12 @@ def _select_override_source(
         except WorktreeError:
             # Unknown in this repo: cannot be a merge target — ignore it rather
             # than park the whole chain on a stale/foreign commit reference.
+            continue
+        if _is_merge_commit(repo_root, resolved):
+            # `git cherry` deliberately does not compute patch IDs for merge
+            # commits.  A historic "merge main into kanban/<root>" stamped as
+            # completion metadata would otherwise remain external forever once
+            # a later rebase removes it from the chain branch.
             continue
         if branch_present and _branch_is_ancestor(
             repo_root, resolved, default_branch
