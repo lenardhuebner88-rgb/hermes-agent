@@ -98,3 +98,69 @@ def test_dashboard_includes_operator_go_safety_copy():
     assert "requires operator Go" in text
     assert "no provider routing change" in text
     assert "no runtime mutation" in text
+
+
+# ---------------------------------------------------------------------------
+# Parser units
+# ---------------------------------------------------------------------------
+
+def test_parse_rubric_keeps_only_ten_column_data_rows(tmp_path, monkeypatch):
+    """Exactly-10-column data rows parse; a 10-column SEPARATOR row and a
+    9-column row must never surface as skills (the dashboard would render
+    a '---' skill or a truncated one)."""
+    module = load_module()
+    rubric = tmp_path / "rubric.md"
+    data = "| " + " | ".join(["good"] * 10) + " |"
+    sep = "| " + " | ".join(["---"] * 10) + " |"
+    short = "| " + " | ".join(["bad"] * 9) + " |"
+    rubric.write_text("\n".join([sep, data, short]) + "\n", encoding="utf-8")
+    monkeypatch.setattr(module, "RUBRIC", rubric)
+
+    rows = module.parse_rubric()
+
+    assert [row["skill"] for row in rows] == ["good"]
+
+
+def test_parse_results_reads_a_nonempty_tsv(tmp_path, monkeypatch):
+    """The empty-file guard must not swallow a real results file — an
+    empty dashboard on a results night is the silent-failure mode."""
+    module = load_module()
+    results = tmp_path / "results.tsv"
+    results.write_text("skill\tsafety\nalpha\t2\n", encoding="utf-8")
+    monkeypatch.setattr(module, "RESULTS", results)
+
+    assert module.parse_results() == [{"skill": "alpha", "safety": "2"}]
+
+
+def test_extract_inventory_routes_bullets_after_heading_to_the_skill(
+    tmp_path, monkeypatch
+):
+    """Bullets AFTER a skill heading are that skill's details, not global
+    summary lines — misrouting them inflates the summary and starves the
+    per-skill cards."""
+    module = load_module()
+    inv = tmp_path / "inv.md"
+    inv.write_text(
+        "- Total skills: 3\n\n### 1. my-skill\n- Status: active\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "INVENTORY", inv)
+
+    summary, inventory = module.extract_inventory()
+
+    assert summary == {"Total skills": "3"}
+    assert inventory["my-skill"]["status"] == "active"
+
+
+def test_area_from_path_recognises_firecrawl_hyphen_paths():
+    module = load_module()
+    assert module.area_from_path("skills/firecrawl-search/SKILL.md") == "firecrawl"
+
+
+def test_weakness_keys_treats_score_three_as_healthy():
+    """3 is the floor of 'fine' — every score of 3 must yield NO weakness
+    keys; only scores below 3 flag the section."""
+    module = load_module()
+    healthy = {k: "3" for k in ("safety", "output", "activation", "workflow", "eval", "maintain")}
+    assert module.weakness_keys(healthy) == []
+    assert module.weakness_keys(dict(healthy, safety="2")) == ["safety_gates"]
