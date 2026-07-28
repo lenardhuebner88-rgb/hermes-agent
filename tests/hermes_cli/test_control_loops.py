@@ -68,7 +68,12 @@ def hermetic_model_catalog(monkeypatch):
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     packs = tmp_path / "packs"
-    repo = tmp_path / "kein-repo"  # existiert nicht → commits_ahead == 0
+    # Das Repo-VERZEICHNIS existiert (Normalfall: der Start-Endpoint lehnt seit
+    # 2026-07-28 ein Pack mit totem repo-Pfad vorab mit 409 ab), es ist aber
+    # kein Git-Repo → commits_ahead bleibt 0. Der Fall "Pfad fehlt ganz" hat
+    # einen eigenen Test.
+    repo = tmp_path / "kein-git-repo"
+    repo.mkdir()
     write_pack(packs, "nacht", "sweep", repo)  # keine land_*-Felder → Loader-Defaults
     write_pack(
         packs, "fliessband", "pipeline", repo,
@@ -136,7 +141,8 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["timer_schedule"] == "23:37"
     assert nacht["timer_next_run"] is None
     assert nacht["autoland"] is False
-    assert nacht["repo"] == str((tmp / "kein-repo").resolve())
+    assert nacht["repo"] == str((tmp / "kein-git-repo").resolve())
+    assert nacht["repo_exists"] is True
     assert nacht["base_branch"] == "main"
     assert nacht["land_remote"] == "piet-fork"
     assert nacht["land_push"] is True
@@ -435,6 +441,34 @@ def test_start_rejects_bad_override_keys_and_values(api):
     resp = client.post("/api/loops/nacht/start", json={"overrides": {"FOCUS": "a\nBOOM=1"}})
     assert resp.status_code == 400
     assert not any(c[0] == "start" for c in calls), "bei 400 darf kein Unit-Start passieren"
+
+
+def test_summary_flags_a_pack_whose_repo_is_gone(api, tmp_path):
+    """Ein Pack mit totem repo-Pfad sah bis 28.07. im Dashboard normal aus.
+
+    Belegt an xai-hard-gate/loops-date-audit, die beide auf einen geloeschten
+    Worktree zeigten: die Karte war unauffaellig, der Start starb erst in der
+    Unit. Gleiche Semantik wie der Runner-Check (`pack.repo.is_dir()`).
+    """
+    client, _calls, tmp = api
+    write_pack(tmp / "packs", "verwaist", "sweep", tmp_path / "weg-damit")
+    packs = {p["name"]: p for p in client.get("/api/loops").json()["packs"]}
+    assert packs["verwaist"]["repo_exists"] is False
+    # Gegenprobe: das intakte Pack aus derselben Antwort bleibt unmarkiert,
+    # sonst wuerde der Test jedes Pack als kaputt melden.
+    assert packs["nacht"]["repo_exists"] is True
+
+
+def test_start_refuses_a_pack_whose_repo_is_gone(api, tmp_path):
+    """Statt einen Loop zu starten, der in der Unit stirbt und als kryptischer
+    502 zurueckkommt, sagt der Endpoint vorher WAS fehlt."""
+    client, calls, tmp = api
+    write_pack(tmp / "packs", "verwaist", "sweep", tmp_path / "weg-damit")
+    resp = client.post("/api/loops/verwaist/start", json={"overrides": {}})
+    assert resp.status_code == 409
+    assert "weg-damit" in resp.json()["detail"]
+    # Kein systemctl start fuer dieses Pack — der Loop darf gar nicht erst laufen.
+    assert not any(a[0] == "start" and "verwaist" in " ".join(a) for a in calls)
 
 
 def test_start_conflicts_while_running(api):

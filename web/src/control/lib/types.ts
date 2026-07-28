@@ -1362,6 +1362,8 @@ export interface LoopPackSummary {
   source?: "repo" | "custom";
   /** Gebundener Projektpfad aus dem Pack-Manifest; kein frei editierbares Ziel. */
   repo: string;
+  /** Existiert `repo` noch? false = Start scheitert, das Pack ist verwaist. */
+  repo_exists: boolean;
   base_branch: string;
   /** Ziel-Remote der Landung (z.B. "piet-fork"); nur relevant, wenn land_push true ist. */
   land_remote: string;

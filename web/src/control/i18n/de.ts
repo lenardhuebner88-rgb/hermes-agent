@@ -1255,6 +1255,11 @@ export const de = {
     empty: "Keine Packs gefunden",
     emptyHint: "Der Loop-Bereich ist ohne Pack noch nicht startbereit.",
     packCount: (n: number) => `${n} ${n === 1 ? "Pack" : "Packs"}`,
+    // Verwaistes Pack: der repo-Pfad im Manifest existiert nicht mehr. Bis
+    // 28.07. sah so ein Pack normal aus und starb erst in der Unit.
+    repoMissing: "Repo fehlt",
+    repoMissingHint: (repo: string) =>
+      `Der gebundene Pfad existiert nicht mehr: ${repo} — Start würde scheitern. Pack neu binden oder stilllegen.`,
     typePipeline: "Pipeline",
     typeSweep: "Sweep",
     stabilityExperimental: "Experimentell",

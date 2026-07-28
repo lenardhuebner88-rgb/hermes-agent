@@ -77,6 +77,7 @@ const runningPipeline: LoopPack = {
   // beide Fixture-Packs sind reale kuratierte Manifeste unter loops/packs/.
   source: "repo",
   repo: "/home/piet/.hermes/hermes-agent",
+  repo_exists: true,
   base_branch: "main",
   // land_remote/land_push/land_gates: builder-reviewer/pack.yaml setzt keins
   // davon → Loader-Defaults (piet-fork/true/null), real geerntet (2026-07-16).
@@ -122,6 +123,7 @@ const idleSweepWithCommits: LoopPack = {
   type: "sweep",
   source: "repo",
   repo: "/home/piet/.hermes/hermes-agent",
+  repo_exists: true,
   base_branch: "main",
   // doc-sweep/pack.yaml setzt ebenfalls keins der drei Felder → dieselben Defaults.
   land_remote: "piet-fork",
@@ -410,6 +412,40 @@ describe("LoopsGrid", () => {
 // height/width < 24 CSS px). Fix = feste size-12/min-h-12-Klassen statt
 // box-content+padding (Chromium ignoriert Padding-Hitbox-Tricks bei nativen
 // Checkboxen — an dieser Stelle live verifiziert, nicht nur angenommen).
+// Verwaistes Pack (2026-07-28): zwei Packs zeigten auf einen geloeschten
+// Worktree (`.../codex-loops-health-track-audit-20260712/...`), sahen im Tab
+// voellig normal aus und waeren erst beim Start gestorben — der Runner prueft
+// `pack.repo.is_dir()` und wirft "Pack-Repo existiert nicht", was als
+// kryptischer 502 "Loop-Unit sofort gescheitert" im UI ankam. Der Tab sagt es
+// jetzt vorher UND sperrt den Start, statt in die Sackgasse laufen zu lassen.
+describe("LoopsGrid — verwaistes Pack (totes repo)", () => {
+  const orphan = { ...runningPipeline, name: "orphan-pack", running: false, repo_exists: false };
+
+  it("markiert ein Pack mit fehlendem Repo sichtbar", () => {
+    const html = renderGrid([orphan]);
+    expect(html).toContain(t.repoMissing);
+  });
+
+  it("laesst ein intaktes Pack unmarkiert (Gegenprobe — sonst markiert der Test alles)", () => {
+    const html = renderGrid([{ ...runningPipeline, running: false }]);
+    expect(html).not.toContain(t.repoMissing);
+  });
+
+  it("sperrt den Start-Knopf und nennt den Grund", () => {
+    const { container } = renderInteractiveGrid([orphan]);
+    const start = within(container).getByText(t.actions.start).closest("button");
+    expect(start).not.toBeNull();
+    expect(start!.disabled).toBe(true);
+    expect(start!.title).toContain(orphan.repo);
+  });
+
+  it("laesst den Start-Knopf bei intaktem Repo bedienbar (Gegenprobe)", () => {
+    const { container } = renderInteractiveGrid([{ ...runningPipeline, running: false }]);
+    const start = within(container).getByText(t.actions.start).closest("button");
+    expect(start!.disabled).toBe(false);
+  });
+});
+
 describe("LoopsGrid — Touch-Target-Boden (W3-5)", () => {
   it("gibt der Nachttimer-Checkbox eine size-12-Klickfläche (vorher h-5 w-5 = 18.8px, unter dem WCAG-2.5.8-Boden)", () => {
     // Gegen ein schema-validiertes Pack (echte Manifest-Form), nicht nur das

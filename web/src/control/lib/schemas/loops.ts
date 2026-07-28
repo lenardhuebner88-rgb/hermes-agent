@@ -53,6 +53,11 @@ export const LoopPackSummarySchema = z.object({
   // "repo" = kuratiertes Manifest, "custom" = per Werkstatt dupliziert (control_loops.py:220).
   source: z.enum(["repo", "custom"]).optional(),
   repo: z.string().catch(""),
+  // Existiert der repo-Pfad noch? Ein Pack mit totem Repo sah im Tab normal aus
+  // und starb erst beim Start (control_loops.py, gleiche Semantik wie der
+  // Runner-Check). `catch(true)` ist die sichere Vorgabe: ein altes Backend ohne
+  // das Feld darf keine Pack-Karte fälschlich als kaputt markieren.
+  repo_exists: z.boolean().catch(true),
   base_branch: z.string().catch("main"),
   land_remote: z.string().catch("piet-fork"),
   land_push: z.boolean().catch(true),

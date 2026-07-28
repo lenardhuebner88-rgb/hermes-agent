@@ -719,6 +719,13 @@ def _pack_summary(
         "type": pack.type,
         "source": source,
         "repo": str(pack.repo),
+        # Ein Pack, dessen repo-Pfad nicht mehr existiert, sah im Dashboard
+        # normal aus und starb erst beim Start (runner.py: "Pack-Repo
+        # existiert nicht") — belegt am 28.07. an xai-hard-gate und
+        # loops-date-audit, die beide auf einen geloeschten Worktree zeigten.
+        # Gleiche Semantik wie der Runner-Check, damit UI und Start nicht
+        # auseinanderlaufen.
+        "repo_exists": pack.repo.is_dir(),
         "base_branch": pack.base_branch,
         "land_remote": pack.land_remote,
         "land_push": pack.land_push,
@@ -850,6 +857,17 @@ def register_loops_routes(app: FastAPI) -> None:
         state = _state_root() / loaded.name
         if _is_running(state):
             raise HTTPException(status_code=409, detail="Loop läuft bereits")
+        # Fehlt das Repo, stirbt der Runner erst in der Unit und der Fehler
+        # kommt als kryptischer 502 ("Loop-Unit sofort gescheitert") zurueck.
+        # Hier sagen wir vorher, WAS fehlt.
+        if not loaded.repo.is_dir():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Pack-Repo existiert nicht: {loaded.repo} — Pack im "
+                    "Manifest neu binden oder stilllegen."
+                ),
+            )
         param_keys = {p.upper() for p in loaded.params}
         lines = []
         for key, val in body.overrides.items():

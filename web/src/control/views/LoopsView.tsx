@@ -1318,12 +1318,15 @@ interface LoopCardProps {
 function LoopCardAction({
   children,
   disabled,
+  title,
   onClick,
   tone = "neutral",
   filled = false,
 }: {
   children: ReactNode;
   disabled?: boolean;
+  /** Grund der Sperre — ein disabled Button ohne Begruendung ist eine Sackgasse. */
+  title?: string;
   onClick: () => void;
   tone?: "neutral" | "bronze" | "alert";
   filled?: boolean;
@@ -1333,6 +1336,7 @@ function LoopCardAction({
     <button
       type="button"
       disabled={disabled}
+      title={title}
       onClick={onClick}
       className={cn(
         "inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border px-3 text-xs font-semibold disabled:opacity-50",
@@ -1675,6 +1679,11 @@ function LoopCard({
         <SourceBadge source={pack.source} />
         <NightPill tone={isStable ? "ok" : "warn"}>{isStable ? t.stabilityStable : t.stabilityExperimental}</NightPill>
         <TypeBadge type={pack.type} />
+        {pack.repo_exists ? null : (
+          <span title={t.repoMissingHint(pack.repo)}>
+            <NightPill tone="warn" icon={AlertTriangle}>{t.repoMissing}</NightPill>
+          </span>
+        )}
       </div>
 
       <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-soft)" }}>{statusLabel}</p>
@@ -1728,7 +1737,8 @@ function LoopCard({
           ) : (
             <>
               <LoopCardAction
-                disabled={busy}
+                disabled={busy || !pack.repo_exists}
+                title={pack.repo_exists ? undefined : t.repoMissingHint(pack.repo)}
                 onClick={() => onOpenStart(pack.name)}
                 tone="bronze"
                 filled
