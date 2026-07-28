@@ -1,4 +1,6 @@
+import asyncio
 import subprocess
+import threading
 
 import pytest
 import anyio
@@ -287,6 +289,75 @@ def test_upload_mockup_creates_html_entry_and_serves_asset(client, monkeypatch):
     # and the rendered PNG sibling is served too
     png_name = entry["asset"].split("/")[-1]
     assert client.get(f"/api/design-board/cards/{cid}/assets/{png_name}").status_code == 200
+
+
+def test_upload_mockup_runs_renderer_off_event_loop_thread(client, monkeypatch):
+    call_thread = None
+
+    def _record_thread(*args, **kwargs):
+        nonlocal call_thread
+        call_thread = threading.current_thread()
+        return "e_rendered"
+
+    monkeypatch.setattr(view.design_board_cli, "add_mockup", _record_thread)
+    cid = client.post(
+        "/api/design-board/cards",
+        json={"kind": "mockup", "title": "Thread probe"},
+    ).json()["id"]
+    event_loop_thread = threading.current_thread()
+
+    async def _upload():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as async_client:
+            return await async_client.post(
+                f"/api/design-board/cards/{cid}/mockups",
+                files={"file": ("probe.html", b"<h1>probe</h1>", "text/html")},
+            )
+
+    response = asyncio.run(_upload())
+
+    assert response.status_code == 200
+    assert response.json() == {"id": "e_rendered"}
+    assert call_thread is not None
+    assert call_thread is not event_loop_thread
+
+
+def test_serve_asset_reads_file_off_event_loop_thread(client, monkeypatch):
+    class ThreadRecordingAsset:
+        name = "probe.png"
+        read_thread = None
+
+        def is_file(self):
+            return True
+
+        def read_bytes(self):
+            self.read_thread = threading.current_thread()
+            return b"PNGDATA"
+
+    asset = ThreadRecordingAsset()
+    monkeypatch.setattr(store, "resolve_asset_path", lambda card_id, name: asset)
+    event_loop_thread = threading.current_thread()
+
+    async def _serve():
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as async_client:
+            return await async_client.get(
+                "/api/design-board/cards/c_probe/assets/probe.png"
+            )
+
+    response = asyncio.run(_serve())
+
+    assert response.status_code == 200
+    assert response.content == b"PNGDATA"
+    assert response.headers["content-type"].startswith("image/png")
+    assert asset.read_thread is not None
+    assert asset.read_thread is not event_loop_thread
 
 
 def test_upload_mockup_forces_html_extension(client, monkeypatch):

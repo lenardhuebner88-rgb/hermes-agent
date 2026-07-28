@@ -1,6 +1,7 @@
 """FastAPI routes for the /control Design Board."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import os
@@ -181,7 +182,9 @@ def register_design_board_routes(app: FastAPI) -> None:
             with open(html_path, "wb") as fh:
                 fh.write(bytes(buf))
             try:
-                eid = design_board_cli.add_mockup(card_id, html_path, note=note)
+                eid = await asyncio.to_thread(
+                    design_board_cli.add_mockup, card_id, html_path, note=note
+                )
             except FileNotFoundError as exc:
                 logger.warning("design-board mockup renderer missing: %s", exc)
                 raise HTTPException(502, {
@@ -210,4 +213,5 @@ def register_design_board_routes(app: FastAPI) -> None:
         if not path.is_file():
             raise HTTPException(404, "asset not found")
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        return Response(content=path.read_bytes(), media_type=ctype)
+        data = await asyncio.to_thread(path.read_bytes)
+        return Response(content=data, media_type=ctype)
