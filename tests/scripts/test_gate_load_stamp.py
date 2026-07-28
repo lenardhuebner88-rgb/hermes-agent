@@ -4,6 +4,7 @@ Pure observability: the stamp must never change the exit code of run-affected.sh
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -19,6 +20,34 @@ SCRIPTS = REPO_ROOT / "scripts"
 STAMP_SCRIPT = SCRIPTS / "gate_load_stamp.py"
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py", "gate_load_stamp.py")
 _MAPPING_MODULE = REPO_ROOT / "hermes_cli" / "affected_test_mapping.py"
+
+
+def _mapping_module_closure() -> list[Path]:
+    """Every hermes_cli module the mapping entrypoint needs, resolved from imports.
+
+    The throwaway repo below used to copy affected_test_mapping.py alone. That
+    silently rots: on 2026-07-28 the mapper gained symbol_test_narrowing and
+    affected_test_budget, and these tests went red with ModuleNotFoundError in
+    the merged tree although each branch was green on its own. Walking the real
+    import graph keeps the fixture correct when the next module arrives.
+    """
+    pending = [_MAPPING_MODULE]
+    seen: dict[str, Path] = {_MAPPING_MODULE.stem: _MAPPING_MODULE}
+    while pending:
+        tree = ast.parse(pending.pop().read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.startswith("hermes_cli."):
+                continue
+            name = node.module.split(".", 1)[1]
+            if name in seen:
+                continue
+            candidate = REPO_ROOT / "hermes_cli" / f"{name}.py"
+            if candidate.is_file():
+                seen[name] = candidate
+                pending.append(candidate)
+    return sorted(seen.values())
 
 # Real-shaped fragment from test_durations.json (repo-relative + absolute junk).
 _REAL_DURATION_FRAGMENT = {
@@ -100,7 +129,8 @@ def _make_run_affected_repo(
 
     (repo / "hermes_cli").mkdir()
     (repo / "hermes_cli" / "__init__.py").write_text("")
-    shutil.copy2(_MAPPING_MODULE, repo / "hermes_cli" / "affected_test_mapping.py")
+    for module_path in _mapping_module_closure():
+        shutil.copy2(module_path, repo / "hermes_cli" / module_path.name)
     (repo / "config").mkdir()
     (repo / "config" / "affected-test-exceptions.json").write_text(
         '{"schema_version": 1, "exceptions": []}\n'
