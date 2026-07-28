@@ -1,6 +1,6 @@
 # repo-housekeeper — Hygiene-Sweep mit minimalem Fix-Mandat (melden > löschen).
 # Blaupause: Berman "House Keeper/Repo Cleanup"; destruktives FS bleibt Operator-Sache.
-name: repo-housekeeper
+name: _retired-repo-housekeeper
 type: sweep
 description: Pro Runde EINEN Hygiene-Fund melden und nur additiv-trivial fixen
 stability: experimental

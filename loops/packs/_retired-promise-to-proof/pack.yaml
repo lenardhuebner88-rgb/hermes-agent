@@ -1,6 +1,6 @@
 # promise-to-proof — Sweep gegen unbelegte Verhaltens-Behauptungen in Doku/Docstrings/
 # Kommentaren. Blaupause: Berman "Promise-to-Proof".
-name: promise-to-proof
+name: _retired-promise-to-proof
 type: sweep
 description: Pro Runde EINE unbelegte, testbare Verhaltens-Behauptung mit einem Beweis-Test absichern oder widerlegen
 stability: experimental

@@ -2,7 +2,7 @@
 # Kimi K2.7 (Coding-Abo, $0/Token) auditiert ein Backend-Subsystem und fixt einen
 # Fund pro Runde. Ersetzt perspektivisch ~/.hermes/kimi-loop/ (nach erstem
 # begleitetem Lauf dort deprecaten).
-name: kimi-audit
+name: _retired-kimi-audit
 type: sweep
 description: Kimi auditiert ein Subsystem und fixt einen Fund pro Runde (Per-Funktions-Scope)
 stability: experimental
