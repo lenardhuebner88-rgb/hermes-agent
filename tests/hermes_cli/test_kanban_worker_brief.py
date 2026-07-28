@@ -174,6 +174,36 @@ def test_operator_context_is_bounded_operator_profile(kanban_home):
     assert rendered.manifest["phase"] == "execute"
 
 
+def test_worker_brief_frontloads_stale_evidence_freshness(kanban_home, monkeypatch, tmp_path):
+    stamped_sha = "0123456789abcdef"
+    current_sha = "fedcba9876543210"
+    monkeypatch.setattr(kb, "_git_head_sha_for_workspace", lambda _path: current_sha)
+    monkeypatch.setattr(kb, "_git_commit_distance", lambda _older, _newer, _path: 3)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="stale evidence",
+            body="Reproduce the recorded failure before changing code.",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            scope_contract={"evidence_freshness": {
+                "commit": stamped_sha,
+                "recorded_at": "2026-07-28T01:00:00Z",
+                "test_files": ["tests/unit/test_evidence.py"],
+            }},
+        )
+        rendered = kb.render_worker_brief_for_task(conn, task_id)
+
+    assert "## Evidence freshness: reproduce first" in rendered.payload
+    assert stamped_sha in rendered.payload
+    assert current_sha in rendered.payload
+    assert "3 commit(s)" in rendered.payload
+    assert rendered.payload.index("Evidence freshness") < rendered.payload.index(
+        "Reproduce the recorded failure"
+    )
+
+
 def test_lane_descriptions_use_active_runtime_provider_and_model(monkeypatch):
     monkeypatch.setattr(
         kb,

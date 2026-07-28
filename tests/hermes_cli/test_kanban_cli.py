@@ -99,6 +99,29 @@ def test_run_slash_create_and_list(kanban_home):
     assert "alice" in out
 
 
+def test_run_slash_create_persists_optional_evidence_freshness_stamp(kanban_home):
+    out = kc.run_slash(
+        "create 'reproduce red gate' --assignee alice "
+        "--evidence-commit 0123456789abcdef "
+        "--evidence-recorded-at 2026-07-28T01:00:00Z "
+        "--evidence-test-file tests/unit/test_red_gate.py "
+        "--evidence-test-file tests/unit/test_other.py --json"
+    )
+    task_id = json.loads(out)["id"]
+
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+
+    assert task.scope_contract["evidence_freshness"] == {
+        "commit": "0123456789abcdef",
+        "recorded_at": "2026-07-28T01:00:00Z",
+        "test_files": [
+            "tests/unit/test_red_gate.py",
+            "tests/unit/test_other.py",
+        ],
+    }
+
+
 def test_run_slash_complete_freigabe_closes_live_fixture_hold(kanban_home):
     fixture = _review_efficiency_fixture("complete_freigabe")
     with kb.connect() as conn:
