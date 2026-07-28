@@ -564,7 +564,11 @@ describe("LK-3 Ketten-Kontext in der Detailansicht", () => {
           chain_context: CHAIN_CONTEXT,
         } as never}
         latestRun={{
-          profile: "premium",
+          // MUSS sich von task.assignee ("premium") unterscheiden: die
+          // Laufprofil-Zeile zeigt dieses Feld, die Task-Lane-Zeile den
+          // assignee. Sind beide gleich, findet das getByText("premium")
+          // weiter unten zwei Knoten und wirft "Found multiple elements".
+          profile: "coder-frontend",
           status: "running",
           runtime_seconds: 90,
           cost_usd: 0.42,
