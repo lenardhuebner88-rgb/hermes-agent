@@ -534,6 +534,11 @@ def test_conflict_fixer_commit_near_runtime_limit_gets_bounded_extension(
             for event in kb.list_events(conn, fixer_id)
             if event.kind == kb.FIXER_RUNTIME_EXTENSION_GRANTED_EVENT
         )
+        # A granted extension must be effective on the next dispatcher sweep;
+        # the already-accounted-for commit does not need to be recommitted.
+        now += kb.CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS - 1
+        assert kb.enforce_max_runtime(conn) == []
+        task = kb.get_task(conn, fixer_id)
 
     assert task is not None and task.status == "running"
     assert extension.payload["reason"] == "fresh_heartbeat_and_new_commit"

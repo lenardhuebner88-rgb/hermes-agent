@@ -22507,6 +22507,30 @@ def _fixer_runtime_extension_payload(
     }
 
 
+def _fixer_runtime_effective_limit(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> int:
+    """Return this run's persisted fixer deadline without extending it again."""
+    run_id = row["current_run_id"]
+    base_limit = int(row["max_runtime_seconds"])
+    if run_id is None:
+        return base_limit
+    extension_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = ?",
+            (row["id"], int(run_id), FIXER_RUNTIME_EXTENSION_GRANTED_EVENT),
+        ).fetchone()[0]
+    )
+    if not extension_count:
+        return base_limit
+    return min(
+        CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP,
+        base_limit + extension_count * CONFLICT_FIXER_RUNTIME_EXTENSION_SECONDS,
+    )
+
+
 def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
@@ -22574,6 +22598,9 @@ def enforce_max_runtime(
                         run_id=int(row["current_run_id"]),
                     )
                     continue
+
+        if elapsed < _fixer_runtime_effective_limit(conn, row):
+            continue
 
         pid = int(row["worker_pid"])
         tid = row["id"]
