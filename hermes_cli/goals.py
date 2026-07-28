@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from hermes_cli import goal_judge_rendering as _goal_judge_rendering
 
 logger = logging.getLogger(__name__)
 
@@ -56,26 +57,15 @@ DEFAULT_JUDGE_TIMEOUT = 30.0
 # we've live-tested; override via auxiliary.goal_judge.max_tokens for
 # specifically constrained setups.
 DEFAULT_JUDGE_MAX_TOKENS = 4096
-# The goal text contains the Kanban card title and body. Typical PlanSpec
-# cards exceed the historical 2,000-character cap before their acceptance
-# criteria, so leave room for the complete card while retaining a hard limit.
-DEFAULT_GOAL_JUDGE_GOAL_CHARS = 8_000
+# Kept as an alias because tests/hermes_cli/test_goals.py asserts it against
+# hermes_cli/config.py. The other rendering constants live only in
+# goal_judge_rendering — an unused alias in an upstream-owned file costs merge
+# conflicts on every sync and buys nothing.
+DEFAULT_GOAL_JUDGE_GOAL_CHARS = (
+    _goal_judge_rendering.DEFAULT_GOAL_JUDGE_GOAL_CHARS
+)
 # Cap how much of the last response + recent messages we send to the judge.
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
-_GOAL_MIDDLE_OMITTED_MARKER = "\n\n[... omitted middle content ...]\n\n"
-_GOAL_TRUNCATION_SUFFIX = "… [truncated]"
-_ACCEPTANCE_CRITERIA_HEADING_RE = re.compile(
-    r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]*"
-    r"(?:Akzeptanzkriterien|Acceptance Criteria)[ \t]*:?[ \t]*#*[ \t]*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-_MARKDOWN_HEADING_RE = re.compile(
-    r"^[ \t]{0,3}(?P<hashes>#{1,6})[ \t]+", re.MULTILINE
-)
-_ACCEPTANCE_CRITERIA_LINE_RE = re.compile(
-    r"^[ \t]*(?:[-*+][ \t]+)?AC(?:[ \t]*\d+[ \t]*[:.)-]|[ \t]*[:-][ \t]*).*$",
-    re.IGNORECASE | re.MULTILINE,
-)
 # After this many consecutive judge *parse* failures (empty output / non-JSON),
 # the loop auto-pauses and points the user at the goal_judge config. API /
 # transport errors do NOT count toward this — those are transient. This guards
@@ -645,15 +635,6 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "… [truncated]"
 
 
-def _truncate_goal_for_budget(text: str, limit: int) -> str:
-    """Truncate goal text while keeping the rendered text within ``limit``."""
-    if len(text) <= limit:
-        return text
-    if limit <= len(_GOAL_TRUNCATION_SUFFIX):
-        return text[:limit]
-    return text[: limit - len(_GOAL_TRUNCATION_SUFFIX)] + _GOAL_TRUNCATION_SUFFIX
-
-
 def _pid_alive(pid: int) -> bool:
     """Return True if a process with ``pid`` is currently alive.
 
@@ -750,69 +731,12 @@ def _goal_judge_max_tokens() -> int:
 
 def _goal_judge_goal_chars() -> int:
     """Resolve auxiliary.goal_judge.goal_chars with a safe bounded default."""
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config()
-        value = (
-            (cfg.get("auxiliary") or {})
-            .get("goal_judge", {})
-            .get("goal_chars", DEFAULT_GOAL_JUDGE_GOAL_CHARS)
-        )
-        value = int(value)
-        if value > 0:
-            return value
-    except Exception:
-        pass
-    return DEFAULT_GOAL_JUDGE_GOAL_CHARS
-
-
-def _acceptance_criteria_block(goal: str) -> tuple[int, str] | None:
-    """Return a recognized AC block and its source offset, if present."""
-    heading = _ACCEPTANCE_CRITERIA_HEADING_RE.search(goal)
-    if heading:
-        heading_level = len(heading.group("hashes"))
-        end = len(goal)
-        for candidate in _MARKDOWN_HEADING_RE.finditer(goal, heading.end()):
-            if len(candidate.group("hashes")) <= heading_level:
-                end = candidate.start()
-                break
-        return heading.start(), goal[heading.start() : end].rstrip()
-
-    lines = list(_ACCEPTANCE_CRITERIA_LINE_RE.finditer(goal))
-    if lines:
-        return lines[0].start(), "\n".join(match.group(0) for match in lines)
-    return None
+    return _goal_judge_rendering.resolve_goal_chars()
 
 
 def _render_goal_for_judge(goal: str) -> str:
     """Bound goal text without dropping a card's acceptance criteria."""
-    limit = _goal_judge_goal_chars()
-    if len(goal) <= limit:
-        return goal
-
-    criteria = _acceptance_criteria_block(goal)
-    if criteria is None:
-        # Preserve the free-form /goal behavior when no explicit criteria exist.
-        return _truncate_goal_for_budget(goal, limit)
-
-    criteria_start, criteria_block = criteria
-    available = limit - len(_GOAL_MIDDLE_OMITTED_MARKER)
-    if available <= 1:
-        return _truncate_goal_for_budget(goal, limit)
-
-    # Reserve roughly half the available characters for the criteria, unless
-    # either edge fits in less. This preserves both the goal's opening context
-    # and explicit completion criteria while making the omitted middle clear.
-    criteria_budget = min(len(criteria_block), available // 2)
-    head_budget = available - criteria_budget
-    if len(criteria_block) <= available // 2:
-        head_budget = available - len(criteria_block)
-        criteria_budget = len(criteria_block)
-
-    head = _truncate_goal_for_budget(goal[:criteria_start].rstrip(), head_budget)
-    criteria_text = _truncate_goal_for_budget(criteria_block, criteria_budget)
-    return f"{head}{_GOAL_MIDDLE_OMITTED_MARKER}{criteria_text}"
+    return _goal_judge_rendering.render_goal_for_judge(goal)
 
 
 def _parse_judge_response(raw: str) -> Tuple[str, str, bool, Optional[Dict[str, Any]]]:
@@ -1029,7 +953,7 @@ def judge_goal(
             )
             contract_block = f"{contract_block}\n{extra}"
         prompt = JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE.format(
-            goal=_truncate(goal, 2000),
+            goal=_render_goal_for_judge(goal),
             contract_block=_truncate(contract_block, 2500),
             response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
             background_block=background_block,
@@ -1040,7 +964,7 @@ def judge_goal(
             f"- {i}. {text}" for i, text in enumerate(clean_subgoals, start=1)
         )
         prompt = JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE.format(
-            goal=_truncate(goal, 2000),
+            goal=_render_goal_for_judge(goal),
             subgoals_block=_truncate(subgoals_block, 2000),
             response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
             background_block=background_block,
@@ -1146,15 +1070,13 @@ def check_goal_mode_completion(
         return None
 
     task_id = task.id
-    task_title = task.title
-    task_body = task.body
     if not goal_judge_available():
         return None
     verdict = "done"
     reason = ""
     try:
         judge_result = judge_goal(
-            goal=f"{task_title}\n\n{task_body or ''}".strip(),
+            goal=_goal_judge_rendering.render_task_goal(task),
             last_response=(handoff_text or "").strip(),
         )
         # judge_goal's return arity grew from 3 to 4 fields (wait_directive)
