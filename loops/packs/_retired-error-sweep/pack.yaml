@@ -1,6 +1,6 @@
 # error-sweep — Sweep über die Service-Logs: einen wiederkehrenden Fehler fixen.
 # Blaupause: Berman "Production Error Sweep".
-name: error-sweep
+name: _retired-error-sweep
 type: sweep
 description: Pro Runde EINEN wiederkehrenden Log-Fehler root-causen und fixen
 stability: stable

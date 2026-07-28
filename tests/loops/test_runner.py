@@ -12,6 +12,8 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -213,18 +215,31 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
     pack_dir = packs_dir / name
     pack_dir.mkdir(parents=True)
     phases = {}
-    for pname in PHASES_BY_TYPE[ptype]:
-        prompt = pack_dir / f"{pname}.md"
-        lines = [f"PHASE={pname}", "STATE={{STATE_DIR}}", "WT={{WT}}", "PARAMS={{PARAMS}}"]
-        if pname == "plan":
-            lines.append("HAS_WEB={{HAS_WEB}}")
-        if pname in ("build", "verify"):
-            lines.append("PLAN={{PLAN_PATH}}")
-        if pname == "verify":
-            lines.append("RANGE={{RANGE}}")
-            lines.append("BUILD_PROVENANCE={{BUILD_PROVENANCE}}")
-        prompt.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        phases[pname] = {"engine": "fake", "model": "fake-1", "timeout": 60, "prompt": f"{pname}.md"}
+    if ptype == "deterministic":
+        phases["run"] = {"command": "true", "timeout": 60}
+    else:
+        for pname in PHASES_BY_TYPE[ptype]:
+            prompt = pack_dir / f"{pname}.md"
+            lines = [
+                f"PHASE={pname}",
+                "STATE={{STATE_DIR}}",
+                "WT={{WT}}",
+                "PARAMS={{PARAMS}}",
+            ]
+            if pname == "plan":
+                lines.append("HAS_WEB={{HAS_WEB}}")
+            if pname in ("build", "verify"):
+                lines.append("PLAN={{PLAN_PATH}}")
+            if pname == "verify":
+                lines.append("RANGE={{RANGE}}")
+                lines.append("BUILD_PROVENANCE={{BUILD_PROVENANCE}}")
+            prompt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            phases[pname] = {
+                "engine": "fake",
+                "model": "fake-1",
+                "timeout": 60,
+                "prompt": f"{pname}.md",
+            }
     manifest = {
         "name": name, "type": ptype, "repo": str(repo), "phases": phases,
         "stop": {"max_rounds": 6, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
@@ -530,6 +545,141 @@ def test_shipped_blank_template_loads():
     pack = load_pack(PACKS_DIR, "_blank")
     assert pack.type == "sweep"
     assert set(pack.phases) == {"round"}
+
+
+def test_shipped_landing_pack_has_deterministic_command_contract():
+    pack = load_pack(PACKS_DIR, "landing")
+    assert pack.type == "deterministic"
+    assert set(pack.phases) == {"run"}
+    run = pack.phases["run"]
+    assert run.command[:3] == ("python3", "-m", "hermes_cli.landing_loop")
+    assert run.timeout == 7200
+
+
+def test_shipped_landing_pack_remains_readable_by_existing_loop_catalog(
+    tmp_path, monkeypatch
+):
+    from hermes_cli import control_loops
+
+    monkeypatch.setattr(control_loops, "PACKS_DIR_OVERRIDE", PACKS_DIR)
+    monkeypatch.setattr(control_loops, "STATE_ROOT_OVERRIDE", tmp_path / "state")
+    timer = {
+        "landing": {
+            "timer_enabled": False,
+            "timer_schedule": None,
+            "timer_next_run": None,
+        }
+    }
+
+    summary = control_loops._pack_summary("landing", timer_snapshot=timer)
+
+    assert "error" not in summary or "loop/landing" in summary["error"]
+    assert summary["type"] == "deterministic"
+    assert summary["phases"]["run"] == {
+        "engine": "deterministic",
+        "model": "command",
+        "timeout": 7200,
+        "effort": None,
+        "effort_support": [],
+    }
+
+
+def test_deterministic_runner_records_stdout_and_propagates_exit_code(
+    tmp_path, fake_engine
+):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs",
+        "deterministic-test",
+        "deterministic",
+        repo,
+        phases={
+            "run": {
+                "command": "/bin/sh -c 'printf deterministic-output; exit 7'",
+                "timeout": 10,
+            }
+        },
+    )
+    state_root = tmp_path / "state"
+
+    rc = main(
+        [
+            "--pack",
+            "deterministic-test",
+            "--packs-dir",
+            str(tmp_path / "packs"),
+            "--cmd",
+            "run",
+            "--state-root",
+            str(state_root),
+        ]
+    )
+
+    assert rc == 7
+    ledger = (state_root / "deterministic-test" / "LEDGER.md").read_text(
+        encoding="utf-8"
+    )
+    assert "RUN stdout: deterministic-output" in ledger
+    assert "RUN exit=7" in ledger
+
+
+def test_existing_pipeline_pack_still_runs_the_unchanged_path(tmp_path, monkeypatch):
+    pack = load_pack(PACKS_DIR, "hermes-hardening")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls = []
+    monkeypatch.setattr(runner, "_validate_autoland_runtime", lambda: calls.append("validate"))
+    monkeypatch.setattr(runner, "consume_overrides", lambda: calls.append("overrides"))
+    monkeypatch.setattr(runner, "ensure_dirs", lambda: calls.append("dirs"))
+    monkeypatch.setattr(
+        runner, "ensure_wt", lambda fresh=False: calls.append(("worktree", fresh))
+    )
+    monkeypatch.setattr(runner, "_run_pipeline", lambda: calls.append("pipeline"))
+    monkeypatch.setattr(runner, "report", lambda: calls.append("report"))
+
+    assert runner.cmd_run() == 0
+    assert calls == [
+        "validate",
+        "overrides",
+        "dirs",
+        ("worktree", False),
+        "pipeline",
+        "report",
+    ]
+
+
+def test_blocking_repo_lock_waits_for_holder_instead_of_aborting(
+    tmp_path, fake_engine
+):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "lock-owner", "sweep", repo)
+    write_pack(tmp_path / "packs", "lock-wait", "deterministic", repo)
+    first = LoopRunner(
+        load_pack(tmp_path / "packs", "lock-owner"),
+        state_root=tmp_path / "state",
+    )
+    second = LoopRunner(
+        load_pack(tmp_path / "packs", "lock-wait"),
+        state_root=tmp_path / "state",
+    )
+    entered = threading.Event()
+    errors = []
+
+    def waiter():
+        try:
+            with second.locked(blocking=True, timeout=2):
+                entered.set()
+        except Exception as exc:  # pragma: no cover - asserted through errors
+            errors.append(exc)
+
+    with first.locked():
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        time.sleep(0.15)
+        assert not entered.is_set()
+    thread.join(timeout=2)
+
+    assert entered.is_set()
+    assert errors == []
 
 
 def test_missing_pack_lists_available():
@@ -1241,6 +1391,47 @@ def test_land_gates_runs_collection_with_the_selected_interpreter(
     collection = [c for c in seen if "pytest" in c]
     assert collection, "kein pytest-Aufruf im Collection-Sweep"
     assert collection[0][0] == str(chosen)
+
+
+def test_land_gates_frontend_steps_are_unchanged_by_the_extraction(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Die Herausloesung aus LoopRunner darf den Landungsbeweis nicht aendern.
+
+    Diese drei Schritte gelten fuer JEDES Nacht-Pack. Wer sie auf
+    scripts/gate-frontend.sh umstellt, aendert still mit, wann eine naechtliche
+    Landung rot wird (Preflight Exit 3, Build) -- das ist eine eigene
+    Entscheidung und gehoert nicht in einen Extraktions-Slice.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "web-gates", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "web-gates")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    monkeypatch.setattr(
+        runner_module,
+        "select_test_python",
+        lambda _repo: (Path("/test/python"), ""),
+    )
+    seen: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        seen.append(list(command))
+        if command[0] == "git":
+            return subprocess.CompletedProcess(command, 0, "web/src/change.ts\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is True
+    assert "frontend" in report
+    assert ["npm", "run", "lint:control"] in seen
+    assert ["npx", "tsc", "-b", "--noEmit"] in seen
+    assert ["npx", "vitest", "run"] in seen
+    assert not any(
+        str(repo / "scripts" / "gate-frontend.sh") in command for command in seen
+    )
 
 
 def test_land_gates_aborts_with_repair_hint_when_no_test_python(
@@ -2212,13 +2403,22 @@ def test_resolve_packs_dir_rejects_collision(tmp_path, fake_engine):
 # ── Pack-Lint: JEDES ausgelieferte Pack muss laden und den Konventionen genügen ─
 
 def test_all_shipped_packs_load_and_validate():
-    names = sorted(p.name for p in PACKS_DIR.iterdir() if p.is_dir())
+    names = sorted(
+        p.name
+        for p in PACKS_DIR.iterdir()
+        if p.is_dir()
+    )
     assert "builder-reviewer" in names and "_blank" in names
     for name in names:
         pack = load_pack(PACKS_DIR, name)
         assert pack.autoland is (name == "dashboard-experience")
         assert pack.stability in ("stable", "experimental"), f"{name}: stability ungültig"
         assert pack.description, f"{name}: description fehlt"
+        if pack.type == "deterministic":
+            phase = pack.phases["run"]
+            assert phase.command, f"{name}/run: command fehlt"
+            assert phase.timeout > 0, f"{name}/run: timeout ungültig"
+            continue
         for pname, phase in pack.phases.items():
             text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
             assert "{{STATE_DIR}}" in text, f"{name}/{pname}: STATE_DIR-Platzhalter fehlt"
@@ -2594,6 +2794,61 @@ def test_autoland_deny_prefix_blocks_allowed_parent_scope(
     ledger = runner.ledger_path.read_text(encoding="utf-8")
     assert "Deny-Präfix" in ledger
     assert "hermes_cli/auth.py" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
+
+
+def test_autoland_deny_prefix_blocks_root_package_lockfile(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch, name="hermes-feature-forge"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "package-lock.json", "denied-root-lockfile")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Deny-Präfix" in ledger
+    assert "package-lock.json" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
+
+
+def test_operator_autoland_deny_prefix_blocks_root_package_lockfile(
+    tmp_path, fake_engine
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    name = "operator-root-lockfile"
+    write_pack(packs_dir, name, "pipeline", repo)
+    state_root = tmp_path / "state"
+    pack_state = state_root / name
+    pack_state.mkdir(parents=True)
+    (pack_state / "overrides.env").write_text(
+        f"AUTOLAND=1\nAUTOLAND_ACK={name}\n", encoding="utf-8"
+    )
+    runner = LoopRunner(load_pack(packs_dir, name), state_root=state_root)
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "package-lock.json", "denied-root-lockfile")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Deny-Präfix" in ledger
+    assert "package-lock.json" in ledger
     assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
 
 

@@ -1,0 +1,19 @@
+# LL-1 only: deterministic inventory, cleanup, merge, gates, and receipt.
+# No schedule is activated by this file. The intended 06:00 timer remains an
+# explicit operator step; the loop system's 23:37 default must not be used.
+name: landing
+type: deterministic
+description: Inventarisiert alle loop-Branches, bereinigt sichere Leerstaende, landet gruen mergebare Arbeit und parkt den Rest mit Grund
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  run:
+    command: >-
+      python3 -m hermes_cli.landing_loop
+      --repo /home/piet/.hermes/hermes-agent
+      --loops-root /home/piet/.hermes/loops
+      --ledger-dir /home/piet/vault/03-Agents/Hermes/receipts
+      --discord-channel 1486480074491559966
+    timeout: 7200
+notify: {}
+autoland: false
