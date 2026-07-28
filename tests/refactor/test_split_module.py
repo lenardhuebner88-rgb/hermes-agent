@@ -289,3 +289,57 @@ def test_extract_refuses_split_binding_across_modules(tmp_path):
         )
     assert src.exists()
     assert not (tmp_path / "binding_ext").exists()
+
+
+def test_docstring_span_is_none_for_empty_module():
+    """An empty module has no body at all — the docstring probe must
+    answer None, not crash on body[0]."""
+    import ast
+
+    assert split_module._docstring_span(ast.parse("")) is None
+    assert split_module._docstring_span(ast.parse('"""Doc."""\nx = 1\n')) == (1, 1)
+
+
+def test_locally_bound_anywhere_counts_plain_import_names():
+    """`import os` binds 'os' (asname absent) — missing it would let the
+    backward-ref rewrite clobber a locally-imported name."""
+    import ast
+
+    tree = ast.parse(textwrap.dedent("""
+        def f():
+            import os
+            return os.name
+    """))
+    bound = split_module.locally_bound_anywhere(tree.body[0])
+    assert "os" in bound
+
+
+def test_section_owner_counts_banner_on_symbol_line_as_that_section(
+    tmp_path, monkeypatch
+):
+    """A banner AT the symbol's own line (<=, not <) owns the symbol —
+    off-by-one here silently re-homes the symbol to __head__."""
+    src = tmp_path / "edge.py"
+    src.write_text("def f():\n    return 1\n")
+    monkeypatch.setattr(
+        split_module.layering, "banner_sections", lambda lines: [(1, "Same")]
+    )
+    report = split_module.analyze(str(src))
+    assert report["modules"] == ["Same"]
+
+
+def test_analyze_oversized_boundary_is_strictly_above_4000(tmp_path):
+    """A section of EXACTLY 4000 lines is not oversized — the threshold is
+    strict; flagging the boundary would cry wolf on the limit case."""
+    src = tmp_path / "big.py"
+    src.write_text("def f():\n" + "    pass\n" * 3999)
+    report = split_module.analyze(str(src))
+    assert report["module_lines"]["__head__"] == 4000
+    assert report["oversized"] == []
+
+
+def test_import_name_for_path_returns_dotted_relative(tmp_path, monkeypatch):
+    """Inside the cwd the import name is the dotted relative path, never
+    the bare basename — basename imports would collide across packages."""
+    monkeypatch.chdir(tmp_path)
+    assert split_module._import_name_for_path("pkg/mod.py") == "pkg.mod"
