@@ -15,7 +15,8 @@
     "test": "NODE_ENV=test vitest run",
     "typecheck": "tsc -b --noEmit",
     "check:tokens": "bash ../scripts/check-design-tokens.sh",
-    "check": "npm run check:tokens && npm run lint:control && npm run typecheck && npm run test"
+    "check:contrast": "python3 ../scripts/check-contrast.py",
+    "check": "npm run check:tokens && npm run check:contrast && npm run lint:control && npm run typecheck && npm run test"
   },
   "dependencies": {
     "@fontsource-variable/archivo": "^5.2.8",

@@ -429,6 +429,13 @@ step "design-tokens ratchet"
 # scripts/design-token-baseline.txt nicht überschreiten (DESIGN.md Regel 8).
 "$script_dir/check-design-tokens.sh"
 
+step "contrast ratchet (WCAG AA)"
+# Zweite Design-Regel mit Zähnen: Text- und Daten-Tokens müssen gegen JEDE
+# Fläche AA (4,5:1) halten. Anders als der Hex-Ratchet gibt es hier KEINE
+# Baseline — der Boden ist absolut. Gebaut, weil --color-ink-3 seit Bestehen
+# auf allen vier Flächen durchfiel und trotzdem unter ganzen Sätzen stand.
+python3 "$script_dir/check-contrast.py"
+
 step "npm run lint:control"
 npm run lint:control
 

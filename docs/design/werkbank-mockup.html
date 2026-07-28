@@ -59,7 +59,10 @@
   --line-soft: #1e2420;
   --ink: #ebe7de;
   --ink-2: #a9a59b;
-  --ink-3: #757166;
+  /* 2026-07-28: #757166 -> #928d81. Der alte Wert fiel auf allen vier Flaechen
+     durch AA (3,92 / 3,71 / 3,46 / 3,08:1). Kein neuer Look, ein Lesbarkeitsfix;
+     Beweis-Tabelle an der Token-Definition in web/src/control/theme.css. */
+  --ink-3: #928d81;
   --bronze: #c9884a;
   --bronze-hi: #dda05f;
   --color-lane-prem: #b18bc4;

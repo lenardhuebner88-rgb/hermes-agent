@@ -36,16 +36,71 @@ one calibrated bronze accent replaces the old cyan glow.
 | `--color-status-warn` | `#d9b23a` | Status trio: needs attention / degraded (signal yellow). |
 | `--color-status-alert` | `#e0604f` | Status trio: failed / tot / alert (warm red). |
 | `--color-ink` | `#ebe7de` | Primary text (warm off-white). |
-| `--color-ink-2` | `#a9a59b` | Secondary text — AA-contrast floor on `surface-1`/`surface-2`. Minimum for body text. |
-| `--color-ink-3` | `#757166` | Tertiary text / eyebrows only (not body copy). |
+| `--color-ink-2` | `#a9a59b` | Secondary text — AA on every surface (≥6.10:1). Minimum for body text. |
+| `--color-ink-3` | `#928d81` | Tertiary text / eyebrows only (not body copy). AA on every surface (≥4.53:1). |
 | `--radius-panel` | `10px` | Panel-level rounding (columns, top-level containers). |
 | `--radius-card` | `7px` | Card-level rounding (rows, buttons, chips-adjacent controls). |
 | `--font-display` | `'Archivo Variable', 'Arial Narrow', sans-serif` | Mastheads, KPI headlines, eyebrows — semi-expanded caps, the machined-plate voice. |
 | `--font-data` | `'IBM Plex Mono', ui-monospace, 'Courier New', monospace` | DATA only: ids, costs, timestamps, code, terminal. |
+| `--shadow-raised` | contact + ambient | Card lifted off its panel — the rank-2 element on a screen. |
+| `--shadow-floating` | contact + ambient | Drawer, popover, menu — sits above the content. |
+| `--shadow-overlay` | contact + ambient | Sheet, dialog — claims the screen. |
+
+### Two tiers: primitives and roles
+
+`theme.css` has two blocks and the distinction is the point:
+
+- **`@theme` — primitives.** Values. `--color-bronze` is a *value* name: it cannot
+  become green without lying.
+- **`@theme inline` — roles.** Jobs. `--color-action`, `--color-action-hi`,
+  `--color-focus`, `--color-selected`, `--color-stamped`. A role name survives a
+  value change because only the reference moves.
+
+**New code takes the role, not the value** — `bg-action` over `bg-bronze`. Existing
+call sites stay valid; there is no forced migration.
+
+The alias set is deliberately small. `surface-*`, `ink*`, `status-*` and `data-*`
+are **already roles** and get no second name — two names for one thing is worse
+than one imprecise name. Aliases exist only where today's name is a *value*, or
+where a role had no name at all (focus, selected).
+
+`scripts/check-contrast.py` resolves the aliases, so the role tier is covered by
+the gate rather than bypassing it; an alias pointing at nothing is a hard failure.
+
+### Elevation
+
+Three steps, no more. Before 2026-07-28 the sheet had **zero** elevation tokens
+while the code carried 12 hand-written `shadow-2xl` / `shadow-black/40` /
+arbitrary-inset values — the need was proven, just unsystematic. Without depth,
+rank on a flat palette can only be expressed by abusing color, which is exactly
+why every panel in the old build reads as equally important.
+
+**Do not invent a fourth step.** Whoever needs more depth usually needs hierarchy,
+not more shadow.
 
 All fonts are self-hosted via `@fontsource`/`@fontsource-variable` — **never**
 a remote `fonts.googleapis.com` (or any other remote) request. Zero-layout-
 shift, works offline, no third-party request from the operator's browser.
+
+## You may break a rule — say which and why
+
+Every rule below may be broken. The one condition: **name the rule and justify
+the break in one sentence** in your slice note or PR description. A broken rule
+with a reason is a contribution; a silently circumvented one is a defect.
+
+This is not a loophole, it is the point. On 2026-07-28 four design agents worked
+the same screen from four opposing theses, independently — and **all four had to
+break a rule of this document to produce any visual hierarchy at all**. Each one
+named it. Without the permission the honest outcome would have been four
+well-behaved, flat screens.
+
+Two things this does **not** cover, because a machine adjudicates them and no
+argument overrules a measurement:
+
+- the contrast floor (`scripts/check-contrast.py`, absolute, no baseline), and
+- the raw-hex ratchet (`scripts/check-design-tokens.sh`).
+
+Everything else is doctrine, and doctrine is arguable.
 
 ## Accent doctrine
 
@@ -73,9 +128,18 @@ shift, works offline, no third-party request from the operator's browser.
    `surface-1` = panel body, `surface-2` = card / inset content, `surface-3`
    = hover/selected state only (never a resting background).
 6. **Text hierarchy**: `ink` for primary content, `ink-2` as the floor for
-   body text (AA on `surface-1`/`surface-2`), `ink-3` only for
-   eyebrows/tertiary labels. Never use `white/45` or similar opacity hacks —
-   they fall below AA.
+   body text, `ink-3` only for eyebrows/tertiary labels. Never use `white/45`
+   or similar opacity hacks — they fall below AA.
+   - **All three text tokens clear AA (4.5:1) on all four surfaces** — proven
+     by the table at the token definition in `theme.css` and enforced
+     mechanically by `scripts/check-contrast.py` in the frontend gate. A new
+     or changed text/surface token that drops a pair below 4.5:1 fails the
+     gate; there is no baseline to ratchet against, the floor is absolute.
+   - **`ink-3` never carries a full sentence.** It is for eyebrows, unit
+     suffixes, and micro-labels. Panel footnotes and explanatory lines are
+     body copy and belong in `ink-2` — passing the contrast check is not a
+     licence to demote running text. (`ink-3` was `#757166` until 2026-07-28
+     and failed AA on every surface while doing exactly that.)
 7. **Chips communicate status only, never navigation.** A chip is not a
    button; clicking should not be the only way to reach a view.
 8. **Radius**: panels/top-level containers use `radius-panel` (10px);
@@ -90,9 +154,17 @@ shift, works offline, no third-party request from the operator's browser.
    those by rule, not by grep: new CSS still draws from the token sheet
    above (`var(--color-*)` or `color-mix()` on top of it), it just isn't
    mechanically ratcheted the way `.tsx` literals are.
-10. **Extend the mockup first.** If a new pattern isn't covered here, add it
-    to `docs/design/werkbank-mockup.html`, get it approved, then port the
-    tokens/rules here — don't invent ad hoc colors in components.
+10. **New patterns are proposed as rendered variants, not as mockup edits.**
+    (Replaces the former "extend the mockup first" rule, 2026-07-28.) If a
+    pattern isn't covered here, build **2–3 rendered variants** — free of the
+    token constraint and free of the gate — put them on the Design Board, and
+    let the operator choose. *Then* the winner is ported into tokens and rules
+    here. The old rule required approval for a pattern before it could be
+    shown, which made "propose nothing" the cheapest path; four independent
+    design agents confirmed the effect. Process and brief format: skill
+    `design-slice` (`~/.hermes/skills/design-slice/SKILL.md`). What stays
+    forbidden is the ad-hoc middle ground: inventing colors inside components
+    without either a token or an approved variant behind them.
 
 ### Premium-Lane-Farbe (W4-8)
 `--color-lane-prem` (warmes Aubergine) markiert ausschließlich LANE-IDENTITÄT (Avatare,

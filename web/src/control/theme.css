@@ -81,14 +81,43 @@
   --color-data-6: #96938a;
   --color-data-7: #c4955f;
 
-  /* text hierarchy */
+  /* text hierarchy
+   * WCAG-AA-Beweis (nachgerechnet 2026-07-28, sRGB-Relativluminanz):
+   * | token | value   | surface-0 | surface-1 | surface-2 | surface-3 |
+   * | ink   | #ebe7de |   16,44:1 |   15,52:1 |   13,66:1 |   11,05:1 |
+   * | ink-2 | #a9a59b |    7,77:1 |    7,34:1 |    6,86:1 |    6,10:1 |
+   * | ink-3 | #928d81 |    5,77:1 |    5,46:1 |    5,10:1 |    4,53:1 |
+   * Alle drei Stufen erreichen AA (4,5:1) auf JEDER Fläche — mechanisch
+   * erzwungen von scripts/check-contrast.py im Frontend-Gate.
+   * ink-3 war bis 2026-07-28 #757166 und fiel damit auf allen vier Flächen
+   * durch (3,92 / 3,71 / 3,46 / 3,08:1), stand im Bestand aber unter ganzen
+   * Sätzen (Panel-Fußzeilen). Der neue Wert ist der hellste, der AA überall
+   * hält, OHNE die dritte Textstufe optisch in ink-2 aufgehen zu lassen —
+   * höhere Werte bestehen den Check, zerstören aber die Hierarchie. */
   --color-ink: #ebe7de; /* primary */
-  --color-ink-2: #a9a59b; /* secondary — AA on surface-1/2, body text minimum */
-  --color-ink-3: #757166; /* tertiary / eyebrows */
+  --color-ink-2: #a9a59b; /* secondary — AA on all surfaces, body text minimum */
+  --color-ink-3: #928d81; /* tertiary / eyebrows — AA on all surfaces */
 
   /* radii */
   --radius-panel: 10px;
   --radius-card: 7px;
+
+  /* elevation — die Tiefen-Achse (2026-07-28).
+   * Bis dahin hatte das Sheet NULL Erhebungs-Tokens, waehrend im Code 12 hand-
+   * geschriebene `shadow-2xl` / `shadow-black/40` / arbitrary-inset standen: der
+   * Bedarf war belegt, nur unsystematisch. Ohne Tiefe ist Rangfolge auf einer
+   * flachen Palette nur ueber Farbmissbrauch darstellbar — genau der Grund,
+   * warum im Bestand jedes Panel gleich wichtig aussieht.
+   * Drei Stufen, nach oben gerichtet, Kontakt- plus Umgebungsschatten:
+   *   raised   — Karte hebt sich vom Panel ab (Rang 2 auf einem Schirm)
+   *   floating — Schublade, Popover, Menue (liegt ueber dem Inhalt)
+   *   overlay  — Sheet, Dialog (nimmt den Schirm in Anspruch)
+   * Tailwind erzeugt daraus `shadow-raised` / `shadow-floating` / `shadow-overlay`.
+   * KEINE vierte Stufe erfinden — wer mehr braucht, braucht meist Rangfolge,
+   * nicht mehr Schatten. */
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.30), 0 2px 6px rgb(0 0 0 / 0.22);
+  --shadow-floating: 0 2px 4px rgb(0 0 0 / 0.34), 0 8px 20px rgb(0 0 0 / 0.30);
+  --shadow-overlay: 0 4px 8px rgb(0 0 0 / 0.40), 0 20px 48px rgb(0 0 0 / 0.42);
 
   /* type families */
   --font-display: 'Archivo Variable', 'Arial Narrow', sans-serif;
@@ -109,4 +138,39 @@
   --text-h1--line-height: 1.15;
   --text-hero: 2.67rem;
   --text-hero--line-height: 1.1;
+}
+
+/* ============================================================================
+ * ROLLEN — die semantische Ebene (2026-07-28)
+ * ============================================================================
+ * Der Block oben sind PRIMITIVE: Werte. Dieser Block sind ROLLEN: Aufgaben.
+ * Warum getrennt: Ein Wertname friert den Wert ein — `--color-bronze` kann nicht
+ * gruen werden, ohne zu luegen. Ein Rollenname ueberlebt den Wertwechsel, weil
+ * nur die Referenz wandert. Bis 2026-07-28 standen Rolle (`--color-live`), Wert
+ * (`--color-bronze`) und Identitaet (`--color-data-3`) gleichrangig; die Semantik
+ * trugen die Kommentare, nicht die Namen.
+ *
+ * Bewusst KLEIN gehalten: Aliase gibt es nur dort, wo der heutige Name ein WERT
+ * ist oder eine Rolle bisher gar keinen Namen hatte. Zwei Namen fuer dieselbe
+ * Sache sind schlimmer als ein unscharfer Name — deshalb bleiben `surface-*`,
+ * `ink*`, `status-*` und `data-*` unveraendert, sie sind bereits Rollen.
+ *
+ * `@theme inline` loest die Referenz beim Erzeugen der Utility auf (Tailwind v4).
+ *
+ * NEUER CODE nimmt die Rolle, nicht den Wert:
+ *   bg-action  statt  bg-bronze          text-action-hi  statt  text-bronze-hi
+ * Bestand bleibt gueltig, es gibt keinen Zwangs-Umbau.
+ * ========================================================================== */
+@theme inline {
+  /* Interaktion — das, was der Operator anfassen kann. Wert heute: Bronze. */
+  --color-action: var(--color-bronze);
+  --color-action-hi: var(--color-bronze-hi);
+  /* Fokusring. Heute wertgleich mit action, aber eine EIGENE Rolle: ein
+   * Tastatur-Fokus darf sich spaeter unterscheiden, ohne action anzufassen. */
+  --color-focus: var(--color-bronze);
+  /* Ausgewaehlte / gehoverte Zeilenfuellung. Flaechenrolle, nie Textfarbe. */
+  --color-selected: var(--color-surface-3);
+  /* Abgestempelt/erledigt-neutral (Laufkarte). Der Primitivname `stamp` sagt
+   * das Material, nicht die Aufgabe. Bewusst KEIN Status-Gruen. */
+  --color-stamped: var(--color-stamp);
 }

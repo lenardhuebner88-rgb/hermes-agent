@@ -5,7 +5,10 @@ import path from 'node:path';
 
 // Reads the real theme.css from disk (not a synthetic copy) so this test
 // fails if the tokens drift from the values ported from the operator-
-// approved mockup (docs/design/leitstand-mockup-terminals.html).
+// approved mockup (docs/design/werkbank-mockup.html — the v1 mockup
+// leitstand-mockup-terminals.html is historical only, see DESIGN.md).
+// Contrast is a separate, absolute contract: scripts/check-contrast.py
+// enforces WCAG AA for every text/data token against every surface.
 const themeCssPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'theme.css');
 const themeCss = readFileSync(themeCssPath, 'utf-8');
 
@@ -23,7 +26,11 @@ const expectedTokens: Record<string, string> = {
   '--color-status-alert': '#e0604f',
   '--color-ink': '#ebe7de',
   '--color-ink-2': '#a9a59b',
-  '--color-ink-3': '#757166',
+  // 2026-07-28 angehoben: der Vorgaengerwert fiel auf allen vier Flaechen durch
+  // WCAG AA (3,92 / 3,71 / 3,46 / 3,08:1) und stand trotzdem unter ganzen
+  // Saetzen. Reiner Lesbarkeitsfix, kein neuer Look — Herleitung und
+  // Beweis-Tabelle stehen an der Token-Definition in theme.css.
+  '--color-ink-3': '#928d81',
 };
 
 describe('Leitstand theme tokens (theme.css)', () => {
