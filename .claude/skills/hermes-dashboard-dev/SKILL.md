@@ -113,13 +113,18 @@ worktree's exclusive deps tree, and npm removes that symlink before reifying —
 with a real (non-isolated) directory and breaking the next gate run with "mixed
 local/dedicated node_modules layout" (the error names the fix: `rm -rf` the path, re-run the
 gate). `scripts/gate-frontend.sh` runs `npm ci` the safe way, via a manifest-only shadow root.
-Python gates in a worktree (no venv there — use the live venv, it is named `venv`, NOT `.venv`):
+Python gates in a worktree (no venv there — use the live checkout's). There are **two**
+venvs and they are not interchangeable: **pytest lives only in `.venv`** (`venv/bin/python
+-m pytest` → `ModuleNotFoundError`, re-measured 2026-07-28), ruff exists in both.
+`scripts/lib/select_test_python.sh` probes `.venv` first for exactly this reason — prefer
+`scripts/run_tests.sh`/`run-affected.sh` over a hand-rolled pytest call and you inherit
+the right one automatically.
 ```bash
 cd <worktree>
-PYTHONPATH=$(pwd) /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest <tests> -q
+PYTHONPATH=$(pwd) /home/piet/.hermes/hermes-agent/.venv/bin/python -m pytest <tests> -q
 # PYTHONPATH wins over the editable install → tests import the WORKTREE copy
 # (verify with: python -c 'import hermes_cli; print(hermes_cli.__file__)')
-/home/piet/.hermes/hermes-agent/venv/bin/ruff check <files>
+/home/piet/.hermes/hermes-agent/.venv/bin/ruff check <files>
 ```
 - **`npx` is a stub trap in worktrees**: `npx tsc` yields `ENOWORKSPACES` or a wrong global
   tsc that "typechecks" nothing. Never `npx tsc`/`npx vitest` here — use the `.bin` paths.
