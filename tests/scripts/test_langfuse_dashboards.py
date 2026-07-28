@@ -455,3 +455,50 @@ def test_trpc_receipt_is_built_from_app_readback(monkeypatch: pytest.MonkeyPatch
     assert receipt["path"] == "trpc"
     assert receipt["changes"] == 13
     assert receipt["understood_definition"]
+
+
+def test_input_dataclasses_are_frozen() -> None:
+    """The provisioning inputs are immutable contracts — a later mutation
+    would change what is provisioned without leaving a receipt trail."""
+    widget = dashboards.WidgetInput(
+        name="w", description="d", view="traces", dimensions=[], metrics=[],
+        filters=[], chart_type="bar", chart_config={"type": "bar"},
+    )
+    dashboard = dashboards.DashboardInput(
+        project_id="p", name="n", description="d", widgets=(widget,),
+    )
+    result = dashboards.SqlWriteResult(rows=1, changes=1)
+    sql_input = dashboards.SqlDashboardInput(
+        id="x", dashboard=dashboard, widget_ids=("a",)
+    )
+    for obj, attr in (
+        (widget, "name"),
+        (dashboard, "name"),
+        (result, "rows"),
+        (sql_input, "id"),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(obj, attr, "mutated")
+
+
+def test_load_golden_fixture_rejects_wrong_version_even_with_valid_source(
+    tmp_path,
+) -> None:
+    """A version mismatch must fail even when the source metadata is
+    perfectly valid — the pin protects against exports from unsupported
+    Langfuse releases, not only against malformed ones."""
+    fixture = {
+        "fixture_version": dashboards.FIXTURE_VERSION + 1,
+        "source": {
+            "langfuse_version": dashboards.EXPECTED_LANGFUSE_VERSION,
+            "revision": dashboards.EXPECTED_LANGFUSE_REVISION,
+        },
+        "definition": {},
+        "dimensions": [],
+        "metrics": [],
+        "chart_config": {},
+    }
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(dashboards.ProvisionError):
+        dashboards.load_golden_fixture(path)
