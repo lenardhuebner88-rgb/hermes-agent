@@ -649,10 +649,11 @@ export interface BoardTask {
   output_tokens?: number | null;
   cost_usd_equivalent?: number | null;
   cost_effective_usd?: number | null;
-  /** KF-5: Ketten-Kontext (nur Kettenmitglieder; additiv). identity_id ist die
-   * Root-Id der Kette; position/total aus deterministischer Topo-Sortierung.
-   * Die lesbare Kennung steht top-level in BoardResponse.chain_identities. */
-  chain?: { identity_id: string; position: number; total: number } | null;
+  /** BV-2/KF-5: Ketten-Kontext (nur Kettenmitglieder; additiv), wenn das
+   * Backend (KF-4) ihn je Task liefert. position/total aus deterministischer
+   * Topo-Sortierung; die lesbare Kennung steht top-level in
+   * BoardResponse.chain_identities. */
+  chain?: BoardChainContext | null;
 }
 
 /** True when the task runs in a dispatcher-provisioned isolated worktree
@@ -733,6 +734,17 @@ export interface DoneBoardPage {
   next_cursor: string | null;
 }
 
+/** BV-2/KF-5 (additiv): Backend-Kettenkontext je Board-Task aus dem
+ * Ketten-Lesevertrag (KF-4). identity_id ist die Root-ID der Kette, position
+ * die 1-basierte eigene Station, total die Stationszahl. Optional: Backend
+ * lässt den Key weg, wenn der Kettenkontext-Slice (KF-4) nicht integriert
+ * ist — das Frontend leitet den Bezug dann aus chain_summaries ab. */
+export interface BoardChainContext {
+  identity_id: string;
+  position: number;
+  total: number;
+}
+
 export interface BoardResponse {
   columns: BoardColumn[];
   summary?: {
@@ -752,8 +764,9 @@ export interface BoardResponse {
   latest_event_id: number;
   source_errors: BoardSourceError[];
   chain_summaries?: ChainSummary[];
-  /** KF-5: lesbare Ketten-Kennungen je Root-Id (PlanSpec-Slug oder Titel des
-   * ersten Glieds). Additiv; fehlt, wenn es keine Mehrglied-Ketten gibt. */
+  /** BV-2/KF-5 (additiv): lesbare Kennung je Ketten-Root (identity_id →
+   * Kennung: PlanSpec-Slug oder Titel des ersten Glieds). Fehlt das
+   * Backend-Feld, gilt die Kennung aus chain_summaries (LV-1). */
   chain_identities?: Record<string, string>;
   done_page?: DoneBoardPage;
   now: number;

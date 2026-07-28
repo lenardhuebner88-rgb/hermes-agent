@@ -8,9 +8,9 @@
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Link2 } from "lucide-react";
+import { Copy } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
+import { fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
 import { taskStatusLabel } from "../../lib/tones";
 import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
@@ -37,7 +37,7 @@ interface BoardTabProps {
   initialStatusFilter?: TaskStatus | null;
   /** Callback: öffnet den Karten-Detail-Drawer. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
-  /** KF-5: Klick auf den Ketten-Chip — fuehrt in die Ketten-Ansicht dieser Kette. */
+  /** BV-2/KF-5: Tipp auf den Ketten-Bezug öffnet die Laufkarte im Ketten-Reiter. */
   onOpenChain?: (rootId: string) => void;
   selectedNodeId?: string | null;
   detailControlsId?: string;
@@ -83,6 +83,60 @@ function copyTaskId(taskId: string): void {
   void navigator.clipboard.writeText(taskId).catch(() => undefined);
 }
 
+/** BV-2: Ketten-Bezug einer Karte (Stanzkanten-Motiv der Laufkarte, LK-1). */
+interface CardChainRef {
+  identityId: string;
+  /** Kennung der Kette (LV-1/KF-4); Fallback: Root-Präfix. */
+  label: string;
+  /** 1-basierte eigene Position; null, wenn aus den gelieferten Daten nicht ableitbar. */
+  position: number | null;
+  total: number;
+  /** Abgeschlossene Stationen (Segment-Füllung, wenn position fehlt). */
+  done: number;
+}
+
+/**
+ * BV-2: Ketten-Bezug je Karte. Primär der Backend-Kettenkontext (KF-4:
+ * task.chain + board.chain_identities); solange jener Slice nicht integriert
+ * ist, wird derselbe Bezug aus chain_summaries abgeleitet (root_id je Karte,
+ * LV-1-Kennung, Stationsliste in Positionsreihenfolge). Eine Kette besteht
+ * aus mindestens zwei Gliedern (KF-5-Semantik) — ohne Mehrglied-Kette gibt es
+ * keinen Ketten-Bezug.
+ */
+function chainRefForTask(t: BoardTask, board: PaginatedBoardResponse | BoardResponse | null): CardChainRef | null {
+  const identityId = t.chain?.identity_id ?? t.root_id ?? "";
+  if (!identityId) return null;
+  const summary = board?.chain_summaries?.find((s) => s.root_id === identityId) ?? null;
+  if (!t.chain && !summary) return null;
+  const total = t.chain?.total ?? summary?.stations_total ?? summary?.total ?? 0;
+  if (total < 2) return null;
+  let position: number | null = t.chain?.position ?? null;
+  if (position == null && summary?.stations) {
+    const idx = summary.stations.findIndex((st) => st.id === t.id);
+    if (idx >= 0) position = idx + 1;
+  }
+  const kennung = board?.chain_identities?.[identityId] ?? summary?.kennung ?? null;
+  return {
+    identityId,
+    label: kennung ?? `t_${identityId.replace(/^t_/, "").slice(0, 8)}`,
+    position,
+    total,
+    done: summary?.done ?? 0,
+  };
+}
+
+/** Segment-Zustand der Stanzkante: zurückgelegt = Stahl, eigenes Glied =
+ * Bronze (oder Stahl, wenn die Karte selbst fertig ist), offen = ausgestanzt. */
+function chainSegmentState(index: number, ref: CardChainRef, taskDone: boolean): "done" | "now" | "open" {
+  const pos = index + 1;
+  if (ref.position != null) {
+    if (pos < ref.position) return "done";
+    if (pos === ref.position) return taskDone ? "done" : "now";
+    return "open";
+  }
+  return pos <= ref.done ? "done" : "open";
+}
+
 /**
  * Lade-Skeleton (L3-Spec 3.4, Befund 6): 1 KPI-Skeleton-Zeile + 5 Row-
  * Skeletons (Avatar-Kreis + zwei Text-Bars per .hc-skeleton) statt Text-
@@ -125,9 +179,6 @@ export function BoardTab({
   detailControlsId,
 }: BoardTabProps) {
   const [q, setQ] = useState("");
-  // KF-5: lesbare Ketten-Kennungen je Root-Id (additiv; aeltere Server liefern
-  // den Key nicht). Fallback im Chip ist die Root-Id selbst.
-  const chainIdentities = board?.chain_identities;
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">(() =>
     initialStatusFilter && STATUS_ORDER.includes(initialStatusFilter) ? initialStatusFilter : "all",
   );
@@ -153,6 +204,24 @@ export function BoardTab({
     setStatusFilter(initialStatusFilter);
   }, [initialStatusFilter]);
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
+  // BV-2/AC-6: Die Gruppen-Köpfe kleben unter der Steuerleiste; deren Höhe
+  // ist je nach Umbruch dynamisch → per ResizeObserver als CSS-Variable
+  // nachführen (auf Mobile ist die Leiste static → Offset 0).
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const controlsRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const root = rootRef.current;
+    const controls = controlsRef.current;
+    if (!root || !controls || typeof ResizeObserver === "undefined") return;
+    const apply = () => {
+      const sticky = window.getComputedStyle(controls).position === "sticky";
+      root.style.setProperty("--fleet-boardtab-controls-h", sticky ? `${controls.offsetHeight}px` : "0px");
+    };
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(controls);
+    return () => observer.disconnect();
+  }, []);
   const [archiveTasks, setArchiveTasks] = useState<BoardTask[]>([]);
   const [archivePage, setArchivePage] = useState<BoardArchiveResponse | null>(null);
   const [archiveLoading, setArchiveLoading] = useState(false);
@@ -357,7 +426,7 @@ export function BoardTab({
   const metricDone = summary?.status_counts.done ?? donePage?.total_count ?? fallbackStatusCount("done");
 
   return (
-    <div className="fleet-boardtab">
+    <div className="fleet-boardtab" ref={rootRef}>
       <div className="fleet-boardtab-metrics" aria-label="Board-Kennzahlen">
         {/* data-tone nur bei Wert > 0 (L3-Spec 3.3): 0 bleibt neutral. */}
         <div data-tone={metricRunning > 0 ? "running" : undefined}><span>Laufend</span><strong>{metricRunning}</strong></div>
@@ -368,7 +437,7 @@ export function BoardTab({
         </div>
       </div>
 
-      <div className="fleet-boardtab-controls" aria-label="Board-Steuerung">
+      <div className="fleet-boardtab-controls" aria-label="Board-Steuerung" ref={controlsRef}>
         <input
           className="fleet-boardtab-suche"
           type="text"
@@ -507,16 +576,18 @@ export function BoardTab({
         grouped.map(({ status, tasks }) => (
           <section key={status} className="fleet-boardtab-group">
             <header className="fleet-boardtab-group-header">
+              <span className={`fleet-boardtab-group-mark fleet-status-${status}`} aria-hidden="true" />
               <span className={`fleet-boardtab-status fleet-status-${status}`}>
                 {taskStatusLabel[status] ?? status}
               </span>
               <span className="fleet-boardtab-count">{tasks.length}</span>
             </header>
+            <div className="fleet-boardtab-group-cards">
             {tasks.map((t) => {
-              // KF-5: Ketten-Kontext (nur Kettenmitglieder). Wenn vorhanden,
-              // ersetzt der Ketten-Chip den nackten → t_abcd12-Verweis.
-              const chain = t.chain ?? null;
-              const chainLabel = chain ? (chainIdentities?.[chain.identity_id] ?? chain.identity_id) : null;
+              // BV-2 ersetzt den KF-5-Chip: derselbe Kettenkontext (t.chain /
+              // chain_identities), aber als Stanzkanten-Bezug der Laufkarte.
+              const chainRef = chainRefForTask(t, board);
+              const taskDone = t.status === "done" || t.status === "archived";
               const metaTitle = [
                 t.id,
                 t.assignee,
@@ -524,71 +595,71 @@ export function BoardTab({
                 t.comment_count > 0 ? `${t.comment_count} Kommentare` : null,
                 t.link_counts.parents > 0 ? `${t.link_counts.parents} Vorgänger` : null,
                 t.link_counts.children > 0 ? `${t.link_counts.children} Nachfolger` : null,
-                !chain && t.root_id && t.root_id !== t.id && t.link_counts.children === 0 ? `→ ${(t.root_id ?? "").slice(0, 8)}` : null,
                 t.cost_effective_usd != null && t.cost_effective_usd > 0 ? fmtUsd(t.cost_effective_usd) : null,
                 t.progress && t.progress.total > 0 ? `${t.progress.done}/${t.progress.total}` : null,
               ].filter(Boolean).join(" · ");
-              const content = (
-                <>
-                <span
-                  className={`fleet-avatar ${t.assignee ? profileColorClass(t.assignee) : "fleet-avatar-default"}`}
-                  {...premiumLaneMarker(t.assignee)}
-                  aria-label={t.assignee ? `Assignee ${t.assignee}` : "Kein Assignee"}
-                >
-                  {t.assignee ? profileInitial(t.assignee) : "?"}
-                </span>
-                <span className="fleet-boardtab-row-main">
-                  <span className="fleet-boardtab-title">{t.title || t.id}</span>
-                  <span className="fleet-boardtab-meta" title={metaTitle}>
-                    <span className="fleet-boardtab-id" title={t.id}>{t.id}</span>
-                    {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}
-                    {t.priority !== 0 && <span className="fleet-boardtab-priority">Prio {t.priority}</span>}
-                    {t.comment_count > 0 && <span className="fleet-boardtab-comments">{t.comment_count} Kommentare</span>}
-                    {t.link_counts.parents > 0 && <span className="fleet-boardtab-parents">{t.link_counts.parents} Vorgänger</span>}
-                    {t.link_counts.children > 0 && (
-                      <span className="fleet-boardtab-chain" title="Teil einer Kette">{t.link_counts.children} Nachfolger</span>
-                    )}
-                    {!chain && t.root_id && t.root_id !== t.id && t.link_counts.children === 0 && (
-                      <span className="fleet-boardtab-inchain" title="Gehört zu einer Kette">→ {(t.root_id ?? "").slice(0, 8)}</span>
-                    )}
-                    {t.cost_effective_usd != null && t.cost_effective_usd > 0 && (
-                      <span className="fleet-boardtab-cost">{fmtUsd(t.cost_effective_usd)}</span>
-                    )}
-                    {t.progress && t.progress.total > 0 && (
-                      <span className="fleet-boardtab-prog" title="Fortschritt">{t.progress.done}/{t.progress.total}</span>
-                    )}
-                  </span>
-                </span>
-                </>
-              );
+              const selected = selectedNodeId === t.id;
+              const cardClass = `fleet-boardtab-card${selected ? " fleet-boardtab-card-selected" : ""}`;
+              const rowClass = `fleet-boardtab-row${readOnly ? " fleet-boardtab-row-readonly" : ""}`;
+              const krefLabel = chainRef
+                ? chainRef.position != null
+                  ? `Kette ${chainRef.label} · Position ${chainRef.position}/${chainRef.total} — Laufkarte öffnen`
+                  : `Kette ${chainRef.label} · ${chainRef.total} Stationen — Laufkarte öffnen`
+                : null;
               return (
-                <div key={t.id} className="fleet-boardtab-card">
+                <div key={t.id} className={cardClass}>
                   <button
-                    className={`fleet-boardtab-row${readOnly ? " fleet-boardtab-row-readonly" : ""}${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
+                    className={`${rowClass} fleet-boardtab-row-head`}
                     onClick={() => onOpenNodeDetail(t.id)}
-                    aria-expanded={selectedNodeId === t.id}
+                    aria-expanded={selected}
                     aria-controls={detailControlsId}
                     title={readOnly ? "Fremd-Board · nur lesen" : undefined}
                   >
-                    {content}
+                    <span className="fleet-boardtab-title">{t.title || t.id}</span>
                   </button>
-                  {chain && chainLabel ? (
+                  {chainRef ? (
                     <button
                       type="button"
-                      className="fleet-boardtab-chainchip"
-                      title={`Kette ${chainLabel} · Glied ${chain.position} von ${chain.total} — Kette öffnen`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenChain?.(chain.identity_id);
-                      }}
+                      className="fleet-boardtab-kref"
+                      onClick={() => onOpenChain?.(chainRef.identityId)}
+                      disabled={!onOpenChain}
+                      title={krefLabel ?? undefined}
+                      aria-label={krefLabel ?? undefined}
                     >
-                      <Link2 size={12} aria-hidden="true" />
-                      <span className="fleet-boardtab-chainchip-label">{chainLabel}</span>
-                      <span className="fleet-boardtab-chainchip-pos">
-                        {chain.position}/{chain.total}
+                      <span className="fleet-boardtab-kref-stanz" aria-hidden="true">
+                        {Array.from({ length: chainRef.total }, (_, i) => (
+                          <i key={i} className={`is-${chainSegmentState(i, chainRef, taskDone)}`} />
+                        ))}
+                      </span>
+                      <span className="fleet-boardtab-kref-label">
+                        {chainRef.label}
+                        {chainRef.position != null ? <b>{`·${chainRef.position}/${chainRef.total}`}</b> : null}
                       </span>
                     </button>
                   ) : null}
+                  <button
+                    className={`${rowClass} fleet-boardtab-row-meta`}
+                    onClick={() => onOpenNodeDetail(t.id)}
+                    aria-label={`Task-Details zu ${t.id} öffnen`}
+                  >
+                    <span className="fleet-boardtab-meta" title={metaTitle}>
+                      <span className="fleet-boardtab-id" title={t.id}>{t.id}</span>
+                      {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}
+                      {t.priority !== 0 && <span className="fleet-boardtab-priority">Prio {t.priority}</span>}
+                      {t.comment_count > 0 && <span className="fleet-boardtab-comments">{t.comment_count} Kommentare</span>}
+                      {t.link_counts.parents > 0 && <span className="fleet-boardtab-parents">{t.link_counts.parents} Vorgänger</span>}
+                      {t.link_counts.children > 0 && (
+                        <span className="fleet-boardtab-children">{t.link_counts.children} Nachfolger</span>
+                      )}
+                      {t.cost_effective_usd != null && t.cost_effective_usd > 0 && (
+                        <span className="fleet-boardtab-cost">{fmtUsd(t.cost_effective_usd)}</span>
+                      )}
+                      {t.progress && t.progress.total > 0 && (
+                        <span className="fleet-boardtab-prog" title="Fortschritt">{t.progress.done}/{t.progress.total}</span>
+                      )}
+                    </span>
+                  </button>
+                  {!chainRef ? <span className="fleet-boardtab-solo">keine Kette</span> : null}
                   <button
                     type="button"
                     className="fleet-boardtab-copy"
@@ -601,6 +672,7 @@ export function BoardTab({
                 </div>
               );
             })}
+            </div>
           </section>
         ))
       )}

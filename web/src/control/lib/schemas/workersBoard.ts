@@ -242,6 +242,13 @@ const BoardSourceErrorSchema = z.object({
   backup_path: z.string().nullable().catch(null),
   retry_count: z.coerce.number().catch(0),
 });
+/** BV-2/KF-5 (additiv): Backend-Kettenkontext je Board-Task (KF-4-Vertrag). */
+const FleetBoardChainContextSchema = z.object({
+  identity_id: z.string().catch(""),
+  position: z.coerce.number().int().min(1).catch(1),
+  total: z.coerce.number().int().min(1).catch(1),
+});
+
 export const BoardTaskSchema = z.object({
   id: z.coerce.string(),
   title: z.string().catch("Ohne Titel"),
@@ -313,6 +320,9 @@ export const BoardTaskSchema = z.object({
   output_tokens: z.coerce.number().nullable().catch(null),
   cost_usd_equivalent: z.coerce.number().nullable().catch(null),
   cost_effective_usd: z.coerce.number().nullable().catch(null),
+  // BV-2/KF-5 (additiv): Backend-Kettenkontext je Task (KF-4). Fehlt der Key,
+  // leitet die Karte den Ketten-Bezug aus chain_summaries ab.
+  chain: FleetBoardChainContextSchema.nullable().optional().catch(null),
 });
 
 // LV-2 (Ketten-Lesevertrag) ergänzt state/chain_identifier/stations auf der
@@ -416,9 +426,9 @@ export const BoardResponseSchema = z.object({
   latest_event_id: z.coerce.number().catch(0),
   source_errors: z.array(BoardSourceErrorSchema).catch([]),
   chain_summaries: z.array(ChainSummarySchema).catch([]).optional(),
-  // KF-5: lesbare Ketten-Kennungen je Root-Id (PlanSpec-Slug oder Titel des
-  // ersten Glieds). Additiv; das Backend lässt den Key weg, wenn es keine
-  // Mehrglied-Ketten gibt.
+  // BV-2/KF-5 (additiv): lesbare Kennung je Ketten-Root (identity_id →
+  // Kennung: PlanSpec-Slug oder Titel des ersten Glieds). Das Backend lässt
+  // den Key weg, wenn es keine Mehrglied-Ketten gibt.
   chain_identities: z.record(z.string(), z.string()).catch({}).optional(),
   done_page: DoneBoardPageSchema.optional(),
   now: epochSeconds,

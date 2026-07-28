@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { BoardArchiveResponse, BoardResponse, BoardTask } from "../../lib/types";
+import type { BoardArchiveResponse, BoardResponse, BoardTask, ChainSummary } from "../../lib/types";
 import { BoardSwitcher } from "../../components/fleet/BoardIdentity";
 import { BoardTab } from "./BoardTab";
 
@@ -42,6 +42,17 @@ function board(tasks: BoardTask[]): BoardResponse {
     latest_event_id: 1,
     source_errors: [],
     now: 1_783_800_300,
+  };
+}
+
+function chainSummary(overrides: Partial<ChainSummary> & { root_id: string }): ChainSummary {
+  return {
+    root_title: "Kette",
+    total: 5,
+    done: 1,
+    status_counts: {},
+    latest_completed_at: null,
+    ...overrides,
   };
 }
 
@@ -220,24 +231,28 @@ describe("BoardTab operator information", () => {
       />,
     );
 
-    const row = screen.getByText("Operator truth card").closest(".fleet-boardtab-row");
-    expect(row).not.toBeNull();
-    const rowQueries = within(row as HTMLElement);
-    expect(rowQueries.getByText("premium-reviewer")).toBeTruthy();
-    expect(rowQueries.getByText("Prio 7")).toBeTruthy();
-    expect(rowQueries.getByText("3 Kommentare")).toBeTruthy();
-    expect(rowQueries.getByText("2 Vorgänger")).toBeTruthy();
-    expect(rowQueries.getByText("4 Nachfolger")).toBeTruthy();
-    expect(rowQueries.getByText("1/4")).toBeTruthy();
+    const card = screen.getByText("Operator truth card").closest(".fleet-boardtab-card");
+    expect(card).not.toBeNull();
+    const cardQueries = within(card as HTMLElement);
+    expect(cardQueries.getByText("premium-reviewer")).toBeTruthy();
+    expect(cardQueries.getByText("Prio 7")).toBeTruthy();
+    expect(cardQueries.getByText("3 Kommentare")).toBeTruthy();
+    expect(cardQueries.getByText("2 Vorgänger")).toBeTruthy();
+    expect(cardQueries.getByText("4 Nachfolger")).toBeTruthy();
+    expect(cardQueries.getByText("1/4")).toBeTruthy();
 
-    const meta = row?.querySelector(".fleet-boardtab-meta");
+    const meta = card?.querySelector(".fleet-boardtab-meta");
     expect(meta?.getAttribute("title")).toBe(
       "t_truth01 · premium-reviewer · Prio 7 · 3 Kommentare · 2 Vorgänger · 4 Nachfolger · 1/4",
     );
 
     expect(screen.queryByLabelText("Weitere Informationen zu Operator truth card")).toBeNull();
-    fireEvent.click(row as HTMLElement);
+    const headRow = screen.getByText("Operator truth card").closest(".fleet-boardtab-row");
+    expect(headRow?.classList.contains("fleet-boardtab-row-readonly")).toBe(true);
+    fireEvent.click(headRow as HTMLElement);
     expect(onOpenNodeDetail).toHaveBeenCalledWith("t_truth01");
+    fireEvent.click(meta?.closest(".fleet-boardtab-row") as HTMLElement);
+    expect(onOpenNodeDetail).toHaveBeenCalledTimes(2);
   });
 
   it("does not invent zero-value metadata for absent card information", () => {
@@ -261,9 +276,9 @@ describe("BoardTab operator information", () => {
       />,
     );
 
-    const row = screen.getByText("Sparse card").closest(".fleet-boardtab-row");
-    expect(row).not.toBeNull();
-    const text = row?.textContent ?? "";
+    const card = screen.getByText("Sparse card").closest(".fleet-boardtab-card");
+    expect(card).not.toBeNull();
+    const text = card?.textContent ?? "";
     expect(text).not.toContain("Prio 0");
     expect(text).not.toContain("0 Kommentare");
     expect(text).not.toContain("0 Vorgänger");
@@ -294,65 +309,119 @@ describe("BoardTab operator information", () => {
   });
 });
 
-describe("KF-5: Ketten-Chip", () => {
-  function chainBoard(chainIdentities: Record<string, string> = { t_root001: "pl-spec-foo" }): BoardResponse {
-    return {
-      ...board([
-        task({
-          id: "t_root001",
-          title: "Wurzel",
-          status: "blocked",
-          link_counts: { parents: 0, children: 1 },
-          root_id: "t_root001",
-          chain: { identity_id: "t_root001", position: 1, total: 2 },
-        }),
-        task({
-          id: "t_leaf002",
-          title: "Blatt",
-          status: "blocked",
-          root_id: "t_root001",
-          link_counts: { parents: 1, children: 0 },
-          chain: { identity_id: "t_root001", position: 2, total: 2 },
-        }),
-        task({ id: "t_solo999", title: "Eigenständig", status: "blocked", root_id: "t_solo999", link_counts: { parents: 0, children: 0 } }),
-      ]),
-      chain_identities: chainIdentities,
-    };
-  }
-
-  it("zeigt Chip mit Kennung und Position auf jedem Kettenglied (AC-1)", () => {
-    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
-    const chips = screen.getAllByRole("button", { name: /pl-spec-foo/ });
-    expect(chips).toHaveLength(2);
-    expect(chips[0].textContent).toContain("1/2");
-    expect(chips[1].textContent).toContain("2/2");
+describe("BoardTab BV-2 Ketten-Bezug", () => {
+  const stations = [
+    { id: "t_ch0", kennung: null, title: "Station eins", state: "fertig", lane: "coder", runtime_seconds: null, cost_usd: null, started_at: null, completed_at: null, wait_reason: null },
+    { id: "t_ch1", kennung: null, title: "Station zwei", state: "laeuft", lane: "coder", runtime_seconds: null, cost_usd: null, started_at: null, completed_at: null, wait_reason: null },
+  ];
+  const summary = chainSummary({
+    root_id: "t_root1",
+    kennung: "Kettenweite",
+    total: 5,
+    stations_total: 5,
+    done: 1,
+    stations,
+  });
+  const chainBoard = (tasks: BoardTask[]): BoardResponse => ({
+    ...board(tasks),
+    chain_summaries: [summary],
   });
 
-  it("ersetzt den nackten → t_abcd12-Verweis auf Blatt-Karten (AC-2)", () => {
-    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
-    expect(screen.queryByText("→ t_root00")).toBeNull();
-  });
-
-  it("zeigt keinen Chip auf eigenständigen Karten", () => {
-    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
-    const soloCard = screen.getByText("Eigenständig").closest(".fleet-boardtab-card");
-    expect(soloCard?.querySelector(".fleet-boardtab-chainchip")).toBeNull();
-  });
-
-  it("Klick auf den Chip ruft onOpenChain mit der Root-Id, nicht den Detail-Drawer (AC-3)", () => {
+  it("zeigt Kennung und Position als Stanzkanten-Bezug aus chain_summaries (AC-1)", () => {
     const onOpenChain = vi.fn();
-    const onOpenNodeDetail = vi.fn();
-    render(<BoardTab board={chainBoard()} onOpenNodeDetail={onOpenNodeDetail} onOpenChain={onOpenChain} />);
-    fireEvent.click(screen.getAllByRole("button", { name: /pl-spec-foo/ })[1]);
-    expect(onOpenChain).toHaveBeenCalledWith("t_root001");
-    expect(onOpenNodeDetail).not.toHaveBeenCalled();
+    const member = task({ id: "t_ch1", title: "Chain member one", status: "running", root_id: "t_root1", link_counts: { parents: 1, children: 0 } });
+    const { container } = render(
+      <BoardTab board={chainBoard([member])} onOpenNodeDetail={vi.fn()} onOpenChain={onOpenChain} />,
+    );
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenweite · Position 2/5 — Laufkarte öffnen" });
+    expect(kref.textContent).toContain("Kettenweite");
+    expect(kref.textContent).toContain("·2/5");
+    const segments = container.querySelectorAll(".fleet-boardtab-kref-stanz i");
+    expect(segments).toHaveLength(5);
+    expect(segments[0].className).toBe("is-done");
+    expect(segments[1].className).toBe("is-now");
+    expect(segments[2].className).toBe("is-open");
+    expect(segments[4].className).toBe("is-open");
+    expect(screen.queryByText("keine Kette")).toBeNull();
   });
 
+  it("führt der Tipp auf den Ketten-Bezug zur Laufkarte (AC-3)", () => {
+    const onOpenChain = vi.fn();
+    const member = task({ id: "t_ch1", title: "Chain member one", status: "running", root_id: "t_root1", link_counts: { parents: 1, children: 0 } });
+    render(<BoardTab board={chainBoard([member])} onOpenNodeDetail={vi.fn()} onOpenChain={onOpenChain} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Kette Kettenweite/ }));
+    expect(onOpenChain).toHaveBeenCalledWith("t_root1");
+  });
+
+  it("bevorzugt den Backend-Kettenkontext (KF-4) vor der Ableitung", () => {
+    const onOpenChain = vi.fn();
+    const member = task({
+      id: "t_ctx1",
+      title: "Backend context card",
+      status: "ready",
+      root_id: "t_root9",
+      chain: { identity_id: "t_root9", position: 3, total: 4 },
+    });
+    const boardData: BoardResponse = { ...board([member]), chain_identities: { t_root9: "Kettenkennung" } };
+    render(<BoardTab board={boardData} onOpenNodeDetail={vi.fn()} onOpenChain={onOpenChain} />);
+
+    const kref = screen.getByRole("button", { name: "Kette Kettenkennung · Position 3/4 — Laufkarte öffnen" });
+    fireEvent.click(kref);
+    expect(onOpenChain).toHaveBeenCalledWith("t_root9");
+  });
+
+  it("sagt bei Karten ohne Kette ausdrücklich 'keine Kette' (AC-4)", () => {
+    const solo = task({ id: "t_solo1", title: "Standalone card", status: "ready", root_id: "t_solo1", link_counts: { parents: 0, children: 0 } });
+    render(<BoardTab board={board([solo])} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    expect(screen.getByText("keine Kette")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Laufkarte öffnen/ })).toBeNull();
+  });
+
+  it("markiert eigene Position einer fertigen Karte als Stahl, nicht Bronze", () => {
+    const member = task({ id: "t_ch1", title: "Done member", status: "done", root_id: "t_root1", link_counts: { parents: 1, children: 0 } });
+    const { container } = render(
+      <BoardTab board={chainBoard([member])} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />,
+    );
+    const segments = container.querySelectorAll(".fleet-boardtab-kref-stanz i");
+    expect(segments[1].className).toBe("is-done");
+    expect(container.querySelectorAll(".fleet-boardtab-kref-stanz i.is-now")).toHaveLength(0);
+  });
+
+  it("lässt die mehrdeutigen Alt-Marker (Nachfolger-Chip, Wurzel-Pfeil) entfallen (AC-2)", () => {
+    const member = task({ id: "t_ch1", title: "Chain member one", status: "running", root_id: "t_root1" });
+    render(<BoardTab board={chainBoard([member])} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    expect(screen.queryByTitle("Teil einer Kette")).toBeNull();
+    expect(screen.queryByTitle("Gehört zu einer Kette")).toBeNull();
+    expect(document.querySelector(".fleet-boardtab-chain")).toBeNull();
+    expect(document.querySelector(".fleet-boardtab-inchain")).toBeNull();
+  });
+
+  // Aus KF-5 uebernommen: ohne Kennungs-Mapping traegt der Bezug die Root-Id.
   it("fällt ohne Kennungs-Mapping auf die Root-Id zurück", () => {
-    const { container } = render(<BoardTab board={chainBoard({})} onOpenNodeDetail={vi.fn()} />);
-    const chips = container.querySelectorAll(".fleet-boardtab-chainchip");
-    expect(chips).toHaveLength(2);
-    expect(chips[0].textContent).toContain("t_root001");
-    expect(chips[0].textContent).toContain("1/2");
+    const member = task({
+      id: "t_ctx1",
+      title: "Backend context card",
+      status: "ready",
+      root_id: "t_root9",
+      chain: { identity_id: "t_root9", position: 3, total: 4 },
+    });
+    render(<BoardTab board={board([member])} onOpenNodeDetail={vi.fn()} onOpenChain={vi.fn()} />);
+
+    const kref = screen.getByRole("button", { name: "Kette t_root9 · Position 3/4 — Laufkarte öffnen" });
+    expect(kref.textContent).toContain("t_root9");
+    expect(kref.textContent).toContain("·3/4");
+  });
+
+  it("trägt Farbmarker und Zähler in den Statusgruppen (AC-6)", () => {
+    const blocked = task({ id: "t_solo1", title: "Standalone card", status: "blocked", root_id: "t_solo1" });
+    render(<BoardTab board={board([blocked])} onOpenNodeDetail={vi.fn()} />);
+
+    const header = document.querySelector(".fleet-boardtab-group-header");
+    expect(header?.querySelector(".fleet-boardtab-group-mark")).not.toBeNull();
+    expect(header?.querySelector(".fleet-boardtab-count")?.textContent).toBe("1");
   });
 });
