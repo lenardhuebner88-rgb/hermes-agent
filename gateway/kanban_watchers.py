@@ -2753,6 +2753,17 @@ class GatewayKanbanWatchersMixin:
                         "kanban dispatcher: no-silent-stall sweep failed on board %s",
                         slug, exc_info=True,
                     )
+                try:
+                    from hermes_cli.kanban_chain_repair import repair_broken_operator_holds
+
+                    repair_broken_operator_holds(conn)
+                except Exception:
+                    logger.debug(
+                        "kanban dispatcher: broken operator-hold chain repair failed "
+                        "on board %s",
+                        slug,
+                        exc_info=True,
+                    )
                 # Safety net: guarantee no *settled* block stays silent — every
                 # block the self-healing lane is done with gets an
                 # operator_escalation so it reaches the operator (silent_blocks

@@ -8,7 +8,7 @@
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, SlidersHorizontal } from "lucide-react";
+import { Copy, Link2, SlidersHorizontal } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
@@ -37,6 +37,8 @@ interface BoardTabProps {
   initialStatusFilter?: TaskStatus | null;
   /** Callback: öffnet den Karten-Detail-Drawer. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
+  /** KF-5: Klick auf den Ketten-Chip — fuehrt in die Ketten-Ansicht dieser Kette. */
+  onOpenChain?: (rootId: string) => void;
   selectedNodeId?: string | null;
   detailControlsId?: string;
 }
@@ -118,10 +120,14 @@ export function BoardTab({
   readOnly = false,
   initialStatusFilter = null,
   onOpenNodeDetail,
+  onOpenChain,
   selectedNodeId = null,
   detailControlsId,
 }: BoardTabProps) {
   const [q, setQ] = useState("");
+  // KF-5: lesbare Ketten-Kennungen je Root-Id (additiv; aeltere Server liefern
+  // den Key nicht). Fallback im Chip ist die Root-Id selbst.
+  const chainIdentities = board?.chain_identities;
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">(() =>
     initialStatusFilter && STATUS_ORDER.includes(initialStatusFilter) ? initialStatusFilter : "all",
   );
@@ -496,6 +502,10 @@ export function BoardTab({
               <span className="fleet-boardtab-count">{tasks.length}</span>
             </header>
             {tasks.map((t) => {
+              // KF-5: Ketten-Kontext (nur Kettenmitglieder). Wenn vorhanden,
+              // ersetzt der Ketten-Chip den nackten → t_abcd12-Verweis.
+              const chain = t.chain ?? null;
+              const chainLabel = chain ? (chainIdentities?.[chain.identity_id] ?? chain.identity_id) : null;
               const metaTitle = [
                 t.id,
                 t.assignee,
@@ -503,7 +513,7 @@ export function BoardTab({
                 t.comment_count > 0 ? `${t.comment_count} Kommentare` : null,
                 t.link_counts.parents > 0 ? `${t.link_counts.parents} Vorgänger` : null,
                 t.link_counts.children > 0 ? `${t.link_counts.children} Nachfolger` : null,
-                t.root_id && t.root_id !== t.id && t.link_counts.children === 0 ? `→ ${(t.root_id ?? "").slice(0, 8)}` : null,
+                !chain && t.root_id && t.root_id !== t.id && t.link_counts.children === 0 ? `→ ${(t.root_id ?? "").slice(0, 8)}` : null,
                 t.cost_effective_usd != null && t.cost_effective_usd > 0 ? fmtUsd(t.cost_effective_usd) : null,
                 t.progress && t.progress.total > 0 ? `${t.progress.done}/${t.progress.total}` : null,
               ].filter(Boolean).join(" · ");
@@ -527,7 +537,7 @@ export function BoardTab({
                     {t.link_counts.children > 0 && (
                       <span className="fleet-boardtab-chain" title="Teil einer Kette">{t.link_counts.children} Nachfolger</span>
                     )}
-                    {t.root_id && t.root_id !== t.id && t.link_counts.children === 0 && (
+                    {!chain && t.root_id && t.root_id !== t.id && t.link_counts.children === 0 && (
                       <span className="fleet-boardtab-inchain" title="Gehört zu einer Kette">→ {(t.root_id ?? "").slice(0, 8)}</span>
                     )}
                     {t.cost_effective_usd != null && t.cost_effective_usd > 0 && (
@@ -551,6 +561,23 @@ export function BoardTab({
                   >
                     {content}
                   </button>
+                  {chain && chainLabel ? (
+                    <button
+                      type="button"
+                      className="fleet-boardtab-chainchip"
+                      title={`Kette ${chainLabel} · Glied ${chain.position} von ${chain.total} — Kette öffnen`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenChain?.(chain.identity_id);
+                      }}
+                    >
+                      <Link2 size={12} aria-hidden="true" />
+                      <span className="fleet-boardtab-chainchip-label">{chainLabel}</span>
+                      <span className="fleet-boardtab-chainchip-pos">
+                        {chain.position}/{chain.total}
+                      </span>
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     className="fleet-boardtab-copy"

@@ -561,6 +561,12 @@ export const de = {
     actionCancelTaskConfirm: "Task archivieren — laufende Arbeit verwerfen?",
     actionCancelChain: "Kette abbrechen",
     actionCancelChainConfirm: "Ganze Kette stoppen — laufende beenden, offene halten?",
+    actionReleaseChain: (rootId: string, count: number) =>
+      `Kette ${rootId} freigeben (${count} Glieder)`,
+    actionReleaseChainConfirm: (rootId: string, count: number) =>
+      `Kette ${rootId} mit ${count} Gliedern freigeben — danach übernimmt der Dispatcher?`,
+    actionChainReleased: (released: number) =>
+      `Kette freigegeben — ${released} Glieder startbereit.`,
     actionConfirm: "Bestätigen",
     actionDismiss: "Zurück",
     actionBusy: "…",

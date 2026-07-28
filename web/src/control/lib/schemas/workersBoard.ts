@@ -274,6 +274,17 @@ export const BoardTaskSchema = z.object({
   tenant: z.string().nullable().catch(null),
   root_id: z.string().nullable().catch(null),
   epic_id: z.string().nullable().catch(null),
+  // KF-5: Ketten-Kontext je Karte (additiv; nur Kettenmitglieder tragen das Feld).
+  // identity_id = Root-Id der Kette, position/total aus deterministischer
+  // Topo-Sortierung; die lesbare Kennung steht top-level in chain_identities.
+  chain: z
+    .object({
+      identity_id: z.string().catch(""),
+      position: z.coerce.number().int().positive().catch(1),
+      total: z.coerce.number().int().positive().catch(1),
+    })
+    .nullable()
+    .catch(null),
   // Phase C: staged-review tier (Phase B column). Additiv — ältere Server / Karten
   // ohne das Feld fallen auf null zurück (= standard / kein Tier-Pill).
   review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
@@ -405,6 +416,10 @@ export const BoardResponseSchema = z.object({
   latest_event_id: z.coerce.number().catch(0),
   source_errors: z.array(BoardSourceErrorSchema).catch([]),
   chain_summaries: z.array(ChainSummarySchema).catch([]).optional(),
+  // KF-5: lesbare Ketten-Kennungen je Root-Id (PlanSpec-Slug oder Titel des
+  // ersten Glieds). Additiv; das Backend lässt den Key weg, wenn es keine
+  // Mehrglied-Ketten gibt.
+  chain_identities: z.record(z.string(), z.string()).catch({}).optional(),
   done_page: DoneBoardPageSchema.optional(),
   now: epochSeconds,
 });

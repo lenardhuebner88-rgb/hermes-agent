@@ -649,6 +649,10 @@ export interface BoardTask {
   output_tokens?: number | null;
   cost_usd_equivalent?: number | null;
   cost_effective_usd?: number | null;
+  /** KF-5: Ketten-Kontext (nur Kettenmitglieder; additiv). identity_id ist die
+   * Root-Id der Kette; position/total aus deterministischer Topo-Sortierung.
+   * Die lesbare Kennung steht top-level in BoardResponse.chain_identities. */
+  chain?: { identity_id: string; position: number; total: number } | null;
 }
 
 /** True when the task runs in a dispatcher-provisioned isolated worktree
@@ -748,6 +752,9 @@ export interface BoardResponse {
   latest_event_id: number;
   source_errors: BoardSourceError[];
   chain_summaries?: ChainSummary[];
+  /** KF-5: lesbare Ketten-Kennungen je Root-Id (PlanSpec-Slug oder Titel des
+   * ersten Glieds). Additiv; fehlt, wenn es keine Mehrglied-Ketten gibt. */
+  chain_identities?: Record<string, string>;
   done_page?: DoneBoardPage;
   now: number;
 }

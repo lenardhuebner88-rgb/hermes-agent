@@ -22,6 +22,7 @@ import { extractDetail } from "../../hooks/internal";
 import { useLanesCatalog } from "../../hooks/planSpecsLanes";
 import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
 import { useTaskBodyOnDemand, useTaskDeliverablesOnDemand } from "../../hooks/taskBodyOnDemand";
+import { useChainGraph, useFlowRelease } from "../../hooks/chainFlow";
 import { useWorkerActivity } from "../../hooks/workersBoard";
 import { DrawerShell } from "../../components/leitstand";
 import { WorkerLogTail } from "../../components/WorkerCard";
@@ -141,6 +142,24 @@ export function NodeDetailContent({
   const chainRootId = chainNodes.length > 1
     ? ([...chainNodes].sort((a, b) => a.level - b.level)[0]?.id ?? null)
     : null;
+  // KF-2: Gehaltene Operator-Kette erkennen. Gehaltene Flow-Ketten haben
+  // ausschließlich scheduled-Glieder (freigabe='operator'); nach der Freigabe
+  // kippt mindestens das Entry-Glied Richtung todo/running. Der Chain-Graph
+  // wird nur on-demand geholt, wenn die Karte scheduled ist und der Aufrufer
+  // keine Ketten-Nodes mitgegeben hat (Board-/Risiko-Einstieg statt Ketten-Tab).
+  const heldChainCandidate = task?.status === "scheduled";
+  const chainGraph = useChainGraph(heldChainCandidate && chainNodes.length === 0 ? taskId : null, board);
+  const flowRelease = useFlowRelease(onChanged);
+  const heldChain = (() => {
+    if (!heldChainCandidate) return null;
+    const nodes = chainNodes.length > 0 ? chainNodes : (chainGraph.data?.nodes ?? []);
+    if (nodes.length < 2) return null;
+    if (!nodes.every((node) => node.status === "scheduled")) return null;
+    const rootId = chainNodes.length > 0
+      ? chainRootId
+      : (chainGraph.data?.root_id ?? null);
+    return rootId ? { rootId, memberCount: nodes.length } : null;
+  })();
   // Deliverables: eigener Endpoint /tasks/{id}/deliverables — degradiert sauber zu []
   const deliverables = deliverablesResult.data?.deliverables ?? [];
   const events = activity.data?.events ?? [];
@@ -308,6 +327,10 @@ export function NodeDetailContent({
               taskId={taskId}
               status={task.status ?? ""}
               chainRootId={chainRootId}
+              heldChain={heldChain}
+              onReleaseChain={heldChain ? (rootId) => flowRelease.release(rootId, { release_level: "live" }) : null}
+              releaseChainError={heldChain ? (flowRelease.errorById[heldChain.rootId] ?? null) : null}
+              releaseBusy={heldChain ? flowRelease.busyId === heldChain.rootId : false}
               onChanged={onChanged}
               onCancelled={onClose}
               stageBlockReason={stageBlockReason}
