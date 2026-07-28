@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_chain_status as chain_status
+from hermes_cli import kanban_lane_fixer as lane_fixer
 from hermes_cli import kanban_worktrees as kwt
 from hermes_cli.kanban_chain_status import (
     CONFLICT_FIXER_FAILED_EVENT,
@@ -13,6 +16,7 @@ from hermes_cli.kanban_chain_status import (
 
 
 _PARK_REASON = "integration parked: merge conflict/failure (aborted): foo.py"
+FIXER_FAILURE_PUBLISH_FAILED_EVENT = "fixer_failure_publish_failed"
 
 
 def _parked_parent(conn, tmp_path: Path) -> tuple[str, str, Path]:
@@ -188,6 +192,132 @@ def test_gave_up_regular_blocked_task_still_holds_retry_and_merge_gates(
     assert len(dispatched) == 1
     assert summary["conflict_fixer_dispatched"] == []
     assert open_sibling is not None
+
+
+def test_blocked_fixer_without_gave_up_releases_in_flight_guard_without_unblocking_hold(
+    kanban_home,
+    tmp_path,
+):
+    with kb.connect_closing() as conn:
+        parent_id, root_id, worktree = _parked_parent(conn, tmp_path)
+        conflict_fixer = _create_fixer(
+            conn,
+            parent_id=parent_id,
+            root_id=root_id,
+            worktree=worktree,
+            attempt=1,
+        )
+        assert kb.claim_task(conn, conflict_fixer) is not None
+        assert kb.block_task(
+            conn,
+            conflict_fixer,
+            reason="operator hold: await approval",
+            kind="needs_input",
+        )
+
+        lane_fixer_id = kb.create_task(
+            conn,
+            title="held lane-scope fixer",
+            assignee="coder",
+            idempotency_key="lane-scope-fixer:held:abc:1",
+        )
+        assert kb.claim_task(conn, lane_fixer_id) is not None
+        assert kb.block_task(
+            conn,
+            lane_fixer_id,
+            reason="manual hold: do not dispatch",
+            kind="capability",
+        )
+
+        conflict_after = kb.get_task(conn, conflict_fixer)
+        lane_after = kb.get_task(conn, lane_fixer_id)
+        conflict_block = next(
+            event for event in kb.list_events(conn, conflict_fixer) if event.kind == "blocked"
+        )
+        lane_block = next(
+            event for event in kb.list_events(conn, lane_fixer_id) if event.kind == "blocked"
+        )
+
+        assert is_settled_fixer_card(conn, conflict_fixer)
+        assert is_settled_fixer_card(conn, lane_fixer_id)
+
+    assert conflict_after is not None and conflict_after.status == "blocked"
+    assert conflict_block.payload["reason"] == "operator hold: await approval"
+    assert lane_after is not None and lane_after.status == "blocked"
+    assert lane_block.payload["reason"] == "manual hold: do not dispatch"
+
+
+def test_failed_lane_scope_fixer_wakes_a_bounded_replacement_attempt(
+    kanban_home,
+    tmp_path,
+):
+    with kb.connect_closing() as conn:
+        parent_id, _root_id, worktree = _parked_parent(conn, tmp_path)
+        parent = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (parent_id,)
+        ).fetchone()
+        first_child = lane_fixer.maybe_route_lane_scope_fixer(
+            conn,
+            parent,
+            violating_paths=["web/src/control/Panel.tsx"],
+            expected_lane="coder-frontend",
+        )
+        assert first_child is not None
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = ?",
+                (
+                    int(time.time()) - kb.CONFLICT_FIXER_BACKOFF_SECONDS - 1,
+                    parent_id,
+                    lane_fixer.LANE_FIXER_DISPATCHED_EVENT,
+                ),
+            )
+
+        _fail_after_timeout(conn, first_child)
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == lane_fixer.LANE_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert len(dispatched) == 2
+    assert dispatched[-1].payload["child_id"] != first_child
+
+
+def test_fixer_failure_publish_error_is_recorded_as_an_event(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        parent_id, root_id, worktree = _parked_parent(conn, tmp_path)
+        fixer_id = _create_fixer(
+            conn,
+            parent_id=parent_id,
+            root_id=root_id,
+            worktree=worktree,
+            attempt=1,
+        )
+
+        def raise_during_wake(*args, **kwargs):
+            raise RuntimeError("wake publication failed")
+
+        monkeypatch.setattr(
+            chain_status,
+            "_matching_conflict_fixer_attempts",
+            raise_during_wake,
+        )
+        _fail_after_timeout(conn, fixer_id)
+        failures = [
+            event
+            for event in kb.list_events(conn, fixer_id)
+            if event.kind == FIXER_FAILURE_PUBLISH_FAILED_EVENT
+        ]
+
+    assert len(failures) == 1
+    assert failures[0].payload["source"] == "on_fixer_card_failed"
+    assert failures[0].payload["error_type"] == "RuntimeError"
 
 
 def test_fixer_failure_signals_child_and_parent_and_escalates_once(
