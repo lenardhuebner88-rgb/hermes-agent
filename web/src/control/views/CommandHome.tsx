@@ -46,6 +46,7 @@ import { KpiTile, RoleChip, SignalChip, SignalLabel, type SignalTone } from "../
 import { Eyebrow, Text } from "../components/primitives";
 import { DayBars, Sparkline } from "../components/charts/charts";
 import { FlowCapture } from "../components/fleet/FlowCapture";
+import { ApprovalInbox } from "../components/ApprovalInbox";
 import { DictateStatusTile } from "../components/DictateStatusTile";
 import "./command-home.css";
 
@@ -171,6 +172,12 @@ export function CommandHome({ density }: { density: Density }) {
           Registry + echte Alarme. Nichts, was ein Agent selbst entscheiden
           könnte. Leer = nichts (ruhig = leer). */}
       <OperatorDigestCard />
+
+      {/* ── FREIGABEN & DISPOSITIONEN ─────────────────────────────────────────
+          Die zwei Freigabe-Rückstaus (Funnel-Drafts + Disposition-Items) mit
+          echten Aktionen — die decision-queue zeigt die Ausnahme, hier wird
+          sie aufgelöst. Leer = ruhiger Normalfall, kein Fehlerkasten. */}
+      <ApprovalInbox />
 
       {/* ── SYSTEM-/KOSTEN-PULS ─────────────────────────────────────────────── */}
       <section aria-label="System- und Kosten-Puls" className="space-y-3">
