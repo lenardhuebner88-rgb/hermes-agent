@@ -3308,7 +3308,7 @@ export function AgentTerminalsView() {
                 <h2 id="execution-capsule-title" className="mt-1 truncate font-display text-base font-semibold text-ink">
                   Kanban-Run mit {executionCapsuleTarget.session}:{executionCapsuleTarget.window} verknüpfen
                 </h2>
-                <p className="mt-1 text-xs leading-relaxed text-ink-3">
+                <p className="mt-1 text-xs leading-relaxed text-ink-2">
                   tmux speichert nur Task-, Run- und Korrelationszeiger. Der begrenzte Handoff bleibt in der Run-Historie.
                 </p>
               </div>

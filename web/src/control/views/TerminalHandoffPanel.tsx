@@ -608,7 +608,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                 {busy === "dispatch" ? "Vorschau…" : "dispatch --dry-run"}
               </button>
             </div>
-            <p className="text-[11px] text-ink-3">
+            <p className="text-[11px] text-ink-2">
               Nur Vorschau (<code>dry_run=true</code>) — dispatcht nichts. Echtes Dispatch erfolgt
               ausschließlich über das Board, getrennt von dieser Ansicht.
             </p>
