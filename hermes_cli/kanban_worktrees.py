@@ -6807,6 +6807,31 @@ def _enforce_lane_scope_on_complete(
             changed_files = [
                 path for path in changed_files if path in net_vs_base
             ]
+        elif _branch_is_ancestor(repo_root, branch, base):
+            # Empty net set AND the branch is fully contained in `base`: this
+            # completion lands NOTHING, so it cannot introduce a lane
+            # violation — there is no path for one to travel on. Skipping is
+            # therefore correct rather than permissive, and the fail-open
+            # worry above does not apply once containment is proven.
+            #
+            # Live case 2026-07-28 (t_292bfb57, chain t_ba484cd6): a
+            # verification-only slice whose criteria were already met by an
+            # earlier, archived predecessor completed with zero own commits.
+            # Its stamped basis predated a branch refresh, so the two-dot
+            # `pre_run_sha..branch` range had picked up 19 files from FIVE
+            # unrelated cards that landed on main in between — and because the
+            # net set was empty, the intersection above never ran and every one
+            # of those foreign paths was charged to the card. A re-dispatch
+            # reproduces it exactly, so the card could never clear itself.
+            _log.warning(
+                "lane-scope: task %s adds nothing over %s (branch %s is "
+                "contained in it) — skipping enforcement for this completion; "
+                "a branch that lands no change cannot cross a lane",
+                task_id,
+                base,
+                branch,
+            )
+            return None
     except WorktreeError as exc:
         _log.warning(
             "lane-scope check could not diff %s: %s", diff_spec, exc,
