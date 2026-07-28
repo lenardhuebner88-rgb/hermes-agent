@@ -113,17 +113,25 @@ def test_reconcile_proposed_specs_dry_run_maps_board_and_never_ingested(
 
 
 @pytest.mark.parametrize("status", ["vetoed", "released"])
-def test_terminal_decision_dedup_uses_lever_not_random_hash(tmp_path: Path, status: str):
+@pytest.mark.parametrize(
+    ("stored_key", "target_key"),
+    [
+        ("GATE-FIX-PYTHON-1a2b3c4d", "GATE-FIX-PYTHON-deadbeef"),
+        ("GATE-TRIAGE-PYTHON-1a2b3c4d", "GATE-TRIAGE-PYTHON-deadbeef"),
+        ("GATE-DEFLAKE-PYTHON-1a2b3c4d", "GATE-DEFLAKE-PYTHON-deadbeef"),
+    ],
+)
+def test_terminal_decision_dedup_preserves_distinct_same_family_levers(
+    tmp_path: Path, status: str, stored_key: str, target_key: str
+):
     plans_root = tmp_path / "specs"
     plans_root.mkdir()
     (plans_root / "gate-triage-python-oldhash.md").write_text(
-        f"---\nstatus: {status}\nslice: GATE-TRIAGE-PYTHON-a1b2c3d4\n---\n",
+        f"---\nstatus: {status}\nslice: {stored_key}\n---\n",
         encoding="utf-8",
     )
 
-    assert strategist_specs.has_terminal_decision_for_lever(
-        plans_root, "GATE-TRIAGE-PYTHON-deadbeef"
-    ) is True
+    assert strategist_specs.has_terminal_decision_for_lever(plans_root, target_key) is False
 
 
 def test_gate_paths_skip_terminal_decisions_before_writing_or_ingesting(
@@ -160,9 +168,8 @@ def test_gate_paths_skip_terminal_decisions_before_writing_or_ingesting(
     for index, key in enumerate(
         (dry_gate["key"], dry_triage["key"], dry_deflake["filed"][0]["key"])
     ):
-        variant = f"{key[:-8]}{index:08x}"
         (specs / f"terminal-{index}.md").write_text(
-            f"---\nstatus: vetoed\nslice: {variant}\n---\n", encoding="utf-8"
+            f"---\nstatus: vetoed\nslice: {key}\n---\n", encoding="utf-8"
         )
 
     def forbidden(*_args, **_kwargs):

@@ -10,7 +10,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import logging
 from pathlib import Path
-import re
 from typing import Any
 
 import yaml
@@ -20,7 +19,6 @@ from hermes_cli import kanban_db as kb
 logger = logging.getLogger(__name__)
 
 TERMINAL_DECISION_STATUSES = frozenset({"vetoed", "released", "archived", "done"})
-_DECISION_SUFFIX = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
 
 
 def utc_now() -> str:
@@ -84,8 +82,13 @@ def persist_task_decision(
 
 
 def canonical_lever_key(value: object) -> str:
-    """Remove the generated hash suffix used by the gate PlanSpec families."""
-    return _DECISION_SUFFIX.sub("", str(value or "").strip().upper())
+    """Normalize a persisted lever key without discarding its identity digest.
+
+    Gate-fix, triage, and deflake levers include a deterministic digest in their
+    key.  That digest distinguishes causes, red-file sets, and files within the
+    same gate, so it must participate in the terminal-decision comparison.
+    """
+    return str(value or "").strip().upper()
 
 
 def _frontmatter_for_path(path: Path) -> dict[str, Any] | None:
@@ -99,9 +102,9 @@ def _frontmatter_for_path(path: Path) -> dict[str, Any] | None:
 def has_terminal_decision_for_lever(plans_root: Path, lever_key: str) -> bool:
     """Whether a source PlanSpec already has a terminal decision for this lever.
 
-    Gate specs append a random eight-hex digest to both their slice and filename;
-    comparison therefore uses the frontmatter ``slice`` and canonicalizes only
-    that suffix instead of treating filename identity as lever identity.
+    Comparison uses the frontmatter ``slice`` rather than the filename.  The
+    full slice is the lever identity; its deterministic digest must match too
+    so a decision on one cause or flaky file cannot suppress another.
     """
     target = canonical_lever_key(lever_key)
     if not target:
