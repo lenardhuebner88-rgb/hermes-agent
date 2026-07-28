@@ -6754,6 +6754,31 @@ def _enforce_lane_scope_on_complete(
             ).splitlines()
             if path
         ]
+        if snapshot_diff_spec is not None:
+            # A review snapshot pins the exact commit pair the reviewer judged,
+            # which is right for REVIEW — but for a chain slice the candidate is
+            # the shared chain TIP, so this diff carries every sibling's commits
+            # too.  Selecting the snapshot spec also skips the per-task
+            # `pre_run_commit_sha` attribution above (`pre_run` stays None), so
+            # neither the orphaned-basis receipts nor the merge-base subtraction
+            # ever run: the slice is charged with the whole chain.
+            #
+            # Live case 2026-07-28 (t_237fb16b, KF-5 of chain t_0ffdfd45): seven
+            # parks in two days on `gateway/kanban_watchers.py` and six more
+            # backend paths owned by KF-1/KF-3/KF-4. Snapshot pair
+            # `1d8ee511d..4cac18d81` spanned all five chain commits; the card's
+            # own recorded commits touch exactly six `web/src/control/**` files.
+            # Its own commit receipts are the task-local ground truth, so keep
+            # them as an upper bound here as well — a slice can only be charged
+            # for paths its OWN commits touched. No receipts (legacy task) means
+            # no change in behaviour.
+            recorded_paths = _lane_scope_recorded_task_commit_paths(
+                conn, task_id, repo_root, completion_metadata,
+            )
+            if recorded_paths is not None:
+                changed_files = [
+                    path for path in changed_files if path in recorded_paths
+                ]
         if exclude_pre_own_basis:
             recorded_paths = _lane_scope_recorded_task_commit_paths(
                 conn, task_id, repo_root, completion_metadata,

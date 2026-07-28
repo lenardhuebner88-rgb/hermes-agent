@@ -2576,3 +2576,56 @@ def test_lane_scope_still_parks_own_violation_when_branch_also_carries_base(
     assert out is not None and out["action"] == "parked"
     assert "hermes_cli/owned_by_this_card.py" in out["reason"]
     assert "hermes_cli/other_card.py" not in out["reason"]
+
+
+def test_lane_scope_review_snapshot_does_not_charge_sibling_commits(repo, kanban_home):
+    """A review snapshot must not turn a chain slice into its siblings' owner.
+
+    The snapshot pins the exact commit pair the reviewer judged — correct for
+    review, but for a chain slice the candidate is the shared chain TIP, so the
+    diff also carries every sibling commit.  Selecting the snapshot spec also
+    skips the per-task `pre_run_commit_sha` attribution, so neither the
+    orphaned-basis receipts nor the merge-base subtraction get a chance to run.
+
+    Live case 2026-07-28: KF-5 (t_237fb16b) parked seven times across two days on
+    `gateway/kanban_watchers.py` and six further backend paths that belonged to
+    KF-1/KF-3/KF-4, while its own commits touched only `web/src/control/**`.
+    """
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="frontend slice on a shared chain branch",
+            assignee="coder-frontend",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, task_id)
+        base_commit = _git(repo, "rev-parse", "HEAD").strip()
+        _claim_and_materialize(conn, task_id)
+
+        # A backend sibling lands on the SHARED chain branch first.
+        _commit_in(
+            info["path"], "gateway/sibling_slice.py", "SIB = 1\n",
+            msg="backend sibling slice on the same chain branch",
+        )
+        # Then this card commits its own, strictly in-lane work.
+        _commit_in(
+            info["path"], "web/src/control/Owned.tsx",
+            "export const Owned = 1\n",
+            msg="own frontend work",
+        )
+        own_commit = _git(info["path"], "rev-parse", "HEAD").strip()
+
+        # The reviewer's snapshot spans the chain tip — both commits.
+        _record_review_snapshot_event(
+            conn, task_id, base_commit=base_commit, candidate_commit=own_commit,
+        )
+        assert "gateway/sibling_slice.py" in _git(
+            repo, "diff", "--name-only", f"{base_commit}..{own_commit}",
+        )
+
+        out = _complete(
+            conn, task_id, completion_metadata={"commit": own_commit},
+        )
+
+    assert out is None or out["action"] != "parked"
