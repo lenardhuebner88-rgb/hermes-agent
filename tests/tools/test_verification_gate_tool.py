@@ -334,3 +334,45 @@ def test_handler_tolerates_runtime_injected_task_id_kwarg():
     )
 
     assert result
+
+
+def test_registry_dispatches_task_bound_ui_shot_to_gate_backend(repo, monkeypatch, tmp_path):
+    """The runtime's injected task id must not block the task-bound UI gate."""
+    from tools import verification_gate_tool as tool
+    from tools.registry import registry
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_dispatch")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "1")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(repo))
+    calls = []
+
+    def fake_run_ui_shot(root, artifact_dir, route, scenario):
+        calls.append((root, artifact_dir, route, scenario))
+        return {
+            "status": "passed",
+            "results": [{"command_id": "ui_shot", "exit_code": 0}],
+            "artifacts": [f"agent-terminals-{viewport}.png" for viewport in tool.VIEWPORTS],
+        }
+
+    monkeypatch.setattr(tool, "_run_ui_shot", fake_run_ui_shot)
+
+    dispatched = registry.dispatch(
+        "verification_gate",
+        {
+            "action": "ui_shot",
+            "phase": "review",
+            "route": "agent-terminals",
+            "scenario": "terminal_bridge",
+        },
+        task_id="t_dispatch",
+    )
+
+    assert isinstance(dispatched, str)
+    result = json.loads(dispatched)
+
+    assert result["gate_id"] == "ui_shot"
+    assert result["status"] == "passed"
+    assert [(root, route, scenario) for root, _artifact_dir, route, scenario in calls] == [
+        (repo.resolve(), "agent-terminals", "terminal_bridge"),
+    ]
