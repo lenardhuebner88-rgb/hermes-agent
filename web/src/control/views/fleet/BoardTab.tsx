@@ -13,7 +13,7 @@ import { fetchJSON } from "@/lib/api";
 import { fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
 import { taskStatusLabel } from "../../lib/tones";
-import type { BoardArchiveResponse, BoardResponse, BoardTask, ChainSummaryState, TaskStatus } from "../../lib/types";
+import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
 import {
   loadDoneBoardPage,
   type DoneBoardPage,
@@ -93,18 +93,7 @@ interface CardChainRef {
   total: number;
   /** Abgeschlossene Stationen (Segment-Füllung, wenn position fehlt). */
   done: number;
-  /** KZ-1: Zustand der Kette (chain_summaries[].state); null ohne Summary. */
-  state: ChainSummaryState | null;
 }
-
-/** KZ-1: Kettenzustand auf die vorhandene fleet-status-Klassenfamilie
- * abbilden — kein neues CSS (fleet.css gehoert den LK-Slices). */
-const CHAIN_STATE_META: Record<ChainSummaryState, { label: string; fleetClass: string }> = {
-  laeuft: { label: "läuft", fleetClass: "fleet-status-running" },
-  angebrochen: { label: "angebrochen", fleetClass: "fleet-status-scheduled" },
-  gehalten: { label: "gehalten", fleetClass: "fleet-status-blocked" },
-  fertig: { label: "fertig", fleetClass: "fleet-status-done" },
-};
 
 /**
  * BV-2: Ketten-Bezug je Karte. Primär der Backend-Kettenkontext (KF-4:
@@ -133,7 +122,6 @@ function chainRefForTask(t: BoardTask, board: PaginatedBoardResponse | BoardResp
     position,
     total,
     done: summary?.done ?? 0,
-    state: summary?.state ?? null,
   };
 }
 
@@ -613,11 +601,10 @@ export function BoardTab({
               const selected = selectedNodeId === t.id;
               const cardClass = `fleet-boardtab-card${selected ? " fleet-boardtab-card-selected" : ""}`;
               const rowClass = `fleet-boardtab-row${readOnly ? " fleet-boardtab-row-readonly" : ""}`;
-              const krefStateMeta = chainRef?.state ? CHAIN_STATE_META[chainRef.state] : null;
               const krefLabel = chainRef
                 ? chainRef.position != null
-                  ? `Kette ${chainRef.label} · Position ${chainRef.position}/${chainRef.total}${krefStateMeta ? ` · ${krefStateMeta.label}` : ""} — Laufkarte öffnen`
-                  : `Kette ${chainRef.label} · ${chainRef.total} Stationen${krefStateMeta ? ` · ${krefStateMeta.label}` : ""} — Laufkarte öffnen`
+                  ? `Kette ${chainRef.label} · Position ${chainRef.position}/${chainRef.total} — Laufkarte öffnen`
+                  : `Kette ${chainRef.label} · ${chainRef.total} Stationen — Laufkarte öffnen`
                 : null;
               return (
                 <div key={t.id} className={cardClass}>
@@ -645,8 +632,6 @@ export function BoardTab({
                         ))}
                       </span>
                       <span className="fleet-boardtab-kref-label">
-                        {krefStateMeta ? <b className={krefStateMeta.fleetClass}>{krefStateMeta.label}</b> : null}
-                        {krefStateMeta ? " " : null}
                         {chainRef.label}
                         {chainRef.position != null ? <b>{`·${chainRef.position}/${chainRef.total}`}</b> : null}
                       </span>
