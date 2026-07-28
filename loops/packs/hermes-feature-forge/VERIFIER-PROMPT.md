@@ -38,16 +38,19 @@ scripts/gate-frontend.sh --skip-build           # bei web/src/control-Anteil
 
 ## Verdict
 
-- PASS: `last-status` exakt `PASS <plan-id>` + knappe Begründung unter
-  `## Verifier-Evidence` im Plan.
-- FAIL: `last-status` exakt `FAIL <hauptgrund>` + konkrete, umsetzbare Punkte
-  unter `## Verifier-Feedback`. Der Driver revertiert; höchstens ein Retry.
+- PASS: `PASS <plan-id>` als einzige Zeile in die DATEI
+  `{{STATE_DIR}}/last-status`; die knappe Begründung getrennt davon unter
+  `## Verifier-Evidence` im Plan `{{PLAN_PATH}}`.
+- FAIL: `FAIL <hauptgrund>` als einzige Zeile in dieselbe DATEI
+  `{{STATE_DIR}}/last-status`; die konkreten, umsetzbaren Punkte unter
+  `## Verifier-Feedback` im Plan. Der Driver revertiert; höchstens ein Retry.
 - Findest du dabei einen echten Bug AUSSERHALB des Plan-Scopes: nicht fixen,
   strukturierter Block nach `{{STATE_DIR}}/ESCALATIONS.md`.
-- HART: `last-status` als ALLERLETZTER Schritt des Turns; davor `cat` der Datei
-  und prüfen, dass exakt `PASS <plan-id>` bzw. `FAIL <grund>` drinsteht. Keine
-  Hintergrund-Tasks. Ein Turn ohne `last-status` zählt als FAIL und revertiert
-  den Build.
+- HART: `{{STATE_DIR}}/last-status` ist eine DATEI, kein Feld im Plan — eine
+  Statuszeile im Plan zählt NICHT. Schreibe sie als ALLERLETZTEN Schritt des
+  Turns; davor `cat {{STATE_DIR}}/last-status` und prüfen, dass exakt
+  `PASS <plan-id>` bzw. `FAIL <grund>` drinsteht. Keine Hintergrund-Tasks. Ein
+  Turn ohne geschriebene Datei zählt als FAIL und revertiert den Build.
 
 Du fixt nichts. NIE push, merge, deploy, Service-Restart oder
 Live-Dashboard-Zugriff. Die Landung gehört dem Runner/Morgen-Gate.

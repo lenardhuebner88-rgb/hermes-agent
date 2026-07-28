@@ -36,13 +36,17 @@ scripts/gate-frontend.sh --skip-build           # bei web-Anteil
 
 ## Verdict
 
-- PASS: `last-status` exakt `PASS <plan-id>` + Begründung unter
-  `## Verifier-Evidence`.
-- FAIL: `last-status` exakt `FAIL <hauptgrund>` + umsetzbare Punkte unter
-  `## Verifier-Feedback` (Driver revertiert; max. ein Retry).
+- PASS: `PASS <plan-id>` als einzige Zeile in die DATEI
+  `{{STATE_DIR}}/last-status`; die Begründung getrennt davon unter
+  `## Verifier-Evidence` im Plan `{{PLAN_PATH}}`.
+- FAIL: `FAIL <hauptgrund>` als einzige Zeile in dieselbe DATEI
+  `{{STATE_DIR}}/last-status`; die umsetzbaren Punkte unter
+  `## Verifier-Feedback` im Plan (Driver revertiert; max. ein Retry).
 - Out-of-Scope-Funde: nicht fixen → strukturierter Block nach
   `{{STATE_DIR}}/ESCALATIONS.md`.
-- HART: `last-status` als ALLERLETZTER Schritt; davor `cat` und Wortlaut
-  prüfen. Keine Hintergrund-Tasks. Turn ohne `last-status` = FAIL + Revert.
+- HART: `{{STATE_DIR}}/last-status` ist eine DATEI, kein Feld im Plan — eine
+  Statuszeile im Plan zählt NICHT und revertiert den Build. Schreibe sie als
+  ALLERLETZTEN Schritt, danach `cat {{STATE_DIR}}/last-status` und den Wortlaut
+  prüfen. Keine Hintergrund-Tasks. Turn ohne geschriebene Datei = FAIL + Revert.
 
 NIE push, merge, deploy, Service-Restart, Live-Dashboard-Zugriff.
