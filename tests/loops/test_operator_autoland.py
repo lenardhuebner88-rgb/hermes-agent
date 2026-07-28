@@ -128,7 +128,7 @@ def test_operator_contract_allows_any_path_but_keeps_the_deny_list(tmp_path):
         "hermes_cli/auth.py",
         "hermes_cli/dashboard_auth/session.py",
         "hermes_cli/kanban_db.py",
-        "web/package-lock.json",
+        "package-lock.json",
         "loops/runner.py",
         ".github/workflows/ci.yml",
         "scripts/deploy_dashboard.sh",

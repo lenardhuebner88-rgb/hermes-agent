@@ -170,13 +170,13 @@ AUTOLAND_RUNTIME_ACK_KEY = "AUTOLAND_ACK"
 # Pfad-Vertrag für Packs OHNE kuratierten Eintrag. Bewusst weit im Erlauben
 # (ein beliebiges Pack weiß der Runner nicht vorher, was es anfasst), aber
 # gleich streng im Verbieten wie die kuratierten Verträge: Auth, Board-Spine
-# und die Lockfiles landen nie unbeaufsichtigt.
+# und das Root-Lockfile landet nie unbeaufsichtigt.
 OPERATOR_AUTOLAND_DENY_PREFIXES = (
     "hermes_cli/auth.py",
     "hermes_cli/dashboard_auth/",
     "hermes_cli/kanban_db.py",
     "web/package.json",
-    "web/package-lock.json",
+    "package-lock.json",
     "loops/runner.py",
     ".github/",
     "scripts/deploy_dashboard.sh",
@@ -205,7 +205,7 @@ _HERMES_REPO_DENIES = (
     "hermes_cli/dashboard_auth/",
     "hermes_cli/kanban_db.py",
     "web/package.json",
-    "web/package-lock.json",
+    "package-lock.json",
 )
 
 # Werden zusammen mit den kuratierten Dateien aktualisiert. Der Loader prueft
