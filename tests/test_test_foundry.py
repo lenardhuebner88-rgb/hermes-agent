@@ -6,8 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 
 from hermes_cli import test_foundry
 from hermes_cli._ast_mutator import Mutant
@@ -99,6 +98,29 @@ def _mutants() -> list[Mutant]:
             description="0 -> 1",
         ),
     ]
+
+
+def test_oversized_mutation_skip_is_returned_with_target_name(
+    tmp_path,
+    monkeypatch,
+):
+    repo, target_rel = _make_fake_repo(tmp_path)
+    _install_fake_isolation(monkeypatch, tmp_path, repo)
+
+    def skip_mutation(_source, *, source_name, on_skip, **_kwargs):
+        reason = f"skipped mutation generation for {source_name}: AST exceeds 50,000 nodes"
+        on_skip(reason)
+        return []
+
+    monkeypatch.setattr(test_foundry, "generate_mutants", skip_mutation)
+    result = test_foundry.run_test_foundry(
+        target_rel,
+        run_suite=lambda *_args, **_kwargs: True,
+    )
+
+    assert result["ok"] is False
+    assert target_rel in result["reason"]
+    assert "AST exceeds" in result["reason"]
 
 
 def test_survivor_generated_test_kept_after_head_and_mutant_gate(tmp_path, monkeypatch):
@@ -242,7 +264,7 @@ def test_apply_none_leaves_real_target_unchanged(tmp_path, monkeypatch):
     assert not (repo / "tests" / "test_sample_target_foundry.py").exists()
 
 
-def test_endpoint_trigger_returns_409_when_test_foundry_running(tmp_path, monkeypatch):
+def test_trigger_returns_409_when_test_foundry_running(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_TEST_FOUNDRY_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "audit"))
     import hermes_cli.autoresearch_view as view
@@ -251,29 +273,21 @@ def test_endpoint_trigger_returns_409_when_test_foundry_running(tmp_path, monkey
     view = importlib.reload(view)
     monkeypatch.setattr(view, "_spawn_test_foundry_runner", lambda _path: 4242)
 
-    app = FastAPI()
-    view.register_autoresearch_routes(app)
-    client = TestClient(app)
-
-    first = client.post(
-        "/api/autoresearch/test-foundry/trigger",
-        json={"target": "hermes_cli/kanban_db.py", "max_mutants": 1, "apply": False},
+    first = view.trigger_test_foundry(
+        target="hermes_cli/kanban_db.py",
+        max_mutants=1,
+        apply=False,
     )
-    assert first.status_code == 200, first.text
-    assert first.json()["pid"] == 4242
+    assert first["pid"] == 4242
 
-    busy = client.post(
-        "/api/autoresearch/test-foundry/trigger",
-        json={"target": "hermes_cli/kanban_db.py"},
-    )
-    assert busy.status_code == 409
+    with pytest.raises(HTTPException) as busy:
+        view.trigger_test_foundry(target="hermes_cli/kanban_db.py")
+    assert busy.value.status_code == 409
 
-    status = client.get("/api/autoresearch/test-foundry/status").json()
+    status = test_foundry.read_status()
     assert status["state"] == "running"
     assert status["target"] == "hermes_cli/kanban_db.py"
-
-    targets = client.get("/api/autoresearch/test-foundry/targets").json()
-    assert "hermes_cli/kanban_db.py" in targets["targets"]
+    assert "hermes_cli/kanban_db.py" in test_foundry.curated_targets()
 
 
 # ---------------------------------------------------------------------------

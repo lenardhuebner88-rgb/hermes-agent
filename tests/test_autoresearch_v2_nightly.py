@@ -42,6 +42,16 @@ def _isolate_live_state(monkeypatch, tmp_path):
         lambda provider="openai-codex": _usage_snapshot(session=5, weekly=5),
     )
 
+    def run_lane_in_process(lane, payload, _budget_seconds):
+        try:
+            return nightly._LaneExecution(
+                result=nightly._execute_lane_worker(lane, payload),
+            )
+        except Exception as exc:
+            return nightly._LaneExecution(error=nightly._lane_error(exc))
+
+    monkeypatch.setattr(nightly, "_run_lane_process", run_lane_in_process)
+
 
 # ---------------------------------------------------------------- rotation
 
@@ -246,6 +256,66 @@ def test_main_isolates_a_lane_crash(monkeypatch, capsys):
     assert "Test-Foundry" in out and "(+1)" in out  # other lane still ran
 
 
+def test_hard_lane_timeout_keeps_other_lane_result(monkeypatch, capsys):
+    calls = []
+
+    def fake_lane_process(lane, payload, budget_seconds):
+        calls.append((lane, budget_seconds))
+        if lane == "deep-audit":
+            return nightly._LaneExecution(
+                error="lane budget exhausted after 0.1s; worker process group terminated",
+                timed_out=True,
+                elapsed_seconds=0.1,
+            )
+        return nightly._LaneExecution(
+            result=[_tf(target, tests_kept=1, tokens=1000) for target in payload["targets"]],
+            elapsed_seconds=0.01,
+        )
+
+    monkeypatch.setattr(nightly, "_run_lane_process", fake_lane_process)
+
+    rc = nightly.main([
+        "--no-send",
+        "--date",
+        "2026-06-04",
+        "--wall-clock-budget-seconds",
+        "0.1",
+        "--circuit-breaker-threshold",
+        "1",
+    ])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert calls == [("deep-audit", 0.1), ("test-foundry", 0.1)]
+    assert "Deep-Audit" in out and "budget exhausted" in out
+    assert "Test-Foundry" in out and "(+1)" in out
+
+
+def test_bounded_lane_process_terminates_blocker_then_runs_other(tmp_path):
+    marker = tmp_path / "other-lane-result.txt"
+    slow = nightly.run_bounded_process(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        budget_seconds=0.1,
+        cwd=tmp_path,
+        terminate_grace_seconds=0.1,
+    )
+    fast = nightly.run_bounded_process(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('delivered')",
+            str(marker),
+        ],
+        budget_seconds=2.0,
+        cwd=tmp_path,
+    )
+
+    assert slow.timed_out is True
+    assert slow.elapsed_seconds < 2.0
+    assert fast.timed_out is False and fast.returncode == 0
+    assert marker.read_text(encoding="utf-8") == "delivered"
+
+
 def test_main_returns_nonzero_when_every_selected_lane_is_infra_failed(monkeypatch, capsys):
     monkeypatch.setattr(
         nightly,
@@ -309,40 +379,6 @@ def test_main_runs_reconciler_after_prune_before_summary(monkeypatch):
     assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
     assert order == ["deep-audit", "test-foundry", "prune", "reconcile", "shadow", "summary"]
 
-
-
-def test_main_wall_clock_budget_skips_remaining_lanes_but_keeps_report(monkeypatch):
-    order = []
-    ticks = iter([0.0, 0.0, 2.0])
-
-    monkeypatch.setattr(nightly.time, "monotonic", lambda: next(ticks, 2.0))
-    monkeypatch.setattr(nightly, "run_deep_audit_lane", lambda *_a, **_k: order.append("deep-audit") or _da())
-
-    def unexpected_tf(*_a, **_k):
-        raise AssertionError("test-foundry must not run after the wall-clock budget is exhausted")
-
-    monkeypatch.setattr(nightly, "run_test_foundry_lane", unexpected_tf)
-
-    def fake_prune():
-        order.append("prune")
-        return {"auto_skipped": 0, "archived": 0}
-
-    monkeypatch.setattr(nightly._proposals, "prune_proposals", fake_prune, raising=False)
-    monkeypatch.setattr(nightly, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
-
-    def fake_build_summary(*args, **kwargs):
-        order.append("summary")
-        assert kwargs["tf_error"].startswith("Wall-clock budget exhausted")
-        return "summary"
-
-    monkeypatch.setattr(nightly, "build_summary", fake_build_summary)
-
-    assert nightly.main([
-        "--no-send",
-        "--date", "2026-06-04",
-        "--wall-clock-budget-seconds", "1",
-    ]) == 0
-    assert order == ["deep-audit", "prune", "reconcile", "summary"]
 
 
 def test_main_circuit_breaker_skips_remaining_lanes_but_keeps_hygiene(monkeypatch):
