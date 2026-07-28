@@ -7467,11 +7467,17 @@ def _record_integration_events_and_receipts(
     """Write integration events/comments/release-gate; return final outcome."""
     try:
         with kb.write_txn(conn):
-            kind = {
-                "merged": "integration_merged",
-                "clean": "integration_clean",
-                "rebase_conflict": "integration_rebase_conflict",
-            }.get(outcome["action"], "integration_parked")
+            if (
+                outcome["action"] == "merged"
+                and outcome.get("verification") == "incomplete"
+            ):
+                kind = "integration_merged_verification_incomplete"
+            else:
+                kind = {
+                    "merged": "integration_merged",
+                    "clean": "integration_clean",
+                    "rebase_conflict": "integration_rebase_conflict",
+                }.get(outcome["action"], "integration_parked")
             kb._append_event(conn, task_id, kind, outcome)
             if outcome.get("artifact_receipt"):
                 kb._append_event(
@@ -7480,7 +7486,10 @@ def _record_integration_events_and_receipts(
                     "artifact_preserved",
                     outcome["artifact_receipt"],
                 )
-            if outcome["action"] == "merged":
+            if (
+                outcome["action"] == "merged"
+                and outcome.get("verification") != "incomplete"
+            ):
                 kb._append_event(
                     conn,
                     task_id,
@@ -7515,13 +7524,23 @@ def _record_integration_events_and_receipts(
             _log.debug("artifact preserve receipt comment failed", exc_info=True)
     if outcome["action"] == "merged":
         try:
-            kb.add_comment(
-                conn, task_id, "integrator",
-                f"✅ Integrated: merged `{outcome['branch']}` into "
-                f"`{outcome['target']}` as `{outcome['merge_commit'][:12]}` "
-                f"(--no-ff, post-merge gate green: {outcome.get('gate', '')}). "
-                "Worktree and branch removed. Not pushed.",
-            )
+            if outcome.get("verification") == "incomplete":
+                kb.add_comment(
+                    conn, task_id, "integrator",
+                    f"⚠️ Integrated, verification incomplete: merged "
+                    f"`{outcome['branch']}` into `{outcome['target']}` as "
+                    f"`{outcome['merge_commit'][:12]}`, but "
+                    f"{outcome.get('verification_reason', 'the approved commit could not be resolved')}. "
+                    "The merge landed; worktree and branch were removed. Not pushed.",
+                )
+            else:
+                kb.add_comment(
+                    conn, task_id, "integrator",
+                    f"✅ Integrated: merged `{outcome['branch']}` into "
+                    f"`{outcome['target']}` as `{outcome['merge_commit'][:12]}` "
+                    f"(--no-ff, post-merge gate green: {outcome.get('gate', '')}). "
+                    "Worktree and branch removed. Not pushed.",
+                )
         except Exception:
             _log.debug("integration receipt comment failed", exc_info=True)
         if outcome.get("release_gate_required"):
@@ -7880,7 +7899,23 @@ def maybe_integrate_on_complete(
             approved_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
         except WorktreeError:
             approved_commit = None
-    if approved_commit is not None:
+    if outcome.get("action") in {"merged", "clean"} and approved_commit is None:
+        effective_target = str(outcome.get("target") or target or "")
+        reason = (
+            "cannot resolve approved completion commit after integration: "
+            f"{branch} -> {effective_target or 'unknown'}"
+        )
+        if outcome["action"] == "merged":
+            outcome["verification"] = "incomplete"
+            outcome["verification_reason"] = reason
+        else:
+            outcome = {
+                "action": "parked",
+                "reason": reason,
+                "branch": branch,
+                "target": effective_target or target,
+            }
+    elif approved_commit is not None:
         outcome["approved_commit"] = approved_commit
         effective_target = str(outcome.get("target") or target or "")
         if outcome.get("action") in {"merged", "clean"} and (
