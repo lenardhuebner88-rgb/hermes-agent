@@ -2270,8 +2270,7 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
         if kanban_db.get_task(conn, task_id) is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         delivery = kanban_comment_delivery.write_comment(
-            conn, task_id, author=payload.author or "dashboard", body=payload.body,
-        )
+            conn, task_id, author=payload.author or "dashboard", body=payload.body)
         return {"ok": True, "delivery": delivery.as_dict()}
     finally:
         conn.close()
