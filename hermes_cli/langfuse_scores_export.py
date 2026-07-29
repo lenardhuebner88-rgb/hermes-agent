@@ -478,10 +478,18 @@ def synthesize_traces(
                 ORDER BY r.id
             """, (resume_after, resume_after)).fetchall()
         except sqlite3.OperationalError:
-            rows = connection.execute("""
-                SELECT id, task_id, profile, status, started_at, outcome, metadata, active_model
-                FROM task_runs WHERE (? IS NULL OR id > ?) ORDER BY id
-            """, (resume_after, resume_after)).fetchall()
+            try:
+                rows = connection.execute("""
+                    SELECT id, task_id, profile, status, started_at, outcome,
+                           metadata, active_model, cost_usd
+                    FROM task_runs WHERE (? IS NULL OR id > ?) ORDER BY id
+                """, (resume_after, resume_after)).fetchall()
+            except sqlite3.OperationalError:
+                rows = connection.execute("""
+                    SELECT id, task_id, profile, status, started_at, outcome,
+                           metadata, active_model
+                    FROM task_runs WHERE (? IS NULL OR id > ?) ORDER BY id
+                """, (resume_after, resume_after)).fetchall()
     finally:
         connection.close()
     host, authorization = _credentials(runtime_env)

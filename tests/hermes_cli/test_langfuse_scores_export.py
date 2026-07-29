@@ -693,7 +693,7 @@ def test_synthesize_traces_is_deterministic_and_uses_generation_observation(tmp_
     assert generation["type"] == "generation-create"
     assert generation["body"]["usageDetails"] == {
         "input": 10, "output": 4, "cache_read_input_tokens": 2, "reasoning_tokens": 1}
-    assert generation["body"]["costDetails"] == {"total": 0.25}
+    assert generation["body"]["costDetails"] == {"total": 0.1}
     second = synthesize_traces(db_path=db_path, env=env)
     assert second["synthesized"] == 0
     assert second["skipped_seen"] == 1
