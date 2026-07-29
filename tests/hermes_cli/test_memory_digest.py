@@ -365,3 +365,29 @@ def test_digest_reads_completed_runs_from_db(tmp_path, monkeypatch):
     assert "Use Milvus server" in texts
     assert digest["decisions"][0]["task_id"] == tid
     conn.close()
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_render_followups_section_shows_text_and_task_id():
+    """Kill bool_op_swap L342 (or->and blanks followups list) and
+    L348 (or->and turns task_id into '?')."""
+    now = 100 * DAY
+    runs = [_run("t_fu", now - 1 * DAY, followup=["Restart gateway"])]
+    digest = md.build_digest(runs, now=now, since_seconds=7 * DAY)
+    text = md.render_digest(digest, fmt="text")
+    assert "Restart gateway" in text
+    assert "t_fu" in text
+
+
+def test_render_superseded_section_shows_ref_and_by_task():
+    """Kill bool_op_swap L352 (or->and blanks superseded list) and
+    L356 (or->and turns by_task into '?')."""
+    now = 100 * DAY
+    runs = [_run("t_new", now - 1 * DAY,
+                 decisions=[{"decision": "new way", "supersedes": "t_old"}])]
+    digest = md.build_digest(runs, now=now, since_seconds=7 * DAY)
+    text = md.render_digest(digest, fmt="text")
+    assert "t_old" in text
+    assert "t_new" in text
