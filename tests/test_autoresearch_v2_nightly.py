@@ -569,10 +569,13 @@ def test_watchdog_starts_only_for_positive_budget():
     negative deadline would fire immediately and kill a healthy sweep."""
     import threading
 
+    def _watchdogs():
+        return {t.ident for t in threading.enumerate() if t.name == "ar-v2-watchdog"}
+
+    before = _watchdogs()
     nightly._install_hang_forensics(0.0, 0.0)
     nightly._install_hang_forensics(0.0, -5.0)
-    names = {t.name for t in threading.enumerate()}
-    assert "ar-v2-watchdog" not in names
+    assert _watchdogs() == before
 
 
 def test_test_foundry_lane_normalizes_bare_ok_result(monkeypatch):
