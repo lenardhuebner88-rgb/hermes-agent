@@ -326,3 +326,93 @@ def test_read_comment_file_round_trip(tmp_path):
     p = tmp_path / "notes.md"
     p.write_text("  closure notes here  \n", encoding="utf-8")
     assert kcs.read_comment_file(str(p)) == "closure notes here"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_kid_receipt_title_preserved(kanban_home):
+    """Kill bool_op_swap L89: or->and would replace a truthy title with '(untitled)'."""
+    with kb.connect() as conn:
+        kid = kb.create_task(conn, title="Real Title", assignee="coder")
+        receipt = kcs._kid_receipt(conn, kid)
+    assert receipt.title == "Real Title"
+
+
+def test_kid_receipt_summary_whitespace_becomes_none(kanban_home):
+    """Kill bool_op_swap L82 (second or): strip() or None — whitespace summary → None."""
+    with kb.connect() as conn:
+        kid = kb.create_task(conn, title="T", assignee="coder")
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, summary, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kid, "coder", "ended", now - 90, now - 10, "completed", "   ", "{}"),
+        )
+        conn.commit()
+        receipt = kcs._kid_receipt(conn, kid)
+    assert receipt.summary is None
+
+
+def test_kid_receipt_summary_preserved(kanban_home):
+    """Kill bool_op_swap L82 (first or): summary or '' — truthy summary kept."""
+    with kb.connect() as conn:
+        kid = kb.create_task(conn, title="T", assignee="coder")
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, summary, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kid, "coder", "ended", now - 90, now - 10, "completed", "did the work", "{}"),
+        )
+        conn.commit()
+        receipt = kcs._kid_receipt(conn, kid)
+    assert receipt.summary == "did the work"
+
+
+def test_kid_receipt_runtime_none_when_ended_missing(kanban_home):
+    """Kill bool_op_swap L80: and->or would compute int(None - started) → TypeError."""
+    with kb.connect() as conn:
+        kid = kb.create_task(conn, title="T", assignee="coder")
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, outcome, summary, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (kid, "coder", "ended", now - 90, None, "completed", "done", "{}"),
+        )
+        conn.commit()
+        receipt = kcs._kid_receipt(conn, kid)
+    assert receipt.runtime_seconds is None
+
+
+def test_closure_comment_shows_assignee(kanban_home):
+    """Kill bool_op_swap L142/L249: or->and would replace truthy assignee with '-'."""
+    parent, kids = _make_sprint(n_kids=1)
+    with kb.connect() as conn:
+        body, receipts = kcs.build_closure_comment(conn, parent)
+    assert "coder" in body
+    assert receipts[0].assignee == "coder"
+
+
+def test_close_sprint_custom_result_used(kanban_home):
+    """Kill bool_op_swap L351: or->and would discard a truthy custom result."""
+    parent, _ = _make_sprint(n_kids=1)
+    with kb.connect() as conn:
+        outcome = kcs.close_sprint(conn, parent, result="custom result xyz")
+    assert outcome.ok
+    # Verify the custom result was passed to complete_task
+    with kb.connect() as conn:
+        task = kb.get_task(conn, parent)
+    assert task.result == "custom result xyz"
+
+
+def test_completion_summary_skips_empty_lines(kanban_home):
+    """Kill bool_op_swap L343: and->or would pick an empty line as summary."""
+    parent, _ = _make_sprint(n_kids=1)
+    with kb.connect() as conn:
+        outcome = kcs.close_sprint(
+            conn, parent,
+            comment_override="SPRINT CLOSURE\n\n\nFirst real line\nSecond line",
+        )
+    assert outcome.ok
+    # The summary should be "First real line", not ""
+    assert outcome.completed
