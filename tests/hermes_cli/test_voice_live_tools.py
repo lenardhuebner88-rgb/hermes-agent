@@ -1219,3 +1219,83 @@ async def test_recall_memory_empty_output_reports_no_memories_found():
         result = await executor.execute("recall_memory", {"frage": "test"})
 
     assert result == {"memories": "Keine Erinnerungen gefunden."}
+
+
+# ---------------------------------------------------------------------------
+# Second pass: None-safety + availability guards
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_read_terminal_none_stdout_is_empty_output():
+    """A completed process with stdout=None (captured but empty) yields an
+    empty output string — never a crash on None.splitlines()."""
+    executor = VoiceToolExecutor(delegate=None)
+    with patch("tools.voice_live_tools.subprocess.run", return_value=_proc(None)):
+        result = await executor.execute("read_terminal", {"session": "main"})
+    assert result == {"output": ""}
+
+
+@pytest.mark.asyncio
+async def test_send_to_terminal_requires_command():
+    """A missing command is invalid_arguments — it must not reach tmux
+    with a None argument."""
+    executor = VoiceToolExecutor(delegate=None)
+    with patch("tools.voice_live_tools.subprocess.run", return_value=_proc("")) as run:
+        result = await executor.execute("send_to_terminal", {"session": "main"})
+    assert result["error"]["code"] == "invalid_arguments"
+    run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_look_closely_requires_frame_callback_even_with_key():
+    """An API key alone does not make look_closely available — without a
+    frame callback the error is look_unavailable, not no_frame."""
+    executor = VoiceToolExecutor(delegate=None, gemini_api_key="k")
+    result = await executor.execute("look_closely", {"question": "?"})
+    assert result["error"]["code"] == "look_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_look_closely_single_token_field_reports_incomplete():
+    """Usage with only one token field (prompt missing, candidates
+    present) must be reported incomplete — a half-measured call billed
+    as complete corrupts the cost metric."""
+    reported = {}
+
+    def report_usage(input_tokens, output_tokens, complete):
+        reported["input"] = input_tokens
+        reported["output"] = output_tokens
+        reported["complete"] = complete
+
+    generate_content = AsyncMock(
+        return_value=_fake_generate_content_response(
+            "A.", prompt_tokens=None, candidate_tokens=14
+        )
+    )
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = generate_content
+
+    async def fake_request_frame():
+        return FIXTURE_VIDEO.read_bytes()
+
+    executor = VoiceToolExecutor(
+        delegate=None,
+        request_frame=fake_request_frame,
+        gemini_api_key="k",
+        report_look_usage=report_usage,
+    )
+    with patch("tools.voice_live_tools.genai.Client", return_value=fake_client):
+        await executor.execute("look_closely", {"question": "?"})
+
+    assert reported == {"input": 0, "output": 14, "complete": False}
+
+
+@pytest.mark.asyncio
+async def test_stop_watching_without_callback_reports_not_watching():
+    """stop_watching without a wired callback answers {watching: False,
+    was_watching: False} — the idempotent no-op shape."""
+    executor = VoiceToolExecutor(delegate=None)
+    assert await executor.execute("stop_watching", {}) == {
+        "watching": False,
+        "was_watching": False,
+    }
