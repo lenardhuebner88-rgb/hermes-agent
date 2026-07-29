@@ -559,6 +559,12 @@ def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
     p_show.add_argument("task_id")
     p_show.add_argument("--json", action="store_true")
     p_show.add_argument(
+        "--after-comment-id",
+        type=int,
+        default=None,
+        help="Only show comments with an ID greater than this watermark",
+    )
+    p_show.add_argument(
         "--state-type",
         choices=("status", "outcome"),
         default=None,
@@ -2661,6 +2667,7 @@ def _show_build_json_payload(
     children: Any,
     runs: Any,
     latest_summary: Any,
+    attachments: Any,
 ) -> dict[str, Any]:
     """Build the ``kanban show --json`` payload (pure; no I/O)."""
     return {
@@ -2668,10 +2675,29 @@ def _show_build_json_payload(
         "ui_impact": task.ui_impact,
         "effective_ui_impact": kb.effective_ui_impact(task),
         "latest_summary": latest_summary,
+        "attachments": [
+            {
+                "id": attachment.id,
+                "filename": attachment.filename,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "sha256": attachment.sha256,
+                "stored_path": attachment.stored_path,
+                "uploaded_by": attachment.uploaded_by,
+                "created_at": attachment.created_at,
+            }
+            for attachment in attachments
+        ],
         "parents": parents,
         "children": children,
         "comments": [
-            {"author": c.author, "body": c.body, "created_at": c.created_at}
+            {
+                "id": c.id,
+                "kind": c.kind,
+                "author": c.author,
+                "body": c.body,
+                "created_at": c.created_at,
+            }
             for c in comments
         ],
         "events": [
@@ -2819,7 +2845,7 @@ def _show_print_timeline(
         print()
         print(f"Comments ({len(comments)}):")
         for c in comments:
-            print(f"  [{_fmt_ts(c.created_at)}] {c.author}: {c.body}")
+            print(f"  [#{c.id} {c.kind} {_fmt_ts(c.created_at)}] {c.author}: {c.body}")
     if events:
         print()
         print(f"Events ({len(events)}):")
@@ -2844,6 +2870,21 @@ def _show_print_timeline(
                 print(f"        ! {r.error.splitlines()[0][:160]}")
 
 
+def _show_print_attachments(attachments: Any) -> None:
+    """Print the explicit task attachment manifest for human-readable show."""
+    if not attachments:
+        return
+    print()
+    print(f"Attachments ({len(attachments)}):")
+    for attachment in attachments:
+        sha256 = f" sha256={attachment.sha256}" if attachment.sha256 else ""
+        print(
+            f"  [#{attachment.id}] {attachment.filename} ({attachment.size} bytes)"
+            f"{sha256}"
+        )
+        print(f"        path: {attachment.stored_path}")
+
+
 def _cmd_show(args: argparse.Namespace) -> int:
     rsk = _run_state_kwargs(args)
     if rsk is None:
@@ -2857,11 +2898,16 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if not task:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
-        comments = kb.list_comments(conn, args.task_id)
+        comments = kb.list_comments(
+            conn,
+            args.task_id,
+            after_comment_id=getattr(args, "after_comment_id", None),
+        )
         events = kb.list_events(conn, args.task_id)
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)
         runs = kb.list_runs(conn, args.task_id, **rsk)
+        attachments = kb.list_attachments(conn, args.task_id)
         # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
         # ``result=``. Surfacing the latest summary here keeps ``show`` from
         # looking like a no-op when the worker actually did real work.
@@ -2870,6 +2916,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if getattr(args, "json", False):
             payload = _show_build_json_payload(
                 task, comments, events, parents, children, runs, latest_summary,
+                attachments,
             )
             _emit_json(payload)
             return 0
@@ -2879,6 +2926,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         _show_print_timeline(
             task, parents, children, latest_summary, comments, events, runs,
         )
+        _show_print_attachments(attachments)
         return 0
 
 
