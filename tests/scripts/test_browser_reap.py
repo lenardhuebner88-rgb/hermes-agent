@@ -388,3 +388,88 @@ def test_format_journal_line_bounds_cmd_and_uses_real_hour_math():
     assert "age=18.06h" in line
     assert "x" * 197 + "..." in line
     assert "x" * 198 + "..." not in line
+
+
+# ---------------------------------------------------------------------------
+# Second pass: constants, boundary, process table defaults, liveness probe
+# ---------------------------------------------------------------------------
+
+def test_grace_seconds_is_pinned_at_three():
+    """SIGTERM→SIGKILL grace mirrors the orchestration reaper at exactly
+    3 seconds."""
+    assert br.GRACE_SECONDS == 3
+
+
+def test_format_journal_line_keeps_exactly_200_char_cmd():
+    """The cmd cap is inclusive at 200: a 200-char cmd stays whole, a
+    201-char cmd truncates to 197 + '...'."""
+    exact = "x" * 200
+    line = br.format_journal_line(
+        br.ReapCandidate(pid=1, age_seconds=7200.0, signature="sig", cmd=exact),
+        dry_run=True,
+    )
+    assert exact in line
+
+    over = "y" * 201
+    line2 = br.format_journal_line(
+        br.ReapCandidate(pid=1, age_seconds=7200.0, signature="sig", cmd=over),
+        dry_run=True,
+    )
+    assert "y" * 197 + "..." in line2
+    assert "y" * 201 not in line2
+
+
+def test_collect_procs_defaults_missing_ppid_and_create_time(monkeypatch):
+    """A process whose ppid/create_time the kernel hides gets the 0/0.0
+    defaults — never None (which would crash the age math), and the
+    reaper's own pid stays excluded."""
+    import os
+    import sys
+
+    class _FakeProc:
+        def __init__(self, info):
+            self.info = info
+
+    class _FakePsutil:
+        NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+        AccessDenied = type("AccessDenied", (Exception,), {})
+
+        @staticmethod
+        def process_iter(attrs):
+            return [
+                _FakeProc({
+                    "pid": 424242,
+                    "ppid": None,
+                    "create_time": None,
+                    "cmdline": ["chrome", "--headless"],
+                }),
+                _FakeProc({
+                    "pid": os.getpid(),
+                    "ppid": 1,
+                    "create_time": 1.0,
+                    "cmdline": ["python", "x.py"],
+                }),
+            ]
+
+    monkeypatch.setitem(sys.modules, "psutil", _FakePsutil)
+    procs = br.collect_procs()
+
+    assert [p.pid for p in procs] == [424242]
+    assert procs[0].ppid == 0
+    assert procs[0].create_time == 0.0
+
+
+def test_os_is_alive_probes_with_signal_zero(monkeypatch):
+    """Liveness is os.kill(pid, 0) — signal 0 must never become a real
+    signal (1 = SIGHUP would KILL the target), and ProcessLookupError
+    means dead."""
+    calls = []
+    monkeypatch.setattr(br.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+    assert br._os_is_alive(123) is True
+    assert calls == [(123, 0)]
+
+    def dead(pid, sig):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(br.os, "kill", dead)
+    assert br._os_is_alive(123) is False
