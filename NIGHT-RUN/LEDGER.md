@@ -292,3 +292,9 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - equivalent survivors: L220, L228, L235 (heartbeat_age_s always float, include_heartbeat_age irrelevant)
 - probe after: 17/20 = 85%
 - commit: d79d6c467
+
+## 42. hermes_cli/kanban_shadow_routing.py — 2026-07-29T03:19:59Z
+- probe before: 10/20 = 50%
+- killed survivors: [K] bool_op_swap L32, [K] comparison_swap L34, [K] bool_op_swap L50
+- probe after: 13/20 = 65%
+- commit: 975d99ae4
