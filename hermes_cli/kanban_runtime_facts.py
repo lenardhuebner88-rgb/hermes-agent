@@ -103,6 +103,18 @@ CREATE TABLE IF NOT EXISTS pending_worker_run_retry_links (
 
 RETRY_CLASSES = frozenset({"auto", "integration", "transient", "operator"})
 
+# Lifecycle event kinds that prove the *next* worker run of a task is a retry,
+# mapped to the retry class each one proves. Keys are ``kanban_db`` event kinds;
+# ``tests/hermes_cli/test_kanban_runtime_facts.py`` pins them against that
+# module's constants so a rename fails a gate instead of silently disabling
+# lineage. Owning the map here keeps the classification out of upstream code.
+RETRY_EVENT_CLASSES: Mapping[str, str] = {
+    "auto_retried": "auto",
+    "integration_retry": "integration",
+    "transient_retry": "transient",
+    "unblocked": "operator",
+}
+
 
 def init_schema(conn: sqlite3.Connection) -> None:
     """Install the fork-owned runtime-facts tables for an existing board."""
@@ -234,6 +246,7 @@ def _retry_link_diagnostic(
     task_id: str,
     finding: str,
     details: Mapping[str, Any],
+    kind: str = "retry_link_rejected",
 ) -> None:
     import json
 
@@ -241,7 +254,7 @@ def _retry_link_diagnostic(
         "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
         (
             task_id,
-            "retry_link_rejected",
+            kind,
             json.dumps({"finding": finding, **details}, sort_keys=True),
             int(time.time()),
         ),
@@ -343,23 +356,105 @@ def stage_retry_link(
     )
 
 
+def _predecessor_run_id_when_idle(
+    conn: sqlite3.Connection, task_id: str
+) -> int | None:
+    """Latest ended run of a task, but only while no run is active.
+
+    With an active run the latest *ended* run is demonstrably not the run the
+    next attempt retries, so the lineage stays absent instead of being inferred
+    from an adjacent run (module contract, see the docstring at the top).
+    """
+    task = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None or task["current_run_id"] is not None:
+        return None
+    row = conn.execute(
+        "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def stage_retry_link_for_event(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    kind: str,
+    payload: Mapping[str, Any] | None = None,
+    run_id: int | None = None,
+    event_id: int,
+    board: str | Callable[[], str | None] | None = None,
+) -> bool:
+    """Stage retry lineage if ``kind`` is a retry event; returns whether it did.
+
+    Owns the whole classification so the event writer keeps a single call: which
+    event kinds prove a retry, which run the retry follows, and when the
+    predecessor is simply unknown. ``board`` may be a callable so callers do not
+    pay board resolution on every non-retry event.
+    """
+    retry_class = RETRY_EVENT_CLASSES.get(kind)
+    if retry_class is None:
+        return False
+    predecessor_run_id = (payload or {}).get("blocked_run_id") or run_id
+    if predecessor_run_id is None:
+        predecessor_run_id = _predecessor_run_id_when_idle(conn, task_id)
+    if predecessor_run_id is None:
+        return False
+    stage_retry_link(
+        conn,
+        task_id=task_id,
+        retry_of_task_run_id=int(predecessor_run_id),
+        retry_class=retry_class,
+        triggering_event_id=int(event_id),
+        board=board() if callable(board) else board,
+    )
+    return True
+
+
 def consume_staged_retry_link(
     conn: sqlite3.Connection, *, task_id: str, task_run_id: int
-) -> None:
+) -> bool:
+    """Attach staged lineage to the run that actually is the retry.
+
+    Every run-creating claim consumes the pending row, so the immediately
+    following run carries the link and no later, unrelated run can inherit it.
+    Consumption is unconditional: a pending row that no longer describes a valid
+    relationship is diagnosed into ``task_events`` and dropped rather than
+    failing the claim forever. Returns whether a link was recorded.
+    """
     pending = conn.execute(
         "SELECT * FROM pending_worker_run_retry_links WHERE task_id = ?", (task_id,)
     ).fetchone()
     if pending is None:
-        return
-    record_retry_link(
-        conn,
-        task_run_id=task_run_id,
-        retry_of_task_run_id=int(pending["retry_of_task_run_id"]),
-        retry_class=str(pending["retry_class"]),
-        triggering_event_id=int(pending["triggering_event_id"]),
-        board=str(pending["board"]),
-    )
+        return False
     conn.execute("DELETE FROM pending_worker_run_retry_links WHERE task_id = ?", (task_id,))
+    try:
+        record_retry_link(
+            conn,
+            task_run_id=task_run_id,
+            retry_of_task_run_id=int(pending["retry_of_task_run_id"]),
+            retry_class=str(pending["retry_class"]),
+            triggering_event_id=int(pending["triggering_event_id"]),
+            board=str(pending["board"]),
+        )
+    except ValueError:
+        _retry_link_diagnostic(
+            conn,
+            task_id=task_id,
+            finding="staged_link_no_longer_valid",
+            kind="pending_retry_link_discarded",
+            details={
+                "task_run_id": int(task_run_id),
+                "retry_of_task_run_id": int(pending["retry_of_task_run_id"]),
+                "retry_class": str(pending["retry_class"]),
+                "triggering_event_id": int(pending["triggering_event_id"]),
+            },
+        )
+        return False
+    return True
 
 
 def record_event(

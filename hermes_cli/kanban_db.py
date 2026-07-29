@@ -7306,32 +7306,15 @@ def _append_event(
         (task_id, run_id, kind, pl, now),
     )
     event_id = int(cur.lastrowid)
-    retry_class = {
-        "auto_retried": "auto",
-        INTEGRATION_RETRY_EVENT: "integration",
-        TRANSIENT_RETRY_EVENT: "transient",
-        "unblocked": "operator",
-    }.get(kind)
-    if retry_class is not None:
-        predecessor_run_id = (payload or {}).get("blocked_run_id") or run_id
-        if predecessor_run_id is None:
-            predecessor = conn.execute(
-                "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            predecessor_run_id = predecessor["id"] if predecessor is not None else None
-    else:
-        predecessor_run_id = None
-    if retry_class is not None and predecessor_run_id is not None:
-        _runtime_facts.stage_retry_link(
-            conn,
-            task_id=task_id,
-            retry_of_task_run_id=int(predecessor_run_id),
-            retry_class=retry_class,
-            triggering_event_id=event_id,
-            board=board_slug_for_conn(conn),
-        )
+    _runtime_facts.stage_retry_link_for_event(
+        conn,
+        task_id=task_id,
+        kind=kind,
+        payload=payload,
+        run_id=run_id,
+        event_id=event_id,
+        board=lambda: board_slug_for_conn(conn),
+    )
     return event_id
 
 
@@ -12102,6 +12085,13 @@ def claim_review_task(
             task_run_id=run_id,
             claimed_at_seconds=now,
             board=board_slug_for_conn(conn),
+        )
+        # A review-lane run is a real run: when a retry event staged lineage
+        # (e.g. the pid-loss sweep ended a review-claimed run), this run is the
+        # retry and must carry the link. Leaving the pending row here would let a
+        # later coder claim inherit it and record a wrong predecessor and class.
+        _runtime_facts.consume_staged_retry_link(
+            conn, task_id=task_id, task_run_id=int(run_id)
         )
         return get_task(conn, task_id)
 

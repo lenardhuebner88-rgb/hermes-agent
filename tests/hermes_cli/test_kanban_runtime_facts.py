@@ -239,6 +239,161 @@ def test_append_event_stages_exact_retry_relationship_for_next_claim(
     assert event["kind"] == event_kind
 
 
+def _current_run(conn, task_id: str) -> int:
+    return conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()["current_run_id"]
+
+
+def _pending_retry_rows(conn, task_id: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM pending_worker_run_retry_links WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()[0]
+
+
+def _park(conn, task_id: str, status: str) -> None:
+    conn.execute(
+        "UPDATE tasks SET status = ?, claim_lock = NULL, claim_expires = NULL "
+        "WHERE id = ?",
+        (status, task_id),
+    )
+
+
+def test_retry_event_classes_are_pinned_to_the_lifecycle_event_constants():
+    assert facts.RETRY_EVENT_CLASSES == {
+        "auto_retried": "auto",
+        kb.INTEGRATION_RETRY_EVENT: "integration",
+        kb.TRANSIENT_RETRY_EVENT: "transient",
+        "unblocked": "operator",
+    }
+    assert set(facts.RETRY_EVENT_CLASSES.values()) <= facts.RETRY_CLASSES
+
+
+def test_review_claim_consumes_lineage_so_a_later_coder_claim_inherits_nothing(
+    kanban_home,
+):
+    """The review-lane run is the retry; a later coder run must stay unlinked."""
+    with kb.connect_closing() as conn:
+        task_id, crashed_run = _claimed_run(conn)
+        kb._end_run(conn, task_id, outcome="crashed")
+        _park(conn, task_id, "review")
+        event_id = kb._append_event(
+            conn, task_id, kb.TRANSIENT_RETRY_EVENT, {}, run_id=crashed_run
+        )
+        staged = conn.execute(
+            "SELECT retry_of_task_run_id, retry_class FROM "
+            "pending_worker_run_retry_links WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+
+        assert kb.claim_review_task(conn, task_id, reviewer_profile="reviewer") is not None
+        review_run = _current_run(conn, task_id)
+        review_link = facts.get_retry_link(conn, task_run_id=review_run)
+        pending_after_review = _pending_retry_rows(conn, task_id)
+
+        kb._end_run(conn, task_id, outcome="completed")
+        _park(conn, task_id, "ready")
+        assert kb.claim_task(conn, task_id) is not None
+        coder_run = _current_run(conn, task_id)
+        coder_link = facts.get_retry_link(conn, task_run_id=coder_run)
+        pending_after_coder = _pending_retry_rows(conn, task_id)
+        trigger = conn.execute(
+            "SELECT task_id, kind FROM task_events WHERE id = ?", (event_id,)
+        ).fetchone()
+
+    assert (staged["retry_of_task_run_id"], staged["retry_class"]) == (
+        crashed_run,
+        "transient",
+    )
+    assert crashed_run < review_run < coder_run
+    assert review_link is not None
+    assert review_link["task_run_id"] == review_run
+    assert review_link["retry_of_task_run_id"] == crashed_run
+    assert review_link["retry_class"] == "transient"
+    assert review_link["triggering_event_id"] == event_id
+    assert review_link["task_id"] == task_id
+    assert review_link["board"] == "default"
+    assert (trigger["task_id"], trigger["kind"]) == (task_id, kb.TRANSIENT_RETRY_EVENT)
+    assert coder_link is None
+    assert (pending_after_review, pending_after_coder) == (0, 0)
+
+
+def test_retry_event_leaves_lineage_absent_while_a_run_is_active(kanban_home):
+    """With an active run the latest ended run is not the predecessor."""
+    with kb.connect_closing() as conn:
+        task_id, ended_run = _claimed_run(conn)
+        kb._end_run(conn, task_id, outcome="crashed")
+        _park(conn, task_id, "ready")
+        assert kb.claim_task(conn, task_id) is not None
+        active_run = _current_run(conn, task_id)
+
+        kb._append_event(conn, task_id, "unblocked", {})
+        pending_while_active = _pending_retry_rows(conn, task_id)
+
+        # Control: the very same event does stage once no run is active, so the
+        # empty result above is the guard and not a broken event path.
+        kb._end_run(conn, task_id, outcome="crashed")
+        kb._append_event(conn, task_id, "unblocked", {})
+        staged_when_idle = conn.execute(
+            "SELECT retry_of_task_run_id, retry_class FROM "
+            "pending_worker_run_retry_links WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+
+    assert ended_run < active_run
+    assert pending_while_active == 0
+    assert (staged_when_idle["retry_of_task_run_id"], staged_when_idle["retry_class"]) == (
+        active_run,
+        "operator",
+    )
+
+
+def test_invalid_staged_retry_link_is_discarded_instead_of_blocking_the_claim(
+    kanban_home,
+):
+    with kb.connect_closing() as conn:
+        task_id, first_run = _claimed_run(conn)
+        kb._end_run(conn, task_id, outcome="crashed")
+        _park(conn, task_id, "ready")
+        event_id = kb._append_event(
+            conn, task_id, "operator_retry", {"attempt": 1}, run_id=first_run
+        )
+        unknown_run = first_run + 10_000
+        facts.stage_retry_link(
+            conn,
+            task_id=task_id,
+            retry_of_task_run_id=unknown_run,
+            retry_class="operator",
+            triggering_event_id=event_id,
+            board="default",
+        )
+
+        claimed = kb.claim_task(conn, task_id)
+        retry_run = _current_run(conn, task_id)
+        link = facts.get_retry_link(conn, task_run_id=retry_run)
+        pending_after_claim = _pending_retry_rows(conn, task_id)
+        rejected = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'retry_link_rejected' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        discarded = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'pending_retry_link_discarded' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    assert claimed is not None
+    assert link is None
+    assert pending_after_claim == 0
+    assert json.loads(rejected["payload"])["finding"] == "missing_predecessor"
+    discarded_payload = json.loads(discarded["payload"])
+    assert discarded_payload["finding"] == "staged_link_no_longer_valid"
+    assert discarded_payload["retry_of_task_run_id"] == unknown_run
+    assert discarded_payload["task_run_id"] == retry_run
+
+
 def test_foreign_task_retry_link_is_rejected_with_structured_diagnostic(kanban_home):
     with kb.connect_closing() as conn:
         first_task, foreign_run_id = _claimed_run(conn)
