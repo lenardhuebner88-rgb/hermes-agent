@@ -217,3 +217,73 @@ def test_drain_pending_on_start_rearms_stranded_bundle(
     # Empty pending → no re-arm.
     assert aqp.drain_pending_on_start(db_path=qdb) is False
     assert scheduled == [1.0]
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_bundle_body_uses_primary_question_text() -> None:
+    """Kill bool_op_swap L163: or->and would replace the actual question
+    text with the '{n} neue Fragen' fallback in bundled payloads."""
+    payload = aqp.build_question_push_payload(
+        [
+            {"id": 1, "kind": "claude", "question_text": "First?", "status": "open"},
+            {"id": 2, "kind": "codex", "question_text": "Second question?", "status": "open"},
+        ]
+    )
+    assert payload is not None
+    assert payload["title"] == "2 offene Fragen"
+    # Body must contain the primary (highest-id) question text, not the fallback.
+    assert "Second question?" in payload["body"]
+    assert "neue Fragen" not in payload["body"]
+
+
+def test_send_fn_import_failure_returns_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill boolean_flip L181: False->True would report enabled=True
+    when the sender import actually fails."""
+    import builtins
+    real_import = builtins.__import__
+
+    def _fail_import(name, *args, **kwargs):
+        if "plugin_api" in name:
+            raise ImportError("no plugin")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_import)
+    result = aqp._send_payload({"test": True})
+    assert result["enabled"] is False
+    assert result["sent"] == 0
+
+
+def test_flush_skips_old_events_by_ts(qdb: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill bool_op_swap L225: or->and would make _iso_to_epoch receive ''
+    for valid timestamps, returning None and letting old events through."""
+    t0 = 1_700_000_000.0
+    old_id = _insert_open(qdb, pane="%30", question="Stale?", now=t0 - (3 * 3600))
+    aqp._save_pending([old_id], db_path=qdb, now=t0)
+    aq.set_meta("push_last_ts", "0", db_path=qdb)
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(aqp, "_send_fn", lambda payload: sent.append(payload) or {"sent": 1})
+
+    result = aqp.flush_pending_pushes(now=t0, db_path=qdb)
+    # Old event must be filtered out — nothing to send.
+    assert result.get("sent") is False or result.get("events_sent", 0) == 0
+    assert sent == []
+
+
+def test_flush_first_push_sends_immediately(qdb: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill bool_op_swap L359: or->and would block the very first push
+    (last<=0) because elapsed>=DEBOUNCE_S is False when last==0."""
+    t0 = 1_700_000_000.0
+    eid = _insert_open(qdb, pane="%40", question="Fresh?", now=t0)
+    aqp._save_pending([eid], db_path=qdb, now=t0)
+    # Ensure no prior push timestamp (first push ever).
+    aq.set_meta("push_last_ts", "0", db_path=qdb)
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(aqp, "_send_fn", lambda payload: sent.append(payload) or {"sent": 1})
+
+    result = aqp.flush_pending_pushes(now=t0, db_path=qdb)
+    assert len(sent) == 1
+    assert result.get("sent") is True or result.get("events_sent", 1) >= 1
