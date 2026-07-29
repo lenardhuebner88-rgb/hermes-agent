@@ -52,7 +52,7 @@ Fork-owned = present in HEAD, absent from `origin/main`. Reproduce with:
 - [x] `hermes_cli/pa_health.py` (350 LoC) — `tests/hermes_cli/test_pa_health.py`
 - [x] `hermes_cli/pa_news.py` (342 LoC) — `tests/hermes_cli/test_pa_news.py`
 - [x] `hermes_cli/design_board_kanban.py` (327 LoC) — `tests/test_design_board_kanban.py`
-- [ ] `hermes_cli/library_state.py` (323 LoC) — `tests/hermes_cli/test_library_state.py`
+- [x] `hermes_cli/library_state.py` (323 LoC) — `tests/hermes_cli/test_library_state.py`
 - [ ] `hermes_cli/autoresearch_lane_contracts.py` (322 LoC) — `tests/hermes_cli/test_autoresearch_lane_contracts.py`
 - [ ] `hermes_cli/health_status.py` (322 LoC) — `tests/hermes_cli/test_health_status.py`
 - [ ] `hermes_cli/kanban_shadow_routing.py` (286 LoC) — `tests/hermes_cli/test_kanban_shadow_routing.py`
