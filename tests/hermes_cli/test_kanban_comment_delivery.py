@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from argparse import Namespace
@@ -158,6 +159,51 @@ def test_comments_after_worker_brief_checkpoint_are_identifiable(kanban_home):
         assert [comment.id for comment in kb.list_comments(conn, task_id) if comment.id > watermark] == [new_comment_id]
     finally:
         conn.close()
+
+
+def test_launch_snapshot_excludes_comments_arriving_after_its_watermark(
+    kanban_home, monkeypatch,
+):
+    """A late comment stays pending even while launch persists its snapshot."""
+    with kb.connect_closing() as conn:
+        task_id = _claimed_task(conn)
+        known_comment_id = kb.add_comment(conn, task_id, "operator", "Known note.")
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+
+    real_render = kb.render_worker_brief_for_task
+    render_calls = 0
+    late_comment_id = 0
+
+    def render_then_add_late_comment(conn, task_id, **kwargs):
+        nonlocal render_calls, late_comment_id
+        render_calls += 1
+        rendered = real_render(conn, task_id, **kwargs)
+        if render_calls == 1:
+            late_comment_id = kb.add_comment(conn, task_id, "operator", "Late note.")
+        return rendered
+
+    monkeypatch.setattr(kb, "render_worker_brief_for_task", render_then_add_late_comment)
+    launched = kb._prepare_worker_brief_launch(task, board=None, audience="hermes")
+
+    with kb.connect_closing() as conn:
+        run = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (task.current_run_id,)
+        ).fetchone()
+        assert run is not None
+        metadata = json.loads(run["metadata"])
+        event = next(
+            item for item in kb.list_events(conn, task_id) if item.kind == "brief_rendered"
+        )
+
+    watermark = metadata["brief"]["comment_id_watermark"]
+    assert event.payload is not None
+    assert render_calls == 1
+    assert watermark == known_comment_id
+    assert event.payload["comment_id_watermark"] == watermark
+    assert "Known note." in launched.payload
+    assert "Late note." not in launched.payload
+    assert late_comment_id > watermark
 
 
 # --- mutation-hardening tests (night-run 2026-07-29) ---

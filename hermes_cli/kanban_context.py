@@ -133,7 +133,10 @@ def render_comment_thread(
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
             safe_author = (c.author or "").replace("`", "")
             lines.append(f"operator directive `{safe_author}` at {ts}:")
-            lines.append(cap_text(c.body, comment_bytes))
+            # Directives are operational corrections, not background comment
+            # history.  They deliberately bypass both comment count and byte
+            # caps so a continuation cannot lose the instruction that fixes it.
+            lines.append(c.body or "")
             lines.append("")
 
     if regular:
@@ -213,6 +216,7 @@ class WorkerBriefInput:
     title: str
     header: str
     sections: Mapping[str, Sequence[BriefRecord]]
+    comment_id_watermark: int = 0
 
 
 @dataclass(frozen=True)
@@ -234,6 +238,7 @@ def _fingerprint(task: WorkerBriefInput, *, phase: str, audience: str, profile: 
         "title": task.title,
         "phase": phase,
         "profile": profile,
+        "comment_id_watermark": task.comment_id_watermark,
         "header": _RELATIVE_TIME_RE.sub("<relative-time>", task.header).rstrip(),
         "sections": {
             name: [{"key": record.key, "text": _canonical_record(record)} for record in task.sections.get(name, ())]
@@ -305,6 +310,7 @@ def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, pr
         "profile": profile,
         "chars": len(payload),
         "token_estimate": (len(payload) + 3) // 4,
+        "comment_id_watermark": task.comment_id_watermark,
         "section_counts": section_counts,
         "omitted_records": sum(v["omitted"] for v in section_counts.values()),
         "payload_fingerprint": _fingerprint(task, phase=phase, audience=audience, profile=profile),

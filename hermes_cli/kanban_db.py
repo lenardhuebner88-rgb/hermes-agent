@@ -32590,6 +32590,7 @@ def _prepare_worker_brief_launch(
                 "token_estimate": brief.manifest["token_estimate"],
                 "section_counts": brief.manifest["section_counts"],
                 "payload_fingerprint": brief.manifest["payload_fingerprint"],
+                "comment_id_watermark": brief.manifest["comment_id_watermark"],
                 "artifact_count": len(artifacts),
             },
             run_id=task.current_run_id,
@@ -32619,7 +32620,7 @@ def _prepare_worker_brief_launch(
                 exc_info=True,
             )
         conn.commit()
-        return render_worker_brief_for_task(conn, task.id, audience=audience)
+        return _with_worker_brief_artifacts(brief, artifacts)
 
 
 def _default_spawn(
@@ -34045,6 +34046,7 @@ def _worker_brief_input(
         title=task.title,
         header="\n".join(header).rstrip(),
         sections=sections,
+        comment_id_watermark=comment_id_watermark,
     )
 
 
@@ -34061,6 +34063,26 @@ def _current_brief_artifacts(conn: sqlite3.Connection, task: "Task") -> list[dic
         return []
     artifacts = metadata.get("brief_artifacts") if isinstance(metadata, dict) else None
     return artifacts if isinstance(artifacts, list) else []
+
+
+def _with_worker_brief_artifacts(
+    brief: _kanban_context.RenderedWorkerBrief,
+    artifacts: list[dict],
+) -> _kanban_context.RenderedWorkerBrief:
+    """Attach launch-materialized overflow links without re-rendering a brief."""
+    if not artifacts:
+        return brief
+    lines = [brief.payload.rstrip(), "", "## Overflow artifacts"]
+    for artifact in artifacts:
+        lines.append(
+            f"- `{artifact.get('section', 'unknown')}`: {artifact.get('omitted_records', 0)} omitted record(s); "
+            f"sha256 `{artifact.get('sha256', '')}`; full content: `{artifact.get('path', '')}`"
+        )
+    return _kanban_context.RenderedWorkerBrief(
+        payload="\n".join(lines).rstrip() + "\n",
+        manifest=brief.manifest,
+        overflows=brief.overflows,
+    )
 
 
 def render_worker_brief_for_task(
@@ -34087,19 +34109,7 @@ def render_worker_brief_for_task(
         profile=resolved_profile,
     )
     artifacts = _current_brief_artifacts(conn, task)
-    if not artifacts:
-        return brief
-    lines = [brief.payload.rstrip(), "", "## Overflow artifacts"]
-    for artifact in artifacts:
-        lines.append(
-            f"- `{artifact.get('section', 'unknown')}`: {artifact.get('omitted_records', 0)} omitted record(s); "
-            f"sha256 `{artifact.get('sha256', '')}`; full content: `{artifact.get('path', '')}`"
-        )
-    return _kanban_context.RenderedWorkerBrief(
-        payload="\n".join(lines).rstrip() + "\n",
-        manifest=brief.manifest,
-        overflows=brief.overflows,
-    )
+    return _with_worker_brief_artifacts(brief, artifacts)
 
 
 def build_worker_context(
