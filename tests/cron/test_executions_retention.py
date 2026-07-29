@@ -36,6 +36,9 @@ def test_noisy_job_cannot_evict_quiet_job(monkeypatch, tmp_path):
     full history (the A-M9 regression shape)."""
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "5")
+    # Count-only retention: loop 15 added a time-based guarantee (fresh rows
+    # beyond the count window are kept); these tests pin the count semantics.
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")
 
     for _ in range(20):
         _run(executions, "noisy")
@@ -50,6 +53,7 @@ def test_noisy_job_cannot_evict_quiet_job(monkeypatch, tmp_path):
 def test_per_job_retention_preserves_inflight(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "2")
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")  # count-only
 
     inflight = executions.create_execution("live", source="builtin")
     executions.mark_execution_running(inflight["id"])
@@ -96,6 +100,7 @@ def test_env_override_beats_module_constant(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setattr(executions, "KEEP_TERMINAL_EXECUTIONS_PER_JOB", 50)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "2")
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")  # count-only
 
     for _ in range(6):
         _run(executions, "env-job")
@@ -107,6 +112,7 @@ def test_invalid_env_falls_back_to_constant(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setattr(executions, "KEEP_TERMINAL_EXECUTIONS_PER_JOB", 3)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "not-a-number")
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")  # count-only
 
     for _ in range(6):
         _run(executions, "bad-env")

@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
@@ -35,10 +36,17 @@ EXECUTIONS_FILE = _IMPORT_HOME / "cron" / "executions.db"
 # Retention (see _prune_unlocked): keep the newest N terminal executions PER
 # JOB so high-frequency jobs only evict their own history instead of pushing
 # rare report jobs out of the ledger (the old global FIFO cap did exactly
-# that), plus a global safety cap bounding total ledger size. Both limits are
-# DELETE-based and self-healing — changing either value takes effect on the
-# next prune, no migration needed.
+# that). On top of the count window there is a TIME-based guarantee (loop 15
+# / F2): a row beyond the per-job count is still kept while it falls inside
+# the keep-days horizon (default 30 days) — and failed/unknown rows inside
+# that horizon survive regardless of count, so error history outlives the
+# success flood. A row is only deleted when it is beyond the count window
+# AND older than the horizon. The global cap stays a hard safety bound on
+# total ledger size and may, in the extreme, break the time-based guarantee
+# (see _prune_unlocked). All limits are DELETE-based and self-healing —
+# changing any value takes effect on the next prune, no migration needed.
 KEEP_TERMINAL_EXECUTIONS_PER_JOB = 50
+KEEP_TERMINAL_EXECUTIONS_DAYS = 30
 MAX_TERMINAL_EXECUTIONS = 20000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
@@ -126,6 +134,19 @@ def _max_terminal_executions() -> int:
         0,
         _int_env_override(
             "HERMES_CRON_EXECUTIONS_MAX_TERMINAL", MAX_TERMINAL_EXECUTIONS
+        ),
+    )
+
+
+def _keep_terminal_days() -> int:
+    """Time-based retention horizon in days (loop 15 / F2).
+
+    0 disables the guarantee (prune reverts to pure count-based retention).
+    """
+    return max(
+        0,
+        _int_env_override(
+            "HERMES_CRON_EXECUTIONS_KEEP_DAYS", KEEP_TERMINAL_EXECUTIONS_DAYS
         ),
     )
 
@@ -220,13 +241,27 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
 
     Per-job retention keeps the newest N terminal executions of EVERY job, so
     high-frequency jobs evict only their own history and can no longer push
-    rare report jobs out of the ledger. The global cap is a safety bound on
-    total ledger size. In-flight (claimed/running) rows are never pruned.
+    rare report jobs out of the ledger. Since loop 15 (F2) a row beyond that
+    count window is deleted only when ALL of these hold:
+      (a) it sits beyond the per-job keep-N window (rn > N), AND
+      (b) it is older than the keep-days horizon (default 30 days), AND
+      (c) it is not a failed/unknown row inside that horizon (error history
+          survives the success flood for the same horizon).
+    With a single shared horizon (c) is implied by (b); it stays explicit so
+    a future, longer error horizon only has to change one parameter. Setting
+    HERMES_CRON_EXECUTIONS_KEEP_DAYS=0 reverts to pure count-based pruning.
+    In-flight (claimed/running) rows are never pruned.
+
+    The global cap afterwards is a hard safety bound on total ledger size:
+    it deliberately does NOT honor the time-based guarantee — in the extreme
+    (more terminal rows than the cap inside the horizon) bounding the
+    database wins over history completeness.
     """
+    cutoff = (_hermes_now() - timedelta(days=_keep_terminal_days())).isoformat()
     conn.execute(
         """DELETE FROM executions WHERE id IN (
              SELECT id FROM (
-               SELECT id,
+               SELECT id, claimed_at, status,
                       ROW_NUMBER() OVER (
                         PARTITION BY job_id
                         ORDER BY claimed_at DESC, id DESC
@@ -234,8 +269,10 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
                FROM executions
                WHERE status IN ('completed','failed','unknown')
              ) WHERE rn > ?
+               AND claimed_at < ?
+               AND NOT (status IN ('failed','unknown') AND claimed_at >= ?)
            )""",
-        (_keep_terminal_per_job(),),
+        (_keep_terminal_per_job(), cutoff, cutoff),
     )
     conn.execute(
         """DELETE FROM executions WHERE id IN (

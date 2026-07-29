@@ -1047,13 +1047,72 @@ def _rotate_jobs_backups(jobs_file: Path) -> None:
         )
 
 
+def _is_plausible_job_record(record: Any) -> bool:
+    """Shape-check one job record restored from a backup (loop 15 / F3).
+
+    The bar is "create_job() could have written this": a non-empty string
+    ``id`` and ``name``, and a ``schedule`` dict whose ``kind`` is one
+    parse_schedule() can emit, carrying that kind's payload with a plausible
+    type (interval → positive int minutes, cron → expr string, once → run_at
+    string). Deliberately not a full semantic validation — restored records
+    keep flowing through _normalize_job_record() on read like any stored job.
+    """
+    if not isinstance(record, dict):
+        return False
+    job_id = record.get("id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return False
+    name = record.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    schedule = record.get("schedule")
+    if not isinstance(schedule, dict):
+        return False
+    kind = schedule.get("kind")
+    if kind == "interval":
+        minutes = schedule.get("minutes")
+        return isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0
+    if kind == "cron":
+        expr = schedule.get("expr")
+        return isinstance(expr, str) and bool(expr.strip())
+    if kind == "once":
+        run_at = schedule.get("run_at")
+        return isinstance(run_at, str) and bool(run_at.strip())
+    return False
+
+
+def _validate_backup_records(
+    path: Path, records: List[Any]
+) -> Optional[List[Dict[str, Any]]]:
+    """Filter a backup's raw records down to plausible job records (loop 15 / F3).
+
+    Corrupt records are discarded with a loud count; a backup only counts as
+    a recovery source when at least one valid record survives — restoring an
+    empty store distilled from all-garbage records would look like a clean
+    recovery while silently dropping every job. An honestly-empty backup
+    (zero records) stays a valid empty restore.
+    """
+    valid = [r for r in records if _is_plausible_job_record(r)]
+    discarded = len(records) - len(valid)
+    if discarded:
+        logger.warning(
+            "jobs.json backup %s: discarded %d invalid job record(s); "
+            "%d valid record(s) remain",
+            path, discarded, len(valid),
+        )
+    if records and not valid:
+        return None
+    return valid
+
+
 def _read_jobs_backup(path: Path) -> Optional[List[Dict[str, Any]]]:
     """Return the job list from a backup file, or None if it is not usable.
 
-    A backup only counts as a recovery source when it parses as JSON and has
+    A backup only counts as a recovery source when it parses as JSON, has
     the expected top-level shape (a dict with a ``jobs`` list, or a bare list
-    like load_jobs() tolerates). Anything else is skipped so recovery never
-    restores garbage over garbage.
+    like load_jobs() tolerates), AND — since loop 15 — still contains at
+    least one plausible job record after per-record validation. Anything
+    else is skipped so recovery never restores garbage over garbage.
     """
     try:
         with open(path, "r", encoding="utf-8-sig") as f:
@@ -1061,9 +1120,9 @@ def _read_jobs_backup(path: Path) -> Optional[List[Dict[str, Any]]]:
     except Exception:
         return None
     if isinstance(data, dict) and isinstance(data.get("jobs"), list):
-        return data["jobs"]
+        return _validate_backup_records(path, data["jobs"])
     if isinstance(data, list):
-        return data
+        return _validate_backup_records(path, data)
     return None
 
 
@@ -1103,11 +1162,13 @@ def _recover_jobs_from_backup(
             )
             return None
         # Restore atomically so a crash mid-recovery cannot leave a torn
-        # jobs.json that the NEXT load would again treat as corrupt.
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_recover_"
-        )
+        # jobs.json that the NEXT load would again treat as corrupt. The
+        # mkstemp is inside the try so its failure rolls back too.
+        tmp_path: Optional[str] = None
         try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_recover_"
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(
                     {"jobs": recovered, "updated_at": _hermes_now().isoformat()},
@@ -1117,12 +1178,32 @@ def _recover_jobs_from_backup(
                 os.fsync(f.fileno())
             atomic_replace(tmp_path, jobs_file)
             _secure_file(jobs_file)
-        except BaseException:
+        except Exception as write_error:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            # Roll the quarantine back (loop 15 / F3): a failed restore must
+            # never leave NO jobs.json at all — the next load would see "no
+            # file" and silently start from an empty store. Returning None
+            # keeps the caller on the old fail-closed RuntimeError path with
+            # the corrupt store back in place for manual repair.
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+                os.replace(quarantine, jobs_file)
+            except OSError as rollback_error:
+                logger.error(
+                    "Could not roll back quarantined jobs.json %s after a "
+                    "failed restore: %s — the store is missing until manual "
+                    "repair",
+                    quarantine, rollback_error,
+                )
+            logger.error(
+                "Restore of jobs.json backup %s failed (%s); quarantine "
+                "rolled back, store left as-is",
+                backup, write_error,
+            )
+            return None
         message = (
             f"jobs.json was corrupt ({cause}); quarantined to {quarantine.name} "
             f"and restored {len(recovered)} job(s) from backup {backup.name}. "
@@ -1134,6 +1215,36 @@ def _recover_jobs_from_backup(
         record_ticker_error(message)
         return recovered
     return None
+
+
+def _recover_corrupt_store(
+    jobs_file: Path,
+    cause: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Backup recovery for a corrupt jobs.json, serialized under _jobs_lock().
+
+    Two concurrent load_jobs() calls racing the same corrupt store must not
+    both quarantine-and-restore (loop 15 / F3): the loser waits on the
+    cross-process lock, re-reads the store — which the winner has already
+    quarantined + restored — and returns those jobs. Exactly one quarantine,
+    no crash, no double recovery. The lock is re-entrant per thread, so
+    callers already inside _jobs_lock() (create_job/update_job/...) nest
+    safely.
+    """
+    with _jobs_lock():
+        # Re-read under the lock: a concurrent loader may have finished the
+        # whole recovery while we waited — then the store is healthy again
+        # and NO second quarantine must happen.
+        try:
+            with open(jobs_file, "r", encoding="utf-8-sig") as f:
+                data = json.loads(f.read(), strict=False)
+        except Exception:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("jobs"), list):
+            return data["jobs"]
+        if isinstance(data, list):
+            return data
+        return _recover_jobs_from_backup(jobs_file, cause)
 
 
 def load_jobs() -> List[Dict[str, Any]]:
@@ -1159,7 +1270,7 @@ def load_jobs() -> List[Dict[str, Any]]:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
-            recovered = _recover_jobs_from_backup(jobs_file, f"unparseable JSON: {e}")
+            recovered = _recover_corrupt_store(jobs_file, f"unparseable JSON: {e}")
             if recovered is not None:
                 return recovered
             raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
@@ -1186,7 +1297,7 @@ def load_jobs() -> List[Dict[str, Any]]:
             logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
         return data
 
-    recovered = _recover_jobs_from_backup(
+    recovered = _recover_corrupt_store(
         jobs_file, f"unexpected top-level type {type(data).__name__}"
     )
     if recovered is not None:
@@ -1394,6 +1505,8 @@ def create_job(
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
     retry: Optional[Dict[str, Any]] = None,
+    timeout_seconds: Optional[int] = None,
+    delivery_timeout_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1445,6 +1558,13 @@ def create_job(
                 instead of advancing the regular schedule, so transient API
                 failures are retried. Default None = no retry (old behaviour).
                 See mark_job_run's docstring for the full semantics.
+        timeout_seconds: Optional per-job script/run timeout (audit loop 15 /
+                F1). Validated strictly (1..MAX_JOB_TIMEOUT_SECONDS); only
+                persisted when set, so existing/default jobs stay
+                byte-identical and the scheduler's global timeout applies.
+        delivery_timeout_seconds: Optional per-job delivery-send timeout
+                (1..MAX_JOB_DELIVERY_TIMEOUT_SECONDS), same
+                validate-and-only-persist-when-set rule.
 
     Returns:
         The created job dict
@@ -1478,6 +1598,21 @@ def create_job(
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_retry = _normalize_retry(retry)
+    # Defense-in-depth at the canonical write path (loop 15 / F1): the
+    # cronjob tool / CLI validate via the same helpers before calling, and a
+    # direct caller gets the same strict rejection instead of a silently
+    # clamped timeout.
+    normalized_timeout = (
+        validate_timeout_field("timeout_seconds", timeout_seconds, MAX_JOB_TIMEOUT_SECONDS)
+        if timeout_seconds is not None else None
+    )
+    normalized_delivery_timeout = (
+        validate_timeout_field(
+            "delivery_timeout_seconds", delivery_timeout_seconds,
+            MAX_JOB_DELIVERY_TIMEOUT_SECONDS,
+        )
+        if delivery_timeout_seconds is not None else None
+    )
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1577,6 +1712,12 @@ def create_job(
     # (audit loop 6): absent key => no retry, old behaviour.
     if normalized_retry is not None:
         job["retry"] = normalized_retry
+    # Same rule for the per-job timeouts (audit loop 15): absent key => the
+    # scheduler's global/default resolution applies unchanged.
+    if normalized_timeout is not None:
+        job["timeout_seconds"] = normalized_timeout
+    if normalized_delivery_timeout is not None:
+        job["delivery_timeout_seconds"] = normalized_delivery_timeout
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -1677,6 +1818,14 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
             previous_inference_axes = _normalized_inference_axes(job)
             updated = _apply_skill_fields({**job, **updates})
+            # Explicit-null clearing for the opt-in policy fields (loop 15 /
+            # F1): create_job persists retry/timeout_seconds/
+            # delivery_timeout_seconds only when set, so "absent key" is the
+            # canonical unset state. A clearing update must therefore REMOVE
+            # the key, not store a null that would drift the stored shape.
+            for policy_field in ("retry", "timeout_seconds", "delivery_timeout_seconds"):
+                if policy_field in updates and updates[policy_field] is None:
+                    updated.pop(policy_field, None)
             schedule_changed = "schedule" in updates
             inference_fields_changed = bool(
                 {"provider", "model", "base_url", "no_agent"}.intersection(updates)
@@ -1829,6 +1978,82 @@ def remove_job(job_id: str) -> bool:
                 shutil.rmtree(job_output_dir)
             return True
     return False
+
+
+# Bounds for the user-facing per-job policy fields exposed through the
+# cronjob tool and `hermes cron create/edit` (audit loop 15 / F1). The retry
+# attempt cap is MAX_RUN_RETRY_ATTEMPTS itself; the timeout caps mirror the
+# scheduler-side clamps (_MAX_PER_JOB_SCRIPT_TIMEOUT = 7200, delivery sends
+# must stay well under the tick cadence) so a value accepted here can never
+# arrive at the scheduler only to be clamped.
+MAX_RETRY_BACKOFF_DELAYS = 8
+MAX_JOB_TIMEOUT_SECONDS = 7200
+MAX_JOB_DELIVERY_TIMEOUT_SECONDS = 600
+
+
+def validate_retry_policy(retry: Any) -> Dict[str, Any]:
+    """Strictly validate a user-supplied run-retry policy (audit loop 15 / F1).
+
+    This is the API-boundary validator shared by the cronjob model tool and
+    `hermes cron create/edit` — the single copy of these rules. Unlike
+    _normalize_retry (lenient: clamps/drops garbage so hand-edited or legacy
+    stored records never crash the scheduler), anything invalid here is a
+    ValueError with an actionable message instead of silent clamping.
+
+    Returns a normalized dict {"max_attempts": int, "backoff_seconds": [...]}.
+    """
+    if not isinstance(retry, dict):
+        raise ValueError(
+            'retry must be an object like {"max_attempts": 2, '
+            '"backoff_seconds": [60, 300]}'
+        )
+    raw_attempts = retry.get("max_attempts")
+    if isinstance(raw_attempts, bool) or not isinstance(raw_attempts, int):
+        raise ValueError(
+            f"retry.max_attempts must be an integer between 1 and "
+            f"{MAX_RUN_RETRY_ATTEMPTS}"
+        )
+    if not 1 <= raw_attempts <= MAX_RUN_RETRY_ATTEMPTS:
+        raise ValueError(
+            f"retry.max_attempts must be between 1 and "
+            f"{MAX_RUN_RETRY_ATTEMPTS} (got {raw_attempts})"
+        )
+    normalized: Dict[str, Any] = {"max_attempts": raw_attempts}
+    backoff = retry.get("backoff_seconds")
+    if backoff is None:
+        return normalized
+    if not isinstance(backoff, (list, tuple)):
+        raise ValueError("retry.backoff_seconds must be a list of positive integers")
+    if len(backoff) > MAX_RETRY_BACKOFF_DELAYS:
+        raise ValueError(
+            f"retry.backoff_seconds may have at most {MAX_RETRY_BACKOFF_DELAYS} "
+            f"entries (got {len(backoff)})"
+        )
+    delays: List[int] = []
+    for value in backoff:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"retry.backoff_seconds entries must be positive integers "
+                f"(seconds); got {value!r}"
+            )
+        delays.append(value)
+    if delays:
+        normalized["backoff_seconds"] = delays
+    return normalized
+
+
+def validate_timeout_field(name: str, value: Any, maximum: int) -> int:
+    """Strictly validate a per-job timeout field at the API boundary (loop 15).
+
+    Used for ``timeout_seconds`` (1..MAX_JOB_TIMEOUT_SECONDS) and
+    ``delivery_timeout_seconds`` (1..MAX_JOB_DELIVERY_TIMEOUT_SECONDS). Single
+    copy of the rule, shared by the cronjob tool and the CLI.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer number of seconds; got {value!r}")
+    if not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum} seconds (got {value})")
+    return value
 
 
 def _normalize_retry(retry: Any) -> Optional[Dict[str, Any]]:

@@ -26,7 +26,15 @@ def tmp_cron_dir(tmp_path, monkeypatch):
 
 
 def _save(tmp_path, tag):
-    jobs.save_jobs([{"id": f"job-{tag}", "prompt": tag}])
+    # Records must carry the create_job shape (id/name/schedule) — loop 15
+    # made backup recovery validate each record, so a bare {"id": ...} stub
+    # would be discarded as implausible.
+    jobs.save_jobs([{
+        "id": f"job-{tag}",
+        "name": f"job-{tag}",
+        "prompt": tag,
+        "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+    }])
 
 
 def _jobs_file(tmp_path):

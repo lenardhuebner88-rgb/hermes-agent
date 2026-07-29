@@ -409,6 +409,58 @@ def _print_outbox_summary() -> None:
         ))
 
 
+def _build_policy_args(args, *, allow_clear: bool):
+    """Build the loop-15 policy kwargs (retry / timeouts) from CLI args.
+
+    Validation uses the canonical helpers in cron.jobs — the single copy of
+    these rules shared with the cronjob model tool; nothing is re-implemented
+    here. Returns ``(kwargs, error)``; ``kwargs`` only contains keys the user
+    actually supplied. With ``allow_clear`` (edit), ``--retry-attempts 0`` /
+    ``--timeout-seconds 0`` map to the tool's clear semantics ({} / 0).
+    """
+    from cron.jobs import (
+        MAX_JOB_DELIVERY_TIMEOUT_SECONDS,
+        MAX_JOB_TIMEOUT_SECONDS,
+        validate_retry_policy,
+        validate_timeout_field,
+    )
+
+    kwargs: dict = {}
+    attempts = getattr(args, "retry_attempts", None)
+    backoff = getattr(args, "retry_backoff", None) or None
+    if attempts is not None or backoff:
+        if allow_clear and attempts == 0 and not backoff:
+            kwargs["retry"] = {}  # tool: {} clears the retry policy
+        else:
+            if attempts is None:
+                return {}, "--retry-backoff requires --retry-attempts"
+            candidate: dict = {"max_attempts": attempts}
+            if backoff:
+                candidate["backoff_seconds"] = list(backoff)
+            try:
+                validate_retry_policy(candidate)
+            except ValueError as exc:
+                return {}, str(exc)
+            kwargs["retry"] = candidate
+
+    for flag, field, maximum in (
+        ("timeout_seconds", "timeout_seconds", MAX_JOB_TIMEOUT_SECONDS),
+        ("delivery_timeout_seconds", "delivery_timeout_seconds", MAX_JOB_DELIVERY_TIMEOUT_SECONDS),
+    ):
+        value = getattr(args, flag, None)
+        if value is None:
+            continue
+        if allow_clear and value == 0:
+            kwargs[field] = 0  # tool: 0 clears the override
+            continue
+        try:
+            validate_timeout_field(field, value, maximum)
+        except ValueError as exc:
+            return {}, str(exc)
+        kwargs[field] = value
+    return kwargs, None
+
+
 def cron_create(args):
     final_skills = _normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None))
     lifecycle_block = _reject_if_gateway_lifecycle(
@@ -418,6 +470,11 @@ def cron_create(args):
     )
     if lifecycle_block is not None:
         return lifecycle_block
+
+    policy_kwargs, policy_error = _build_policy_args(args, allow_clear=False)
+    if policy_error:
+        print(color(f"Invalid retry/timeout options: {policy_error}", Colors.RED))
+        return 1
 
     # Defense-in-depth: cron.jobs.create_job also enforces the gateway-lifecycle
     # guard (shared with the agent's `cronjob` model tool, which calls
@@ -436,6 +493,7 @@ def cron_create(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", False) or None,
+        **policy_kwargs,
     )
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -452,6 +510,12 @@ def cron_create(args):
         print("  Mode: no-agent (script stdout delivered directly)")
     if job_data.get("workdir"):
         print(f"  Workdir: {job_data['workdir']}")
+    if job_data.get("retry"):
+        print(f"  Retry: {job_data['retry'].get('max_attempts')} attempt(s)")
+    if job_data.get("timeout_seconds"):
+        print(f"  Timeout: {job_data['timeout_seconds']}s")
+    if job_data.get("delivery_timeout_seconds"):
+        print(f"  Delivery timeout: {job_data['delivery_timeout_seconds']}s")
     print(f"  Next run: {result['next_run_at']}")
     _warn_if_gateway_not_running()
     return 0
@@ -495,6 +559,11 @@ def cron_edit(args):
     if lifecycle_block is not None:
         return lifecycle_block
 
+    policy_kwargs, policy_error = _build_policy_args(args, allow_clear=True)
+    if policy_error:
+        print(color(f"Invalid retry/timeout options: {policy_error}", Colors.RED))
+        return 1
+
     result = _cron_api(
         action="update",
         job_id=args.job_id,
@@ -507,6 +576,7 @@ def cron_edit(args):
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         no_agent=getattr(args, "no_agent", None),
+        **policy_kwargs,
     )
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
@@ -526,6 +596,12 @@ def cron_edit(args):
         print("  Mode: no-agent (script stdout delivered directly)")
     if updated.get("workdir"):
         print(f"  Workdir: {updated['workdir']}")
+    if updated.get("retry"):
+        print(f"  Retry: {updated['retry'].get('max_attempts')} attempt(s)")
+    if updated.get("timeout_seconds"):
+        print(f"  Timeout: {updated['timeout_seconds']}s")
+    if updated.get("delivery_timeout_seconds"):
+        print(f"  Delivery timeout: {updated['delivery_timeout_seconds']}s")
     return 0
 
 

@@ -21,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cron.jobs import (
     AmbiguousJobReference,
+    MAX_JOB_DELIVERY_TIMEOUT_SECONDS,
+    MAX_JOB_TIMEOUT_SECONDS,
     claim_job_for_fire,
     create_job,
     get_job,
@@ -32,6 +34,8 @@ from cron.jobs import (
     resolve_job_ref,
     resume_job,
     update_job,
+    validate_retry_policy,
+    validate_timeout_field,
 )
 
 
@@ -564,6 +568,45 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
     return None
 
 
+def _validate_run_policy_params(
+    retry: Optional[Any],
+    timeout_seconds: Optional[Any],
+    delivery_timeout_seconds: Optional[Any],
+) -> tuple:
+    """Validate the loop-15 per-job policy fields via the cron.jobs helpers.
+
+    Single validation path for create AND update — no second copy of the
+    rules lives here. Returns ``(validated, error)`` where ``validated`` maps
+    field → value and contains ONLY fields the caller actually supplied. On
+    update, a value of None means "clear the field" (retry={} /
+    timeout_seconds=0 / delivery_timeout_seconds=0); create_job pops those
+    keys so the stored shape stays "absent when unset".
+    """
+    validated: Dict[str, Any] = {}
+    if retry is not None:
+        if retry == {}:
+            validated["retry"] = None  # explicit clear (update semantics)
+        else:
+            try:
+                validated["retry"] = validate_retry_policy(retry)
+            except ValueError as exc:
+                return {}, str(exc)
+    for field, value, maximum in (
+        ("timeout_seconds", timeout_seconds, MAX_JOB_TIMEOUT_SECONDS),
+        ("delivery_timeout_seconds", delivery_timeout_seconds, MAX_JOB_DELIVERY_TIMEOUT_SECONDS),
+    ):
+        if value is None:
+            continue
+        if isinstance(value, int) and not isinstance(value, bool) and value == 0:
+            validated[field] = None  # explicit clear (update semantics)
+            continue
+        try:
+            validated[field] = validate_timeout_field(field, value, maximum)
+        except ValueError as exc:
+            return {}, str(exc)
+    return validated, None
+
+
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(job.get("prompt") or "")
     skills = _canonical_skills(job.get("skill"), job.get("skills"))
@@ -598,6 +641,12 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         result["enabled_toolsets"] = job["enabled_toolsets"]
     if job.get("workdir"):
         result["workdir"] = job["workdir"]
+    if job.get("retry"):
+        result["retry"] = job["retry"]
+    if job.get("timeout_seconds"):
+        result["timeout_seconds"] = job["timeout_seconds"]
+    if job.get("delivery_timeout_seconds"):
+        result["delivery_timeout_seconds"] = job["delivery_timeout_seconds"]
     return result
 
 
@@ -677,6 +726,9 @@ def cronjob(
     workdir: Optional[str] = None,
     no_agent: Optional[bool] = None,
     attach_to_session: Optional[bool] = None,
+    retry: Optional[Dict[str, Any]] = None,
+    timeout_seconds: Optional[int] = None,
+    delivery_timeout_seconds: Optional[int] = None,
     task_id: str = None,
 ) -> str:
     """Unified cron job management tool."""
@@ -733,6 +785,21 @@ def cronjob(
                             success=False,
                         )
 
+            # Loop-15 policy fields (retry / timeouts) — strict validation via
+            # the canonical cron.jobs helpers. Clearing is update-only
+            # semantics; on create it would be a no-op hiding a caller mistake.
+            policy, policy_error = _validate_run_policy_params(
+                retry, timeout_seconds, delivery_timeout_seconds
+            )
+            if policy_error:
+                return tool_error(policy_error, success=False)
+            for policy_field, policy_value in policy.items():
+                if policy_value is None:
+                    return tool_error(
+                        f"{policy_field}: clearing is only valid on action='update'",
+                        success=False,
+                    )
+
             job = create_job(
                 prompt=prompt or "",
                 schedule=schedule,
@@ -750,6 +817,9 @@ def cronjob(
                 workdir=_normalize_optional_job_value(workdir),
                 no_agent=_no_agent,
                 attach_to_session=attach_to_session,
+                retry=policy.get("retry"),
+                timeout_seconds=policy.get("timeout_seconds"),
+                delivery_timeout_seconds=policy.get("delivery_timeout_seconds"),
             )
             _notify_provider_jobs_changed_safe()
             _create_message = f"Cron job '{job['name']}' created."
@@ -960,6 +1030,19 @@ def cronjob(
                 if job.get("state") != "paused":
                     updates["state"] = "scheduled"
                     updates["enabled"] = True
+            # Loop-15 policy fields (retry / timeouts) — strict validation via
+            # the canonical cron.jobs helpers; retry={} or timeout=0 clears.
+            if (
+                retry is not None
+                or timeout_seconds is not None
+                or delivery_timeout_seconds is not None
+            ):
+                policy, policy_error = _validate_run_policy_params(
+                    retry, timeout_seconds, delivery_timeout_seconds
+                )
+                if policy_error:
+                    return tool_error(policy_error, success=False)
+                updates.update(policy)
             if not updates:
                 return tool_error("No updates provided.", success=False)
             updated = update_job(job_id, updates)
@@ -1091,6 +1174,30 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "type": "boolean",
                 "description": "When True, this job becomes CONTINUABLE: the user can reply to its delivery and the agent has the brief in context instead of asking 'what is that?'. On thread-capable platforms (Telegram topics, Discord/Slack threads) a dedicated thread is opened for the job and its replies; on DM-only platforms (WhatsApp/Signal) the brief is mirrored into the origin DM session. Use this for conversational recurring jobs the user will reply to — daily briefings, reminders that kick off follow-up work. Leave unset for fire-and-forget alerts/watchdogs. Overrides the global cron.mirror_delivery config for this one job. Only the origin chat is touched (never fan-out targets); no effect when deliver='local'."
             },
+            "retry": {
+                "type": "object",
+                "description": "Optional per-job run-retry policy for FAILED runs (transient API/provider errors). Shape: {\"max_attempts\": N, \"backoff_seconds\": [d1, d2, ...]} with max_attempts 1-3 and up to 8 positive-integer backoff delays (seconds). On a failed run with retries left, the job is re-armed at now + backoff instead of advancing the regular schedule. Omit for no retry (default). On update, pass an empty object {} to clear the policy.",
+                "properties": {
+                    "max_attempts": {
+                        "type": "integer",
+                        "description": "Retries after a failed run, 1-3."
+                    },
+                    "backoff_seconds": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional backoff ladder in seconds (positive integers, max 8 entries); the last entry repeats for remaining attempts. Default 300s per attempt."
+                    }
+                },
+                "required": ["max_attempts"]
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "Optional per-job script/run timeout in seconds (1-7200). Overrides the global cron script timeout for this job only. Omit to keep the global default. On update, pass 0 to clear the override."
+            },
+            "delivery_timeout_seconds": {
+                "type": "integer",
+                "description": "Optional per-job delivery-send timeout in seconds (1-600). Bounds the platform send for this job only. Omit to keep the global default (60s). On update, pass 0 to clear the override."
+            },
         },
         "required": ["action"]
     }
@@ -1146,6 +1253,9 @@ registry.register(
         enabled_toolsets=args.get("enabled_toolsets"),
         workdir=args.get("workdir"),
         no_agent=args.get("no_agent"),
+        retry=args.get("retry"),
+        timeout_seconds=args.get("timeout_seconds"),
+        delivery_timeout_seconds=args.get("delivery_timeout_seconds"),
         task_id=kw.get("task_id"),
     ))(),
     check_fn=check_cronjob_requirements,

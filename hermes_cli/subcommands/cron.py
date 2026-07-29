@@ -70,6 +70,34 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         "--workdir",
         help="Absolute path for the job to run from. Injects AGENTS.md / CLAUDE.md / .cursorrules from that directory and uses it as the cwd for terminal/file/code_exec tools. Omit to preserve old behaviour (no project context files).",
     )
+    cron_create.add_argument(
+        "--retry-attempts",
+        type=int,
+        metavar="N",
+        help="Retry a FAILED run up to N times (1-3) before advancing the regular schedule. Omit for no retry.",
+    )
+    cron_create.add_argument(
+        "--retry-backoff",
+        dest="retry_backoff",
+        type=int,
+        action="append",
+        metavar="SECONDS",
+        help="Backoff delay for retries in seconds (positive, repeatable, max 8 entries; requires --retry-attempts). Default 300s per attempt.",
+    )
+    cron_create.add_argument(
+        "--timeout-seconds",
+        dest="timeout_seconds",
+        type=int,
+        metavar="SECONDS",
+        help="Per-job script/run timeout in seconds (1-7200). Overrides the global cron script timeout for this job.",
+    )
+    cron_create.add_argument(
+        "--delivery-timeout-seconds",
+        dest="delivery_timeout_seconds",
+        type=int,
+        metavar="SECONDS",
+        help="Per-job delivery-send timeout in seconds (1-600). Bounds the platform send for this job.",
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(
@@ -133,6 +161,34 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument(
         "--workdir",
         help="Absolute path for the job to run from (injects AGENTS.md etc. and sets terminal cwd). Pass empty string to clear.",
+    )
+    cron_edit.add_argument(
+        "--retry-attempts",
+        type=int,
+        metavar="N",
+        help="Retry a FAILED run up to N times (1-3). Pass 0 to clear the job's retry policy.",
+    )
+    cron_edit.add_argument(
+        "--retry-backoff",
+        dest="retry_backoff",
+        type=int,
+        action="append",
+        metavar="SECONDS",
+        help="Backoff delay for retries in seconds (positive, repeatable, max 8 entries; requires --retry-attempts). Replaces the existing ladder.",
+    )
+    cron_edit.add_argument(
+        "--timeout-seconds",
+        dest="timeout_seconds",
+        type=int,
+        metavar="SECONDS",
+        help="Per-job script/run timeout in seconds (1-7200). Pass 0 to clear the override.",
+    )
+    cron_edit.add_argument(
+        "--delivery-timeout-seconds",
+        dest="delivery_timeout_seconds",
+        type=int,
+        metavar="SECONDS",
+        help="Per-job delivery-send timeout in seconds (1-600). Pass 0 to clear the override.",
     )
 
     # lifecycle actions
