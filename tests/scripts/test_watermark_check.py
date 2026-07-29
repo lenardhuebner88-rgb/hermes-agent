@@ -143,3 +143,61 @@ def test_custom_thresholds_are_respected():
 ])
 def test_memmax_is_capped(value, expected):
     assert wc.memmax_is_capped(value) is expected
+
+
+# ---------------------------------------------------------------------------
+# Collector + contract pinning
+# ---------------------------------------------------------------------------
+
+def test_dataclasses_are_frozen():
+    """The snapshot records must be immutable — an alert pipeline that
+    could mutate its own metrics would silently re-classify a breach."""
+    proc = wc.BigProc(pid=1, name="x", rss_bytes=10, capped=False)
+    metrics = wc.Metrics(swap_used_pct=None, disk_used_pct=0.0, procs=(proc,))
+    with pytest.raises(AttributeError):
+        proc.capped = True
+    with pytest.raises(AttributeError):
+        metrics.disk_used_pct = 99.0
+
+
+def test_gib_is_binary_gibibyte():
+    """GIB is 1024**3 — a decimal 1000**3 would under-report every RSS by
+    ~7% and move the alert boundary."""
+    assert wc.GIB == 1024 ** 3
+
+
+def test_proc_capped_fails_closed_on_unreadable_cgroup():
+    """A pid whose cgroup file cannot be read must classify as NOT capped
+    (fail closed: report the process) — never as safely capped."""
+    assert wc._proc_capped(2**40) is False  # beyond any pid_max — cannot exist
+
+
+def test_collect_metrics_carries_only_procs_strictly_over_threshold(monkeypatch):
+    """The scan threshold is strict: a process at EXACTLY the threshold is
+    not carried, one byte over is — the alert boundary must not wobble."""
+    import psutil
+    from collections import namedtuple
+
+    Mem = namedtuple("Mem", ["rss"])
+    Swap = namedtuple("Swap", ["total", "percent"])
+    Disk = namedtuple("Disk", ["percent"])
+
+    class _P:
+        def __init__(self, info):
+            self.info = info
+
+    exact = int(wc.DEFAULT_RSS_GIB * wc.GIB)
+    procs = [
+        _P({"pid": 1, "name": "exact", "memory_info": Mem(exact)}),
+        _P({"pid": 2, "name": "over", "memory_info": Mem(exact + 1)}),
+    ]
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: iter(procs))
+    monkeypatch.setattr(psutil, "swap_memory", lambda: Swap(total=0, percent=0.0))
+    monkeypatch.setattr(psutil, "disk_usage", lambda path: Disk(percent=10.0))
+    monkeypatch.setattr(wc, "_proc_capped", lambda pid: True)
+
+    metrics = wc.collect_metrics(rss_threshold_bytes=exact)
+
+    assert metrics.swap_used_pct is None
+    assert metrics.disk_used_pct == 10.0
+    assert [(p.pid, p.rss_bytes) for p in metrics.procs] == [(2, exact + 1)]
