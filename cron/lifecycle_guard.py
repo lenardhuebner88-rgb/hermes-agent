@@ -46,25 +46,18 @@ class GatewayLifecycleBlocked(ValueError):
 # is anchored on a concrete command identifier so a match can only fire on
 # actual shell-command-shaped strings, not on prose.
 #
-# SYNC NOTE: this mirrors the STRUCTURE of ``_GATEWAY_LIFECYCLE_PATTERNS`` in
-# ``hermes_cli/cron.py`` 1:1 (same constants, same separator-limited
-# lookaheads, same whitespace normalization in
-# :func:`contains_gateway_lifecycle_command` below) — that module is the
-# guard for the CLI subcommand path (``hermes cron create``/``edit``) and is
-# the more-hardened, canonical source for these command shapes (reviewed and
-# extended first). This module additionally guards the agent's ``cronjob``
-# tool path (``cron.jobs.create_job``, called directly — no CLI involved).
-# When a new gateway-lifecycle command shape is added to either guard,
-# mirror it in the other (same branch shape, same character classes) or the
-# two enforcement points diverge and one path lets a foot-gun through that
-# the other blocks. Diverged once already (Codex cross-review,
-# fix/merge-losses-20260703): a bare `\bhermes\b` here matched only
-# `hermes gateway` immediately (missed `hermes --profile coder gateway
-# restart`), `[^\n]*` lookaheads crossed shell separators like `;` (over-block
-# risk) yet didn't cross literal newlines the way the CLI's whitespace
-# normalization does (under-block risk on a script with the command split
-# across lines) — hence copying the CLI's exact constants below instead of
-# hand-tuning parallel ones.
+# SINGLE SOURCE OF TRUTH: this module is the canonical definition of the
+# gateway-lifecycle command shapes for EVERY enforcement point — the agent's
+# ``cronjob`` model tool path (``cron.jobs.create_job``, called directly) AND
+# the CLI subcommand path (``hermes cron create``/``edit``), which imports
+# :func:`contains_gateway_lifecycle_command` from here instead of keeping its
+# own copy (the two definitions diverged once already, Codex cross-review
+# fix/merge-losses-20260703: a bare `\bhermes\b` matched only `hermes
+# gateway` immediately and missed `hermes --profile coder gateway restart`,
+# `[^\n]*` lookaheads crossed shell separators like `;` yet didn't cross
+# literal newlines the way the whitespace normalization below does).
+# New gateway-lifecycle command shapes are added HERE, once; both paths pick
+# them up automatically.
 _HERMES_GATEWAY_ACTION = (
     r"\bgateway\b"
     r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"
@@ -112,8 +105,7 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     """Return True if *text* contains a gateway lifecycle command pattern."""
     if not text:
         return False
-    # Collapse all whitespace so regex gaps match across newlines — mirrors
-    # hermes_cli.cron._contains_gateway_lifecycle_command exactly. Without
+    # Collapse all whitespace so regex gaps match across newlines. Without
     # this, a command split across lines in a cron script (`python3 -m
     # hermes_cli.main\ngateway restart`) would slip past the `[^;&|<>\`]*`
     # lookaheads above (they stop at neither a real shell separator nor a

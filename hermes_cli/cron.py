@@ -6,7 +6,6 @@ pause/resume/run/remove, status, and tick.
 """
 
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -15,49 +14,32 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli.colors import Colors, color
+from cron.lifecycle_guard import (
+    contains_gateway_lifecycle_command as _canonical_lifecycle_check,
+)
 
-# Patterns that indicate a cron job targets the gateway lifecycle.
-# Matches commands that restart/stop the gateway or its service manager.
-# Deliberately specific — a bare "gateway ... restart" catch-all would block
-# legitimate prompts that merely mention an unrelated gateway (e.g. "summarize
-# the API gateway logs and report restart events").
+# Gateway-lifecycle command shapes (restart/stop/kill of the gateway or its
+# service manager) are defined ONCE in `cron/lifecycle_guard.py` — the single
+# source of truth shared by this CLI subcommand path (`hermes cron
+# create`/`edit`) and the agent's `cronjob` model tool path
+# (`cron.jobs.create_job`). The two used to carry parallel copies of the
+# pattern guarded only by a SYNC-NOTE convention, and diverged once already
+# (fix/merge-losses-20260703); new command shapes now go into
+# `cron/lifecycle_guard.py` exclusively.
 #
-# SYNC NOTE: this is the CANONICAL, more-hardened guard for the CLI
-# subcommand path (`hermes cron create`/`edit`). The agent's `cronjob` model
-# tool bypasses this module entirely (`cron.jobs.create_job` is called
-# directly), so it is guarded separately by `_GATEWAY_LIFECYCLE_PATTERN` in
-# `cron/lifecycle_guard.py`. When a new gateway-lifecycle command shape is
-# added here, mirror it there too or the agent-tool path stays exploitable
-# for that shape after this one is closed.
-_HERMES_GATEWAY_ACTION = (
-    r"\bgateway\b"
-    r"(?:\s+(?:-\w|--[\w-]+)(?:[= ]\S+)?)*"
-    r"\s+(restart|stop)\b"
-)
-_SERVICE_GATEWAY_NAME = r"(?:ai\.)?hermes[.-]gateway(?:\.(?:plist|service))?\b"
-_GATEWAY_LIFECYCLE_PATTERNS = re.compile(
-    r"(?i)"
-    r"(\bhermes\b(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
-    r"|(\bpython(?:3(?:\.\d+)?)?\s+-m\s+hermes_cli(?:\.main)?\b"
-    r"(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
-    r"|(\bpython(?:3(?:\.\d+)?)?\s+\S*hermes_cli/main\.py\b"
-    r"(?=[^;&|<>`]*" + _HERMES_GATEWAY_ACTION + r"))"
-    r"|(\blaunchctl\s+(kickstart|unload|load|stop|restart)\b[^;&|<>`]*"
-    + _SERVICE_GATEWAY_NAME
-    + r")"
-    r"|(\bsystemctl\s+(-\S+\s+)*(restart|stop|start)\b[^;&|<>`]*"
-    + _SERVICE_GATEWAY_NAME
-    + r")"
-    r"|((p?kill|pgrep)\s+.*hermes)"
-)
+# The patterns are deliberately command-shaped — a bare "gateway ... restart"
+# catch-all would block legitimate prompts that merely mention an unrelated
+# gateway (e.g. "summarize the API gateway logs and report restart events").
 
 
 def _contains_gateway_lifecycle_command(text: str) -> bool:
-    """Return True if *text* contains a gateway lifecycle command pattern."""
-    # Collapse all whitespace so regex gaps match across newlines; re.MULTILINE
-    # only changes ^/$ behavior and would not fix command-splitting bypasses.
-    normalized = re.sub(r"\s+", " ", text or "")
-    return bool(_GATEWAY_LIFECYCLE_PATTERNS.search(normalized))
+    """Return True if *text* contains a gateway lifecycle command pattern.
+
+    Thin wrapper over the canonical guard in `cron.lifecycle_guard` kept for
+    the existing callers (`tools/terminal_tool.py`) and tests that import
+    this name.
+    """
+    return _canonical_lifecycle_check(text or "")
 
 
 def _reject_if_gateway_lifecycle(

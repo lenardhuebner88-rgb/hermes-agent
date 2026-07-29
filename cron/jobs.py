@@ -120,6 +120,14 @@ _cron_store_override: ContextVar[Optional[_CronStorePaths]] = ContextVar(
 # OUTPUT_DIR — the documented escape hatch existing tests/embedders use)
 # is distinguishable from the constants merely being stale.
 _IMPORT_STORE = _CronStorePaths(CRON_DIR, JOBS_FILE, OUTPUT_DIR)
+# Same reconciliation for the ticker marker constants (A-M1): prod code
+# resolves marker paths through _ticker_marker_path() below, which honors a
+# deliberately re-pointed TICKER_HEARTBEAT_FILE/TICKER_SUCCESS_FILE and
+# otherwise derives the path from the ACTIVE cron store — keeping per-profile
+# scoping (#69377) while making the constants the single definition of the
+# marker file names instead of dead code shadowed by string literals.
+_IMPORT_TICKER_HEARTBEAT_FILE = TICKER_HEARTBEAT_FILE
+_IMPORT_TICKER_SUCCESS_FILE = TICKER_SUCCESS_FILE
 
 
 def _current_cron_store() -> _CronStorePaths:
@@ -821,6 +829,26 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 # Ticker heartbeat (liveness signal for `hermes cron status`)
 # =============================================================================
 
+def _ticker_marker_path(
+    constant: Path,
+    import_snapshot: Path,
+) -> Path:
+    """Resolve a ticker marker file path from its module constant.
+
+    Precedence mirrors ``_current_cron_store()``:
+
+    1. a deliberately re-pointed module constant (the documented
+       monkeypatch/compat surface — honored verbatim);
+    2. the ACTIVE cron store's dir plus the constant's file *name*, so
+       per-profile scoping (#69377) and use_cron_store() overrides keep
+       working while the constant remains the single definition of the
+       marker file name.
+    """
+    if constant != import_snapshot:
+        return constant
+    return _current_cron_store().cron_dir / constant.name
+
+
 def _atomic_write_epoch(path: Path) -> None:
     """Atomically write the current epoch time to ``path``.
 
@@ -860,14 +888,17 @@ def record_ticker_heartbeat(success: bool = False) -> None:
 
     Best-effort: a write failure must never disrupt the tick loop.
     """
-    store = _current_cron_store()
     try:
-        _atomic_write_epoch(store.cron_dir / "ticker_heartbeat")
+        _atomic_write_epoch(
+            _ticker_marker_path(TICKER_HEARTBEAT_FILE, _IMPORT_TICKER_HEARTBEAT_FILE)
+        )
     except Exception:
         pass
     if success:
         try:
-            _atomic_write_epoch(store.cron_dir / "ticker_last_success")
+            _atomic_write_epoch(
+                _ticker_marker_path(TICKER_SUCCESS_FILE, _IMPORT_TICKER_SUCCESS_FILE)
+            )
         except Exception:
             pass
 
@@ -890,8 +921,9 @@ def get_ticker_heartbeat_age() -> Optional[float]:
     scoped to the active profile — critical under multiplex_profiles where
     ``hermes cron status`` must report per-profile liveness (#69377).
     """
-    store = _current_cron_store()
-    return _epoch_file_age(store.cron_dir / "ticker_heartbeat")
+    return _epoch_file_age(
+        _ticker_marker_path(TICKER_HEARTBEAT_FILE, _IMPORT_TICKER_HEARTBEAT_FILE)
+    )
 
 
 def get_ticker_success_age() -> Optional[float]:
@@ -901,8 +933,9 @@ def get_ticker_success_age() -> Optional[float]:
     scoped to the active profile — critical under multiplex_profiles where
     ``hermes cron status`` must report per-profile liveness (#69377).
     """
-    store = _current_cron_store()
-    return _epoch_file_age(store.cron_dir / "ticker_last_success")
+    return _epoch_file_age(
+        _ticker_marker_path(TICKER_SUCCESS_FILE, _IMPORT_TICKER_SUCCESS_FILE)
+    )
 
 
 def record_ticker_error(message: str) -> None:
