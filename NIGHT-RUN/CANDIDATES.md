@@ -39,7 +39,7 @@ Fork-owned = present in HEAD, absent from `origin/main`. Reproduce with:
 - [x] `hermes_cli/disposition.py` (458 LoC) — `tests/hermes_cli/test_disposition.py`
 - [x] `hermes_cli/auto_release.py` (442 LoC) — `tests/hermes_cli/test_auto_release.py`
 - [x] `hermes_cli/symbol_test_narrowing.py` (439 LoC) — `tests/hermes_cli/test_symbol_test_narrowing.py` *(REJECTED: probe timeout)*
-- [ ] `hermes_cli/capability_researcher.py` (438 LoC) — `tests/test_capability_researcher.py`
+- [x] `hermes_cli/capability_researcher.py` (438 LoC) — `tests/test_capability_researcher.py`
 - [ ] `hermes_cli/memory_digest.py` (438 LoC) — `tests/hermes_cli/test_memory_digest.py`
 - [ ] `hermes_cli/library_models.py` (425 LoC) — `tests/hermes_cli/test_library_models.py`
 - [ ] `hermes_cli/terminal_candidates.py` (416 LoC) — `tests/hermes_cli/test_terminal_candidates.py`
