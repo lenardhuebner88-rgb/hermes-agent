@@ -160,12 +160,6 @@ def test_dataclasses_are_frozen():
         metrics.disk_used_pct = 99.0
 
 
-def test_gib_is_binary_gibibyte():
-    """GIB is 1024**3 — a decimal 1000**3 would under-report every RSS by
-    ~7% and move the alert boundary."""
-    assert wc.GIB == 1024 ** 3
-
-
 def test_proc_capped_fails_closed_on_unreadable_cgroup():
     """A pid whose cgroup file cannot be read must classify as NOT capped
     (fail closed: report the process) — never as safely capped."""

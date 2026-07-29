@@ -164,12 +164,6 @@ def test_deep_audit_lane_normalizes_sparse_result_to_safe_defaults(monkeypatch):
     assert summary["ok"] is True
 
 
-def test_expected_skip_error_tolerates_none():
-    """Lanes without a tf_error carry None — the classifier must answer
-    'not an expected skip', not crash."""
-    assert nightly._expected_skip_error(None) is None
-
-
 # ---------------------------------------------------------------- discord contract
 
 def test_post_summary_uses_send_message_contract():

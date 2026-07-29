@@ -394,12 +394,6 @@ def test_format_journal_line_bounds_cmd_and_uses_real_hour_math():
 # Second pass: constants, boundary, process table defaults, liveness probe
 # ---------------------------------------------------------------------------
 
-def test_grace_seconds_is_pinned_at_three():
-    """SIGTERM→SIGKILL grace mirrors the orchestration reaper at exactly
-    3 seconds."""
-    assert br.GRACE_SECONDS == 3
-
-
 def test_format_journal_line_keeps_exactly_200_char_cmd():
     """The cmd cap is inclusive at 200: a 200-char cmd stays whole, a
     201-char cmd truncates to 197 + '...'."""

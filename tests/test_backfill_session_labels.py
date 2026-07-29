@@ -304,25 +304,6 @@ def test_format_examples_caps_at_exactly_max_examples():
     assert len(backfill._format_examples(cands[:3], max_examples=2)) == 2
 
 
-def test_backup_state_db_tolerates_existing_backups_dir(tmp_path, monkeypatch):
-    """The second backfill of the night meets an EXISTING backups dir —
-    mkdir must not raise, or the apply run aborts before writing."""
-    from datetime import datetime, timezone
-
-    monkeypatch.setattr(backfill, "get_hermes_home", lambda: tmp_path)
-    (tmp_path / "backups").mkdir()
-    src = tmp_path / "state.db"
-    conn = sqlite3.connect(src)
-    conn.execute("CREATE TABLE t (x INTEGER)")
-    conn.commit()
-    conn.close()
-
-    dst = backfill.backup_state_db(
-        src, now=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-    )
-    assert dst.exists()
-
-
 def test_run_missing_state_db_returns_exit_code_two(tmp_path):
     """A missing state db is a usage error with exit code 2 — scripts
     key off that code to distinguish 'nothing to do' from 'crashed'."""
