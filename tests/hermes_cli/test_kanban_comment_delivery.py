@@ -55,6 +55,8 @@ def test_expired_claim_and_dead_pid_are_not_reported_as_live_worker(
         assert result.reaches_current_worker is False
         assert result.effective_from == "next_worker_brief"
         assert result.worker_is_live is False
+        assert result.kind == "comment"
+        assert "kein lebender Worker" in result.message
         assert len(kb.list_comments(conn, task_id)) == 1
     finally:
         conn.close()
@@ -81,6 +83,8 @@ def test_live_claim_and_pid_still_explain_that_next_brief_applies(
         assert result.reaches_current_worker is False
         assert result.effective_from == "next_worker_brief"
         assert result.worker_is_live is True
+        assert result.kind == "directive"
+        assert "Direktive" in result.message
         assert "nächsten Worker-Brief" in result.message
     finally:
         conn.close()
@@ -123,7 +127,11 @@ def test_worker_brief_declares_the_latest_comment_checkpoint(kanban_home):
         payload = kb.build_worker_context(conn, task_id, audience="operator")
 
         assert f"Comment checkpoint: comment_id_watermark={latest_comment_id}" in payload
-        assert "Completion checkpoint: Before completing, re-read this task's comments" in payload
+        assert (
+            f"hermes kanban show {task_id} --after-comment-id {latest_comment_id}"
+            in payload
+        )
+        assert f"kanban_show(after_comment_id={latest_comment_id})" in payload
         assert "Second note." in payload
         assert (
             payload.index("Completion checkpoint:")

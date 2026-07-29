@@ -265,6 +265,30 @@ def test_run_slash_show_includes_comments(kanban_home):
     assert "performance section" in show
 
 
+def test_run_slash_show_comment_delta_is_complete_and_ordered(kanban_home):
+    """The production CLI keeps every post-watermark comment, beyond slim caps."""
+    created = kc.run_slash("create 'comment delta' --assignee coder")
+    tid = re.search(r"(t_[a-f0-9]+)", created).group(1)
+    for index in range(10):
+        kc.run_slash(f"comment {tid} 'cli delta {index}'")
+
+    full = json.loads(kc.run_slash(f"show {tid} --json"))
+    watermark = full["comments"][0]["id"]
+    delta = json.loads(kc.run_slash(
+        f"show {tid} --json --after-comment-id {watermark}",
+    ))
+    delta_ids = [comment["id"] for comment in delta["comments"]]
+
+    assert [comment["body"] for comment in delta["comments"]] == [
+        f"cli delta {index}" for index in range(1, 10)
+    ]
+    assert delta_ids == sorted(delta_ids)
+    assert len(delta_ids) == 9
+    assert all(comment["kind"] == "comment" for comment in delta["comments"])
+    text_delta = kc.run_slash(f"show {tid} --after-comment-id {watermark}")
+    assert f"#{delta_ids[0]} comment" in text_delta
+
+
 def test_run_slash_comment_max_len_trims_long_body(kanban_home):
     out = kc.run_slash("create 'x'")
     import re

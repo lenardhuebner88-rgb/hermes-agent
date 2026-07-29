@@ -559,6 +559,12 @@ def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
     p_show.add_argument("task_id")
     p_show.add_argument("--json", action="store_true")
     p_show.add_argument(
+        "--after-comment-id",
+        type=int,
+        default=None,
+        help="Only show comments with an ID greater than this watermark",
+    )
+    p_show.add_argument(
         "--state-type",
         choices=("status", "outcome"),
         default=None,
@@ -2671,7 +2677,13 @@ def _show_build_json_payload(
         "parents": parents,
         "children": children,
         "comments": [
-            {"author": c.author, "body": c.body, "created_at": c.created_at}
+            {
+                "id": c.id,
+                "kind": c.kind,
+                "author": c.author,
+                "body": c.body,
+                "created_at": c.created_at,
+            }
             for c in comments
         ],
         "events": [
@@ -2819,7 +2831,7 @@ def _show_print_timeline(
         print()
         print(f"Comments ({len(comments)}):")
         for c in comments:
-            print(f"  [{_fmt_ts(c.created_at)}] {c.author}: {c.body}")
+            print(f"  [#{c.id} {c.kind} {_fmt_ts(c.created_at)}] {c.author}: {c.body}")
     if events:
         print()
         print(f"Events ({len(events)}):")
@@ -2857,7 +2869,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if not task:
             print(f"no such task: {args.task_id}", file=sys.stderr)
             return 1
-        comments = kb.list_comments(conn, args.task_id)
+        comments = kb.list_comments(
+            conn,
+            args.task_id,
+            after_comment_id=getattr(args, "after_comment_id", None),
+        )
         events = kb.list_events(conn, args.task_id)
         parents = kb.parent_ids(conn, args.task_id)
         children = kb.child_ids(conn, args.task_id)

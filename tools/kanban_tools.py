@@ -480,7 +480,8 @@ def _handle_show(args: dict, **kw) -> str:
             task = kb.get_task(conn, tid)
             if task is None:
                 return tool_error(f"task {tid} not found")
-            comments = kb.list_comments(conn, tid)
+            after_comment_id = args.get("after_comment_id")
+            comments = kb.list_comments(conn, tid, after_comment_id=after_comment_id)
             events = kb.list_events(conn, tid)
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
@@ -516,6 +517,7 @@ def _handle_show(args: dict, **kw) -> str:
 
             def _comment_dict(c):
                 return {
+                    "id": c.id,
                     "author": c.author, "body": c.body,
                     "created_at": c.created_at,
                     "kind": getattr(c, "kind", "comment"),
@@ -531,7 +533,11 @@ def _handle_show(args: dict, **kw) -> str:
             if mode not in {"worker_slim", "full"}:
                 return tool_error("mode must be one of: worker_slim, full")
 
-            if mode == "worker_slim" and os.environ.get("HERMES_KANBAN_TASK"):
+            if (
+                mode == "worker_slim"
+                and after_comment_id is None
+                and os.environ.get("HERMES_KANBAN_TASK")
+            ):
                 return json.dumps({
                     "task": {
                         "id": task.id,
@@ -1959,6 +1965,11 @@ KANBAN_SHOW_SCHEMA = {
                 "description": _DESC_TASK_ID_DEFAULT,
             },
             "board": _board_schema_prop(),
+            "after_comment_id": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Only return comments with an ID greater than this watermark.",
+            },
             "mode": {
                 "type": "string",
                 "enum": ["worker_slim", "full"],

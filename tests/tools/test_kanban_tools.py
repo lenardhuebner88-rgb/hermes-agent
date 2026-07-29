@@ -290,6 +290,34 @@ def test_show_defaults_to_env_task_id(worker_env):
 
 
 
+def test_show_comment_delta_bypasses_worker_slim_comment_cap(worker_env):
+    """The live tool surface must not discard post-watermark comments."""
+    from tools import kanban_tools as kt
+
+    for index in range(10):
+        written = json.loads(kt._handle_comment({
+            "task_id": worker_env,
+            "body": f"tool delta {index}",
+            "author": "operator",
+        }))
+        assert written["ok"] is True
+
+    full = json.loads(kt._handle_show({"task_id": worker_env, "mode": "full"}))
+    watermark = full["comments"][0]["id"]
+    delta = json.loads(kt._handle_show({
+        "task_id": worker_env,
+        "after_comment_id": watermark,
+    }))
+
+    assert [comment["body"] for comment in delta["comments"]] == [
+        f"tool delta {index}" for index in range(1, 10)
+    ]
+    assert [comment["id"] for comment in delta["comments"]] == sorted(
+        comment["id"] for comment in delta["comments"]
+    )
+    assert len(delta["comments"]) == 9
+
+
 def test_show_worker_default_is_slim_but_full_preserves_legacy_payload(worker_env):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt

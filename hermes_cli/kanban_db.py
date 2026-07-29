@@ -6881,10 +6881,20 @@ def add_event(
         _append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
-def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
+def list_comments(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    after_comment_id: Optional[int] = None,
+) -> list[Comment]:
+    where = "task_id = ?"
+    params: list[object] = [task_id]
+    if after_comment_id is not None:
+        where += " AND id > ?"
+        params.append(int(after_comment_id))
     rows = conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
-        (task_id,),
+        f"SELECT * FROM task_comments WHERE {where} ORDER BY id ASC",
+        params,
     ).fetchall()
     return [
         Comment(
@@ -33908,7 +33918,12 @@ def _worker_brief_input(
         f"Assignee: {task.assignee or '(unassigned)'}",
         f"Status:   {task.status}",
         f"Comment checkpoint: comment_id_watermark={comment_id_watermark}",
-        "Completion checkpoint: Before completing, re-read this task's comments and act on records with an id greater than comment_id_watermark.",
+        (
+            "Completion checkpoint: before completing, run "
+            f"`hermes kanban show {task.id} --after-comment-id {comment_id_watermark}` "
+            "or call `kanban_show(after_comment_id="
+            f"{comment_id_watermark})`; act on every returned record."
+        ),
     ]
     if task.tenant:
         header.append(f"Tenant:   {task.tenant}")
