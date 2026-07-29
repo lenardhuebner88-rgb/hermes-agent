@@ -65,8 +65,8 @@ def test_block_task_stores_reviewer_metadata(kanban_home):
         assert stored["verdict"] == "REQUEST_CHANGES"
 
 
-def test_block_task_without_metadata_is_unchanged(kanban_home):
-    """Default None reviewer_metadata leaves the run metadata empty (today)."""
+def test_block_task_without_reviewer_metadata_preserves_spawn_identity(kanban_home):
+    """A plain block retains claim-time runtime identity without reviewer facts."""
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="x", assignee="coder")
         kb.claim_task(conn, tid)
@@ -75,7 +75,10 @@ def test_block_task_without_metadata_is_unchanged(kanban_home):
         row = conn.execute(
             "SELECT metadata FROM task_runs WHERE id = ?", (rid,)
         ).fetchone()
-        assert row["metadata"] in (None, "", "{}", "null")
+        stored = json.loads(row["metadata"])
+        assert stored["worker_runtime"] == "hermes"
+        assert "verdict" not in stored
+        assert "blocking_findings" not in stored
 
 
 def test_unblock_resets_failure_counters(kanban_home):
