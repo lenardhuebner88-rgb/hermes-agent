@@ -31,12 +31,7 @@ SPAWN_IDENTITY_METADATA_FIELDS = frozenset(
         "worker_runtime",
         "route_provider",
         "model_source",
-        "provider",
-        "model",
         "fallback_providers",
-        "subscription",
-        "billing_mode",
-        "cost_source",
     }
 )
 
@@ -133,9 +128,13 @@ def preserve_spawn_identity_metadata(
         return merged
     if not isinstance(spawn_metadata, dict):
         return merged
-    for field in SPAWN_IDENTITY_METADATA_FIELDS:
-        if field in spawn_metadata:
-            merged[field] = spawn_metadata[field]
+    worker_runtime = spawn_metadata.get("worker_runtime")
+    if worker_runtime is not None:
+        merged["worker_runtime"] = worker_runtime
+    for field in SPAWN_IDENTITY_METADATA_FIELDS - {"worker_runtime"}:
+        value = spawn_metadata.get(field)
+        if value is not None:
+            merged.setdefault(field, value)
     return merged
 
 

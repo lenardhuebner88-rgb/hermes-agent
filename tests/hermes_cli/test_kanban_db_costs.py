@@ -1019,6 +1019,62 @@ def test_s1c_audited_non_claude_equivalent_dry_run_and_apply(kanban_home, tmp_pa
         assert meta["cost_equivalent_cache_read_tokens"] == 4_464_640
 
 
+def test_s1c_fresh_completed_run_remains_stampable_after_spawn_identity_merge(
+    kanban_home, tmp_path, monkeypatch
+):
+    profile_dir = tmp_path / "profiles" / "coder"
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
+    monkeypatch.setattr(
+        kb,
+        "_spawn_identity_metadata",
+        lambda *args, **kwargs: {
+            "worker_runtime": "hermes",
+            "provider": "dispatch-provider",
+            "model": "dispatch-model",
+            "cost_source": "dispatch_metered_stamp",
+        },
+    )
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="fresh completed", assignee="coder")
+        assert kb.claim_task(conn, task_id) is not None
+        run_id = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["current_run_id"]
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="done",
+            metadata={
+                "worker_session_id": "S-fresh",
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+            },
+        )
+        conn.execute(
+            "UPDATE task_runs SET input_tokens = 1000, output_tokens = 500 "
+            "WHERE id = ?",
+            (run_id,),
+        )
+        _write_session_rows(profile_dir / "state.db", [{
+            "id": "S-fresh", "source": "cli", "started_at": 1500,
+            "input_tokens": 1000, "output_tokens": 500,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "actual_cost_usd": None, "estimated_cost_usd": 0.0,
+            "model": "gpt-5.5", "billing_provider": "openai-codex",
+            "cwd": f"/x/kanban/workspaces/{task_id}",
+        }])
+
+        report = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50)
+        metadata = json.loads(conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()[0])
+
+    assert report["classes"]["stampable_with_model_and_price"] == 1
+    assert metadata["provider"] == "openai-codex"
+    assert metadata["model"] == "gpt-5.5"
+    assert "cost_source" not in metadata
+
+
 def test_s1c_audited_non_claude_equivalent_skips_no_model_claude_and_metered(
     kanban_home, tmp_path, monkeypatch
 ):

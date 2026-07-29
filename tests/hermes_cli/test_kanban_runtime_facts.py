@@ -187,9 +187,17 @@ def test_terminal_facts_keep_process_protocol_outcome_and_reason_independent(
     assert terminal["end_reason"] == "worker_process_observed"
 
 
-@pytest.mark.parametrize("retry_class", sorted(facts.RETRY_CLASSES))
-def test_retry_class_and_trigger_event_are_exact_run_relationships(
-    kanban_home, retry_class
+@pytest.mark.parametrize(
+    ("event_kind", "retry_class", "payload", "pass_run_id"),
+    [
+        ("auto_retried", "auto", {"blocked_run_id": "predecessor"}, False),
+        (kb.INTEGRATION_RETRY_EVENT, "integration", {}, False),
+        (kb.TRANSIENT_RETRY_EVENT, "transient", {}, True),
+        ("unblocked", "operator", {}, False),
+    ],
+)
+def test_append_event_stages_exact_retry_relationship_for_next_claim(
+    kanban_home, event_kind, retry_class, payload, pass_run_id
 ):
     with kb.connect_closing() as conn:
         task_id, predecessor_id = _claimed_run(conn)
@@ -199,18 +207,16 @@ def test_retry_class_and_trigger_event_are_exact_run_relationships(
             "claim_expires = NULL WHERE id = ?",
             (task_id,),
         )
-        event_id = conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at, run_id) "
-            "VALUES (?, ?, ?, 1, ?)",
-            (task_id, f"{retry_class}_retry", "{}", predecessor_id),
-        ).lastrowid
-        assert event_id is not None
-        facts.stage_retry_link(
+        resolved_payload = {
+            key: predecessor_id if value == "predecessor" else value
+            for key, value in payload.items()
+        }
+        event_id = kb._append_event(
             conn,
-            task_id=task_id,
-            retry_of_task_run_id=predecessor_id,
-            retry_class=retry_class,
-            triggering_event_id=event_id,
+            task_id,
+            event_kind,
+            resolved_payload,
+            run_id=predecessor_id if pass_run_id else None,
         )
         claimed = kb.claim_task(conn, task_id)
         assert claimed is not None
@@ -219,11 +225,18 @@ def test_retry_class_and_trigger_event_are_exact_run_relationships(
         ).fetchone()["current_run_id"]
 
         link = facts.get_retry_link(conn, task_run_id=retry_id)
+        event = conn.execute(
+            "SELECT task_id, kind FROM task_events WHERE id = ?", (event_id,)
+        ).fetchone()
 
     assert link is not None
     assert link["retry_of_task_run_id"] == predecessor_id
     assert link["retry_class"] == retry_class
     assert link["triggering_event_id"] == event_id
+    assert link["task_id"] == task_id
+    assert link["board"] == "default"
+    assert event["task_id"] == task_id
+    assert event["kind"] == event_kind
 
 
 def test_foreign_task_retry_link_is_rejected_with_structured_diagnostic(kanban_home):
@@ -252,6 +265,38 @@ def test_foreign_task_retry_link_is_rejected_with_structured_diagnostic(kanban_h
         ).fetchone()
 
     assert json.loads(diagnostic["payload"])["finding"] == "foreign_task_predecessor"
+
+
+def test_retry_link_rejects_non_previous_predecessor(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        kb._end_run(conn, task_id, outcome="crashed")
+        event_id = kb._append_event(
+            conn,
+            task_id,
+            kb.TRANSIENT_RETRY_EVENT,
+            {"attempt": 1},
+            run_id=run_id,
+        )
+
+        with pytest.raises(ValueError, match="cyclic_or_non_previous_predecessor"):
+            facts.record_retry_link(
+                conn,
+                task_run_id=run_id,
+                retry_of_task_run_id=run_id,
+                retry_class="transient",
+                triggering_event_id=event_id,
+            )
+        diagnostic = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'retry_link_rejected' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    assert diagnostic is not None
+    assert json.loads(diagnostic["payload"])["finding"] == (
+        "cyclic_or_non_previous_predecessor"
+    )
 
 
 def test_worker_session_reuse_does_not_create_or_replace_retry_link(kanban_home):
@@ -292,7 +337,11 @@ def test_claim_to_end_preserves_exact_worker_runtime_metadata(
                 conn,
                 task_id,
                 outcome="completed",
-                metadata={"completion_fact": runtime},
+                metadata={
+                    "completion_fact": runtime,
+                    "provider": "terminal-provider",
+                    "model": "terminal-model",
+                },
             )
 
             stored = json.loads(
@@ -304,3 +353,6 @@ def test_claim_to_end_preserves_exact_worker_runtime_metadata(
             assert stored["route_provider"] == "test-provider"
             assert stored["model_source"] == "profile"
             assert stored["completion_fact"] == runtime
+            assert stored["provider"] == "terminal-provider"
+            assert stored["model"] == "terminal-model"
+            assert "cost_source" not in stored

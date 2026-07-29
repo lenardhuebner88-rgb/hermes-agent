@@ -7306,18 +7306,29 @@ def _append_event(
         (task_id, run_id, kind, pl, now),
     )
     event_id = int(cur.lastrowid)
-    retry_evidence = {
-        "auto_retried": ("auto", (payload or {}).get("blocked_run_id")),
-        INTEGRATION_RETRY_EVENT: ("integration", run_id),
-        TRANSIENT_RETRY_EVENT: ("transient", run_id),
-        "unblocked": ("operator", run_id),
+    retry_class = {
+        "auto_retried": "auto",
+        INTEGRATION_RETRY_EVENT: "integration",
+        TRANSIENT_RETRY_EVENT: "transient",
+        "unblocked": "operator",
     }.get(kind)
-    if retry_evidence is not None and retry_evidence[1] is not None:
+    if retry_class is not None:
+        predecessor_run_id = (payload or {}).get("blocked_run_id") or run_id
+        if predecessor_run_id is None:
+            predecessor = conn.execute(
+                "SELECT id FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            predecessor_run_id = predecessor["id"] if predecessor is not None else None
+    else:
+        predecessor_run_id = None
+    if retry_class is not None and predecessor_run_id is not None:
         _runtime_facts.stage_retry_link(
             conn,
             task_id=task_id,
-            retry_of_task_run_id=int(retry_evidence[1]),
-            retry_class=retry_evidence[0],
+            retry_of_task_run_id=int(predecessor_run_id),
+            retry_class=retry_class,
             triggering_event_id=event_id,
             board=board_slug_for_conn(conn),
         )
