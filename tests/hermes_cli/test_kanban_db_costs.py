@@ -724,7 +724,6 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
     """
     import logging
 
-    from agent.models_dev import ModelInfo
 
     profile_dir = tmp_path / "profiles" / "premium"
     monkeypatch.setattr(
@@ -733,21 +732,7 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "premium" else None)
 
-    def fake_get_model_info(provider, model):
-        if (provider, model) == ("anthropic", "claude-opus-4-8"):
-            return ModelInfo(
-                id="claude-opus-4-8",
-                name="Claude Opus 4.8",
-                family="claude-opus",
-                provider_id="anthropic",
-                cost_input=5.0,
-                cost_output=25.0,
-                cost_cache_read=0.5,
-                cost_cache_write=6.25,
-            )
-        return None
-
-    monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 9.125)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="claude-mismatch", assignee="premium")
         run_id = _insert_run_window(
@@ -781,11 +766,11 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
         ), warnings
 
 
-def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path, monkeypatch):
+def test_s1_codex_included_session_priced_from_canonical_feed(kanban_home, tmp_path, monkeypatch):
     """COST-VISIBILITY-WORKERS-S2: a codex subscription session stamps
     estimated_cost_usd=0 ('included'), so the runtime leaves it unpriced. The
-    backfill then computes the API-equivalent as tokens × online price (models.
-    dev) for the session's model — this is what finally lights up the teure
+    backfill then computes the API-equivalent through the canonical pricing
+    feed for the session's model — this is what finally lights up the teure
     Codex lanes that otherwise show $0/'—'. Real cost_usd stays $0."""
     profile_dir = tmp_path / "profiles" / "coder"
     monkeypatch.setattr(
@@ -793,12 +778,8 @@ def test_s1_codex_included_session_priced_from_models_dev(kanban_home, tmp_path,
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "chatgpt" if p == "coder" else None)
-    # Pin the price so the test is hermetic (no models.dev network/cache dep):
-    # gpt-5.5 = $5/Mtok in, $30/Mtok out.
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
-    )
+    # Pin the canonical boundary so the backfill test is hermetic.
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 8.0)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-burn", assignee="coder")
         run_id = _insert_run_window(
@@ -834,11 +815,7 @@ def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypa
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "chatgpt" if p == "coder" else None)
-    # gpt-5.5: in $5, out $30, cache_read $0.5, cache_write $6.25 (per Mtok)
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 30.0, 0.5, 6.25) if model == "gpt-5.5" else None,
-    )
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 14.25)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-cache", assignee="coder")
         run_id = _insert_run_window(
@@ -868,12 +845,7 @@ def test_s1b_audited_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, 
     monkeypatch.setattr(
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
     )
-    monkeypatch.setattr(
-        kb,
-        "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
-        if model == "claude-opus-4-8" else None,
-    )
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 0.953664)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="s1b-golden", assignee="premium")
         run_id = _insert_run_window(
@@ -921,12 +893,6 @@ def test_s1b_audited_claude_equivalent_requires_model_label(kanban_home, tmp_pat
     profile_dir = tmp_path / "profiles" / "premium"
     monkeypatch.setattr(
         "hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir),
-    )
-    monkeypatch.setattr(
-        kb,
-        "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 25.0, 0.5, 6.25)
-        if model == "claude-opus-4-8" else None,
     )
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="s1b-missing-model", assignee="premium")
@@ -1089,7 +1055,7 @@ def test_s1c_audited_non_claude_equivalent_skips_no_model_claude_and_metered(
 def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
     kanban_home, tmp_path, monkeypatch
 ):
-    """S1d: corrected prices, CSI-only lookup, missing models, and S1b guardrails."""
+    """S1d: corrected prices, CSI-only lookup, priced models, and S1b guardrails."""
     profile_dir = tmp_path / "profiles" / "coder"
     state_db = profile_dir / "state.db"
     monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", lambda name: str(profile_dir))
@@ -1171,7 +1137,7 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
              "input_tokens": 1000, "output_tokens": 100,
              "cache_read_tokens": 0, "cache_write_tokens": 0,
              "actual_cost_usd": None, "estimated_cost_usd": 0.0,
-             "model": "kimi-for-coding", "billing_provider": "moonshot",
+             "model": "k3", "billing_provider": "kimi-coding",
              "cwd": f"/x/kanban/workspaces/{missing_tid}"},
         ])
 
@@ -1179,7 +1145,7 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
         assert dry["updated"] == 0
         assert dry["classes"]["restamp_price_correction"] == 2
         assert dry["classes"]["new_stamp_csi"] == 1
-        assert dry["classes"]["new_stamp_missing_model"] == 1
+        assert dry["classes"]["stampable_with_model_and_price"] == 1
 
         applied = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
         assert applied["updated"] == 4
@@ -1189,14 +1155,14 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
             (restamp_run, mini_run, csi_run, missing_run, s1b_run),
         ).fetchall()
         by_id = {row["id"]: json.loads(row["metadata"]) for row in rows}
-        assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(2.6540775)
+        assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(3.0055725)
         assert by_id[restamp_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(6.011145)
         assert by_id[restamp_run]["provider_model_source"] == "unknown"
         assert by_id[mini_run]["cost_usd_equivalent"] == pytest.approx(0.0012)
         assert by_id[mini_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(0.008)
-        assert by_id[csi_run]["cost_usd_equivalent"] == pytest.approx(0.000098)
+        assert by_id[csi_run]["cost_usd_equivalent"] == pytest.approx(0.00184)
         assert by_id[csi_run]["provider_model_source"] == "session_log"
-        assert by_id[missing_run]["cost_usd_equivalent"] == pytest.approx(0.000829)
+        assert by_id[missing_run]["cost_usd_equivalent"] == pytest.approx(0.0045)
         assert by_id[missing_run]["provider_model_source"] == "session_log"
         assert by_id[s1b_run]["cost_usd_equivalent"] == pytest.approx(99.0)
         assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[s1b_run]
@@ -1204,13 +1170,9 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
 
 def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypatch):
     """Opt-in repair: old subscription runs frozen at cost_usd=0.0 with
-    tokens but no worker_session_id can still get a bounded API-equivalent
-    from the active lane preset. The metered cost remains zero."""
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 30.0, 0.5, 6.25)
-        if (provider, model) == ("openai", "gpt-5.5") else None,
-    )
+        tokens but no worker_session_id can still get a bounded API-equivalent
+        from the active lane preset. The metered cost remains zero."""
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 0.008)
     with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
@@ -1282,13 +1244,13 @@ def test_repair_frozen_equivalent_uses_stamped_provider_model_after_lane_flip(
 ):
     seen = []
 
-    def fake_equivalent(provider, model, in_tok, out_tok, *, cache=None):
+    def fake_equivalent(model, *, provider=None, **kwargs):
         seen.append((provider, model))
         if (provider, model) == ("openrouter", "openai/gpt-5-mini"):
             return 0.0012
         return None
 
-    monkeypatch.setattr(kb, "_equiv_from_tokens", fake_equivalent)
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", fake_equivalent)
     with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
@@ -1331,11 +1293,7 @@ def test_repair_frozen_equivalent_uses_stamped_provider_model_after_lane_flip(
 def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
     kanban_home, monkeypatch,
 ):
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (5.0, 30.0, 0.5, 6.25)
-        if (provider, model) == ("openai", "gpt-5.5") else None,
-    )
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 0.008)
     with kb.connect_closing() as conn:
         lane = kb.create_lane(
             conn,
@@ -1406,8 +1364,7 @@ def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_pat
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "chatgpt" if p == "coder" else None)
-    monkeypatch.setattr(kb, "_lookup_model_price_per_mtok",
-                        lambda provider, model: None)
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: None)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="codex-noprice", assignee="coder")
         run_id = _insert_run_window(

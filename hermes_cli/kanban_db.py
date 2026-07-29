@@ -8884,7 +8884,7 @@ def _model_billing_family(value: Optional[str]) -> Optional[str]:
     """Best-effort provider/model family for mismatch warnings.
 
     Unknown labels intentionally do not warn. The warning is diagnostics-only;
-    pricing remains keyed by the model label in _lookup_model_price_per_mtok.
+    pricing remains keyed by the model label in the canonical pricing helper.
     """
     if not value:
         return None

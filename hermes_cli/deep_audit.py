@@ -426,8 +426,8 @@ def _usage_tokens(resp: Any) -> int:
 def _per_turn_cost(resp: Any, model_label: str | None) -> float:
     """Estimate the cost of a single LLM turn from token usage + model pricing.
 
-    Uses the same models.dev price lookup + _PRICE_OVERRIDES_PER_MTOK overrides
-    as the kanban cost path (lazy import to avoid circular dependency).
+    Uses the canonical vendored LiteLLM pricing feed plus its curated overrides
+    (lazy import to avoid a module-level dependency).
     Returns 0.0 when pricing is unavailable — never raises.
     """
     try:

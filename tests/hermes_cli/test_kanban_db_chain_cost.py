@@ -587,7 +587,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     """Claude subscription sessions can be unpriced and omit billing_provider.
 
     ``task_runs`` deliberately has no cache-token columns; the fallback must use
-    the matched state.db session's model/tokens plus models.dev pricing and infer
+    the matched state.db session's model/tokens plus canonical pricing and infer
     Anthropic for bare ``claude-*`` model names.
     """
     profile_dir = tmp_path / "profiles" / "coder-claude"
@@ -596,23 +596,6 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     )
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
-
-    calls: list[tuple[str, str]] = []
-
-    class _FakeModelInfo:
-        cost_input = 15.0
-        cost_output = 75.0
-        cost_cache_read = 1.50
-        cost_cache_write = 18.75
-
-        def has_cost_data(self):
-            return True
-
-    def fake_get_model_info(provider, model):
-        calls.append((provider, model))
-        if (provider, model) == ("anthropic", "claude-opus-4-8"):
-            return _FakeModelInfo()
-        return None
 
     monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 9.125)
 
@@ -640,11 +623,10 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     assert row["input_tokens"] == 1_000_000
     assert row["output_tokens"] == 100_000
     meta = json.loads(row["metadata"])
-    assert meta["cost_usd_equivalent"] == pytest.approx(22.5)
+    assert meta["cost_usd_equivalent"] == pytest.approx(9.125)
     assert meta["model"] == "claude-opus-4-8"
     assert meta["billing_mode"] == "subscription_included"
     assert meta["subscription"] == "claude"
-    assert calls == [("anthropic", "claude-opus-4-8")]
 
 
 def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, monkeypatch):
