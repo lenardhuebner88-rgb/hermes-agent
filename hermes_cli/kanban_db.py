@@ -26621,11 +26621,6 @@ def no_silent_stall_sweep(
         if _is_funnel_root_task(conn, row):
             summary["skipped_funnel"].append(task_id)
             continue
-        # Once escalated, the operator owns it — never retry again.
-        if _has_stall_marker(
-            conn, task_id, INTEGRATION_PARKED_STALL_CLASS
-        ) or _has_stall_marker(conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS):
-            continue
         blocked_event = conn.execute(
             "SELECT payload FROM task_events "
             "WHERE task_id = ? AND kind = 'blocked' "
@@ -26644,7 +26639,23 @@ def no_silent_stall_sweep(
             ),
         ):
             continue
-        if _operator_escalation_is_active(conn, task_id):
+        base_prep_retry_allowed = _escalation_class.base_prep_retry_allowed(
+            conn,
+            task_id=task_id,
+            reason=reason,
+            conflict_fingerprint=_conflict_fingerprint(reason),
+        )
+        # Once escalated, the operator owns it — except for a system-reported
+        # base-prep park whose failed fixer still has bounded budget.
+        if (
+            _has_stall_marker(conn, task_id, INTEGRATION_PARKED_STALL_CLASS)
+            or _has_stall_marker(conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS)
+        ) and not base_prep_retry_allowed:
+            continue
+        if (
+            _operator_escalation_is_active(conn, task_id)
+            and not base_prep_retry_allowed
+        ):
             # Explicit operator hold: no integration self-heal sweep may retry
             # or unblock a task while the latest escalation is unresolved.
             summary["skipped_held"].append(task_id)
@@ -26663,7 +26674,7 @@ def no_silent_stall_sweep(
         # is spent (or there is no worktree to fix in) it escalates exactly like
         # the needs_operator path below. The transient §5 path above is
         # untouched.
-        if park_class == "needs_orchestrator":
+        if park_class == "needs_orchestrator" or base_prep_retry_allowed:
             _maybe_route_conflict_park_fixer(
                 conn,
                 row,
