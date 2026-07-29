@@ -156,3 +156,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 18/20 = 90%
 - gate: narrow pytest 46 passed | ruff clean
 - commit: d182893dc
+
+## 22. hermes_cli/pa_loops.py — 2026-07-29T00:25:49Z
+- probe before: 11/20 = 55%
+- killed survivors: [K] bool_op_swap L50, [K] bool_op_swap L63, [K] bool_op_swap L118, [K] bool_op_swap L120
+- probe after: 15/20 = 75%
+- gate: narrow pytest 21 passed | ruff clean
+- commit: c6123acac
