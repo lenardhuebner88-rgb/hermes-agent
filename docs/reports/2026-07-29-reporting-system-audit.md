@@ -264,3 +264,26 @@ bei hard-deadline lebt bis Prozessende; Live-Proposals nicht appliziert
 (Auftragsgrenze).
 
 **Teststand final:** hermes **1058/1058** (56 Dateien) + tool-nah 228/228 · scripts **60/60**.
+
+---
+
+## K. Abschluss-Loops 23 + Endergebnis
+
+| Codex-#5-Restbefund | Fix | Commit |
+|---|---|---|
+| HTTPError-Body außerhalb Deadline-Klammer | `_run_with_deadline` verallgemeinert; Fehlerbody im selben Bracket, 64-KiB-Cap, Header-retry_after-Fallback | `bf721c0` (scripts) |
+| `DISCORD_NOTIFY_TOTAL_TIMEOUT=inf` ⇒ OverflowError | finite-positive-Validierung (Env + Flag), lauter Default | `bf721c0` (scripts) |
+| Cursor überspringt Gleichstände | zusammengesetzter Cursor (claimed_at, id), rückwärtskompatibel | `ead25087d7` |
+| „delivery proof"-Wording in scheduler.py | Docstring-Ehrlichkeit (local_send_witness vs. platform_message) | `ead25087d7` |
+| „holder crashed" kategorisch | „stale/ambiguous — crashed OR slow; retry-due" | `ead25087d7` |
+| öffentlicher Legacy-Umgehungspfad | `_allow_legacy_no_execution` privat, test-only | `ead25087d7` |
+
+## Endergebnis
+
+**Codex-Score: 5.6 → 7.1 → 8.2 → 8.8 → 9.1/10** (Ziel ≥9 erreicht, Bewertung #5:
+`eval/2026-07-29-codex-final4.json`).
+Kategorien final: delivery_reliability 9.1 · failure_handling 8.9 · scheduler_hygiene 9.4 ·
+observability 9.1 · code_quality 9.0 · test_coverage 9.5 · documentation_truth 8.8.
+
+**Tests final:** hermes **1065/1065** (57 Dateien) + tool-nah **228/228** · scripts **64/64**.
+**Loops:** 23 (12 geplant + 11 Schärf-Loops auf Codex-Findings). **Commits:** 15 (hermes) + 14 (scripts).
