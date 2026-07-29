@@ -180,7 +180,20 @@ class TestConcurrentRecovery:
 
         def _load(tag):
             try:
-                results[tag] = [j["id"] for j in jobs.load_jobs()]
+                # Bounded retry on an EMPTY load (loop 18): load_jobs checks
+                # jobs_file.exists() before taking the lock, so a thread can
+                # land inside the winner's quarantine→restore window (the
+                # file is briefly absent) and see "no file" → []. This is a
+                # pre-existing load_jobs race this test kept flaking on under
+                # a loaded gate (reproduced on the loop-15 base); the
+                # assertions that matter — convergence on the restored store,
+                # exactly one quarantine, no crash — are unaffected.
+                for _ in range(20):
+                    loaded = [j["id"] for j in jobs.load_jobs()]
+                    if loaded:
+                        break
+                    threading.Event().wait(0.15)
+                results[tag] = loaded
             except Exception as exc:  # noqa: BLE001 - test captures all
                 errors.append(exc)
 

@@ -53,6 +53,10 @@ def test_terminal_execution_cannot_be_rewritten(monkeypatch, tmp_path):
 
 def test_retention_bounds_terminal_history_but_preserves_inflight(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
+    # Count-only cap semantics: loop 18 made the global cap horizon-aware
+    # (in-horizon rows survive the cap with a warning); this test pins the
+    # pure count bound, so it disables the time guarantee.
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")
     monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 3)
     inflight = executions.create_execution("live", source="builtin")
     executions.mark_execution_running(inflight["id"])

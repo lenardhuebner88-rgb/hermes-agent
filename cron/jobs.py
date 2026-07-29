@@ -1047,14 +1047,50 @@ def _rotate_jobs_backups(jobs_file: Path) -> None:
         )
 
 
+# The persisted job-record schema (loop 18 / F2): every field create_job()
+# writes, with its stored type. Restore validation is PRESENT-THEN-STRICT —
+# records written before a field existed (or minimal hand-written records)
+# stay restorable, but a field that IS present must carry the type
+# create_job()/save_jobs() would have written. Unknown extra fields are
+# tolerated for forward compatibility with newer writers.
+_JOB_RECORD_STATES = frozenset({"scheduled", "paused", "error", "completed"})
+# Optional-string fields: create_job stores a str or None for each of these.
+_JOB_RECORD_OPTIONAL_STR_FIELDS = (
+    "prompt", "skill", "model", "provider", "provider_snapshot",
+    "model_snapshot", "base_url", "script", "schedule_display",
+    "paused_at", "paused_reason", "created_at", "next_run_at",
+    "last_run_at", "last_status", "last_error", "last_delivery_error",
+    "deliver", "workdir",
+)
+# Boolean fields: strictly bool — a truthy int/str is a corrupt write.
+_JOB_RECORD_BOOL_FIELDS = ("enabled", "no_agent", "attach_to_session")
+# Fields stored as a list of strings or None.
+_JOB_RECORD_STR_LIST_FIELDS = ("skills", "context_from", "enabled_toolsets")
+# Optional per-job timeouts: persisted only when set, strictly int (never
+# bool — isinstance(True, int) is True, so exclude it explicitly).
+_JOB_RECORD_INT_FIELDS = ("timeout_seconds", "delivery_timeout_seconds")
+
+
+def _is_int_not_bool(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _is_plausible_job_record(record: Any) -> bool:
     """Shape-check one job record restored from a backup (loop 15 / F3).
 
-    The bar is "create_job() could have written this": a non-empty string
-    ``id`` and ``name``, and a ``schedule`` dict whose ``kind`` is one
+    The bar is "create_job() could have written this". Mandatory: a non-empty
+    string ``id`` and ``name``, and a ``schedule`` dict whose ``kind`` is one
     parse_schedule() can emit, carrying that kind's payload with a plausible
     type (interval → positive int minutes, cron → expr string, once → run_at
-    string). Deliberately not a full semantic validation — restored records
+    string). Since loop 18 (F2) every OTHER field create_job() persists is
+    type-checked too whenever it is present: enabled/no_agent bool, repeat a
+    dict with int-or-None times and int completed, state a string from the
+    known state enum, deliver/script/model/... str-or-None, skills/
+    context_from/enabled_toolsets a list of strings or None, origin/retry a
+    dict or None, and the opt-in timeouts strictly int. Fields absent from
+    the record are tolerated (back-compat with older or hand-written stores)
+    and unknown extra fields are tolerated (forward-compat with newer
+    writers). Deliberately not a full semantic validation — restored records
     keep flowing through _normalize_job_record() on read like any stored job.
     """
     if not isinstance(record, dict):
@@ -1071,14 +1107,61 @@ def _is_plausible_job_record(record: Any) -> bool:
     kind = schedule.get("kind")
     if kind == "interval":
         minutes = schedule.get("minutes")
-        return isinstance(minutes, int) and not isinstance(minutes, bool) and minutes > 0
-    if kind == "cron":
+        if not _is_int_not_bool(minutes) or minutes <= 0:
+            return False
+    elif kind == "cron":
         expr = schedule.get("expr")
-        return isinstance(expr, str) and bool(expr.strip())
-    if kind == "once":
+        if not (isinstance(expr, str) and expr.strip()):
+            return False
+    elif kind == "once":
         run_at = schedule.get("run_at")
-        return isinstance(run_at, str) and bool(run_at.strip())
-    return False
+        if not (isinstance(run_at, str) and run_at.strip()):
+            return False
+    else:
+        return False
+
+    # Full-schema type checks for the remaining persisted fields (loop 18 /
+    # F2), present-then-strict as documented above.
+    for field in _JOB_RECORD_OPTIONAL_STR_FIELDS:
+        if field in record and not (
+            record[field] is None or isinstance(record[field], str)
+        ):
+            return False
+    for field in _JOB_RECORD_BOOL_FIELDS:
+        if field in record and not isinstance(record[field], bool):
+            return False
+    for field in _JOB_RECORD_STR_LIST_FIELDS:
+        if field in record:
+            value = record[field]
+            if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+            ):
+                return False
+    for field in _JOB_RECORD_INT_FIELDS:
+        if field in record and not _is_int_not_bool(record[field]):
+            return False
+    for field in ("origin", "retry"):
+        if field in record and not (
+            record[field] is None or isinstance(record[field], dict)
+        ):
+            return False
+    if "state" in record:
+        state = record["state"]
+        if not (isinstance(state, str) and state in _JOB_RECORD_STATES):
+            return False
+    if "repeat" in record:
+        repeat = record["repeat"]
+        if repeat is not None:
+            if not isinstance(repeat, dict):
+                return False
+            times = repeat.get("times")
+            if times is not None and not (_is_int_not_bool(times) and times > 0):
+                return False
+            completed = repeat.get("completed", 0)
+            if not _is_int_not_bool(completed) or completed < 0:
+                return False
+    return True
 
 
 def _validate_backup_records(

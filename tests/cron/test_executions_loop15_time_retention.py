@@ -5,8 +5,12 @@ high-frequency jobs burned through their window in hours and error runs were
 evicted as fast as successes. _prune_unlocked now deletes a terminal row only
 when it is (a) beyond the per-job keep-N window AND (b) older than the
 keep-days horizon (HERMES_CRON_EXECUTIONS_KEEP_DAYS, default 30) AND (c) not
-a failed/unknown row inside that horizon. The global cap stays a hard safety
-bound and may break the time guarantee in the extreme.
+a failed/unknown row inside that horizon. Since loop 18 the global cap is
+horizon-aware: it only deletes rows already older than the horizon and warns
+loudly when the ledger overflows the cap with in-horizon rows, instead of
+silently eating the time guarantee at high run volume (old loop-15 cap
+semantics). The in-horizon overflow behaviour is covered in
+test_executions_loop18_horizon_cap.py.
 """
 
 from __future__ import annotations
@@ -116,17 +120,24 @@ def test_old_failed_run_beyond_horizon_is_deleted(monkeypatch, tmp_path):
     assert len([r for r in records if r["status"] == "failed"]) == 1
 
 
-def test_global_cap_may_break_time_guarantee(monkeypatch, tmp_path):
-    """The global cap is a hard safety bound: it prunes even fresh rows when
-    total terminal history exceeds it (documented extreme-case behaviour)."""
+def test_global_cap_prunes_rows_beyond_horizon(monkeypatch, tmp_path):
+    """The global cap still bounds OLD terminal history: rows past the
+    keep-days horizon are pruned down to the cap, oldest first. (Loop 18
+    changed the cap to be horizon-aware; the in-horizon overflow case it no
+    longer prunes is covered in test_executions_loop18_horizon_cap.py.)"""
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "50")
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_MAX_TERMINAL", "5")
 
-    for _ in range(10):
-        _run(executions, "capped")
+    aged = [_run(executions, "capped") for _ in range(10)]
+    for execution_id in aged:
+        _age(executions, execution_id, days=40)
+    fresh = _run(executions, "capped")  # fresh run triggers the prune
 
-    assert len(executions.list_executions(limit=500)) == 5
+    records = executions.list_executions(limit=500)
+    # Cap=5: the fresh run plus the four newest aged rows survive.
+    assert len(records) == 5
+    assert fresh in {r["id"] for r in records}
 
 
 def test_keep_days_zero_disables_time_guarantee(monkeypatch, tmp_path):

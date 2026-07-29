@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import uuid
 from contextlib import contextmanager
@@ -41,10 +42,14 @@ EXECUTIONS_FILE = _IMPORT_HOME / "cron" / "executions.db"
 # the keep-days horizon (default 30 days) — and failed/unknown rows inside
 # that horizon survive regardless of count, so error history outlives the
 # success flood. A row is only deleted when it is beyond the count window
-# AND older than the horizon. The global cap stays a hard safety bound on
-# total ledger size and may, in the extreme, break the time-based guarantee
-# (see _prune_unlocked). All limits are DELETE-based and self-healing —
-# changing any value takes effect on the next prune, no migration needed.
+# AND older than the horizon. Since loop 18 the global cap is horizon-aware
+# too: enforcing it may only delete rows already outside the keep-days
+# horizon (oldest first, until the ledger is back under the cap), so the cap
+# can no longer silently eat the time guarantee at high run volume. When the
+# overflow consists entirely of in-horizon rows, nothing is deleted for the
+# cap and a loud one-per-prune warning makes the overflow visible instead. All limits are
+# DELETE-based and self-healing — changing any value takes effect on the
+# next prune, no migration needed.
 KEEP_TERMINAL_EXECUTIONS_PER_JOB = 50
 KEEP_TERMINAL_EXECUTIONS_DAYS = 30
 MAX_TERMINAL_EXECUTIONS = 20000
@@ -252,10 +257,25 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
     HERMES_CRON_EXECUTIONS_KEEP_DAYS=0 reverts to pure count-based pruning.
     In-flight (claimed/running) rows are never pruned.
 
-    The global cap afterwards is a hard safety bound on total ledger size:
-    it deliberately does NOT honor the time-based guarantee — in the extreme
-    (more terminal rows than the cap inside the horizon) bounding the
-    database wins over history completeness.
+    All time comparisons go through SQLite's julianday() (loop 18 / F1): the
+    stored claimed_at is a tz-aware ISO string whose offset varies with the
+    configured/local timezone, so a raw string comparison misorders mixed
+    offsets; julianday() normalizes every ISO-8601 variant (offsets, 'Z',
+    space separator) onto one UTC scale. Unparseable values yield NULL, which
+    fails safe toward KEEPING the row (both ``<`` comparisons come out NULL).
+
+    Since loop 18 the global cap is horizon-aware: enforcing it may only
+    delete terminal rows that are ALREADY older than the keep-days horizon,
+    so the time-based guarantee holds even at high run volume (the loop-15
+    cap deleted regardless of age and ate the guarantee exactly where it was
+    needed). When the ledger exceeds the cap, the OLDEST out-of-horizon rows
+    are deleted until the ledger is back under the cap or no deletable rows
+    remain; if it still overflows — i.e. the excess consists entirely of
+    in-horizon rows — nothing further is deleted and a loud one-per-prune
+    warning on the log and stderr makes the overflow visible so the operator
+    can raise HERMES_CRON_EXECUTIONS_MAX_TERMINAL or shorten the horizon.
+    With KEEP_DAYS=0 the horizon is "now" and the cap degenerates to the old
+    pure count-based global bound.
     """
     cutoff = (_hermes_now() - timedelta(days=_keep_terminal_days())).isoformat()
     conn.execute(
@@ -264,24 +284,47 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
                SELECT id, claimed_at, status,
                       ROW_NUMBER() OVER (
                         PARTITION BY job_id
-                        ORDER BY claimed_at DESC, id DESC
+                        ORDER BY julianday(claimed_at) DESC, id DESC
                       ) AS rn
                FROM executions
                WHERE status IN ('completed','failed','unknown')
              ) WHERE rn > ?
-               AND claimed_at < ?
-               AND NOT (status IN ('failed','unknown') AND claimed_at >= ?)
+               AND julianday(claimed_at) < julianday(?)
+               AND NOT (status IN ('failed','unknown')
+                        AND julianday(claimed_at) >= julianday(?))
            )""",
         (_keep_terminal_per_job(), cutoff, cutoff),
     )
-    conn.execute(
-        """DELETE FROM executions WHERE id IN (
-             SELECT id FROM executions
-             WHERE status IN ('completed','failed','unknown')
-             ORDER BY claimed_at DESC, id DESC LIMIT -1 OFFSET ?
-           )""",
-        (_max_terminal_executions(),),
-    )
+    cap = _max_terminal_executions()
+    overflow = conn.execute(
+        """SELECT COUNT(*) FROM executions
+           WHERE status IN ('completed','failed','unknown')"""
+    ).fetchone()[0] - cap
+    if overflow > 0:
+        conn.execute(
+            """DELETE FROM executions WHERE id IN (
+                 SELECT id FROM executions
+                 WHERE status IN ('completed','failed','unknown')
+                   AND julianday(claimed_at) < julianday(?)
+                 ORDER BY julianday(claimed_at) ASC, id ASC LIMIT ?
+               )""",
+            (cutoff, overflow),
+        )
+        remaining = conn.execute(
+            """SELECT COUNT(*) FROM executions
+               WHERE status IN ('completed','failed','unknown')"""
+        ).fetchone()[0]
+        if remaining > cap:
+            message = (
+                f"cron executions ledger holds {remaining} terminal rows, "
+                f"exceeding the global cap of {cap}; the excess is entirely "
+                f"inside the keep-days horizon, so no rows were deleted for "
+                f"the cap (the time-based retention guarantee wins). Raise "
+                f"HERMES_CRON_EXECUTIONS_MAX_TERMINAL or lower "
+                f"HERMES_CRON_EXECUTIONS_KEEP_DAYS to bound the ledger again."
+            )
+            logger.warning(message)
+            print(f"WARNING: {message}", file=sys.stderr)
 
 
 def create_execution(job_id: str, *, source: str) -> Dict[str, Any]:

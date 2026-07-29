@@ -72,6 +72,11 @@ def test_global_cap_bounds_total_terminal_history(monkeypatch, tmp_path):
     by the global safety cap (module-constant override)."""
     executions = _point_ledger(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "8")
+    # Count-only cap semantics: loop 18 made the cap horizon-aware (fresh
+    # in-horizon rows survive the cap with a warning); this test pins the
+    # pure count bound, so it disables the time guarantee like the other
+    # count-semantics tests in this module.
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")
     monkeypatch.setattr(executions, "MAX_TERMINAL_EXECUTIONS", 10)
 
     for job_index in range(5):
@@ -88,6 +93,9 @@ def test_global_cap_bounds_total_terminal_history(monkeypatch, tmp_path):
 
 def test_global_cap_env_override(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
+    # Count-only cap semantics (loop 18 made the cap horizon-aware; see
+    # test_global_cap_bounds_total_terminal_history).
+    monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_DAYS", "0")
     monkeypatch.setenv("HERMES_CRON_EXECUTIONS_MAX_TERMINAL", "4")
 
     for _ in range(6):
