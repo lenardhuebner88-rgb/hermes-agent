@@ -304,3 +304,9 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - killed survivors: [K] bool_op_swap L41, [K] bool_op_swap L151, [K] bool_op_swap L152, [K] bool_op_swap L153, [K] bool_op_swap L154, [K] bool_op_swap L163
 - probe after: 8/20 = 40%
 - commit: 42ef00f43
+
+## 44. hermes_cli/scoped_auto_commit.py — 2026-07-29T03:29:02Z
+- probe before: 11/20 = 55%
+- killed survivors: [K] comparison_swap L44, [K] boolean_flip L65, [K] bool_op_swap L200
+- probe after: 14/20 = 70%
+- commit: ccae3f1bd
