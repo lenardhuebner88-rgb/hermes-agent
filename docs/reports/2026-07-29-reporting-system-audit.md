@@ -201,3 +201,42 @@ Jeder `top_issue`-Punkt aus Codex #2 und sein Status:
 | Gate-Kommandos nicht reproduzierbar | 16 | Sektion G: exakte Kommandos + Counts (931 vs 915 erklärt) | (docs) |
 
 **Teststand final:** hermes 976/976 (49 Dateien) + tool-nah 228/228 · scripts 54/54.
+
+---
+
+## I. Schärf-Loops 17–19 (auf Codex #3 = 8.2/10)
+
+| Codex-#3-Befund | Loop | Fix | Commit |
+|---|---|---|---|
+| execution_id nicht im Job-Dict für direkte/Tool-Runs → Outbox-Kollision | 17 | `run_one_job` schreibt execution_id vor `_deliver_result` ins Dict; Enqueue ohne ID für produktive Pfade = WARNING | `bb8d1f0160` |
+| config/relay Dead-Letters überschreiben Payloads | 17 | append-only pro execution_id; Sichtbarkeits-Cap 3/(job,target,class) ersetzt ältesten, kein Payload-Verlust ≤3 | `bb8d1f0160` |
+| Replay nicht crash-genau | 17 | Send-Lease (`sending`+lease_ts+pid VOR Send), Receipt (platform-message-id bzw. payload-hash), verwaischte Lease→Retry; ehrlicher Restspalt (at-least-once, sichtbar) im Docstring | `bb8d1f0160` |
+| load_gateway_config-Fehler nicht in Outbox | 17 | Config-Load-Pfad enqueued error_class=config | `bb8d1f0160` |
+| 30d-Retention durch 20k-Kappe brechbar; ISO-String-Vergleiche | 18 | horizon-aware Kappe (löscht nur out-of-horizon, sonst Warnung statt Garantie-Bruch); alle Zeitvergleiche via julianday (UTC-normalisiert, Offset-sicher) | `8e43f26284` |
+| Restore validiert nur grobe Hülle | 18 | Full-Schema-Validierung (32 Typ-Fälle, Extra-Felder toleriert); Cross-PROCESS-Recovery-Test (2× subprocess, 1 Quarantäne) | `8e43f26284` |
+| notify 1s-Floor widerspricht harter Deadline | 18b | strikt: Timeout = Restbudget, ≤0.05s ⇒ kein Request (rc=1); Fallback = exaktes Restbudget; Tests mit simulierter Request-Laufzeit | `17bed29` (scripts) |
+| (Nebenfund Loop 18) load_jobs-Race: exists() vor Lock ⇒ stiller leerer Store im Quarantäne-Fenster | 19 | Re-Check unter `_jobs_lock()`; Test: Loader blockiert bis Recovery fertig | `92f6791249` |
+| Sektion H überzeichnet / 228-Kommando fehlt | 19 | Diese Tabelle + präzisierte Gates unten | (docs) |
+
+**Ehrliche Restgrenzen (von Codex akzeptierte Design-Trade-offs, keine Lücken):**
+at-least-once-Restspalt zwischen Send und Receipt-Write (ohne plattformseitige
+Idempotenz-Keys nicht schließbar, aber sichtbar); Prune-Warnung noisy bei
+Dauer-Überlauf; Live-Proposals weiterhin nicht appliziert (Auftragsgrenze).
+
+**Teststand final:** hermes **1004/1004** (53 Dateien) · scripts **58/58**.
+
+### Präzisierte Gate-Kommandos (ersetzt/ergänzt Sektion G)
+
+```bash
+cd /home/piet/.hermes/worktrees/kimi-reporting-audit
+scripts/run_tests.sh tests/cron tests/hermes_cli/test_cron.py -q -p no:cacheprovider
+#   final: 53 Dateien, 1004 Tests passed, 0 failed (23.3s)
+
+# tool-nahe Suiten (Loop-15-Verifikation, 228 Tests):
+scripts/run_tests.sh tests/tools/test_cronjob_tools.py tests/tools/test_cronjob_run_immediate.py \
+  tests/tools/test_cron_prompt_injection.py tests/gateway/test_api_server_jobs.py \
+  tests/cron/test_cronjob_schema.py tests/hermes_cli/test_gateway_restart_loop.py -q -p no:cacheprovider
+
+cd /home/piet/.hermes/worktrees/kimi-reporting-scripts
+python3 -m pytest tests/ -q     # final: 58 passed
+```
