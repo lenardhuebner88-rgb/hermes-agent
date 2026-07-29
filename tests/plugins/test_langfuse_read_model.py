@@ -132,10 +132,130 @@ def test_missing_credentials_is_explicit_and_fail_soft():
     assert payload["metrics"] == {}
 
 
+def test_standard_langfuse_triplet_is_accepted(monkeypatch):
+    seen_hosts: list[str] = []
+
+    def fake_all_pages(host, _auth, _path, _params, **_kwargs):
+        seen_hosts.append(host)
+        return read_model._PageScan([], False, None, 1)
+
+    monkeypatch.setattr(read_model, "_all_pages", fake_all_pages)
+    payload = read_model._build_remote_snapshot(
+        days=7,
+        env={
+            "LANGFUSE_BASE_URL": "https://standard.example/",
+            "LANGFUSE_PUBLIC_KEY": "public-standard",
+            "LANGFUSE_SECRET_KEY": "secret-standard",
+        },
+    )
+
+    assert payload["available"] is True
+    assert seen_hosts == ["https://standard.example"]
+    assert "public-standard" not in repr(payload)
+    assert "secret-standard" not in repr(payload)
+
+
+def test_hermes_triplet_wins_over_complete_standard_triplet(monkeypatch):
+    seen_hosts: list[str] = []
+
+    def fake_all_pages(host, _auth, _path, _params, **_kwargs):
+        seen_hosts.append(host)
+        return read_model._PageScan([], False, None, 1)
+
+    monkeypatch.setattr(read_model, "_all_pages", fake_all_pages)
+    payload = read_model._build_remote_snapshot(
+        days=7,
+        env={
+            "HERMES_LANGFUSE_HOST": "https://hermes.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public-hermes",
+            "HERMES_LANGFUSE_SECRET_KEY": "secret-hermes",
+            "LANGFUSE_BASE_URL": "https://standard.example",
+            "LANGFUSE_PUBLIC_KEY": "public-standard",
+            "LANGFUSE_SECRET_KEY": "secret-standard",
+        },
+    )
+
+    assert payload["available"] is True
+    assert seen_hosts == ["https://hermes.example"]
+
+
+def test_incomplete_hermes_triplet_does_not_mix_with_standard_values():
+    payload = read_model.get_langfuse_snapshot(
+        env={
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public-hermes",
+            "LANGFUSE_BASE_URL": "https://standard.example",
+            "LANGFUSE_PUBLIC_KEY": "public-standard",
+            "LANGFUSE_SECRET_KEY": "secret-standard",
+        }
+    )
+
+    assert payload["available"] is False
+    assert payload["reason"] == "configuration_invalid"
+    assert "public-hermes" not in repr(payload)
+    assert "public-standard" not in repr(payload)
+
+
+def test_invalid_langfuse_url_is_a_safe_configuration_error():
+    secret = "secret-must-not-leak"
+    payload = read_model.get_langfuse_snapshot(
+        env={
+            "LANGFUSE_BASE_URL": "not-a-url",
+            "LANGFUSE_PUBLIC_KEY": "public-must-not-leak",
+            "LANGFUSE_SECRET_KEY": secret,
+        }
+    )
+
+    assert payload["available"] is False
+    assert payload["reason"] == "configuration_invalid"
+    assert secret not in repr(payload)
+
+
+def test_cache_is_separated_by_resolved_fallback_credentials(monkeypatch):
+    calls: list[str] = []
+
+    def fake_build(*, days, env, resolved=None):
+        assert resolved is not None
+        calls.append(resolved.host)
+        return read_model._absent_payload(
+            days=days,
+            state="absent",
+            reason="test",
+            generated_at="2026-07-29T00:00:00Z",
+        )
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", fake_build)
+    base = {
+        "LANGFUSE_BASE_URL": "https://standard.example",
+        "LANGFUSE_PUBLIC_KEY": "public-standard",
+    }
+    read_model.get_langfuse_snapshot(
+        env={**base, "LANGFUSE_SECRET_KEY": "secret-one"}
+    )
+    read_model.get_langfuse_snapshot(
+        env={**base, "LANGFUSE_SECRET_KEY": "secret-two"}
+    )
+    read_model.get_langfuse_snapshot(
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "https://hermes.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public-hermes",
+            "HERMES_LANGFUSE_SECRET_KEY": "secret-hermes",
+            **base,
+            "LANGFUSE_SECRET_KEY": "secret-two",
+        }
+    )
+
+    assert calls == [
+        "https://standard.example",
+        "https://standard.example",
+        "https://hermes.example",
+    ]
+
+
 def test_negative_cache_is_bounded_to_the_credential_identity(monkeypatch):
     calls = []
 
-    def build(*, days, env):
+    def build(*, days, env, resolved=None):
+        del resolved
         calls.append(dict(env))
         return read_model._absent_payload(
             days=days,
@@ -409,7 +529,8 @@ def test_single_flight_waiter_ignores_foreign_cache_key_notifications(
         "HERMES_LANGFUSE_SECRET_KEY": "secret-b",
     }
 
-    def build(*, days, env):
+    def build(*, days, env, resolved=None):
+        del resolved
         if env["HERMES_LANGFUSE_PUBLIC_KEY"] == "project-a":
             started.set()
             assert release.wait(timeout=2)
@@ -451,8 +572,8 @@ def test_cache_is_single_source_and_returns_stale_on_refresh_error(monkeypatch):
     calls = 0
     lock = threading.Lock()
 
-    def build(*, days, env):
-        del env
+    def build(*, days, env, resolved=None):
+        del env, resolved
         nonlocal calls
         with lock:
             calls += 1

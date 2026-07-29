@@ -42,6 +42,19 @@ class _PageScan:
     pages: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedConfig:
+    host: str
+    public_key: str
+    secret_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigResolution:
+    config: _ResolvedConfig | None
+    error: str | None = None
+
+
 _CACHE_LOCK = threading.Condition(threading.Lock())
 _CACHE: dict[tuple[int, str], _CacheEntry] = {}
 _IN_FLIGHT: set[tuple[int, str]] = set()
@@ -146,40 +159,91 @@ def _metric(
     }
 
 
-def _credentials(env: Mapping[str, str]) -> tuple[str, str] | None:
-    host = (
-        env.get("HERMES_LANGFUSE_BASE_URL")
-        or env.get("HERMES_LANGFUSE_HOST")
-        or ""
-    ).rstrip("/")
-    public_key = env.get("HERMES_LANGFUSE_PUBLIC_KEY", "")
-    secret_key = env.get("HERMES_LANGFUSE_SECRET_KEY", "")
+def _resolve_config(env: Mapping[str, str]) -> _ConfigResolution:
+    namespaces = (
+        (
+            "HERMES_LANGFUSE_BASE_URL",
+            "HERMES_LANGFUSE_HOST",
+            "HERMES_LANGFUSE_PUBLIC_KEY",
+            "HERMES_LANGFUSE_SECRET_KEY",
+        ),
+        (
+            "LANGFUSE_BASE_URL",
+            "LANGFUSE_HOST",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+        ),
+    )
+    values = {
+        name: env.get(name, "").strip()
+        for namespace in namespaces
+        for name in namespace
+    }
+    selected_index = next(
+        (
+            index
+            for index, namespace in enumerate(namespaces)
+            if any(values[name] for name in namespace)
+        ),
+        None,
+    )
+    if selected_index is None:
+        return _ConfigResolution(None, "credentials_missing")
+
+    selected = namespaces[selected_index]
+    base_url_name, host_name, public_name, secret_name = selected
+    host = values[base_url_name] or values[host_name]
+    public_key = values[public_name]
+    secret_key = values[secret_name]
+    lower_level_has_host = any(
+        values[name]
+        for namespace in namespaces[selected_index + 1 :]
+        for name in namespace[:2]
+    )
+    if not host and not lower_level_has_host:
+        host = "https://cloud.langfuse.com"
     if not host or not public_key or not secret_key:
-        return None
-    parsed = urllib.parse.urlparse(host)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return None
+        return _ConfigResolution(None, "configuration_invalid")
+
+    try:
+        parsed = urllib.parse.urlsplit(host)
+        _ = parsed.port
+        invalid_url = (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() for char in host)
+        )
+    except ValueError:
+        invalid_url = True
+    if invalid_url:
+        return _ConfigResolution(None, "configuration_invalid")
+    return _ConfigResolution(
+        _ResolvedConfig(host.rstrip("/"), public_key, secret_key)
+    )
+
+
+def _credentials(config: _ResolvedConfig) -> tuple[str, str]:
     authorization = base64.b64encode(
-        f"{public_key}:{secret_key}".encode("utf-8")
+        f"{config.public_key}:{config.secret_key}".encode("utf-8")
     ).decode("ascii")
-    return host, f"Basic {authorization}"
+    return config.host, f"Basic {authorization}"
 
 
-def _cache_identity(env: Mapping[str, str]) -> str:
+def _cache_identity(resolution: _ConfigResolution) -> str:
     """Scope cached projections to the configured Langfuse project.
 
     The digest changes on host/key rotation without retaining credentials in a
     cache key or exposing them in the returned payload.
     """
-    material = "\0".join(
-        (
-            env.get("HERMES_LANGFUSE_BASE_URL")
-            or env.get("HERMES_LANGFUSE_HOST")
-            or "",
-            env.get("HERMES_LANGFUSE_PUBLIC_KEY", ""),
-            env.get("HERMES_LANGFUSE_SECRET_KEY", ""),
-        )
-    )
+    config = resolution.config
+    if config is None:
+        material = f"langfuse-config:{resolution.error or 'invalid'}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material = "\0".join((config.host, config.public_key, config.secret_key))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -326,22 +390,23 @@ def _usage_total(row: Mapping[str, Any]) -> float | None:
     known = [value for value in values if value is not None]
     return sum(known) if known else None
 
-
 def _build_remote_snapshot(
     *,
     days: int,
     env: Mapping[str, str],
+    resolved: _ResolvedConfig | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    credentials = _credentials(env)
-    now = _utc_now()
-    if credentials is None:
+    now = now or _utc_now()
+    resolution = _resolve_config(env) if resolved is None else _ConfigResolution(resolved)
+    if resolution.config is None:
         return _absent_payload(
             days=days,
             state="absent",
-            reason="credentials_missing",
+            reason=resolution.error or "configuration_invalid",
             generated_at=_iso(now),
         )
-    host, authorization = credentials
+    host, authorization = _credentials(resolution.config)
     since = now - timedelta(days=days)
     scan = _all_pages(
         host,
@@ -637,7 +702,8 @@ def get_langfuse_snapshot(
     """Return one sanitized snapshot with TTL, single-flight and stale fallback."""
     safe_days = max(1, min(30, int(days)))
     selected_env = env if env is not None else os.environ
-    cache_key = (safe_days, _cache_identity(selected_env))
+    resolution = _resolve_config(selected_env)
+    cache_key = (safe_days, _cache_identity(resolution))
     now_mono = time.monotonic()
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
@@ -700,6 +766,7 @@ def get_langfuse_snapshot(
         payload = _build_remote_snapshot(
             days=safe_days,
             env=selected_env,
+            resolved=resolution.config,
         )
         # A bounded negative cache prevents every Scorecard/Statistik poll from
         # retrying a stopped or unconfigured Langfuse instance. It expires

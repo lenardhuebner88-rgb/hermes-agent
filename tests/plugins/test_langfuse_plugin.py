@@ -1010,35 +1010,70 @@ class TestPlaceholderKeyDetection:
     def _clear_env(monkeypatch):
         for k in (
             "HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY",
+            "HERMES_LANGFUSE_BASE_URL", "HERMES_LANGFUSE_HOST",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_BASE_URL", "LANGFUSE_HOST",
         ):
             monkeypatch.delenv(k, raising=False)
 
+    def test_standard_triplet_configures_client(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://standard.example/")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-standard")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-standard")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        client = plugin._get_langfuse()
+
+        assert isinstance(client, _FakeLangfuse)
+        assert client.kwargs["base_url"] == "https://standard.example"
+
+    def test_complete_hermes_triplet_wins_over_standard(self, monkeypatch):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_HOST", "https://hermes.example/")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-hermes")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-hermes")
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://standard.example")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-standard")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-standard")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        client = plugin._get_langfuse()
+
+        assert isinstance(client, _FakeLangfuse)
+        assert client.kwargs["base_url"] == "https://hermes.example"
+
+    def test_incomplete_hermes_triplet_does_not_mix_with_standard(self, monkeypatch, caplog):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-hermes")
+        monkeypatch.setenv("LANGFUSE_BASE_URL", "https://standard.example")
+        monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-standard")
+        monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-standard")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            assert plugin._get_langfuse() is None
+
+        assert "incomplete" in caplog.text.lower()
+        assert "pk-lf-hermes" not in caplog.text
+        assert "pk-lf-standard" not in caplog.text
+        assert "sk-lf-standard" not in caplog.text
+
+    def test_invalid_url_fails_without_credential_fragments(self, monkeypatch, caplog):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "not-a-url")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-private-fragment")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-private-fragment")
+        plugin = self._fresh_plugin(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            assert plugin._get_langfuse() is None
+
+        assert "invalid" in caplog.text.lower()
+        assert "private-fragment" not in caplog.text
+
     # -- helper unit tests (no SDK stub needed: these don't go through
     #    _get_langfuse, they exercise the pure-Python helpers directly) ------
-
-    def test_redact_key_preview_empty(self, monkeypatch):
-        self._clear_env(monkeypatch)
-        plugin = self._fresh_plugin()
-        assert plugin._redact_key_preview("") == "<empty>"
-
-    def test_redact_key_preview_short_value_echoed(self, monkeypatch):
-        """Short placeholder strings are echoed in full so the operator
-        can see exactly which template they forgot to replace."""
-        self._clear_env(monkeypatch)
-        plugin = self._fresh_plugin()
-        assert plugin._redact_key_preview("placeholder") == "'placeholder'"
-        assert plugin._redact_key_preview("test-key") == "'test-key'"
-
-    def test_redact_key_preview_long_value_truncated(self, monkeypatch):
-        """If an operator pasted a real secret into the wrong env var the
-        preview must NOT echo it in full — only the leading 6 chars."""
-        self._clear_env(monkeypatch)
-        plugin = self._fresh_plugin()
-        result = plugin._redact_key_preview("sk-lf-abcdefghijklmnop")
-        assert "abcdefghij" not in result
-        assert result.startswith("'sk-lf-")
-        assert result.endswith("...'")
 
     def test_validate_langfuse_key_accepts_documented_prefix(self, monkeypatch):
         self._clear_env(monkeypatch)
@@ -1081,7 +1116,7 @@ class TestPlaceholderKeyDetection:
             assert plugin._get_langfuse() is None
         text = caplog.text
         assert "HERMES_LANGFUSE_PUBLIC_KEY" in text
-        assert "'placeholder'" in text
+        assert "placeholder" not in text
         assert "pk-lf-" in text
         # The valid secret value must NOT appear (the var NAME does, in
         # the "or unset ..." hint, but the value preview shouldn't).
@@ -1098,7 +1133,7 @@ class TestPlaceholderKeyDetection:
             assert plugin._get_langfuse() is None
         text = caplog.text
         assert "HERMES_LANGFUSE_SECRET_KEY" in text
-        assert "'test-key'" in text
+        assert "test-key" not in text
         assert "sk-lf-" in text
         # The valid public value must NOT appear.
         assert "'pk-lf-" not in text
@@ -1171,11 +1206,8 @@ class TestPlaceholderKeyDetection:
         plugin = self._fresh_plugin(monkeypatch)
         with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
             assert plugin._get_langfuse() is None
-        # Warning names the canonical user-facing env var (the bare
-        # LANGFUSE_PUBLIC_KEY is a backwards-compat alias for the
-        # HERMES_-prefixed one — operators set the HERMES_-prefixed one).
-        assert "HERMES_LANGFUSE_PUBLIC_KEY" in caplog.text
-        assert "'placeholder'" in caplog.text
+        assert "LANGFUSE_PUBLIC_KEY" in caplog.text
+        assert "placeholder" not in caplog.text
 
     def test_missing_credentials_still_skip_silently(self, monkeypatch, caplog):
         """Missing-creds is the documented opt-out path (operator hasn't
