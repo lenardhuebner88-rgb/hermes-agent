@@ -19,14 +19,73 @@ from typing import Any, Protocol
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_FIXTURE_PATH = REPOSITORY_ROOT / "tests/scripts/fixtures/langfuse-dashboard-golden.json"
+SOURCE_CONTRACT_PATH = (
+    REPOSITORY_ROOT
+    / "tests/scripts/fixtures/langfuse-dashboard-contract-3.224.0.json"
+)
 CONFIGURATION_PATHS = (
-    REPOSITORY_ROOT / "config/langfuse-dashboards/north-star.json",
-    REPOSITORY_ROOT / "config/langfuse-dashboards/reviewer-diagnose.json",
-    REPOSITORY_ROOT / "config/langfuse-dashboards/effizienz.json",
+    REPOSITORY_ROOT / "config/langfuse-dashboards/control-center.json",
 )
 FIXTURE_VERSION = 1
+SOURCE_CONTRACT_VERSION = 1
+DASHBOARD_SCHEMA_VERSION = 2
 EXPECTED_LANGFUSE_VERSION = "3.224.0"
 EXPECTED_LANGFUSE_REVISION = "d044f366816282235898a0673d5700e05ccbee8c"
+SUPPORTED_VIEWS = frozenset(
+    {
+        "traces",
+        "observations",
+        "scores-numeric",
+        "scores-boolean",
+        "scores-categorical",
+    }
+)
+SUPPORTED_CHART_TYPES = frozenset(
+    {
+        "LINE_TIME_SERIES",
+        "BAR_TIME_SERIES",
+        "HORIZONTAL_BAR",
+        "VERTICAL_BAR",
+        "PIE",
+        "NUMBER",
+        "HISTOGRAM",
+        "PIVOT_TABLE",
+    }
+)
+# Source-grounded subset from Langfuse v3.224.0
+# packages/shared/src/features/query/dataModel.ts. Keeping this narrow makes
+# config drift fail before a dashboard mutation instead of rendering an empty
+# or semantically wrong tile.
+VIEW_CONTRACTS: dict[str, dict[str, Any]] = {
+    "traces": {
+        "dimensions": {"tags"},
+        "metrics": {"count": {"count"}},
+    },
+    "observations": {
+        "dimensions": {"tags", "providedModelName"},
+        "metrics": {
+            "count": {"count"},
+            "totalCost": {"sum", "avg", "p50", "p95"},
+            "latency": {"avg", "p50", "p95", "max"},
+            "timeToFirstToken": {"avg", "p50", "p95", "max"},
+        },
+    },
+    "scores-numeric": {
+        "dimensions": {"name", "value"},
+        "metrics": {
+            "count": {"count"},
+            "value": {"avg", "p50", "p95", "sum", "min", "max", "histogram"},
+        },
+    },
+    "scores-boolean": {
+        "dimensions": {"name", "booleanValue"},
+        "metrics": {"count": {"count"}, "value": {"avg", "p50", "p95"}},
+    },
+    "scores-categorical": {
+        "dimensions": {"name", "stringValue"},
+        "metrics": {"count": {"count"}},
+    },
+}
 
 
 class ProvisionError(RuntimeError):
@@ -46,6 +105,11 @@ class WidgetInput:
     chart_type: str
     chart_config: dict[str, Any]
     min_version: int = 1
+    denominator: str = "configured source rows"
+    x: int = 0
+    y: int = 0
+    x_size: int = 6
+    y_size: int = 5
 
 
 @dataclass(frozen=True)
@@ -134,29 +198,135 @@ def load_golden_fixture(path: Path = GOLDEN_FIXTURE_PATH) -> dict[str, Any]:
         or source.get("revision") != EXPECTED_LANGFUSE_REVISION
     ):
         raise ProvisionError("golden fixture is not pinned to the supported Langfuse release")
-    required = ("definition", "dimensions", "metrics", "chart_config")
+    required = (
+        "definition",
+        "view",
+        "dimensions",
+        "metrics",
+        "filters",
+        "chart_type",
+        "chart_config",
+    )
     if any(field not in fixture for field in required):
         raise ProvisionError("golden fixture omits a required UI-export field")
-    if not isinstance(fixture["definition"], dict) or not isinstance(fixture["dimensions"], list):
+    if (
+        not isinstance(fixture["definition"], dict)
+        or not isinstance(fixture["view"], str)
+        or not isinstance(fixture["dimensions"], list)
+    ):
         raise ProvisionError("golden fixture has an invalid definition or dimensions shape")
-    if not isinstance(fixture["metrics"], list) or not isinstance(fixture["chart_config"], dict):
+    if (
+        not isinstance(fixture["metrics"], list)
+        or not isinstance(fixture["filters"], list)
+        or not isinstance(fixture["chart_type"], str)
+        or not isinstance(fixture["chart_config"], dict)
+        or fixture["chart_config"].get("type") != fixture["chart_type"]
+    ):
         raise ProvisionError("golden fixture has an invalid metrics or chart_config shape")
     return fixture
 
 
+def load_source_contract(path: Path = SOURCE_CONTRACT_PATH) -> dict[str, Any]:
+    """Load the checked-in extraction of the pinned Langfuse UI/query contract."""
+    contract = _read_json_object(path)
+    source = contract.get("source")
+    if (
+        contract.get("contract_version") != SOURCE_CONTRACT_VERSION
+        or not isinstance(source, dict)
+        or source.get("langfuse_version") != EXPECTED_LANGFUSE_VERSION
+        or source.get("revision") != EXPECTED_LANGFUSE_REVISION
+    ):
+        raise ProvisionError("source contract is not pinned to the supported Langfuse release")
+    source_files = source.get("files")
+    if (
+        source.get("repository") != "langfuse/langfuse"
+        or not isinstance(source_files, list)
+        or not source_files
+        or any(not isinstance(item, str) or not item for item in source_files)
+    ):
+        raise ProvisionError("source contract lacks auditable upstream file provenance")
+
+    chart_types = contract.get("supported_chart_types")
+    if (
+        not isinstance(chart_types, list)
+        or any(not isinstance(item, str) for item in chart_types)
+        or frozenset(chart_types) != SUPPORTED_CHART_TYPES
+    ):
+        raise ProvisionError("source contract chart types drifted from the validator")
+    chart_fields = contract.get("chart_config_fields")
+    if not isinstance(chart_fields, dict) or set(chart_fields) != SUPPORTED_CHART_TYPES:
+        raise ProvisionError("source contract omits chart configuration field contracts")
+    if any(
+        not isinstance(fields, list)
+        or "type" not in fields
+        or any(not isinstance(field, str) for field in fields)
+        for fields in chart_fields.values()
+    ):
+        raise ProvisionError("source contract has invalid chart configuration fields")
+
+    raw_views = contract.get("views")
+    if not isinstance(raw_views, dict):
+        raise ProvisionError("source contract omits view contracts")
+    normalized_views: dict[str, dict[str, Any]] = {}
+    for view_name, raw_view in raw_views.items():
+        if (
+            not isinstance(view_name, str)
+            or not isinstance(raw_view, dict)
+            or not isinstance(raw_view.get("dimensions"), list)
+            or any(
+                not isinstance(dimension, str)
+                for dimension in raw_view.get("dimensions", [])
+            )
+            or not isinstance(raw_view.get("metrics"), dict)
+        ):
+            raise ProvisionError("source contract has an invalid view shape")
+        metrics: dict[str, set[str]] = {}
+        for measure, aggregations in raw_view["metrics"].items():
+            if (
+                not isinstance(measure, str)
+                or not isinstance(aggregations, list)
+                or any(not isinstance(item, str) for item in aggregations)
+            ):
+                raise ProvisionError("source contract has an invalid metric shape")
+            metrics[measure] = set(aggregations)
+        normalized_views[view_name] = {
+            "dimensions": set(raw_view["dimensions"]),
+            "metrics": metrics,
+        }
+    if normalized_views != VIEW_CONTRACTS:
+        raise ProvisionError("source contract views drifted from the validator")
+
+    filter_operators = contract.get("filter_operators")
+    if not isinstance(filter_operators, dict) or any(
+        not isinstance(filter_type, str)
+        or not isinstance(operators, list)
+        or not operators
+        or any(not isinstance(operator, str) for operator in operators)
+        for filter_type, operators in filter_operators.items()
+    ):
+        raise ProvisionError("source contract has invalid filter operators")
+    return contract
+
+
 def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
-    """Load all immutable configs and reject schema or fixture-version drift."""
+    """Load the one version-pinned control center and reject contract drift."""
     if not project_id:
         raise ProvisionError("a project id is required to load dashboard configurations")
-    fixture = load_golden_fixture()
+    load_golden_fixture()
+    source_contract = load_source_contract()
+    chart_config_fields = source_contract["chart_config_fields"]
+    filter_operators = source_contract["filter_operators"]
     configured: list[DashboardInput] = []
     for path in CONFIGURATION_PATHS:
         config = _read_json_object(path)
-        if config.get("fixture_version") != fixture["fixture_version"]:
-            raise ProvisionError(f"{path} is not derived from the current golden fixture version")
-        for field in ("definition", "dimensions", "metrics", "chart_config"):
-            if config.get(field) != fixture[field]:
-                raise ProvisionError(f"{path} {field} has drifted from the golden fixture shape")
+        source = config.get("source")
+        if config.get("schema_version") != DASHBOARD_SCHEMA_VERSION:
+            raise ProvisionError(f"{path} has an unsupported dashboard schema version")
+        if not isinstance(source, dict) or (
+            source.get("langfuse_version") != EXPECTED_LANGFUSE_VERSION
+            or source.get("revision") != EXPECTED_LANGFUSE_REVISION
+        ):
+            raise ProvisionError(f"{path} is not pinned to the supported Langfuse source")
         name, description, widgets = config.get("name"), config.get("description"), config.get("widgets")
         if not isinstance(name, str) or not name or not isinstance(description, str):
             raise ProvisionError(f"{path} lacks a valid dashboard name or description")
@@ -176,6 +346,7 @@ def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
                 "chart_type",
                 "chart_config",
                 "denominator",
+                "layout",
             )
             if any(field not in raw_widget for field in required):
                 raise ProvisionError(f"{path} widget {index} omits a required field")
@@ -184,8 +355,34 @@ def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
             chart_config = raw_widget["chart_config"]
             if not isinstance(view, str) or not isinstance(chart_type, str) or not isinstance(chart_config, dict):
                 raise ProvisionError(f"{path} widget {index} has invalid view or chart configuration")
+            view = view.lower()
+            if view not in SUPPORTED_VIEWS:
+                raise ProvisionError(f"{path} widget {index} uses unsupported view {view!r}")
+            if chart_type not in SUPPORTED_CHART_TYPES:
+                raise ProvisionError(
+                    f"{path} widget {index} uses unsupported chart type {chart_type!r}"
+                )
             if chart_config.get("type") != chart_type:
                 raise ProvisionError(f"{path} widget {index} chart_config.type must equal chart_type")
+            unsupported_chart_fields = set(chart_config) - set(
+                chart_config_fields[chart_type]
+            )
+            if unsupported_chart_fields:
+                raise ProvisionError(
+                    f"{path} widget {index} uses unsupported chart_config fields: "
+                    + ", ".join(sorted(unsupported_chart_fields))
+                )
+            row_limit = chart_config.get("row_limit")
+            if row_limit is not None and (
+                not isinstance(row_limit, int) or not 1 <= row_limit <= 1000
+            ):
+                raise ProvisionError(f"{path} widget {index} has invalid row_limit")
+            bins = chart_config.get("bins")
+            if chart_type == "HISTOGRAM":
+                if isinstance(bins, bool) or not isinstance(bins, int) or not 1 <= bins <= 100:
+                    raise ProvisionError(f"{path} widget {index} has invalid histogram bins")
+            elif bins is not None:
+                raise ProvisionError(f"{path} widget {index} sets bins outside a histogram")
             if not isinstance(raw_widget["denominator"], str) or not raw_widget["denominator"]:
                 raise ProvisionError(f"{path} widget {index} silently omits its denominator")
             for field in ("name", "description"):
@@ -194,18 +391,115 @@ def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
             for field in ("dimensions", "metrics", "filters"):
                 if not isinstance(raw_widget[field], list):
                     raise ProvisionError(f"{path} widget {index} has an invalid {field}")
+            if not raw_widget["metrics"] or any(
+                not isinstance(metric, dict)
+                or not isinstance(metric.get("measure"), str)
+                or not isinstance(metric.get("agg"), str)
+                for metric in raw_widget["metrics"]
+            ):
+                raise ProvisionError(f"{path} widget {index} has invalid metrics")
+            if any(
+                not isinstance(dimension, dict)
+                or not isinstance(dimension.get("field"), str)
+                for dimension in raw_widget["dimensions"]
+            ):
+                raise ProvisionError(f"{path} widget {index} has invalid dimensions")
+            if any(
+                not isinstance(item, dict)
+                or not all(key in item for key in ("column", "operator", "type", "value"))
+                for item in raw_widget["filters"]
+            ):
+                raise ProvisionError(f"{path} widget {index} has invalid filters")
+            for item in raw_widget["filters"]:
+                filter_type = item["type"]
+                operator = item["operator"]
+                allowed_operators = filter_operators.get(filter_type)
+                if (
+                    not isinstance(filter_type, str)
+                    or not isinstance(operator, str)
+                    or not isinstance(allowed_operators, list)
+                    or operator not in allowed_operators
+                ):
+                    raise ProvisionError(
+                        f"{path} widget {index} uses an unsupported filter operator"
+                    )
+                value = item["value"]
+                if filter_type == "string" and not isinstance(value, str):
+                    raise ProvisionError(f"{path} widget {index} has an invalid string filter")
+                if filter_type == "arrayOptions" and (
+                    not isinstance(value, list)
+                    or any(not isinstance(entry, str) for entry in value)
+                    or (operator == "any of" and not value)
+                ):
+                    raise ProvisionError(f"{path} widget {index} has an invalid array filter")
+            contract = VIEW_CONTRACTS[view]
+            dimension_fields = {
+                str(dimension["field"]) for dimension in raw_widget["dimensions"]
+            }
+            filter_fields = {str(item["column"]) for item in raw_widget["filters"]}
+            unsupported_dimensions = (
+                dimension_fields | filter_fields
+            ) - set(contract["dimensions"])
+            if unsupported_dimensions:
+                raise ProvisionError(
+                    f"{path} widget {index} uses unsupported {view} dimensions: "
+                    + ", ".join(sorted(unsupported_dimensions))
+                )
+            for metric in raw_widget["metrics"]:
+                measure = str(metric["measure"])
+                aggregation = str(metric["agg"])
+                allowed = contract["metrics"].get(measure)
+                if allowed is None or aggregation not in allowed:
+                    raise ProvisionError(
+                        f"{path} widget {index} uses unsupported metric "
+                        f"{aggregation}({measure}) for {view}"
+                    )
+            if chart_type == "HISTOGRAM" and (
+                len(raw_widget["metrics"]) != 1
+                or raw_widget["metrics"][0] != {"agg": "histogram", "measure": "value"}
+            ):
+                raise ProvisionError(
+                    f"{path} widget {index} histogram must use histogram(value)"
+                )
+            layout = raw_widget["layout"]
+            if not isinstance(layout, dict):
+                raise ProvisionError(f"{path} widget {index} has invalid layout")
+            layout_values = tuple(layout.get(key) for key in ("x", "y", "x_size", "y_size"))
+            if (
+                any(isinstance(value, bool) or not isinstance(value, int) for value in layout_values)
+                or layout_values[0] < 0
+                or layout_values[1] < 0
+                or layout_values[2] < 1
+                or layout_values[3] < 1
+                or layout_values[0] + layout_values[2] > 12
+            ):
+                raise ProvisionError(f"{path} widget {index} exceeds the 12-column layout")
             widget_inputs.append(
                 WidgetInput(
                     name=raw_widget["name"],
                     description=raw_widget["description"],
-                    view=view.lower(),
+                    view=view,
                     dimensions=raw_widget["dimensions"],
                     metrics=raw_widget["metrics"],
                     filters=raw_widget["filters"],
                     chart_type=chart_type,
                     chart_config=chart_config,
+                    min_version=int(raw_widget.get("min_version", 1)),
+                    denominator=raw_widget["denominator"],
+                    x=layout_values[0],
+                    y=layout_values[1],
+                    x_size=layout_values[2],
+                    y_size=layout_values[3],
                 )
             )
+        for left_index, left in enumerate(widget_inputs):
+            for right in widget_inputs[left_index + 1 :]:
+                overlaps_x = left.x < right.x + right.x_size and right.x < left.x + left.x_size
+                overlaps_y = left.y < right.y + right.y_size and right.y < left.y + left.y_size
+                if overlaps_x and overlaps_y:
+                    raise ProvisionError(
+                        f"{path} widgets {left.name!r} and {right.name!r} overlap"
+                    )
         configured.append(
             DashboardInput(
                 project_id=project_id,
@@ -214,6 +508,8 @@ def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
                 widgets=tuple(widget_inputs),
             )
         )
+    if len(configured) != 1:
+        raise ProvisionError("exactly one native Hermes control center must be configured")
     return configured
 
 
@@ -340,7 +636,7 @@ def provision_dashboard(client: TrpcClient, dashboard: DashboardInput) -> dict[s
     updated_dashboard = client.update_dashboard_definition(
         project_id=dashboard.project_id,
         dashboard_id=dashboard_id,
-        definition={"widgets": _widget_placements(widget_ids)},
+        definition={"widgets": _widget_placements(widget_ids, dashboard.widgets)},
     )
     if updated_dashboard.get("id") != dashboard_id:
         raise ProvisionError("dashboard.updateDashboardDefinition returned an unexpected dashboard")
@@ -383,17 +679,22 @@ filters = EXCLUDED.filters, chart_type = EXCLUDED.chart_type, chart_config = EXC
 min_version = EXCLUDED.min_version"""
 
 
-def _widget_placements(widget_ids: Sequence[str]) -> list[dict[str, Any]]:
-    """Build stable, vertically stacked dashboard placements for each widget id."""
+def _widget_placements(
+    widget_ids: Sequence[str],
+    widgets: Sequence[WidgetInput] | None = None,
+) -> list[dict[str, Any]]:
+    """Build stable placements from the reviewed 12-column control-center layout."""
+    if widgets is not None and len(widget_ids) != len(widgets):
+        raise ProvisionError("widget placement count does not match widget configuration")
     return [
         {
             "type": "widget",
-            "id": f"pending-fixture-placement-{index}",
+            "id": f"hermes-control-center-placement-{index}",
             "widgetId": widget_id,
-            "x": 0,
-            "y": index * 6,
-            "x_size": 6,
-            "y_size": 6,
+            "x": widgets[index].x if widgets is not None else 0,
+            "y": widgets[index].y if widgets is not None else index * 6,
+            "x_size": widgets[index].x_size if widgets is not None else 6,
+            "y_size": widgets[index].y_size if widgets is not None else 6,
         }
         for index, widget_id in enumerate(widget_ids)
     ]
@@ -455,36 +756,41 @@ def _app_readback_receipt(
             raise ProvisionError("app read-back definition has fewer widget placements than configured widgets")
         understood.append({"dashboard": row.dashboard.name, "widget_placements": len(placements)})
         for widget in row.dashboard.widgets:
-            source = "observations" if widget.view == "observations" else "exported_score"
+            source = (
+                "observations"
+                if widget.view == "observations"
+                else "traces"
+                if widget.view == "traces"
+                else "exported_score"
+            )
             evidence.append(
                 {"dashboard": row.dashboard.name, "widget": widget.name, "source": source,
                  "denominator": _widget_denominator(row.dashboard, widget.name)}
             )
-            if widget.name == "Model mix":
+            if model_mix is None and widget.view == "observations" and any(
+                dimension.get("field") == "providedModelName"
+                for dimension in widget.dimensions
+            ):
                 model_mix = {
                     "source": "OBSERVATIONS", "dimension": "providedModelName",
-                    "denominator": _widget_denominator(row.dashboard, widget.name),
+                    "denominator": widget.denominator,
                 }
     if not any(item["source"] == "exported_score" for item in evidence) or not any(
         item["source"] == "observations" for item in evidence
     ):
         raise ProvisionError("app receipt requires visible exported score and observation evidence")
     if model_mix is None:
-        raise ProvisionError("app receipt requires the Model mix observation denominator")
+        raise ProvisionError("app receipt requires a model observation denominator")
     return {
-        "receipt_version": 1, "path": path, "understood_definition": understood,
+        "receipt_version": 2, "path": path, "understood_definition": understood,
         "visible_export_evidence": evidence, "model_mix": model_mix, "changes": changes,
     }
 
 
 def _widget_denominator(dashboard: DashboardInput, name: str) -> str:
-    for path in CONFIGURATION_PATHS:
-        config = _read_json_object(path)
-        if config.get("name") != dashboard.name:
-            continue
-        for widget in config.get("widgets", []):
-            if isinstance(widget, dict) and widget.get("name") == name and isinstance(widget.get("denominator"), str):
-                return widget["denominator"]
+    for widget in dashboard.widgets:
+        if widget.name == name:
+            return widget.denominator
     raise ProvisionError(f"no explicit denominator found for {dashboard.name}/{name}")
 
 
@@ -517,7 +823,14 @@ def run_direct_sql_fallback(
                     project_id,
                     row.dashboard.name,
                     row.dashboard.description,
-                    json.dumps({"widgets": _widget_placements(row.widget_ids)}),
+                    json.dumps(
+                        {
+                            "widgets": _widget_placements(
+                                row.widget_ids,
+                                row.dashboard.widgets,
+                            )
+                        }
+                    ),
                 ),
             )
             if result.rows != 1:
@@ -568,7 +881,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         dashboards = load_dashboard_configs(project_id="dry-run-project")
         print(
             json.dumps(
-                {"status": "fixture_ready", "changes": 0, "dashboard_count": len(dashboards)},
+                {
+                    "status": "control_center_ready",
+                    "changes": 0,
+                    "dashboard_count": len(dashboards),
+                    "widget_count": sum(len(item.widgets) for item in dashboards),
+                },
                 sort_keys=True,
             )
         )

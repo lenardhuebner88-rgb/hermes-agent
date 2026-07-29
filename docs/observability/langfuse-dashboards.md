@@ -1,8 +1,8 @@
 # Langfuse dashboard provisioning
 
-Status: **fixture-backed primary-path implementation**. The provisioning contract
-in `scripts/langfuse_dashboards.py` is pinned to Langfuse `3.224.0`, upstream
-revision `d044f366816282235898a0673d5700e05ccbee8c`.
+Status: **one fixture-backed native Worker Control Center**. The provisioning
+contract in `scripts/langfuse_dashboards.py` is pinned to Langfuse `3.224.0`,
+upstream revision `d044f366816282235898a0673d5700e05ccbee8c`.
 
 ## Authentication and primary path
 
@@ -24,26 +24,54 @@ There is no automatic fallback after a tRPC failure. The injectable transport is
 intentional: the CLI does not create a session transport and cannot mutate a
 live dashboard by accident.
 
-## Golden Fixture and derived configuration
+## Golden fixture and Greenfield configuration
 
 `tests/scripts/fixtures/langfuse-dashboard-golden.json` is a versioned,
 sanitary export of the normal widget manually created in the Langfuse UI. It
-contains the UI-observed `definition`, `dimensions`, `metrics`, and
-`chart_config` structures; every ID is consistently `<REDACTED_ID>`. The
-metadata pins the Langfuse release and source revision.
+contains the UI-observed `definition`, `view`, `dimensions`, `metrics`,
+`filters`, `chart_type`, and `chart_config` structures; every ID is
+consistently `<REDACTED_ID>`.
 
-The three version-matched configuration files are:
+`tests/scripts/fixtures/langfuse-dashboard-contract-3.224.0.json` is the
+checked-in extraction of the supported views, chart types, chart-config fields
+and filter operators. Its provenance names the exact upstream files and
+revision. The validator loads both fixtures on every configuration load; a
+hand-edited constant or unsupported config field therefore fails before any
+transport is created.
 
-- `config/langfuse-dashboards/north-star.json`
-- `config/langfuse-dashboards/reviewer-diagnose.json`
-- `config/langfuse-dashboards/effizienz.json`
+There is exactly one version-matched configuration:
 
-Each widget carries an explicit `denominator`, so sparse coverage cannot be
-silently presented as a population-wide rate. The model-mix widget uses the
-Langfuse API’s normalized `observations` view (the underlying enum is
-`OBSERVATIONS`) and `providedModelName`; its denominator is
-`OBSERVATIONS with non-empty providedModelName`, not the under-populated tasks
-page model field.
+- `config/langfuse-dashboards/control-center.json`
+
+It defines `Hermes Worker Control Center` with 15 native widgets on one
+non-overlapping 12-column grid. `CONFIGURATION_PATHS` intentionally rejects a
+second dashboard. The mobile order follows the JSON order and starts with the
+four decision KPIs, throughput and ranked outcomes.
+
+Every widget carries an explicit `denominator`, so sparse coverage cannot be
+silently presented as a population-wide rate. The first row contains absolute
+completed, blocked and approved counts plus p95 run duration. A categorical
+approval percentage is not invented because the pinned Langfuse metric
+contract cannot calculate that ratio in one widget.
+
+The analysis rows deliberately separate:
+
+- task outcome counts from trace throughput;
+- model-call volume from known model cost;
+- observation latency/TTFT from complete task-run duration;
+- review verdict counts from the thin review-iteration sample;
+- cost values with known prices from missing-price observations.
+
+Rankable categories use `HORIZONTAL_BAR`; thin
+`review_iterations_to_approval` data uses a `NUMBER` plus `HISTOGRAM` instead
+of a smoothed daily line. Histogram widgets are accepted only with
+`histogram(value)` and `1..100` pinned bins. `PIE` remains supported by the
+source contract but is not used in the control center.
+
+Exact correlation and price/score coverage remain read-only audit gates until
+an exact native score exists. They must not be approximated inside Langfuse
+with session names, trace names, missing-value zeros, or ratios across
+different views.
 
 The primary path is invoked only by code that supplies both a real project ID
 and the approved session adapter, for example:
@@ -88,19 +116,19 @@ A live caller must persist a machine-readable, secret-free receipt with:
 
 ```json
 {
-  "receipt_version": 1,
+  "receipt_version": 2,
   "path": "trpc",
-  "understood_definition": [{"dashboard": "Hermes North Star", "widget_placements": 3}],
+  "understood_definition": [{"dashboard": "Hermes Worker Control Center", "widget_placements": 15}],
   "visible_export_evidence": [
-    {"widget": "Euro equivalent per done task", "source": "exported_score"},
-    {"widget": "Model mix", "source": "observations"}
+    {"widget": "Laufresultate", "source": "exported_score"},
+    {"widget": "Modellaufrufe", "source": "observations"}
   ],
   "model_mix": {
     "source": "OBSERVATIONS",
     "dimension": "providedModelName",
-    "denominator": "OBSERVATIONS with non-empty providedModelName"
+    "denominator": "native kanban-worker or backfilled kanban-worker-usage observations with non-empty providedModelName"
   },
-  "changes": 13
+  "changes": 16
 }
 ```
 
@@ -118,9 +146,10 @@ changed denominator must be shown identically in its widget and receipt.
 .venv/bin/python scripts/langfuse_dashboards.py --dry-run
 ```
 
-Dry-run validates the Golden Fixture and all three configurations, creates no
-transport, does not contact Langfuse or PostgreSQL, and prints
-`{"changes": 0, "dashboard_count": 3, "status": "fixture_ready"}`. The
+Dry-run validates the Golden Fixture, source contract and the one
+control-center configuration, creates no transport, does not contact Langfuse
+or PostgreSQL, and prints
+`{"changes": 0, "dashboard_count": 1, "status": "control_center_ready", "widget_count": 15}`. The
 CLI flags are `--dry-run` and `--allow-direct-sql`; the latter is only useful
 to an explicit programmatic caller that also injects a fully guarded adapter
 and contract.

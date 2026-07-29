@@ -163,7 +163,7 @@ def test_provision_uses_all_three_post_mutations_and_app_read_back() -> None:
 class _SqlAdapter:
     def __init__(
         self, *, extra_column: bool = False, row_count: int = 1, changes: int = 1,
-        mutate_home: bool = False, read_back_widget_count: int = 10,
+        mutate_home: bool = False, read_back_widget_count: int = 15,
     ) -> None:
         self.calls: list[str] = []
         self.dashboard_upsert_params: list[tuple[object, ...]] = []
@@ -286,9 +286,9 @@ def test_direct_sql_guards_then_upserts_once_and_receipts_app_readback() -> None
     ]
     assert adapter.calls.count("begin") == adapter.calls.count("commit") == 1
     assert adapter.calls.count("rollback") == 0
-    assert adapter.calls.count("dashboard_upsert") == 3
-    assert adapter.calls.count("widget_upsert") == 10
-    assert adapter.calls.count("app_read_back") == 3
+    assert adapter.calls.count("dashboard_upsert") == 1
+    assert adapter.calls.count("widget_upsert") == 15
+    assert adapter.calls.count("app_read_back") == 1
     dashboard_definitions = []
     for params in adapter.dashboard_upsert_params:
         definition = params[4]
@@ -299,9 +299,12 @@ def test_direct_sql_guards_then_upserts_once_and_receipts_app_readback() -> None
         for definition in dashboard_definitions
     ] == [list(row.widget_ids) for row in rows]
     assert result.receipt["path"] == "direct_sql"
-    assert result.receipt["changes"] == 13
+    assert result.receipt["changes"] == 16
     assert result.receipt["visible_export_evidence"]
-    assert result.receipt["model_mix"]["denominator"] == "OBSERVATIONS with non-empty providedModelName"
+    assert result.receipt["model_mix"]["denominator"] == (
+        "native kanban-worker or backfilled kanban-worker-usage observations "
+        "with non-empty providedModelName"
+    )
 
 
 def test_direct_sql_fails_when_app_readback_omits_configured_widget_placements() -> None:
@@ -351,7 +354,10 @@ def test_dry_run_validates_fixture_without_opening_network_or_writing(
     monkeypatch.setattr(dashboards, "TrpcClient", forbidden)
 
     assert dashboards.main(["--dry-run"]) == 0
-    assert '"status": "fixture_ready"' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert '"status": "control_center_ready"' in output
+    assert '"dashboard_count": 1' in output
+    assert '"widget_count": 15' in output
 
 
 def test_versioned_golden_fixture_preserves_the_sanitised_ui_shapes() -> None:
@@ -374,56 +380,165 @@ def test_versioned_golden_fixture_preserves_the_sanitised_ui_shapes() -> None:
     }
     assert fixture["dimensions"] == []
     assert fixture["metrics"] == [{"agg": "count", "measure": "count"}]
+    assert fixture["view"] == "traces"
+    assert fixture["filters"] == [
+        {
+            "column": "tags",
+            "operator": "any of",
+            "value": ["kanban-worker"],
+            "type": "arrayOptions",
+        }
+    ]
+    assert fixture["chart_type"] == "LINE_TIME_SERIES"
     assert fixture["chart_config"] == {"type": "LINE_TIME_SERIES"}
 
 
-def test_all_dashboard_configs_are_fixture_shaped_and_cover_required_metrics() -> None:
+def test_source_contract_pins_the_validator_to_upstream_files() -> None:
+    contract = dashboards.load_source_contract()
+
+    assert contract["source"]["repository"] == "langfuse/langfuse"
+    assert contract["source"]["revision"] == dashboards.EXPECTED_LANGFUSE_REVISION
+    assert {
+        "packages/shared/src/features/query/dataModel.ts",
+        "packages/shared/src/interfaces/filters.ts",
+        "web/src/features/widgets/components/WidgetForm.tsx",
+        "web/src/features/widgets/utils.ts",
+    } <= set(contract["source"]["files"])
+    assert set(contract["supported_chart_types"]) == dashboards.SUPPORTED_CHART_TYPES
+    assert set(contract["views"]) == dashboards.SUPPORTED_VIEWS
+
+
+def test_greenfield_config_is_one_control_center_with_real_metric_shapes() -> None:
     configs = dashboards.load_dashboard_configs(project_id="project_1")
 
-    assert [config.name for config in configs] == [
-        "Hermes North Star",
-        "Hermes Reviewer Diagnose",
-        "Hermes Effizienz",
-    ]
+    assert [config.name for config in configs] == ["Hermes Worker Control Center"]
     widget_names = {widget.name for config in configs for widget in config.widgets}
     assert {
-        "Euro equivalent per done task",
-        "Cost p50/p95",
-        "Resolve rate",
-        "First-pass approval",
-        "Review submissions to approval",
-        "Operator veto",
-        "Cache-hit ratio",
-        "Exclusive token buckets",
-        "Model mix",
-        "Queue latency seconds",
+        "Abgeschlossene Läufe",
+        "Blockierte Läufe",
+        "Freigegebene Reviews",
+        "P95 Laufzeit",
+        "Worker-Durchsatz",
+        "Laufresultate",
+        "Review-Entscheidungen",
+        "Modellaufrufe",
+        "Bekannte Modellkosten",
+        "P95 Latenz nach Modell",
+        "P95 Zeit bis erster Token",
+        "Kostenverlauf",
+        "Kosten nach Modell",
+        "Review-Runden Ø",
+        "Review-Runden Verteilung",
     } <= widget_names
 
     model_mix = next(
-        widget for config in configs for widget in config.widgets if widget.name == "Model mix"
+        widget for config in configs for widget in config.widgets if widget.name == "Kosten nach Modell"
     )
     assert model_mix.view == "observations"
     assert model_mix.dimensions == [{"field": "providedModelName"}]
-    assert model_mix.metrics == [{"agg": "count", "measure": "count"}]
-    assert model_mix.chart_config == {"type": "LINE_TIME_SERIES"}
+    assert model_mix.metrics == [{"agg": "sum", "measure": "totalCost"}]
+    assert model_mix.chart_config == {
+        "type": "HORIZONTAL_BAR",
+        "row_limit": 12,
+    }
+    assert {widget.chart_type for widget in configs[0].widgets} >= {
+        "NUMBER",
+        "BAR_TIME_SERIES",
+        "LINE_TIME_SERIES",
+        "HORIZONTAL_BAR",
+        "HISTOGRAM",
+    }
+    histogram = next(
+        widget
+        for config in configs
+        for widget in config.widgets
+        if widget.name == "Review-Runden Verteilung"
+    )
+    assert histogram.metrics == [{"agg": "histogram", "measure": "value"}]
+    assert histogram.chart_config == {"type": "HISTOGRAM", "bins": 8}
 
 
-def test_all_dashboard_configs_structurally_preserve_the_four_golden_fixture_fields() -> None:
-    fixture = dashboards.load_golden_fixture()
-    for path in dashboards.CONFIGURATION_PATHS:
-        config = dashboards._read_json_object(path)
-        for field in ("definition", "dimensions", "metrics", "chart_config"):
-            assert config[field] == fixture[field]
+def test_control_center_uses_reviewed_non_overlapping_12_column_layout() -> None:
+    plan = dashboards.load_dashboard_configs(project_id="project_1")[0]
+    placements = dashboards._widget_placements(
+        [f"widget-{index}" for index in range(len(plan.widgets))],
+        plan.widgets,
+    )
+
+    assert max(item["x"] + item["x_size"] for item in placements) == 12
+    assert placements[0] | {"widgetId": "ignored"} != placements[1] | {"widgetId": "ignored"}
+    assert placements[-2]["x_size"] + placements[-1]["x_size"] == 12
+    for index, left in enumerate(placements):
+        for right in placements[index + 1 :]:
+            overlaps_x = left["x"] < right["x"] + right["x_size"] and right["x"] < left["x"] + left["x_size"]
+            overlaps_y = left["y"] < right["y"] + right["y_size"] and right["y"] < left["y"] + left["y_size"]
+            assert not (overlaps_x and overlaps_y)
 
 
-@pytest.mark.parametrize("field", ["definition", "dimensions", "metrics", "chart_config"])
-def test_config_fixture_drift_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: object, field: str) -> None:
+def test_config_source_drift_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
     config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
-    config[field] = {} if field in {"definition", "chart_config"} else [{"drift": True}]
+    config["source"]["revision"] = "drift"
     path = tmp_path / "drift.json"  # type: ignore[operator]
     path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
     monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
-    with pytest.raises(dashboards.ProvisionError, match="fixture shape"):
+    with pytest.raises(dashboards.ProvisionError, match="supported Langfuse source"):
+        dashboards.load_dashboard_configs(project_id="project_1")
+
+
+def test_overlapping_widget_layout_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
+    config["widgets"][1]["layout"] = dict(config["widgets"][0]["layout"])
+    path = tmp_path / "overlap.json"  # type: ignore[operator]
+    path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
+    monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
+    with pytest.raises(dashboards.ProvisionError, match="overlap"):
+        dashboards.load_dashboard_configs(project_id="project_1")
+
+
+def test_unpinned_metric_shape_is_rejected_before_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
+    config["widgets"][0]["metrics"] = [{"measure": "invented", "agg": "sum"}]
+    path = tmp_path / "metric-drift.json"  # type: ignore[operator]
+    path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
+    monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
+    with pytest.raises(dashboards.ProvisionError, match="unsupported metric"):
+        dashboards.load_dashboard_configs(project_id="project_1")
+
+
+def test_histogram_requires_pinned_bins_and_aggregation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
+    histogram = next(
+        widget
+        for widget in config["widgets"]
+        if widget["chart_type"] == "HISTOGRAM"
+    )
+    histogram["chart_config"]["bins"] = 0
+    path = tmp_path / "invalid-histogram.json"  # type: ignore[operator]
+    path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
+    monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
+
+    with pytest.raises(dashboards.ProvisionError, match="histogram bins"):
+        dashboards.load_dashboard_configs(project_id="project_1")
+
+
+def test_unpinned_chart_config_field_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
+    config["widgets"][0]["chart_config"]["show_value_labels"] = True
+    path = tmp_path / "chart-config-drift.json"  # type: ignore[operator]
+    path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
+    monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
+
+    with pytest.raises(dashboards.ProvisionError, match="chart_config fields"):
         dashboards.load_dashboard_configs(project_id="project_1")
 
 
@@ -435,7 +550,7 @@ def test_receipt_is_secret_free_and_a_deterministic_second_equivalent_run_has_ze
         allow_direct_sql=True, adapter=_SqlAdapter(changes=0), contract=_sql_contract(), rows=_sql_rows()
     )
     receipt = second.receipt
-    assert first.receipt["changes"] == 13
+    assert first.receipt["changes"] == 16
     assert receipt["changes"] == 0
     assert set(receipt) >= {"path", "understood_definition", "visible_export_evidence", "model_mix", "changes"}
     assert "project_1" not in json.dumps(receipt)
@@ -453,5 +568,5 @@ def test_trpc_receipt_is_built_from_app_readback(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(dashboards, "provision_dashboard", read_back)
     receipt = dashboards.provision_dashboards_with_receipt(object(), plans)  # type: ignore[arg-type]
     assert receipt["path"] == "trpc"
-    assert receipt["changes"] == 13
+    assert receipt["changes"] == 16
     assert receipt["understood_definition"]

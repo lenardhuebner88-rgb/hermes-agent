@@ -1,8 +1,9 @@
 {
-  "format_version": 3,
+  "format_version": 4,
   "flat_streaming": {
     "message_id": "msg_011CcwgUfWxuVDj8gZEYgCVA",
     "request_id": "req_011CcwgUZxbdktdJH3Toy5T6",
+    "session_id": "7df0db96-dab8-4f17-92bc-a3a57004b32d",
     "input_tokens": 2,
     "output_tokens": 264,
     "cache_read_input_tokens": 16728,

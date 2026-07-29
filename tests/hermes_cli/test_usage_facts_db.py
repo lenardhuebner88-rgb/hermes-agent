@@ -68,6 +68,10 @@ def test_large_fact_tables_have_additive_read_path_indexes(tmp_path):
         "idx_run_usage_facts_rollup",
         "idx_run_usage_facts_origin_model",
         "idx_run_usage_facts_captured_at",
+        "idx_run_usage_facts_task_run",
+        "idx_run_usage_facts_task",
+        "idx_run_usage_facts_chain",
+        "idx_run_usage_facts_session",
     } <= run_indexes
     assert "idx_run_llm_calls_origin_model" in call_indexes
 
@@ -123,6 +127,12 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
         },
         run_fields={
             "origin": "claude_code",
+            "task_run_id": "42",
+            "task_id": "task-42",
+            "chain_id": "root-42",
+            "board": "default",
+            "session_id": "session-42",
+            "correlation_source": "claude_session_id",
             "profile": "reviewer",
             "wall_ms": 1234,
             "call_kind": "main_loop",
@@ -142,6 +152,12 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
     )
 
     assert fact["origin"] == "claude_code"
+    assert fact["task_run_id"] == "42"
+    assert fact["task_id"] == "task-42"
+    assert fact["chain_id"] == "root-42"
+    assert fact["board"] == "default"
+    assert fact["session_id"] == "session-42"
+    assert fact["correlation_source"] == "claude_session_id"
     assert fact["profile"] == "reviewer"
     assert fact["wall_ms"] == 1234
     assert fact["call_kind"] == "main_loop"

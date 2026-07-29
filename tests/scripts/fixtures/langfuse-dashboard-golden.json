@@ -19,6 +19,7 @@
       }
     ]
   },
+  "view": "traces",
   "dimensions": [],
   "metrics": [
     {
@@ -26,6 +27,15 @@
       "measure": "count"
     }
   ],
+  "filters": [
+    {
+      "column": "tags",
+      "operator": "any of",
+      "value": ["kanban-worker"],
+      "type": "arrayOptions"
+    }
+  ],
+  "chart_type": "LINE_TIME_SERIES",
   "chart_config": {
     "type": "LINE_TIME_SERIES"
   }

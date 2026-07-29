@@ -17,6 +17,54 @@ endpoint never runs schema initialization or materialization.
 The executable example for S7 is
 `tests/fixtures/usage_facts_readmodel/s7_payload_example.json`.
 
+## Exact worker-correlation fields
+
+The persisted run table has six nullable, additive correlation fields:
+
+```text
+task_run_id, task_id, chain_id, board, session_id, correlation_source
+```
+
+Native Hermes hooks populate task/run/chain/board context only after a cached,
+read-only board lookup proves that `HERMES_KANBAN_TASK` names a real task.
+Loop-worker pseudo IDs and missing tasks stay uncorrelated; the lookup never
+initializes or migrates a board database. The Claude Code harvester persists
+the transcript session UUID and may enrich it only through an exact
+`task_runs.metadata.claude_session_id` match.
+
+Correlation rules are intentionally conservative:
+
+- one session matching one task and one run:
+  `correlation_source = claude_session_id_run`;
+- one session reused by multiple runs of the same task: keep the exact task,
+  clear `task_run_id`, and use `claude_session_id_task`;
+- one session matching multiple tasks or boards: leave every worker field
+  unset;
+- name, time-window, model, profile, prompt text and path similarity are never
+  joins.
+
+The additive migration preserves existing rows. Pre-migration/read-only
+databases are valid audit inputs and report the absent fields instead of
+failing or treating them as zero coverage.
+
+After the additive schema is present,
+`hermes kanban export-langfuse-worker-facts --dry-run --limit 100` previews the
+separate exact-correlation adapter. Before migration it fails closed with the
+missing column names. It exports only exact-correlated foreign facts, excludes
+native Hermes origins to avoid duplicate traces, emits no raw
+prompts/tool arguments/results, and uses deterministic trace/generation IDs
+plus the dedicated `kanban-worker-usage` tag and a local ledger for
+idempotency. The native `kanban-worker` tag remains reserved for real worker
+run traces, so the throughput tile never double-counts call-level backfill.
+The default limit is a streaming canary guard; a missing ledger starts empty,
+while an unreadable or malformed ledger or a per-event ingestion error aborts
+without advancing the checkpoint.
+
+`scripts/langfuse_worker_audit.py` is the source of truth for rollout coverage.
+It reports explicit per-origin denominators, structural unknowns and matched
+versus unmatched board runs. A dashboard coverage ratio must not be introduced
+until the corresponding exact score is exported natively.
+
 ## Group contract
 
 `groups[]` is already aggregated. S7 must not sum native database rows.

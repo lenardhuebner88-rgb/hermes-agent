@@ -12,10 +12,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Optional, TextIO
+from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, TextIO
+from urllib.parse import quote
 
 from hermes_cli import usage_facts_db as usage_facts_db_mod
 from hermes_cli.usage_facts_db import (
@@ -27,9 +29,9 @@ from hermes_cli.usage_facts_db import (
 # Bump when the transcript shape we accept changes in a way that would make
 # golden fixtures silently wrong.  Tests pin this value.
 #
-# v3 adds access-configuration-derived billing provenance, so existing HWM
-# snapshots re-harvest their captured files and backfill the new fields.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 3
+# v4 persists the transcript session identity and exact Kanban correlations, so
+# existing HWM snapshots re-harvest their captured files and backfill the link.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 4
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -64,6 +66,9 @@ class HarvestStats:
     calls_written: int = 0
     calls_unchanged: int = 0
     parse_errors: int = 0
+    sessions_correlated: int = 0
+    calls_correlated: int = 0
+    calls_recorrelated: int = 0
     format_version: int = CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
 
 
@@ -93,6 +98,11 @@ class _CallDraft:
     parent_tool_use_id: Optional[str] = None
     parent_agent_id: Optional[str] = None
     source_path: Optional[str] = None
+    task_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    chain_id: Optional[str] = None
+    board: Optional[str] = None
+    correlation_source: Optional[str] = None
     fragment_count: int = 0
 
     @property
@@ -547,6 +557,12 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
     }
     run_fields: dict[str, Any] = {
         "origin": ORIGIN,
+        "session_id": draft.session_id,
+        "task_run_id": draft.task_run_id,
+        "task_id": draft.task_id,
+        "chain_id": draft.chain_id,
+        "board": draft.board,
+        "correlation_source": draft.correlation_source,
         "provider": PROVIDER,
         "model": draft.model,
         "requested_model": draft.model,
@@ -719,6 +735,66 @@ def write_calls_batch(
     return written
 
 
+def recorrelate_existing_calls(
+    correlations: Mapping[str, Any],
+    *,
+    db_path: Path,
+    dry_run: bool,
+) -> int:
+    """Fill exact links for HWM-skipped transcripts after task metadata lands."""
+    if not correlations or not db_path.is_file():
+        return 0
+    resolved = db_path.expanduser().resolve()
+    if dry_run:
+        try:
+            connection = sqlite3.connect(
+                f"file:{quote(str(resolved), safe='/')}?mode=ro",
+                uri=True,
+                timeout=2.0,
+            )
+        except sqlite3.Error:
+            return 0
+    else:
+        connection = usage_facts_db_mod._connect(resolved)
+    try:
+        updated = 0
+        for session_id, correlation in correlations.items():
+            fields = correlation.as_run_fields()
+            if dry_run:
+                try:
+                    row = connection.execute(
+                        "SELECT COUNT(*) FROM run_usage_facts "
+                        "WHERE origin=? AND session_id=? AND task_id IS NULL",
+                        (ORIGIN, session_id),
+                    ).fetchone()
+                except sqlite3.Error:
+                    return 0
+                updated += int(row[0]) if row is not None else 0
+                continue
+            cursor = connection.execute(
+                "UPDATE run_usage_facts SET "
+                "task_run_id=?, task_id=?, chain_id=?, board=?, "
+                "profile=COALESCE(profile, ?), correlation_source=? "
+                "WHERE origin=? AND session_id=? AND task_id IS NULL",
+                (
+                    fields.get("task_run_id"),
+                    fields.get("task_id"),
+                    fields.get("chain_id"),
+                    fields.get("board"),
+                    fields.get("profile"),
+                    fields.get("correlation_source"),
+                    ORIGIN,
+                    session_id,
+                ),
+            )
+            updated += max(0, int(cursor.rowcount))
+        if not dry_run:
+            connection.commit()
+        return updated
+    finally:
+        connection.close()
+
+
 def harvest(
     *,
     projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
@@ -728,6 +804,7 @@ def harvest(
     update_existing_only: bool = False,
     progress_every: int = 200,
     log: Optional[TextIO] = None,
+    kanban_paths: Optional[Sequence[Path | str]] = None,
 ) -> HarvestStats:
     """Run an incremental, idempotent harvest into the usage-facts DB.
 
@@ -756,6 +833,26 @@ def harvest(
     stats = HarvestStats()
     out = log or sys.stderr
     files = discover_jsonl_files(root)
+    from hermes_cli.usage_fact_correlation import (
+        load_claude_session_correlations,
+    )
+
+    candidate_session_ids: set[str] = set()
+    for path in files:
+        if path.parent.name == "subagents" and len(path.parts) >= 3:
+            candidate_session_ids.add(path.parts[-3])
+        else:
+            candidate_session_ids.add(path.stem)
+    correlations = load_claude_session_correlations(
+        candidate_session_ids,
+        kanban_paths=kanban_paths,
+    )
+    stats.sessions_correlated = len(correlations)
+    stats.calls_recorrelated = recorrelate_existing_calls(
+        correlations,
+        db_path=resolved_db,
+        dry_run=dry_run,
+    )
     derived_billing_mode, derived_billing_mode_source = (
         _billing_mode_from_access_configuration()
     )
@@ -783,6 +880,20 @@ def harvest(
                 if draft.billing_mode_source is None:
                     draft.billing_mode = derived_billing_mode
                     draft.billing_mode_source = derived_billing_mode_source
+
+        for draft in drafts.values():
+            correlation = correlations.get(
+                draft.session_id or draft.parent_session_id or ""
+            )
+            if correlation is None:
+                continue
+            draft.task_run_id = correlation.task_run_id
+            draft.task_id = correlation.task_id
+            draft.chain_id = correlation.chain_id
+            draft.board = correlation.board
+            draft.profile = draft.profile or correlation.profile
+            draft.correlation_source = correlation.source
+            stats.calls_correlated += 1
 
         written = write_calls_batch(
             drafts.values(),
@@ -888,6 +999,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "lines_skipped": stats.lines_skipped,
                 "calls_merged": stats.calls_merged,
                 "calls_written": stats.calls_written,
+                "sessions_correlated": stats.sessions_correlated,
+                "calls_correlated": stats.calls_correlated,
+                "calls_recorrelated": stats.calls_recorrelated,
                 "parse_errors": stats.parse_errors,
                 "dry_run": bool(args.dry_run),
                 "db": str(usage_facts_db_path(args.db)),
