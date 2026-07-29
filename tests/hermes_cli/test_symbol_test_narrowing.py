@@ -145,7 +145,7 @@ def test_real_reference_channels_are_indexed(
     assert test_path in symbol_index.by_channel[channel][symbol]
 
 
-def test_all_32_objpatch_only_symbols_remain_tested(real_indexes) -> None:
+def test_all_31_objpatch_only_symbols_remain_tested(real_indexes) -> None:
     _, symbol_index = real_indexes
     symbols = {
         channel: set(symbol_index.by_channel[channel])
@@ -155,7 +155,7 @@ def test_all_32_objpatch_only_symbols_remain_tested(real_indexes) -> None:
         symbols["attr"] | symbols["strpatch"] | symbols["direct"]
     )
 
-    assert len(objpatch_only) == 32
+    assert len(objpatch_only) == 31
     assert "_launch_worker_process" in objpatch_only
     for symbol in objpatch_only:
         assert symbol_index.by_channel["objpatch"][symbol]

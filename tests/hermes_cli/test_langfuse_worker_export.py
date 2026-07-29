@@ -70,6 +70,9 @@ def test_events_are_deterministic_metadata_only_and_session_grouped(tmp_path) ->
     assert "kanban-worker-usage" in trace["tags"]
     assert "kanban-worker" not in trace["tags"]
     assert trace["metadata"]["task_run_id"] == "42"
+    assert trace["metadata"]["kanban_task_id"] == "task-42"
+    assert trace["metadata"]["worker_usage_backfill"] is True
+    assert generation["metadata"]["kanban_task_id"] == "task-42"
     assert generation["model"] == "claude-opus"
     assert generation["usageDetails"] == {
         "input": 100,
@@ -78,6 +81,26 @@ def test_events_are_deterministic_metadata_only_and_session_grouped(tmp_path) ->
         "cache_creation_input_tokens": 5,
         "total": 180,
     }
+
+
+def test_generation_exports_measured_end_time_and_ttft(tmp_path) -> None:
+    path = tmp_path / "usage.db"
+    _seed(path)
+    upsert_run_facts(
+        "claude-run-1",
+        {
+            "duration_ms": 2500,
+            "first_token_ms": 350,
+            "captured_at": "2026-07-29T00:00:00+00:00",
+        },
+        path=path,
+    )
+
+    generation = exporter.events_for_row(_row(path))[1]["body"]
+
+    assert generation["startTime"] == "2026-07-29T00:00:00Z"
+    assert generation["completionStartTime"] == "2026-07-29T00:00:00.350000Z"
+    assert generation["endTime"] == "2026-07-29T00:00:02.500000Z"
 
 
 def test_dry_run_needs_no_credentials_and_excludes_live_hermes(tmp_path) -> None:
@@ -220,6 +243,34 @@ def test_row_selection_retains_only_the_requested_canary(tmp_path) -> None:
     assert len(snapshot.selected_rows) == 3
     assert snapshot.eligible_foreign_runs == 11
     assert snapshot.pending_runs == 10
+
+
+def test_invalid_timestamp_is_counted_without_blocking_the_batch(tmp_path) -> None:
+    path = tmp_path / "usage.db"
+    _seed(path)
+    upsert_run_facts(
+        "claude-invalid-time",
+        {
+            "origin": "claude_code",
+            "task_id": "task-invalid",
+            "session_id": "session-invalid",
+            "correlation_source": "claude_session_id_task",
+            "captured_at": "not-a-timestamp",
+        },
+        path=path,
+    )
+
+    report = exporter.export_worker_facts(
+        usage_path=path,
+        env={},
+        dry_run=True,
+        run_limit=None,
+        ledger_path=tmp_path / "ledger.json",
+    )
+
+    assert report["invalid_timestamp_runs"] == 1
+    assert report["selected_runs"] == 1
+    assert report["would_post_events"] == 2
 
 
 def test_malformed_ledger_fails_closed_before_credentials(

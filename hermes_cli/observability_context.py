@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -22,8 +23,17 @@ def _normalized(value: object) -> Optional[str]:
 def _read_worker_dimensions(
     db_path: str,
     task_id: str,
+    freshness_bucket: int | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    """Validate one worker task through a cached, read-only board lookup."""
+    """Validate one worker task through a short-lived, read-only board lookup.
+
+    ``freshness_bucket`` is supplied by the runtime caller. It keeps both
+    positive and negative cache entries bounded, so a transient SQLITE_BUSY or
+    a task created after process start is retried instead of being suppressed
+    for the entire worker lifetime. The optional default preserves the narrow
+    direct-test seam and ``cache_clear`` contract.
+    """
+    del freshness_bucket
     path = Path(db_path)
     if not path.is_file():
         return None, None
@@ -34,7 +44,7 @@ def _read_worker_dimensions(
         connection = sqlite3.connect(
             f"file:{quote(str(path.resolve()), safe='/')}?mode=ro",
             uri=True,
-            timeout=0.1,
+            timeout=0.5,
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only = ON")
@@ -60,7 +70,14 @@ def _resolve_chain_and_lane(task_id: str) -> tuple[Optional[str], Optional[str]]
         from hermes_cli.kanban_db import kanban_db_path
 
         path = kanban_db_path()
-        return _read_worker_dimensions(str(path.resolve(strict=False)), task_id)
+        # Five seconds is long enough to avoid a board read on every hook, but
+        # short enough to recover during the same run after a transient miss.
+        freshness_bucket = int(time.monotonic() // 5)
+        return _read_worker_dimensions(
+            str(path.resolve(strict=False)),
+            task_id,
+            freshness_bucket,
+        )
     except (OSError, ValueError):
         return None, None
 
@@ -68,25 +85,32 @@ def _resolve_chain_and_lane(task_id: str) -> tuple[Optional[str], Optional[str]]
 def resolve_observability_context() -> dict[str, str]:
     """Return normalized worker dimensions, or an empty dict for normal agents.
 
-    Hook emission must never affect an agent request. A missing or pseudo task
-    therefore returns no worker dimensions instead of fabricating an exact link.
+    A task/run pair comes from the audited worker launcher and remains an exact
+    identity even if the optional board enrichment is briefly unavailable.
+    Task-only pseudo contexts still require successful board validation.
     """
     task_id = _normalized(os.environ.get("HERMES_KANBAN_TASK"))
     if task_id is None:
         return {}
 
+    task_run_id = _normalized(os.environ.get("HERMES_KANBAN_RUN_ID"))
     chain_id, lane = _resolve_chain_and_lane(task_id)
     normalized_chain = _normalized(chain_id)
-    if normalized_chain is None:
+    if normalized_chain is None and task_run_id is None:
         return {}
     result = {
         "kanban_task_id": task_id,
-        "chain_id": normalized_chain,
+        "origin": "hermes_agent",
     }
-    task_run_id = _normalized(os.environ.get("HERMES_KANBAN_RUN_ID"))
     if task_run_id is not None:
         result["task_run_id"] = task_run_id
+    if normalized_chain is not None:
+        result["chain_id"] = normalized_chain
     normalized_lane = _normalized(lane) or _normalized(os.environ.get("HERMES_PROFILE"))
     if normalized_lane is not None:
         result["lane"] = normalized_lane
+        result["profile"] = normalized_lane
+    board = _normalized(os.environ.get("HERMES_KANBAN_BOARD"))
+    if board is not None:
+        result["board"] = board
     return result

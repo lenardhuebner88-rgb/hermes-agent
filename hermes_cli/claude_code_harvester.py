@@ -740,9 +740,22 @@ def recorrelate_existing_calls(
     *,
     db_path: Path,
     dry_run: bool,
+    ambiguous_session_ids: Optional[Iterable[str]] = None,
 ) -> int:
-    """Fill exact links for HWM-skipped transcripts after task metadata lands."""
-    if not correlations or not db_path.is_file():
+    """Reconcile exact links for HWM-skipped transcripts.
+
+    Only sessions proven ambiguous by readable board rows are cleared. Missing
+    correlations are unresolved, not negative evidence. Resolved task-level
+    links enrich NULL fields but never downgrade a previously exact run link.
+    """
+    ambiguous_sessions = {
+        str(value).strip()
+        for value in (ambiguous_session_ids or ())
+        if str(value).strip()
+    }
+    if not correlations and not ambiguous_sessions:
+        return 0
+    if not db_path.is_file():
         return 0
     resolved = db_path.expanduser().resolve()
     if dry_run:
@@ -758,14 +771,62 @@ def recorrelate_existing_calls(
         connection = usage_facts_db_mod._connect(resolved)
     try:
         updated = 0
+        sorted_ambiguous = sorted(ambiguous_sessions)
+        for offset in range(0, len(sorted_ambiguous), 500):
+            chunk = sorted_ambiguous[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            if dry_run:
+                row = connection.execute(
+                    "SELECT COUNT(*) FROM run_usage_facts "
+                    "WHERE origin=? AND session_id IN ("
+                    f"{placeholders}) "
+                    "AND correlation_source LIKE 'claude_session_id_%'",
+                    (ORIGIN, *chunk),
+                ).fetchone()
+                updated += int(row[0]) if row is not None else 0
+                continue
+            cursor = connection.execute(
+                "UPDATE run_usage_facts SET task_run_id=NULL, task_id=NULL, "
+                "chain_id=NULL, board=NULL, correlation_source=NULL "
+                "WHERE origin=? AND session_id IN ("
+                f"{placeholders}) "
+                "AND correlation_source LIKE 'claude_session_id_%'",
+                (ORIGIN, *chunk),
+            )
+            updated += max(0, int(cursor.rowcount))
+
         for session_id, correlation in correlations.items():
             fields = correlation.as_run_fields()
+            task_run_id = fields.get("task_run_id")
+            task_id = fields.get("task_id")
+            chain_id = fields.get("chain_id")
+            board = fields.get("board")
+            source = fields.get("correlation_source")
+            comparison_params = (
+                task_run_id,
+                task_id,
+                chain_id,
+                board,
+                task_run_id,
+                source,
+            )
             if dry_run:
                 try:
                     row = connection.execute(
                         "SELECT COUNT(*) FROM run_usage_facts "
-                        "WHERE origin=? AND session_id=? AND task_id IS NULL",
-                        (ORIGIN, session_id),
+                        "WHERE origin=? AND session_id=? AND ("
+                        "task_run_id IS NOT COALESCE(?, task_run_id) OR "
+                        "task_id IS NOT COALESCE(?, task_id) OR "
+                        "chain_id IS NOT COALESCE(?, chain_id) OR "
+                        "board IS NOT COALESCE(?, board) OR "
+                        "correlation_source IS NOT CASE "
+                        "WHEN ? IS NULL AND task_run_id IS NOT NULL "
+                        "THEN correlation_source ELSE ? END)",
+                        (
+                            ORIGIN,
+                            session_id,
+                            *comparison_params,
+                        ),
                     ).fetchone()
                 except sqlite3.Error:
                     return 0
@@ -773,18 +834,33 @@ def recorrelate_existing_calls(
                 continue
             cursor = connection.execute(
                 "UPDATE run_usage_facts SET "
-                "task_run_id=?, task_id=?, chain_id=?, board=?, "
-                "profile=COALESCE(profile, ?), correlation_source=? "
-                "WHERE origin=? AND session_id=? AND task_id IS NULL",
+                "task_run_id=COALESCE(?, task_run_id), "
+                "task_id=COALESCE(?, task_id), "
+                "chain_id=COALESCE(?, chain_id), "
+                "board=COALESCE(?, board), "
+                "profile=COALESCE(profile, ?), "
+                "correlation_source=CASE "
+                "WHEN ? IS NULL AND task_run_id IS NOT NULL "
+                "THEN correlation_source ELSE ? END "
+                "WHERE origin=? AND session_id=? AND ("
+                "task_run_id IS NOT COALESCE(?, task_run_id) OR "
+                "task_id IS NOT COALESCE(?, task_id) OR "
+                "chain_id IS NOT COALESCE(?, chain_id) OR "
+                "board IS NOT COALESCE(?, board) OR "
+                "correlation_source IS NOT CASE "
+                "WHEN ? IS NULL AND task_run_id IS NOT NULL "
+                "THEN correlation_source ELSE ? END)",
                 (
-                    fields.get("task_run_id"),
-                    fields.get("task_id"),
-                    fields.get("chain_id"),
-                    fields.get("board"),
+                    task_run_id,
+                    task_id,
+                    chain_id,
+                    board,
                     fields.get("profile"),
-                    fields.get("correlation_source"),
+                    task_run_id,
+                    source,
                     ORIGIN,
                     session_id,
+                    *comparison_params,
                 ),
             )
             updated += max(0, int(cursor.rowcount))
@@ -833,9 +909,7 @@ def harvest(
     stats = HarvestStats()
     out = log or sys.stderr
     files = discover_jsonl_files(root)
-    from hermes_cli.usage_fact_correlation import (
-        load_claude_session_correlations,
-    )
+    from hermes_cli.usage_fact_correlation import scan_claude_session_correlations
 
     candidate_session_ids: set[str] = set()
     for path in files:
@@ -843,15 +917,17 @@ def harvest(
             candidate_session_ids.add(path.parts[-3])
         else:
             candidate_session_ids.add(path.stem)
-    correlations = load_claude_session_correlations(
+    correlation_scan = scan_claude_session_correlations(
         candidate_session_ids,
         kanban_paths=kanban_paths,
     )
+    correlations = correlation_scan.correlations
     stats.sessions_correlated = len(correlations)
     stats.calls_recorrelated = recorrelate_existing_calls(
         correlations,
         db_path=resolved_db,
         dry_run=dry_run,
+        ambiguous_session_ids=correlation_scan.ambiguous_session_ids,
     )
     derived_billing_mode, derived_billing_mode_source = (
         _billing_mode_from_access_configuration()

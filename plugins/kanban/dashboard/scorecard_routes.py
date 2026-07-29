@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
+import statistics
+import time
+from typing import Optional
+
+from fastapi import Query
 
 from hermes_cli.kanban_score_hygiene import (
     metric_run_class_counts,
     metric_scores_relation,
+)
+from plugins.kanban.dashboard.langfuse_read_model import (
+    get_langfuse_snapshot as _get_langfuse_snapshot,
 )
 
 
@@ -36,13 +45,23 @@ _RUN_OUTCOME_KIND_LABELS = {
 }
 
 
-def _score_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def _score_rows(
+    conn: sqlite3.Connection,
+    *,
+    since: int | None = None,
+) -> list[sqlite3.Row]:
     scores = metric_scores_relation(conn)
+    where = "WHERE s.name = 'review_verdict'"
+    params: tuple[object, ...] = ()
+    if since is not None:
+        where += " AND s.created_at >= ?"
+        params = (since,)
     return conn.execute(
         "SELECT s.name, s.value, s.created_at, COALESCE(r.profile, 'unknown') AS profile, "
         "COALESCE(r.active_model, r.requested_model, 'unknown') AS model "
         f"FROM {scores} s LEFT JOIN task_runs r ON r.id = s.run_id "
-        "WHERE s.name = 'review_verdict' ORDER BY s.created_at"
+        f"{where} ORDER BY s.created_at",
+        params,
     ).fetchall()
 
 
@@ -114,14 +133,117 @@ def _materialized_scores(conn: sqlite3.Connection) -> dict[str, dict[str, object
     return scores
 
 
+def _quality_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    days: int,
+    now: int,
+) -> dict[str, object]:
+    cutoff = now - (days * 86400)
+    rows = _score_rows(conn, since=cutoff)
+    by_profile: dict[str, list[sqlite3.Row]] = {}
+    by_model: dict[str, list[sqlite3.Row]] = {}
+    verdicts = {"approved": 0, "rejected": 0}
+    daily: dict[str, dict[str, int]] = {}
+    for row in rows:
+        by_profile.setdefault(str(row["profile"]), []).append(row)
+        by_model.setdefault(str(row["model"]), []).append(row)
+        verdicts[
+            "approved" if float(row["value"] or 0) == 1.0 else "rejected"
+        ] += 1
+        day = dt.datetime.fromtimestamp(
+            int(row["created_at"]),
+            tz=dt.timezone.utc,
+        ).date().isoformat()
+        bucket = daily.setdefault(
+            day,
+            {"approved": 0, "rejected": 0},
+        )
+        bucket[
+            "approved" if float(row["value"] or 0) == 1.0 else "rejected"
+        ] += 1
+
+    score_relation = metric_scores_relation(conn)
+    score_rows = conn.execute(
+        f"SELECT name, value FROM {score_relation} "
+        "WHERE created_at >= ? AND name IN ("
+        "'run_outcome_kind', 'review_iterations_to_approval')",
+        (cutoff,),
+    ).fetchall()
+    outcomes: dict[str, int] = {}
+    iterations: list[float] = []
+    for row in score_rows:
+        name = str(row["name"])
+        if name == "run_outcome_kind":
+            label = _run_outcome_kind_label(row["value"])
+            outcomes[label] = outcomes.get(label, 0) + 1
+        else:
+            try:
+                value = float(row["value"])
+            except (TypeError, ValueError):
+                continue
+            if name == "review_iterations_to_approval":
+                iterations.append(value)
+
+    total_runs = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE started_at >= ?",
+            (cutoff,),
+        ).fetchone()[0]
+    )
+    group = lambda data: [
+        dict(name=name, **_rate(items))
+        for name, items in sorted(data.items())
+    ]
+    iteration_distribution: dict[str, int] = {}
+    for value in iterations:
+        key = str(max(0, int(round(value))))
+        iteration_distribution[key] = iteration_distribution.get(key, 0) + 1
+    return {
+        "window_days": days,
+        "overall": _rate(rows),
+        "verdicts": verdicts,
+        "outcomes": dict(
+            sorted(outcomes.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "profiles": group(by_profile),
+        "models": group(by_model),
+        "daily_verdicts": [
+            {"date": date, **values}
+            for date, values in sorted(daily.items())
+        ],
+        "review_iterations": {
+            "average": statistics.fmean(iterations) if iterations else None,
+            "count": len(iterations),
+            "distribution": iteration_distribution,
+        },
+        "coverage": {
+            "runs": total_runs,
+            "review_verdicts": len(rows),
+            "run_outcomes": sum(outcomes.values()),
+            "review_iterations": len(iterations),
+        },
+        "source": "kanban.metric_scores",
+        "captured_at": now,
+    }
+
+
 @scorecard_routes.get("/scorecard")
-def get_scorecard(board: Optional[str] = Query(None, description="Kanban board slug (omit for current)")):
+def get_scorecard(
+    board: Optional[str] = Query(
+        None,
+        description="Kanban board slug (omit for current)",
+    ),
+    days: int = Query(7, ge=1, le=30),
+):
     """Aggregate review verdict scores by profile/model and ISO week."""
+    now = int(time.time())
     conn = _conn(board)
     try:
         rows = _score_rows(conn)
         materialized_scores = _materialized_scores(conn)
         run_classes = metric_run_class_counts(conn)
+        quality = _quality_snapshot(conn, days=days, now=now)
     finally:
         conn.close()
     by_profile: dict[str, list[sqlite3.Row]] = {}
@@ -136,7 +258,11 @@ def get_scorecard(board: Optional[str] = Query(None, description="Kanban board s
         iso = date.isocalendar()
         by_week.setdefault((iso.year, iso.week), []).append(row)
     group = lambda data: [dict(name=name, **_rate(items)) for name, items in sorted(data.items())]
+    # Scorecard owns quality, not remote observability refreshes. It may expose
+    # cached health from Statistik but must never block on Langfuse I/O.
+    langfuse = _get_langfuse_snapshot(days=days, allow_refresh=False)
     return {
+        "contract_version": "hermes-scorecard.v2",
         "overall": _rate(rows),
         "run_classes": run_classes,
         "verdicts": by_verdict,
@@ -144,7 +270,20 @@ def get_scorecard(board: Optional[str] = Query(None, description="Kanban board s
         "models": group(by_model),
         "weeks": [dict(year=year, week=week, **_rate(items)) for (year, week), items in sorted(by_week.items())],
         "materialized_scores": materialized_scores,
-        "checked_at": int(time.time()),
+        "quality": quality,
+        # Health only: throughput, cost, tokens and observation latency remain
+        # exclusive to /control/statistik.
+        "observability": {
+            key: langfuse.get(key)
+            for key in (
+                "available",
+                "state",
+                "reason",
+                "captured_at",
+                "cache",
+            )
+        },
+        "checked_at": now,
     }
 
 

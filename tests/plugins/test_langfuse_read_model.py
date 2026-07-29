@@ -1,0 +1,305 @@
+"""Contract tests for the sanitized Hermes Langfuse read model."""
+
+from __future__ import annotations
+
+import threading
+
+from plugins.kanban.dashboard import langfuse_read_model as read_model
+
+
+def setup_function() -> None:
+    read_model.clear_cache()
+
+
+def teardown_function() -> None:
+    read_model.clear_cache()
+
+
+def test_aggregate_exposes_denominators_and_never_raw_payloads():
+    observations = [
+        {
+            "providedModelName": "model-a",
+            "startTime": "2026-07-29T00:00:00Z",
+            "completionStartTime": "2026-07-29T00:00:00.400Z",
+            "endTime": "2026-07-29T00:00:02Z",
+            "calculatedTotalCost": 0.1,
+            "usageDetails": {"total": 150},
+            "input": "secret prompt must not leave the server",
+        },
+        {
+            "startTime": "2026-07-29T00:01:00Z",
+            "endTime": "2026-07-29T00:01:06Z",
+            "usageDetails": {"input": 30, "output": 5},
+            "output": "secret answer must not leave the server",
+        },
+    ]
+
+    payload = read_model._aggregate(
+        observations,
+        days=7,
+        generated_at="2026-07-29T01:00:00Z",
+    )
+
+    assert payload["available"] is True
+    assert payload["metrics"]["generation_calls"]["value"] == 2
+    assert payload["metrics"]["latency_p50_ms"] == {
+        "value": 2000.0,
+        "denominator": 2,
+        "observed": 2,
+        "coverage": 1.0,
+        "source": "langfuse.generations.time",
+        "captured_at": "2026-07-29T00:01:06Z",
+    }
+    assert payload["metrics"]["ttft_p50_ms"]["coverage"] == 0.5
+    assert payload["metrics"]["known_cost_usd"]["coverage"] == 0.5
+    assert payload["metrics"]["tokens_total"]["value"] == 185.0
+    assert payload["coverage"]["model_unknown"] == 1
+    assert "secret prompt" not in repr(payload)
+    assert "secret answer" not in repr(payload)
+
+
+def test_remote_snapshot_selects_only_worker_generations(monkeypatch):
+    def fake_all_pages(_host, _auth, path, _params, **_kwargs):
+        assert path.endswith("/observations")
+        return read_model._PageScan(
+            rows=[
+                {
+                    "metadata": {
+                        "kanban_task_id": "task-worker",
+                        "origin": "hermes_agent",
+                    },
+                    "traceId": "worker",
+                    "model": "worker-model",
+                    "startTime": "2026-07-29T00:00:00Z",
+                    "endTime": "2026-07-29T00:00:01Z",
+                },
+                {
+                    "metadata": {"origin": "interactive"},
+                    "traceId": "normal",
+                    "model": "normal-model",
+                    "startTime": "2026-07-29T00:00:00Z",
+                    "endTime": "2026-07-29T00:00:01Z",
+                },
+                {
+                    "metadata": {
+                        "task_id": "task-backfill",
+                        "correlation_source": "claude_session_id",
+                        "origin": "claude_code",
+                    },
+                    "traceId": "backfill",
+                    "model": "backfill-model",
+                    "startTime": "2026-07-29T00:00:00Z",
+                    "endTime": "2026-07-29T00:00:01Z",
+                },
+            ],
+            truncated=False,
+            reason=None,
+            pages=1,
+        )
+
+    monkeypatch.setattr(read_model, "_all_pages", fake_all_pages)
+    payload = read_model._build_remote_snapshot(
+        days=7,
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "https://langfuse.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public",
+            "HERMES_LANGFUSE_SECRET_KEY": "secret",
+        },
+    )
+
+    assert payload["metrics"]["generation_calls"]["value"] == 2
+    assert [row["name"] for row in payload["models"]] == [
+        "backfill-model",
+        "worker-model",
+    ]
+    assert payload["coverage"]["scan_truncated"] is False
+    assert "public" not in repr(payload)
+    assert "secret" not in repr(payload)
+
+
+def test_missing_credentials_is_explicit_and_fail_soft():
+    payload = read_model.get_langfuse_snapshot(env={})
+
+    assert payload["available"] is False
+    assert payload["state"] == "absent"
+    assert payload["reason"] == "credentials_missing"
+    assert payload["metrics"] == {}
+
+
+def test_negative_cache_is_bounded_to_the_credential_identity(monkeypatch):
+    calls = []
+
+    def build(*, days, env):
+        calls.append(dict(env))
+        return read_model._absent_payload(
+            days=days,
+            state="absent",
+            reason="synthetic",
+            generated_at="2026-07-29T01:00:00Z",
+        )
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", build)
+    read_model.get_langfuse_snapshot(env={})
+    read_model.get_langfuse_snapshot(env={})
+    read_model.get_langfuse_snapshot(
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "https://other.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public",
+            "HERMES_LANGFUSE_SECRET_KEY": "rotated",
+        }
+    )
+
+    assert len(calls) == 2
+
+
+def test_remote_failure_is_negative_cached(monkeypatch):
+    calls = 0
+
+    def fail(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", fail)
+
+    first = read_model.get_langfuse_snapshot(env={"project": "one"})
+    second = read_model.get_langfuse_snapshot(env={"project": "one"})
+
+    assert first["state"] == "absent"
+    assert second["state"] == "absent"
+    assert first["reason"] == "read_failed:RuntimeError"
+    assert calls == 1
+
+
+def test_refresh_disabled_never_performs_remote_io(monkeypatch):
+    def forbidden(**_kwargs):
+        raise AssertionError("remote refresh must not run")
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", forbidden)
+
+    payload = read_model.get_langfuse_snapshot(
+        env={"project": "scorecard"},
+        allow_refresh=False,
+    )
+
+    assert payload["state"] == "unknown"
+    assert payload["reason"] == "refresh_disabled"
+
+
+def test_page_limit_degrades_to_partial_scan(monkeypatch):
+    calls = 0
+
+    def full_page(_url, _authorization, *, timeout):
+        del timeout
+        nonlocal calls
+        calls += 1
+        return {"data": [{"id": calls}] * read_model._PAGE_SIZE}
+
+    monkeypatch.setattr(read_model, "_request_json", full_page)
+    monkeypatch.setattr(read_model, "_MAX_PAGES", 2)
+
+    scan = read_model._all_pages(
+        "https://langfuse.example",
+        "Basic redacted",
+        "/api/public/observations",
+        {},
+        deadline_monotonic=read_model.time.monotonic() + 10,
+    )
+
+    assert scan.truncated is True
+    assert scan.reason == "page_limit"
+    assert scan.pages == 2
+    assert len(scan.rows) == 2 * read_model._PAGE_SIZE
+
+
+def test_single_flight_waiter_ignores_foreign_cache_key_notifications(
+    monkeypatch,
+):
+    started = threading.Event()
+    release = threading.Event()
+    waiter_done = threading.Event()
+    waiter_payload = []
+    env_a = {
+        "HERMES_LANGFUSE_BASE_URL": "https://langfuse.example",
+        "HERMES_LANGFUSE_PUBLIC_KEY": "project-a",
+        "HERMES_LANGFUSE_SECRET_KEY": "secret-a",
+    }
+    env_b = {
+        "HERMES_LANGFUSE_BASE_URL": "https://langfuse.example",
+        "HERMES_LANGFUSE_PUBLIC_KEY": "project-b",
+        "HERMES_LANGFUSE_SECRET_KEY": "secret-b",
+    }
+
+    def build(*, days, env):
+        if env["HERMES_LANGFUSE_PUBLIC_KEY"] == "project-a":
+            started.set()
+            assert release.wait(timeout=2)
+        return read_model._aggregate(
+            [],
+            days=days,
+            generated_at="2026-07-29T01:00:00Z",
+        )
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", build)
+    leader = threading.Thread(
+        target=lambda: read_model.get_langfuse_snapshot(env=env_a)
+    )
+
+    def wait_for_a():
+        waiter_payload.append(
+            read_model.get_langfuse_snapshot(env=env_a)
+        )
+        waiter_done.set()
+
+    leader.start()
+    assert started.wait(timeout=1)
+    waiter = threading.Thread(target=wait_for_a)
+    waiter.start()
+
+    # Completing another key calls notify_all, but must not release key A.
+    other = read_model.get_langfuse_snapshot(env=env_b)
+    assert other["state"] == "fresh"
+    assert waiter_done.wait(timeout=0.1) is False
+
+    release.set()
+    leader.join(timeout=2)
+    waiter.join(timeout=2)
+    assert waiter_done.is_set()
+    assert waiter_payload[0]["state"] == "fresh"
+
+
+def test_cache_is_single_source_and_returns_stale_on_refresh_error(monkeypatch):
+    calls = 0
+    lock = threading.Lock()
+
+    def build(*, days, env):
+        del env
+        nonlocal calls
+        with lock:
+            calls += 1
+        return read_model._aggregate(
+            [],
+            days=days,
+            generated_at="2026-07-29T01:00:00Z",
+        )
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", build)
+    first = read_model.get_langfuse_snapshot(env={"x": "y"})
+    second = read_model.get_langfuse_snapshot(env={"x": "y"})
+
+    assert first["state"] == "fresh"
+    assert second["state"] == "fresh"
+    assert calls == 1
+
+    def fail(**_kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(read_model, "_build_remote_snapshot", fail)
+    stale = read_model.get_langfuse_snapshot(
+        env={"x": "y"},
+        force_refresh=True,
+    )
+
+    assert stale["available"] is True
+    assert stale["state"] == "stale"
+    assert stale["reason"] == "refresh_failed:RuntimeError"

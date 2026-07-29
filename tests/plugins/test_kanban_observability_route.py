@@ -1,0 +1,236 @@
+"""HTTP coverage for the Hermes-only observability projection."""
+
+from __future__ import annotations
+
+import importlib.util
+import sqlite3
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from hermes_cli import kanban_db as kb
+from hermes_cli.usage_facts_db import upsert_run_facts
+
+
+def _load_plugin_module():
+    repo_root = Path(__file__).resolve().parents[2]
+    plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location(
+        "observability_routes_test_plugin",
+        plugin_file,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def observability_app(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    usage_path = tmp_path / "usage_facts.db"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_USAGE_FACTS_DB", str(usage_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    captured_at = datetime.now(timezone.utc).isoformat()
+    upsert_run_facts(
+        "worker-exact",
+        {
+            "origin": "hermes_agent",
+            "task_run_id": "1",
+            "task_id": "task-exact",
+            "chain_id": "task-exact",
+            "board": "default",
+            "session_id": "session-exact",
+            "correlation_source": "kanban_runtime",
+            "provider": "openai",
+            "model": "gpt-test",
+            "profile": "coder",
+            "lane": "coder",
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_tokens": 50,
+            "cache_write_tokens": 0,
+            "duration_ms": 1200,
+            "first_token_ms": 250,
+            "captured_at": captured_at,
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+    upsert_run_facts(
+        "worker-unlinked",
+        {
+            "origin": "claude_code",
+            "provider": "anthropic",
+            "model": "claude-test",
+            "profile": "reviewer",
+            "lane": "reviewer",
+            "input_tokens": 200,
+            "output_tokens": 40,
+            "cache_read_tokens": 100,
+            "cache_write_tokens": 0,
+            "captured_at": captured_at,
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+    # Tokenless audit rows are valid ledger entries but are outside the Usage
+    # Facts read-model denominator and therefore must not skew coverage.
+    upsert_run_facts(
+        "worker-tokenless",
+        {
+            "origin": "hermes_agent",
+            "task_run_id": "tokenless-run",
+            "task_id": "tokenless-task",
+            "model": "tokenless-model",
+            "captured_at": captured_at,
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+
+    now = int(time.time())
+    with kb.connect_closing() as connection:
+        task_id = kb.create_task(
+            connection,
+            title="observability route",
+            assignee="coder",
+        )
+        run_id = connection.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, active_model, started_at, ended_at) "
+            "VALUES (?, 'coder', 'done', 'gpt-test', ?, ?)",
+            (task_id, now - 120, now),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO scores "
+            "(run_id, task_id, name, value, value_type, source, created_at) "
+            "VALUES (?, ?, 'run_duration_seconds', 120, 'numeric', 'test', ?)",
+            (run_id, task_id, now),
+        )
+        fixture_task_id = kb.create_task(
+            connection,
+            title="synthetic observability fixture",
+            assignee="w",
+        )
+        fixture_run_id = connection.execute(
+            "INSERT INTO task_runs (task_id, profile, status, started_at) "
+            "VALUES (?, 'w', 'done', ?)",
+            (fixture_task_id, now - 1),
+        ).lastrowid
+        connection.execute(
+            "INSERT INTO scores "
+            "(run_id, task_id, name, value, value_type, source, created_at) "
+            "VALUES (?, ?, 'run_duration_seconds', 1, 'numeric', 'test', ?)",
+            (fixture_run_id, fixture_task_id, now),
+        )
+
+    module = _load_plugin_module()
+    monkeypatch.setattr(
+        module,
+        "get_langfuse_snapshot",
+        lambda **_kwargs: {
+            "contract_version": "langfuse-hermes-read.v1",
+            "available": False,
+            "state": "absent",
+            "reason": "credentials_missing",
+            "window_days": 7,
+            "generated_at": captured_at,
+            "captured_at": None,
+            "cache": {"ttl_seconds": 45, "age_seconds": None},
+            "metrics": {},
+            "coverage": {},
+            "models": [],
+        },
+    )
+    app = FastAPI()
+    app.include_router(module.router, prefix="/api/plugins/kanban")
+    return TestClient(app), home / "kanban.db", usage_path
+
+
+def test_observability_route_separates_stats_from_quality(observability_app):
+    client, _kanban_path, _usage_path = observability_app
+
+    response = client.get("/api/plugins/kanban/stats/observability?days=7")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contract_version"] == "langfuse-hermes-read.v1"
+    assert payload["window_days"] == 7
+    assert payload["usage"]["summary"]["fact_rows"] == 2
+    assert payload["usage"]["coverage"]["exact_task_run_links"] == 1
+    assert payload["usage"]["coverage"]["model_known"] == 2
+    assert payload["usage"]["coverage"]["duration_known"] == 1
+    assert payload["usage"]["coverage"]["ttft_known"] == 1
+    assert payload["usage"]["coverage"]["missing_columns"] == []
+    assert sum(
+        row["fact_rows"] for row in payload["usage"]["daily_imports"]
+    ) == payload["usage"]["summary"]["fact_rows"] == 2
+    assert sum(
+        row["token_rows"] for row in payload["usage"]["daily_imports"]
+    ) == 2
+    assert [row["name"] for row in payload["usage"]["origins"]] == [
+        "claude_code",
+        "hermes_agent",
+    ]
+    assert payload["run_duration"] == {
+        "p50_seconds": 120.0,
+        "p95_seconds": 120.0,
+        "count": 1,
+        "source": "kanban.metric_scores.run_duration_seconds",
+    }
+    assert "approval_rate" not in payload
+    assert "review_verdict" not in repr(payload)
+
+
+def test_observability_route_is_read_only(observability_app):
+    client, kanban_path, usage_path = observability_app
+    kanban_observer = sqlite3.connect(kanban_path)
+    usage_observer = sqlite3.connect(usage_path)
+    try:
+        before = (
+            kanban_observer.execute("PRAGMA data_version").fetchone()[0],
+            usage_observer.execute("PRAGMA data_version").fetchone()[0],
+        )
+        response = client.get("/api/plugins/kanban/stats/observability")
+        after = (
+            kanban_observer.execute("PRAGMA data_version").fetchone()[0],
+            usage_observer.execute("PRAGMA data_version").fetchone()[0],
+        )
+    finally:
+        kanban_observer.close()
+        usage_observer.close()
+
+    assert response.status_code == 200
+    assert after == before
+
+
+def test_run_duration_projection_fails_soft_on_legacy_board(
+    tmp_path,
+    monkeypatch,
+):
+    path = tmp_path / "legacy.db"
+    sqlite3.connect(path).close()
+    module = _load_plugin_module()
+    monkeypatch.setattr(
+        module,
+        "_conn",
+        lambda _board: sqlite3.connect(path),
+    )
+
+    assert module._run_duration_projection(board="default", days=7) == {
+        "p50_seconds": None,
+        "p95_seconds": None,
+        "count": 0,
+        "source": "kanban.metric_scores.run_duration_seconds",
+    }

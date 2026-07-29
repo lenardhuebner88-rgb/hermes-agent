@@ -21,7 +21,7 @@ from hermes_cli.claude_code_harvester import (
     parse_transcript_file,
     request_id_or_fallback,
 )
-from hermes_cli.usage_facts_db import initialize_usage_facts_db
+from hermes_cli.usage_facts_db import initialize_usage_facts_db, upsert_run_facts
 
 FIXTURES = (
     Path(__file__).resolve().parents[1] / "fixtures" / "claude_code_harvest"
@@ -216,6 +216,24 @@ def test_same_session_multiple_runs_keeps_exact_task_without_guessing_run(
     assert correlation.source == "claude_session_id_task"
 
 
+def test_unreadable_board_scan_does_not_invent_ambiguity(tmp_path: Path) -> None:
+    from hermes_cli.usage_fact_correlation import scan_claude_session_correlations
+
+    old_board = tmp_path / "old-board.db"
+    with sqlite3.connect(old_board) as connection:
+        connection.execute("CREATE TABLE legacy_only (id INTEGER PRIMARY KEY)")
+
+    scan = scan_claude_session_correlations(
+        ["session-unresolved"],
+        kanban_paths=[old_board],
+    )
+
+    assert scan.correlations == {}
+    assert scan.ambiguous_session_ids == frozenset()
+    assert scan.databases_scanned == 0
+    assert scan.databases_failed == 1
+
+
 def test_hwm_skipped_transcript_is_recorrelated_after_task_metadata_lands(
     db_path: Path,
     tmp_path: Path,
@@ -333,6 +351,129 @@ def test_ambiguous_claude_session_never_guesses_a_task(
             (run_id,),
         ).fetchone()
     assert tuple(run) == (None, None, session_id)
+
+
+def test_recorrelation_clears_a_link_that_later_becomes_ambiguous(
+    db_path: Path,
+) -> None:
+    session_id = "session-later-reused"
+    upsert_run_facts(
+        "claude-exact",
+        {
+            "origin": "claude_code",
+            "session_id": session_id,
+            "task_run_id": "42",
+            "task_id": "task-before",
+            "chain_id": "chain-before",
+            "board": "default",
+            "correlation_source": "claude_session_id_run",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        {},
+        db_path=db_path,
+        dry_run=False,
+        ambiguous_session_ids={session_id},
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts WHERE run_id='claude-exact'"
+        ).fetchone()
+    assert changed == 1
+    assert tuple(row) == (None, None, None, None, None)
+
+
+def test_unresolved_session_never_clears_an_existing_exact_link(
+    db_path: Path,
+) -> None:
+    session_id = "session-board-unavailable"
+    upsert_run_facts(
+        "claude-exact",
+        {
+            "origin": "claude_code",
+            "session_id": session_id,
+            "task_run_id": "42",
+            "task_id": "task-before",
+            "chain_id": "chain-before",
+            "board": "default",
+            "correlation_source": "claude_session_id_run",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        {},
+        db_path=db_path,
+        dry_run=False,
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts WHERE run_id='claude-exact'"
+        ).fetchone()
+    assert changed == 0
+    assert tuple(row) == (
+        "42",
+        "task-before",
+        "chain-before",
+        "default",
+        "claude_session_id_run",
+    )
+
+
+def test_task_level_recorrelation_never_downgrades_an_exact_run(
+    db_path: Path,
+) -> None:
+    from hermes_cli.usage_fact_correlation import WorkerCorrelation
+
+    session_id = "session-continuation"
+    upsert_run_facts(
+        "claude-exact",
+        {
+            "origin": "claude_code",
+            "session_id": session_id,
+            "task_run_id": "42",
+            "task_id": "task-one",
+            "chain_id": "chain-one",
+            "board": "default",
+            "correlation_source": "claude_session_id_run",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        {
+            session_id: WorkerCorrelation(
+                session_id=session_id,
+                task_id="task-one",
+                source="claude_session_id_task",
+            )
+        },
+        db_path=db_path,
+        dry_run=False,
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts WHERE run_id='claude-exact'"
+        ).fetchone()
+    assert changed == 0
+    assert tuple(row) == (
+        "42",
+        "task-one",
+        "chain-one",
+        "default",
+        "claude_session_id_run",
+    )
 
 
 def test_explicit_raw_billing_mode_is_preserved() -> None:

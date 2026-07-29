@@ -9,7 +9,7 @@ import tempfile
 from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
@@ -40,6 +40,7 @@ class _EligibilitySnapshot:
     eligible_foreign_runs: int
     pending_runs: int
     skipped_live_origins: int
+    invalid_timestamp_runs: int
     origins: Counter[str]
 
 
@@ -111,6 +112,23 @@ def _timestamp(value: Any) -> str | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _timestamp_offset(timestamp: str, milliseconds: Any) -> str | None:
+    """Return one validated UTC timestamp shifted by a measured duration."""
+    try:
+        offset = float(milliseconds)
+    except (TypeError, ValueError):
+        return None
+    if offset < 0:
+        return None
+    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return (
+        (parsed + timedelta(milliseconds=offset))
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _usage_details(row: sqlite3.Row) -> dict[str, int]:
@@ -188,6 +206,8 @@ def events_for_row(row: sqlite3.Row) -> list[dict[str, Any]]:
     )
     board = str(row["board"]) if "board" in row.keys() and row["board"] else "unknown"
     metadata = _safe_metadata(row)
+    metadata["kanban_task_id"] = task_id
+    metadata["worker_usage_backfill"] = True
     tags = [
         "kanban-worker-usage",
         "usage-facts-backfill",
@@ -221,6 +241,16 @@ def events_for_row(row: sqlite3.Row) -> list[dict[str, Any]]:
         "environment": "usage-facts-backfill",
         "metadata": metadata,
     }
+    duration_ms = row["duration_ms"] if "duration_ms" in row.keys() else None
+    first_token_ms = (
+        row["first_token_ms"] if "first_token_ms" in row.keys() else None
+    )
+    end_time = _timestamp_offset(timestamp, duration_ms)
+    completion_start = _timestamp_offset(timestamp, first_token_ms)
+    if end_time is not None:
+        generation_body["endTime"] = end_time
+    if completion_start is not None:
+        generation_body["completionStartTime"] = completion_start
     if "model" in row.keys() and row["model"]:
         generation_body["model"] = str(row["model"])
     usage = _usage_details(row)
@@ -280,8 +310,12 @@ def _eligibility_snapshot(
         )
         selected_rows: list[sqlite3.Row] = []
         pending_runs = 0
+        invalid_timestamp_runs = 0
         for row in cursor:
             if str(row["run_id"]) in exported:
+                continue
+            if _timestamp(row["captured_at"]) is None:
+                invalid_timestamp_runs += 1
                 continue
             pending_runs += 1
             if run_limit is None or len(selected_rows) < run_limit:
@@ -293,6 +327,7 @@ def _eligibility_snapshot(
         eligible_foreign_runs=eligible_foreign,
         pending_runs=pending_runs,
         skipped_live_origins=skipped_live,
+        invalid_timestamp_runs=invalid_timestamp_runs,
         origins=origins,
     )
 
@@ -329,6 +364,7 @@ def export_worker_facts(
         "posted_runs": 0,
         "posted_events": 0,
         "skipped_live_origins": eligibility.skipped_live_origins,
+        "invalid_timestamp_runs": eligibility.invalid_timestamp_runs,
         "by_origin": dict(sorted(eligibility.origins.items())),
         "run_limit": run_limit,
     }

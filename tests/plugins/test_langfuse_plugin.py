@@ -343,7 +343,7 @@ class TestPayloadSanitization:
 
 class TestKanbanWorkerTraceMetadata:
     @staticmethod
-    def _start_root_trace(mod):
+    def _start_root_trace(mod, **worker_dimensions):
         recorded = {}
 
         class _RootSpan:
@@ -361,7 +361,7 @@ class TestKanbanWorkerTraceMetadata:
         mod._start_root_trace(
             "task-key", task_id="turn-task", session_id="session", platform="cli",
             provider="provider", model="model", api_mode="chat", messages=[],
-            client=_Client(),
+            client=_Client(), **worker_dimensions,
         )
         return recorded
 
@@ -385,15 +385,30 @@ class TestKanbanWorkerTraceMetadata:
             return _Attributes()
 
         monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
-        recorded = self._start_root_trace(mod)
+        recorded = self._start_root_trace(
+            mod,
+            kanban_task_id="t-kanban",
+            task_run_id="123",
+            board="planspec",
+            profile="coder",
+            lane="coder",
+            origin="hermes_agent",
+        )
 
         assert recorded["metadata"] == {
             "source": "hermes", "task_id": "turn-task", "turn_id": "",
             "api_request_id": "", "platform": "cli", "provider": "provider",
             "model": "model", "api_mode": "chat", "kanban_task_id": "t-kanban",
             "kanban_run_id": "123", "kanban_board": "planspec", "kanban_profile": "coder",
+            "task_run_id": "123", "board": "planspec", "session_id": "session",
+            "origin": "hermes_agent", "profile": "coder", "lane": "coder",
         }
-        assert propagated["tags"] == ["hermes", "langfuse", "kanban-worker"]
+        assert propagated["tags"] == [
+            "hermes",
+            "langfuse",
+            "kanban-worker",
+            "lane:coder",
+        ]
         # Regression: kanban identity must be propagated to TRACE level,
         # not just stamped on the root span.  Without metadata= in
         # propagate_attributes(), Langfuse v4 creates the trace with
@@ -403,6 +418,12 @@ class TestKanbanWorkerTraceMetadata:
             "kanban_run_id": "123",
             "kanban_board": "planspec",
             "kanban_profile": "coder",
+            "task_run_id": "123",
+            "board": "planspec",
+            "session_id": "session",
+            "origin": "hermes_agent",
+            "profile": "coder",
+            "lane": "coder",
         }
 
     def test_root_trace_payload_is_unchanged_outside_kanban_worker(self, monkeypatch):
@@ -495,7 +516,9 @@ class TestKanbanWorkerTraceMetadata:
         mod._start_root_trace(
             "task-key", task_id="turn-task", session_id="session", platform="cli",
             provider="provider", model="model", api_mode="chat", messages=[],
-            task_run_id="77", chain_id="chain-root", lane="coder", client=_Client(),
+            task_run_id="77", chain_id="chain-root", lane="coder",
+            kanban_task_id="task-child", board="planspec", profile="coder",
+            origin="hermes_agent", client=_Client(),
         )
 
 

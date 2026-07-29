@@ -4,6 +4,7 @@ import {
   BudgetLedgerSection,
   EffizienzSection,
   ErrorTaxonomySection,
+  LaneBurnSection,
   LedgerWorkerRunners,
   LatencySection,
   MotherLedgerSection,
@@ -26,6 +27,7 @@ import type {
   WindowedRollupRoot,
   WindowedRollupWorker,
 } from "../lib/schemas";
+import type { ObservabilityStatsResponse } from "../lib/schemas/observability";
 
 type TestRollupState = {
   data: WindowedRollupResponse | null;
@@ -55,6 +57,7 @@ const controlDataMock = vi.hoisted(() => ({
   subscriptionBurn: null as ControlHookState | null,
   chain: null as ControlHookState | null,
   board: null as ControlHookState | null,
+  observability: null as ControlHookState | null,
 }));
 
 vi.mock("../hooks/costsUsage", async (importOriginal) => {
@@ -86,6 +89,9 @@ vi.mock("../hooks/runsDigestRollup", async (importOriginal) => {
     useHermesWindowedRollup: () => windowedRollupMock.state!,
   };
 });
+vi.mock("../hooks/observability", () => ({
+  useObservabilityStats: () => controlDataMock.observability,
+}));
 
 function controlState(data: unknown = null, over: Record<string, unknown> = {}) {
   return {
@@ -115,6 +121,89 @@ function rollupState(over: Partial<TestRollupState> = {}): TestRollupState {
   };
 }
 
+function observabilityData(): ObservabilityStatsResponse {
+  return {
+    contract_version: "langfuse-hermes-read.v1",
+    window_days: 7,
+    generated_at: "2026-07-29T08:00:00Z",
+    checked_at: 1_785_312_000,
+    langfuse: {
+      contract_version: "langfuse-hermes-read.v1",
+      available: false,
+      state: "absent",
+      reason: "credentials_missing",
+      window_days: 7,
+      generated_at: "2026-07-29T08:00:00Z",
+      captured_at: null,
+      cache: { ttl_seconds: 45, age_seconds: null },
+      metrics: {},
+      coverage: {},
+      models: [],
+    },
+    usage: {
+      available: true,
+      state: "fresh",
+      reason: null,
+      captured_at: "2026-07-29T08:00:00Z",
+      summary: {
+        fact_rows: 94_546,
+        context_input_tokens: 23_000_000,
+        new_input_tokens: 2_000_000,
+        output_tokens: 4_000_000,
+        cache_read_tokens: 17_000_000,
+        cache_write_tokens: 0,
+        known_metered_usd: null,
+        price_status: "unknown",
+        priced_breakdowns: 0,
+        unpriced_breakdowns: 94_546,
+        unclassified_fact_rows: 0,
+      },
+      origins: [
+        {
+          name: "claude_code",
+          fact_rows: 92_704,
+          context_input_tokens: 22_000_000,
+          output_tokens: 3_900_000,
+          cache_read_tokens: 16_000_000,
+          cache_write_tokens: 0,
+          model_count: 3,
+        },
+        {
+          name: "hermes_agent",
+          fact_rows: 886,
+          context_input_tokens: 500_000,
+          output_tokens: 80_000,
+          cache_read_tokens: 400_000,
+          cache_write_tokens: 0,
+          model_count: 2,
+        },
+      ],
+      models: [],
+      daily_imports: [
+        { date: "2026-07-27", fact_rows: 93_286, token_rows: 93_100 },
+        { date: "2026-07-28", fact_rows: 466, token_rows: 460 },
+      ],
+      coverage: {
+        available: true,
+        reason: null,
+        fact_rows: 94_546,
+        exact_task_run_links: 0,
+        task_links: 0,
+        model_known: 92_000,
+        duration_known: 321,
+        ttft_known: 0,
+        missing_columns: ["task_run_id", "task_id", "duration_ms", "first_token_ms"],
+      },
+    },
+    run_duration: {
+      p50_seconds: 138,
+      p95_seconds: 1541,
+      count: 983,
+      source: "kanban.metric_scores.run_duration_seconds",
+    },
+  };
+}
+
 beforeEach(() => {
   windowedRollupMock.state = rollupState();
   controlDataMock.reliability = controlState({ now: 1_780_000_000, profiles: [], baseline: [] });
@@ -127,6 +216,7 @@ beforeEach(() => {
   controlDataMock.subscriptionBurn = controlState(null);
   controlDataMock.chain = controlState({ chain_completion_rate: null });
   controlDataMock.board = controlState({ queue_wait_p50_seconds: null });
+  controlDataMock.observability = controlState(observabilityData());
 });
 
 function withViewport<T>(width: number, run: () => T): T {
@@ -453,7 +543,7 @@ describe("WorkerEfficiencySection (B3)", () => {
     expect(html).toContain("—");
   });
 
-  it("places B3 before the legacy Statistik masthead", () => {
+  it("removes the quality duplicate from the Statistik route", () => {
     windowedRollupMock.state = rollupState({ data: rollupResponse() });
     controlDataMock.reliability = controlState({
       now: 1_780_000_000,
@@ -463,10 +553,10 @@ describe("WorkerEfficiencySection (B3)", () => {
 
     const html = renderToStaticMarkup(<StatistikView />);
 
-    const b3 = html.indexOf('data-testid="worker-efficiency"');
-    const masthead = html.indexOf('data-testid="stats-masthead-figure"');
-    expect(b3).toBeGreaterThanOrEqual(0);
-    expect(masthead).toBeGreaterThan(b3);
+    expect(html).not.toContain('data-testid="worker-efficiency"');
+    expect(html).not.toContain('data-testid="stats-masthead-figure"');
+    expect(html).toContain("Observability");
+    expect(html).not.toContain("Akzeptanzrate");
   });
 });
 
@@ -996,13 +1086,47 @@ describe("EffizienzSection (ST5)", () => {
   });
 });
 
-describe("StatistikView (W3-3 masthead removal)", () => {
-  it("no longer renders its own masthead — the shell Puls-Leiste carries the route label since W3-3", () => {
+describe("LaneBurnSection", () => {
+  it("keeps lane token and effective-cost analysis in Statistik", () => {
+    const html = renderToStaticMarkup(
+      <LaneBurnSection
+        costs={[
+          costRow({
+            profile: "coder",
+            runs: 7,
+            input_tokens: 1_200_000,
+            output_tokens: 300_000,
+            cost_usd_equivalent: 1.25,
+          }),
+        ]}
+      />,
+    );
+
+    expect(html).toContain("Lane-Burn");
+    expect(html).toContain("1.5 M");
+    expect(html).toContain("7 Läufe");
+    expect(html).toContain("$1.25");
+  });
+});
+
+describe("StatistikView (Hermes Observability)", () => {
+  it("führt die Datenbasis ohne Scorecard-Dopplung", () => {
     windowedRollupMock.state = rollupState({ data: rollupResponse() });
     controlDataMock.reliability = controlState({
       now: 1_780_000_000,
       profiles: [profile({ profile: "coder", judged: 3, approved: 2, rejected: 1 })],
       baseline: [],
+    });
+    controlDataMock.costs = controlState({
+      profiles: [
+        costRow({
+          profile: "coder",
+          runs: 3,
+          input_tokens: 400_000,
+          output_tokens: 100_000,
+          cost_usd_equivalent: 0.5,
+        }),
+      ],
     });
 
     const html = renderToStaticMarkup(<StatistikView />);
@@ -1010,9 +1134,63 @@ describe("StatistikView (W3-3 masthead removal)", () => {
     expect(html).not.toContain("st-masthead");
     expect(html).not.toContain("st-brand");
     expect(html).not.toContain("st-live-dot");
-    // The Akzeptanzrate hero (StatsMasthead) is real content, not chrome —
-    // it stays, unlike the removed brand/LIVE-dot band.
-    expect(html).toContain("Akzeptanzrate");
+    expect(html).toContain("Observability");
+    expect(html).toContain("Import-Verlauf");
+    expect(html).toContain("Herkunft");
+    expect(html).toContain("Exact Links");
+    expect(html).toContain("Run Duration p50");
+    expect(html).toContain("Lane-Burn");
+    expect(html).toContain("Provider-Budget im Detail");
+    expect(html).not.toContain("Akzeptanzrate");
+  });
+
+  it("kennzeichnet partielle Langfuse-Summen als Untergrenzen", () => {
+    const data = observabilityData();
+    data.langfuse = {
+      ...data.langfuse,
+      available: true,
+      state: "partial",
+      reason: "page_limit",
+      metrics: {
+        generation_calls: {
+          value: 12,
+          denominator: 12,
+          observed: 12,
+          coverage: 1,
+          source: "langfuse.generations",
+          captured_at: "2026-07-29T08:00:00Z",
+        },
+        known_cost_usd: {
+          value: 1.25,
+          denominator: 12,
+          observed: 10,
+          coverage: 10 / 12,
+          source: "langfuse.generations.cost",
+          captured_at: "2026-07-29T08:00:00Z",
+        },
+      },
+      models: [{
+        name: "claude-opus",
+        calls: 12,
+        known_cost_usd: 1.25,
+        cost_coverage: 10 / 12,
+        latency_p50_ms: 1500,
+        latency_p95_ms: 3000,
+        latency_coverage: 1,
+        ttft_p50_ms: 250,
+        ttft_p95_ms: 500,
+        ttft_coverage: 1,
+      }],
+    };
+    controlDataMock.observability = controlState(data);
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("Ausschnitt · Summen sind Untergrenzen, p50 aus Stichprobe");
+    expect(html).toContain("≥12");
+    expect(html).toContain("≥1,25");
+    expect(html).toContain("$");
   });
 
   it("gives the MotherLedger window/sort chipset a >=44px hit-area (W3-3 touch target, 5 controls baseline-flagged <24px)", () => {

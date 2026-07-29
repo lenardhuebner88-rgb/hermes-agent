@@ -1,25 +1,8 @@
 /**
- * StatistikView (/control/statistik) — Leitstand-Reskin (Rule 11+12): dieselbe
- * dunkle Statistik wie Fleet/Start statt des Broadsheet-Vorgängers (ST3/ST4/
- * ST5). Skin via [data-statistik] + statistik.css (Full-Bleed-Regeln über
- * `.hc-page:has([data-statistik])`, selbst-genügsam statt von einer
- * ControlShell-Route-Klasse abzuhängen — Pattern-Parität mit Fleet/Start);
- * Flächen aus den Leitstand-Tokens (surface-0/1/2, ink/ink-2/ink-3, line,
- * live, status-trio). IA/Funktion + alle Sektionen bleiben unverändert
- * gegenüber dem Broadsheet-Vorgänger — nur die Präsentation wechselt von einer
- * bedruckten Papier-Spalte auf Leitstand-Karten/KPI-Pods.
- *
- * Masthead: seit W3-3 (2026-07-10) rendert Statistik KEIN eigenes Masthead
- * mehr — die Shell-Puls-Leiste (ControlShell) trägt Label "Statistik" +
- * Instrumente + die NotificationBridge-Glocke (schließt denselben P2 "Glocke
- * unsichtbar", den Fleet in W3-1a und Start in W3-2 schon hatten). Die alte
- * Brand-Zeile ("Hermes"/"Statistik") + der LIVE/SYNC-Punkt dopplten nur das
- * Shell-Label bzw. trugen kein eigenständiges Signal — ersatzlos entfernt
- * statt verschoben. Die "Akzeptanzrate"-Kachel (`StatsMasthead` unten) bleibt
- * unverändert: das ist echter Inhalt (die Kern-KPI der View), kein Chrome.
- *
- * Mobil-first: die Spalte liest sich bei 390px top-to-bottom ohne horizontales
- * Scrollen.
+ * /control/statistik owns volume, latency, token, cache, and cost analysis.
+ * Langfuse is a server-side data source only; worker quality stays exclusively
+ * in /control/scorecard. The leading observability deck is mobile-first and
+ * fails soft to the local Usage Facts ledger when Langfuse is unavailable.
  */
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { ChevronRight, TriangleAlert } from "lucide-react";
@@ -27,8 +10,10 @@ import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
 import { useAccountUsage, useHermesRunsCosts, useHermesRunsCostSeries, useHermesSubscriptionBurn } from "../hooks/costsUsage";
-import { useChainCompletion, useHermesReliability, useHermesRunsDaily, useHermesRunsIssues, useHermesRunSummary, useHermesWindowedRollup } from "../hooks/runsDigestRollup";
-import { useBoardStats, useStatsConfig } from "../hooks/stats";
+import { useHermesRunsIssues, useHermesWindowedRollup } from "../hooks/runsDigestRollup";
+import { useStatsConfig } from "../hooks/stats";
+import { useObservabilityStats } from "../hooks/observability";
+import type { ObservabilityStatsResponse, ObservabilityUsageOrigin } from "../lib/schemas/observability";
 import type {
   AccountUsageProvider,
   CostProfileRow,
@@ -656,6 +641,49 @@ export function WorkerEfficiencySection({
 }
 
 // ── Flotten-Effizienz (Durchsatz, Gate, Token-Burn je Lane) ──────────────────
+export function LaneBurnSection({ costs }: { costs: CostProfileRow[] }) {
+  const lanes = useMemo(() => laneBurn(costs), [costs]);
+  return (
+    <section className="space-y-3">
+      <SectionHeader label="Lane-Burn" meta="Tokens · effektive Kosten · Läufe" />
+      {lanes.length === 0 ? (
+        <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmptyDesc} />
+      ) : (
+        <div className="st-panel space-y-1.5 p-2">
+          {lanes.map((lane, index) => {
+            const cost = formatEffectiveCost({
+              cost_usd: lane.costUsd ?? 0,
+              cost_effective_usd: lane.costEquivalent ?? 0,
+              tokens: lane.tokens,
+            });
+            return (
+              <StLeaderRow
+                key={lane.profile}
+                rank={index + 1}
+                name={<LaneLabel profile={lane.profile} label={lane.label} />}
+                score={fmtTokens(lane.tokens)}
+                status="neutral"
+                meta={
+                  <>
+                    {cost.estimated ? (
+                      <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
+                    ) : (
+                      cost.text
+                    )}
+                    {" · "}
+                    {de.stats.leaderRuns(lane.runs)}
+                  </>
+                }
+              />
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+
 export function EffizienzSection({
   profiles,
   costs,
@@ -829,7 +857,7 @@ function CostTrendSection({
             })}
           </div>
           <p className="st-note"><b>{de.stats.costTrendSource}:</b> {de.stats.costTrendSourceCopy}</p>
-          <button type="button" className="st-linkbutton" onClick={() => setDrawerOpen(true)}>
+          <button type="button" className="st-linkbutton min-h-11" onClick={() => setDrawerOpen(true)}>
             {de.stats.modelLaneDrilldown}<ChevronRight className="h-3.5 w-3.5" />
           </button>
         </>
@@ -1159,35 +1187,347 @@ export function MotherLedgerSection() {
   );
 }
 
+const ORIGIN_COLORS = [
+  "var(--color-data-1)",
+  "var(--color-data-4)",
+  "var(--color-data-5)",
+  "var(--color-data-3)",
+  "var(--color-data-7)",
+  "var(--color-live)",
+  "var(--color-status-warn)",
+];
+
+const ratio = (observed: number, denominator: number) =>
+  denominator > 0 ? observed / denominator : null;
+
+const metricValue = (
+  data: ObservabilityStatsResponse,
+  name: string,
+) => data.langfuse.metrics[name]?.value ?? null;
+
+const compactUsd = (value: number | string | null) => {
+  if (value == null) return "—";
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed)
+    ? parsed.toLocaleString("de-DE", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 2,
+    })
+    : "—";
+};
+
+function CoverageRow({
+  label,
+  observed,
+  denominator,
+}: {
+  label: string;
+  observed: number;
+  denominator: number;
+}) {
+  const value = ratio(observed, denominator);
+  return (
+    <div className="grid grid-cols-[minmax(92px,1fr)_minmax(100px,2fr)_84px] items-center gap-2 border-b border-line-soft py-2.5 last:border-0">
+      <span className="text-[11px] font-semibold text-ink-2">{label}</span>
+      <span className="h-1.5 overflow-hidden rounded-full bg-surface-3">
+        <i
+          className={cn(
+            "block h-full rounded-full",
+            value != null && value >= 0.8 ? "bg-status-ok" : "bg-status-warn",
+          )}
+          style={{ width: `${Math.max(value == null ? 0 : 2, (value ?? 0) * 100)}%` }}
+        />
+      </span>
+      <b className="text-right font-data text-[10px]">
+        {observed.toLocaleString("de-DE")} / {denominator.toLocaleString("de-DE")}
+      </b>
+    </div>
+  );
+}
+
+function ImportActivityChart({
+  rows,
+}: {
+  rows: ObservabilityStatsResponse["usage"]["daily_imports"];
+}) {
+  if (!rows.length) {
+    return <FleetEmptyState title="Keine Importe" desc="Im gewählten Fenster wurden keine Usage Facts importiert." />;
+  }
+  const peak = Math.max(1, ...rows.map((row) => row.fact_rows));
+  const scale = (value: number) =>
+    Math.max(2, (Math.log1p(value) / Math.log1p(peak)) * 100);
+  return (
+    <div className="mt-4">
+      <div className="flex h-44 items-end gap-1.5 border-b border-line px-1 sm:gap-3" aria-label="Importierte Usage Facts je Tag, logarithmisch skaliert">
+        {rows.map((row) => (
+          <div key={row.date} className="relative flex h-full min-w-0 flex-1 items-end pt-8">
+            <i
+              className="block w-full rounded-t bg-gradient-to-b from-data-1 to-data-1/20"
+              style={{ height: `${scale(row.fact_rows)}%` }}
+              title={`${row.fact_rows.toLocaleString("de-DE")} Usage Facts`}
+            />
+            <b className="absolute left-1/2 top-1 -translate-x-1/2 text-[8px] font-data text-ink-2 sm:text-[10px]">
+              {fmtTokens(row.fact_rows)}
+            </b>
+            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[8px] font-semibold text-ink-3">
+              {row.date.slice(8)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 flex justify-between gap-3 text-[9px] font-semibold text-ink-3">
+        <span>Usage Facts je Importtag</span>
+        <span>logarithmisch · kein Worker-Durchsatz</span>
+      </div>
+    </div>
+  );
+}
+
+function OriginDistribution({
+  rows,
+  total,
+}: {
+  rows: ObservabilityUsageOrigin[];
+  total: number;
+}) {
+  const visible = rows.slice(0, 6);
+  const visibleRows = visible.length < rows.length
+    ? [
+      ...visible,
+      {
+        name: "weitere",
+        fact_rows: rows.slice(6).reduce((sum, row) => sum + row.fact_rows, 0),
+        context_input_tokens: rows.slice(6).reduce((sum, row) => sum + row.context_input_tokens, 0),
+        output_tokens: rows.slice(6).reduce((sum, row) => sum + row.output_tokens, 0),
+        cache_read_tokens: rows.slice(6).reduce((sum, row) => sum + row.cache_read_tokens, 0),
+        cache_write_tokens: rows.slice(6).reduce((sum, row) => sum + row.cache_write_tokens, 0),
+        model_count: rows.slice(6).reduce((sum, row) => sum + row.model_count, 0),
+      },
+    ]
+    : visible;
+  return (
+    <>
+      <div className="mt-4 flex h-4 overflow-hidden rounded-full bg-surface-3" aria-label="Herkunftsanteile">
+        {visibleRows.map((row, index) => (
+          <i
+            key={row.name}
+            style={{
+              width: `${total > 0 ? (row.fact_rows / total) * 100 : 0}%`,
+              backgroundColor: ORIGIN_COLORS[index % ORIGIN_COLORS.length],
+            }}
+            title={`${row.name}: ${total > 0 ? ((row.fact_rows / total) * 100).toFixed(1) : 0} %`}
+          />
+        ))}
+      </div>
+      <div className="mt-4">
+        {visibleRows.map((row, index) => (
+          <div key={row.name} className="grid min-h-11 grid-cols-[12px_minmax(100px,1fr)_72px_76px] items-center gap-2 border-b border-line-soft text-[11px] last:border-0">
+            <i
+              className="size-2.5 rounded-full"
+              style={{ backgroundColor: ORIGIN_COLORS[index % ORIGIN_COLORS.length] }}
+            />
+            <span className="min-w-0 break-words font-semibold text-ink-2">{row.name}</span>
+            <b className="text-right font-data">
+              {total > 0
+                ? `${((row.fact_rows / total) * 100).toLocaleString("de-DE", { maximumFractionDigits: 1 })} %`
+                : "—"}
+            </b>
+            <small className="text-right text-ink-3">{fmtTokens(row.fact_rows)} Facts</small>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function LangfuseSignals({ data }: { data: ObservabilityStatsResponse }) {
+  if (!data.langfuse.available) {
+    return (
+      <div className="mt-4 rounded-xl border border-status-warn/30 bg-status-warn/5 p-4">
+        <b className="text-sm text-status-warn">Noch keine Langfuse-Signale</b>
+        <p className="mt-2 text-xs text-ink-2">
+          Usage Facts bleiben sichtbar. Für Modellkosten, Generation-Latenz und TTFT fehlen aktuell Server-Zugang oder laufende Worker-Traces.
+        </p>
+      </div>
+    );
+  }
+  const models = data.langfuse.models.slice(0, 6);
+  const partial = data.langfuse.state === "partial";
+  const lowerBound = partial ? "≥" : "";
+  return (
+    <div className="mt-3">
+      {partial ? (
+        <p className="mb-3 rounded-lg border border-status-warn/30 bg-status-warn/5 px-3 py-2 text-[10px] font-semibold text-status-warn">
+          Ausschnitt · Summen sind Untergrenzen, p50 aus Stichprobe
+        </p>
+      ) : null}
+      {models.map((row) => (
+        <div key={row.name} className="grid min-h-12 grid-cols-[minmax(110px,1fr)_56px_72px_72px] items-center gap-2 border-b border-line-soft text-[10px] last:border-0">
+          <span className="min-w-0 break-words font-semibold text-ink-2">{row.name}</span>
+          <b className="text-right font-data">{lowerBound}{row.calls.toLocaleString("de-DE")}</b>
+          <span className="text-right text-ink-3">{row.latency_p50_ms == null ? "—" : fmtDur(row.latency_p50_ms / 1000)}</span>
+          <span className="text-right text-ink-3">{row.ttft_p50_ms == null ? "—" : fmtDur(row.ttft_p50_ms / 1000)}</span>
+        </div>
+      ))}
+      <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-semibold text-ink-2">
+        <span className="rounded-lg bg-surface-2 p-2">Generationen <b className="float-right font-data">{lowerBound}{fmtTokens(metricValue(data, "generation_calls") ?? 0)}</b></span>
+        <span className="rounded-lg bg-surface-2 p-2">Kosten <b className="float-right font-data">{lowerBound}{compactUsd(metricValue(data, "known_cost_usd"))}</b></span>
+      </div>
+    </div>
+  );
+}
+
+export function ObservabilityDeck({
+  data,
+  loading,
+  error,
+}: {
+  data: ObservabilityStatsResponse | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading && !data) return <SkeletonCard rows={6} />;
+  if (!data) {
+    return (
+      <section className="hc-surface-card p-4">
+        <FleetEmptyState title="Observability nicht verfügbar" desc={error ?? "Der Hermes-Read-Model-Endpunkt liefert derzeit keine Daten."} />
+      </section>
+    );
+  }
+  const summary = data.usage.summary;
+  const coverage = data.usage.coverage;
+  const linkCoverage = ratio(coverage.exact_task_run_links, coverage.fact_rows);
+  const dataGap = !data.langfuse.available
+    || coverage.exact_task_run_links === 0
+    || summary.price_status !== "complete";
+  const priceStatus = summary.price_status === "complete"
+    ? "vollständig"
+    : summary.price_status === "partial"
+      ? "teilweise"
+      : "unbekannt";
+  const checkedAt = new Date(data.checked_at * 1000).toLocaleString("de-DE");
+  return (
+    <section className="space-y-4">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="hc-type-label hc-dim">VOLUMEN · GESCHWINDIGKEIT · KOSTEN · {data.window_days} TAGE</p>
+          <h1 className="hc-type-display-tight mt-2">Observability</h1>
+          <p className="hc-dim mt-2 text-sm">Worker-Daten in Hermes. Langfuse bleibt unsichtbare Datenquelle.</p>
+        </div>
+        <div className={cn(
+          "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-[11px] font-semibold",
+          data.langfuse.state === "fresh"
+            ? "border-status-ok/40 text-status-ok"
+            : "border-status-warn/40 text-status-warn",
+        )}>
+          <span className="size-2 rounded-full bg-current" aria-hidden />
+          {data.langfuse.state === "fresh" ? "Langfuse fresh" : `Langfuse ${data.langfuse.state}`} · {checkedAt}
+        </div>
+      </header>
+
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <KpiTile
+          label="Usage Facts"
+          value={fmtTokens(summary.fact_rows)}
+          delta={`${data.window_days} Tage · ${data.usage.state}`}
+          dot="live"
+        />
+        <KpiTile
+          label="Context Tokens"
+          value={fmtTokens(summary.context_input_tokens)}
+          delta={`${fmtTokens(summary.cache_read_tokens)} Cache Read`}
+        />
+        <KpiTile
+          label="Run Duration p50"
+          value={data.run_duration.p50_seconds == null ? "—" : fmtDur(data.run_duration.p50_seconds)}
+          delta={`p95 ${data.run_duration.p95_seconds == null ? "—" : fmtDur(data.run_duration.p95_seconds)} · n ${data.run_duration.count.toLocaleString("de-DE")}`}
+        />
+        <KpiTile
+          label="Exact Links"
+          value={linkCoverage == null ? "—" : `${(linkCoverage * 100).toLocaleString("de-DE", { maximumFractionDigits: 1 })} %`}
+          delta={`${coverage.exact_task_run_links.toLocaleString("de-DE")} / ${coverage.fact_rows.toLocaleString("de-DE")} Facts`}
+          deltaTone={linkCoverage != null && linkCoverage < 0.8 ? "down" : "neutral"}
+        />
+      </div>
+
+      {dataGap ? (
+        <div className="flex flex-col gap-1 rounded-xl border border-status-warn/30 bg-status-warn/5 px-4 py-3 text-xs sm:flex-row sm:items-center sm:justify-between" role="status">
+          <b className="text-status-warn">Datenlücke</b>
+          <span className="text-ink-2">
+            {coverage.exact_task_run_links === 0 ? "Run↔Trace-Korrelation fehlt" : "Korrelation teilweise"}
+            {" · "}
+            {data.langfuse.available ? "Langfuse verbunden" : "Langfuse nicht erreichbar"}
+            {" · "}
+            Metered-Preise {priceStatus}
+          </span>
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.35fr)_minmax(360px,.65fr)]">
+        <article className="hc-surface-card p-4 md:p-5">
+          <SectionHeader label="Import-Verlauf" meta="Usage Facts · nicht Durchsatz" />
+          <ImportActivityChart rows={data.usage.daily_imports} />
+        </article>
+        <article className="hc-surface-card p-4 md:p-5">
+          <SectionHeader label="Herkunft" meta={`echter Anteil · n ${summary.fact_rows.toLocaleString("de-DE")}`} />
+          <OriginDistribution rows={data.usage.origins} total={summary.fact_rows} />
+        </article>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <article className="hc-surface-card p-4 md:p-5">
+          <SectionHeader label="Datenabdeckung" meta="größte Hebel zuerst" />
+          <div className="mt-2">
+            <CoverageRow label="Exact Links" observed={coverage.exact_task_run_links} denominator={coverage.fact_rows} />
+            <CoverageRow label="Modell" observed={coverage.model_known} denominator={coverage.fact_rows} />
+            <CoverageRow label="Laufzeit" observed={coverage.duration_known} denominator={coverage.fact_rows} />
+            <CoverageRow label="TTFT" observed={coverage.ttft_known} denominator={coverage.fact_rows} />
+          </div>
+          {coverage.missing_columns.length ? (
+            <p className="mt-3 text-[10px] font-semibold text-status-warn">
+              Fehlende Adapterfelder: {coverage.missing_columns.join(", ")}
+            </p>
+          ) : null}
+        </article>
+        <article className="hc-surface-card p-4 md:p-5">
+          <SectionHeader label="Langfuse-Signale" meta={data.langfuse.available ? "Calls · Latenz p50 · TTFT p50" : "fail-soft"} />
+          <LangfuseSignals data={data} />
+        </article>
+      </div>
+    </section>
+  );
+}
+
 export function StatistikView() {
-  const reliability = useHermesReliability();
-  const summary = useHermesRunSummary();
-  const daily = useHermesRunsDaily();
+  const observability = useObservabilityStats(7);
   const issues = useHermesRunsIssues();
   const accountUsage = useAccountUsage();
   const statsConfig = useStatsConfig();
   const costs = useHermesRunsCosts();
   const costSeries = useHermesRunsCostSeries();
   const subscriptionBurn = useHermesSubscriptionBurn();
-  const workerRollup = useHermesWindowedRollup({ hours: 168, limit: 20 });
-  const chain = useChainCompletion();
-  const board = useBoardStats();
-
-  const now = reliability.data?.now ?? nowSec();
-  const profiles = useMemo(() => reliability.data?.profiles ?? [], [reliability.data]);
-  const baseline = useMemo(() => reliability.data?.baseline ?? [], [reliability.data]);
-  const last7 = useMemo(() => (daily.data?.series ?? []).slice(-7), [daily.data]);
+  const now = observability.data?.checked_at ?? nowSec();
   const issueGroups = useMemo(() => issues.data?.issues ?? [], [issues.data]);
   const providers = useMemo(() => accountUsage.data?.providers ?? [], [accountUsage.data]);
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
-  const reviewValue = useMemo(() => costs.data?.review_value ?? [], [costs.data]);
-
-  const stale = reliability.isStale || daily.isStale;
-  const hasLoadError = Boolean(reliability.error || daily.error);
 
   return (
-    <div data-statistik className="space-y-5">
-      {/* A7: AccountUsageTile bleibt der primäre Live-Cockpit-Block. */}
+    <div data-statistik className="mx-auto w-full max-w-[2200px] space-y-5 p-4 pb-20 md:p-6">
+      <ObservabilityDeck
+        data={observability.data}
+        loading={observability.loading}
+        error={observability.error}
+      />
+
+      {issues.error ? (
+        <StLead tone="warn">
+          <b>{de.stats.loadError}</b>
+        </StLead>
+      ) : null}
+
+      <ErrorTaxonomySection issues={issueGroups} />
+
       <AccountUsageTile
         usage={accountUsage.data}
         loading={accountUsage.loading && !accountUsage.data}
@@ -1195,39 +1535,9 @@ export function StatistikView() {
         config={statsConfig.data ?? DEFAULT_STATS_CONFIG}
       />
 
-      {hasLoadError ? (
-        <StLead tone="warn">
-          <b>{de.stats.loadError}</b>
-        </StLead>
-      ) : null}
-
-      <WorkerEfficiencySection
-        roots={workerRollup.data?.roots ?? []}
-        profiles={profiles}
-        minReviewSample={reliability.data?.min_n ?? DEFAULT_MIN_REVIEW_SAMPLE}
-        loading={workerRollup.loading && !workerRollup.data}
-        error={workerRollup.error}
-        stale={workerRollup.isStale}
-      />
-
-      <section className="st-panel p-4">
-        <StatsMasthead profiles={profiles} baseline={baseline} series={last7} now={now} stale={stale} />
-      </section>
-
-      <LatencySection
-        p50={summary.data?.cycle_time_p50_seconds ?? null}
-        p90={summary.data?.cycle_time_p90_seconds ?? null}
-      />
-
-      <ReliabilitySection profiles={profiles} />
-
-      <ErrorTaxonomySection issues={issueGroups} />
-
-      {/* ST5: Budget-Ledger bleibt unter Details — AccountUsageTile oben ist die
-          primäre Ansicht; das Ledger-Format bleibt für den ausführlichen Blick. */}
       <details className="st-details">
         <summary className="min-h-12 text-xs font-medium tracking-wide text-live hover:brightness-110">
-          {de.stats.secBudget} — {de.stats.budgetLedgerDetailLabel}
+          Provider-Budget im Detail
         </summary>
         <BudgetLedgerSection providers={providers} />
       </details>
@@ -1240,22 +1550,20 @@ export function StatistikView() {
         burn={subscriptionBurn.data ?? null}
       />
 
+      <LaneBurnSection costs={costProfiles} />
+
       <SubscriptionBurnSection
         burn={subscriptionBurn.data ?? null}
         loading={subscriptionBurn.loading && !subscriptionBurn.data}
         error={subscriptionBurn.error}
       />
 
-      <EffizienzSection
-        profiles={profiles}
-        costs={costProfiles}
-        reviewValue={reviewValue}
-        chainRate={chain.data?.chain_completion_rate ?? null}
-        queueWaitSeconds={board.data?.queue_wait_p50_seconds ?? null}
-      />
-
-      {/* ── Kosten pro Kette ────────────────────────────────────────────────── */}
-      <MotherLedgerSection />
+      <details className="st-details">
+        <summary className="min-h-12 text-xs font-medium tracking-wide text-live hover:brightness-110">
+          Kettenkosten im Detail
+        </summary>
+        <MotherLedgerSection />
+      </details>
 
       <div className="st-foot">
         <span>{de.stats.footLeft(fmtClock(now))}</span>

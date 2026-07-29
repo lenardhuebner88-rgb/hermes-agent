@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
+from plugins.kanban.dashboard.langfuse_read_model import clear_cache
 
 
 def _load_plugin_router():
@@ -22,6 +24,20 @@ def _load_plugin_router():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module.router
+
+
+@pytest.fixture(autouse=True)
+def _isolated_langfuse(monkeypatch):
+    for name in (
+        "HERMES_LANGFUSE_BASE_URL",
+        "HERMES_LANGFUSE_HOST",
+        "HERMES_LANGFUSE_PUBLIC_KEY",
+        "HERMES_LANGFUSE_SECRET_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    clear_cache()
+    yield
+    clear_cache()
 
 
 @pytest.fixture
@@ -41,11 +57,20 @@ def client(kanban_home):
     return TestClient(app)
 
 
-def _insert_score(conn, *, task_id, run_id, name, value, value_type="numeric"):
+def _insert_score(
+    conn,
+    *,
+    task_id,
+    run_id,
+    name,
+    value,
+    value_type="numeric",
+    created_at=1,
+):
     conn.execute(
         "INSERT INTO scores (run_id, task_id, name, value, value_type, source, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 'test', 1)",
-        (run_id, task_id, name, value, value_type),
+        "VALUES (?, ?, ?, ?, ?, 'test', ?)",
+        (run_id, task_id, name, value, value_type, created_at),
     )
 
 
@@ -216,3 +241,87 @@ def test_scorecard_request_does_not_modify_sqlite_database(client, kanban_home):
 
     assert response.status_code == 200
     assert after == before
+
+
+def test_scorecard_v2_returns_windowed_quality_without_statistik_metrics(client):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        task_a, run_a = _make_run(conn, model="model-a")
+        task_b, run_b = _make_run(conn, model="model-thin")
+        conn.execute(
+            "UPDATE task_runs SET started_at=? WHERE id IN (?, ?)",
+            (now - 60, run_a, run_b),
+        )
+        _insert_score(
+            conn,
+            task_id=task_a,
+            run_id=run_a,
+            name="review_verdict",
+            value=1,
+            value_type="binary",
+            created_at=now - 50,
+        )
+        _insert_score(
+            conn,
+            task_id=task_b,
+            run_id=run_b,
+            name="review_verdict",
+            value=0,
+            value_type="binary",
+            created_at=now - 40,
+        )
+        _insert_score(
+            conn,
+            task_id=task_a,
+            run_id=run_a,
+            name="run_outcome_kind",
+            value="completed",
+            value_type="categorical",
+            created_at=now - 30,
+        )
+        _insert_score(
+            conn,
+            task_id=task_a,
+            run_id=run_a,
+            name="review_iterations_to_approval",
+            value=2,
+            created_at=now - 20,
+        )
+        # Materialized for legacy consumers, but intentionally absent from
+        # the quality projection rendered by /control/scorecard.
+        _insert_score(
+            conn,
+            task_id=task_a,
+            run_id=run_a,
+            name="run_duration_seconds",
+            value=120,
+            created_at=now - 10,
+        )
+
+    payload = client.get("/api/plugins/kanban/scorecard?days=7").json()
+
+    assert payload["contract_version"] == "hermes-scorecard.v2"
+    assert payload["quality"]["overall"] == {
+        "runs": 2,
+        "approved": 1,
+        "approval_rate": 0.5,
+    }
+    assert payload["quality"]["coverage"] == {
+        "runs": 2,
+        "review_verdicts": 2,
+        "run_outcomes": 1,
+        "review_iterations": 1,
+    }
+    assert payload["quality"]["outcomes"] == {"completed": 1}
+    assert payload["quality"]["review_iterations"]["distribution"] == {"2": 1}
+    assert len(payload["quality"]["daily_verdicts"]) == 1
+    assert "duration_seconds" not in payload["quality"]
+    assert set(payload["observability"]) == {
+        "available",
+        "state",
+        "reason",
+        "captured_at",
+        "cache",
+    }
+    assert payload["observability"]["state"] == "unknown"
+    assert payload["observability"]["reason"] == "refresh_disabled"

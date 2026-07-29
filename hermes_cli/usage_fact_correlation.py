@@ -74,6 +74,21 @@ class WorkerCorrelation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CorrelationScan:
+    """Authoritative positives plus explicitly proven ambiguous sessions.
+
+    A session absent from ``correlations`` and ``ambiguous_session_ids`` is
+    merely unresolved. That distinction matters when a board database is
+    missing, locked, or still on an older schema.
+    """
+
+    correlations: dict[str, WorkerCorrelation]
+    ambiguous_session_ids: frozenset[str]
+    databases_scanned: int
+    databases_failed: int
+
+
 def discover_kanban_databases(
     paths: Sequence[Path | str] | None = None,
 ) -> tuple[Path, ...]:
@@ -121,11 +136,11 @@ def _chunks(values: Sequence[str]) -> Iterable[Sequence[str]]:
         yield values[offset : offset + _SQLITE_PARAMETER_BATCH]
 
 
-def load_claude_session_correlations(
+def scan_claude_session_correlations(
     session_ids: Iterable[str],
     *,
     kanban_paths: Sequence[Path | str] | None = None,
-) -> dict[str, WorkerCorrelation]:
+) -> CorrelationScan:
     """Resolve only unambiguous Claude session → worker relationships.
 
     Multiple continuations may legitimately reuse a session for one task. In
@@ -134,10 +149,13 @@ def load_claude_session_correlations(
     """
     wanted = sorted({_text(value) for value in session_ids} - {None})
     if not wanted:
-        return {}
+        return CorrelationScan({}, frozenset(), 0, 0)
 
     matches: dict[str, list[dict[str, str | None]]] = defaultdict(list)
-    for path in discover_kanban_databases(kanban_paths):
+    database_paths = discover_kanban_databases(kanban_paths)
+    databases_scanned = 0
+    databases_failed = 0
+    for path in database_paths:
         board = _board_for_path(path)
         board_key = str(path.resolve(strict=False))
         try:
@@ -173,16 +191,20 @@ def load_claude_session_correlations(
                             "board_key": board_key,
                             "profile": _text(row["profile"]),
                         })
+            databases_scanned += 1
         except sqlite3.Error:
             # Correlation is enrichment. An unavailable/old board must not
             # break the usage harvester or turn absence into guessed data.
+            databases_failed += 1
             continue
 
     resolved: dict[str, WorkerCorrelation] = {}
+    ambiguous_session_ids: set[str] = set()
     for session_id, rows in matches.items():
         task_ids = {row["task_id"] for row in rows if row["task_id"]}
         board_keys = {row["board_key"] for row in rows if row["board_key"]}
         if len(task_ids) != 1 or len(board_keys) != 1:
+            ambiguous_session_ids.add(session_id)
             continue
         task_run_ids = {row["task_run_id"] for row in rows if row["task_run_id"]}
         chain_ids = {row["chain_id"] for row in rows if row["chain_id"]}
@@ -202,4 +224,21 @@ def load_claude_session_correlations(
                 else "claude_session_id_task"
             ),
         )
-    return resolved
+    return CorrelationScan(
+        correlations=resolved,
+        ambiguous_session_ids=frozenset(ambiguous_session_ids),
+        databases_scanned=databases_scanned,
+        databases_failed=databases_failed,
+    )
+
+
+def load_claude_session_correlations(
+    session_ids: Iterable[str],
+    *,
+    kanban_paths: Sequence[Path | str] | None = None,
+) -> dict[str, WorkerCorrelation]:
+    """Backward-compatible resolved-only view of a correlation scan."""
+    return scan_claude_session_correlations(
+        session_ids,
+        kanban_paths=kanban_paths,
+    ).correlations
