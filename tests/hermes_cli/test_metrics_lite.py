@@ -122,3 +122,32 @@ def test_middleware_records_and_propagates_exceptions() -> None:
     # still propagates (TestClient turns it into a 500 with raise_server_exceptions=False).
     assert groups["/api/boom"]["count"] == 1
     assert groups["/api/boom"]["error_count"] == 1
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_looks_like_id_boundary_exact_10_chars_2_digits() -> None:
+    """Kill comparison_swap L36 (>= -> >) on both length and digit count.
+    Exactly 10 chars with exactly 2 digits must be id-like."""
+    seg = "ab12cdefgh"  # len=10, digits=2
+    assert len(seg) == 10
+    assert sum(c.isdigit() for c in seg) == 2
+    assert ml._looks_like_id(seg) is True
+    # One char shorter must NOT be id-like (boundary below)
+    assert ml._looks_like_id("ab12cdefg") is False
+    # One fewer digit must NOT be id-like (boundary below)
+    assert ml._looks_like_id("ab1cdefghi") is False
+
+
+def test_percentile_empty_returns_zero() -> None:
+    """Kill const_offset L66 (0.0 -> 1.0): empty list must give 0.0."""
+    assert ml._percentile([], 50) == 0.0
+    assert ml._percentile([], 99) == 0.0
+
+
+def test_percentile_single_value_returns_it() -> None:
+    """Kill const_offset L67 (1 -> 2): single-element list must return that element."""
+    assert ml._percentile([42.0], 50) == 42.0
+    assert ml._percentile([7.5], 0) == 7.5
+    assert ml._percentile([7.5], 100) == 7.5
