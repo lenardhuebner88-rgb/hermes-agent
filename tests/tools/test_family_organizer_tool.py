@@ -745,3 +745,28 @@ def test_log_wish_cap_guard(kanban_home):
 def test_log_wish_requires_text(kanban_home):
     out = json.loads(fo.fo_log_wish("   "))
     assert "error" in out
+
+
+# ─── None-safety of the presence wrappers ───────────────────────────────────
+
+def test_list_presence_missing_date_errors_and_none_response_defaults(monkeypatch):
+    """A missing date is a clean tool_error (no crash), and a None API
+    response degrades to an empty presence list — the voice session must
+    stay speakable in both cases."""
+    out = json.loads(fo.fo_list_presence(None))
+    assert "error" in out
+
+    monkeypatch.setattr(fo, "_request", lambda *args, **kwargs: None)
+    out2 = json.loads(fo.fo_list_presence("2026-06-05"))
+    assert out2["presence"] == []
+
+
+def test_set_presence_none_response_yields_empty_presence(monkeypatch):
+    """A None API response still returns updated=True with an empty
+    presence dict — never crashes on None.get()."""
+    monkeypatch.setattr(fo, "_request", lambda *args, **kwargs: None)
+    out = json.loads(
+        fo.fo_set_presence(member_role="papa", status="home", date="2026-06-05")
+    )
+    assert out["updated"] is True
+    assert out["presence"] == {}
