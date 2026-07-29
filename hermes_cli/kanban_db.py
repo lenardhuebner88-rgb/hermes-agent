@@ -7305,7 +7305,23 @@ def _append_event(
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
-    return int(cur.lastrowid)
+    event_id = int(cur.lastrowid)
+    retry_evidence = {
+        "auto_retried": ("auto", (payload or {}).get("blocked_run_id")),
+        INTEGRATION_RETRY_EVENT: ("integration", run_id),
+        TRANSIENT_RETRY_EVENT: ("transient", run_id),
+        "unblocked": ("operator", run_id),
+    }.get(kind)
+    if retry_evidence is not None and retry_evidence[1] is not None:
+        _runtime_facts.stage_retry_link(
+            conn,
+            task_id=task_id,
+            retry_of_task_run_id=int(retry_evidence[1]),
+            retry_class=retry_evidence[0],
+            triggering_event_id=event_id,
+            board=board_slug_for_conn(conn),
+        )
+    return event_id
 
 
 def _emit_operator_escalation(
@@ -9908,6 +9924,26 @@ def _end_run(
             "UPDATE task_runs SET worker_failure_fingerprint = ? WHERE id = ?",
             (fingerprint, run_id),
         )
+    terminal_metadata = (
+        metadata_for_store if isinstance(metadata_for_store, dict) else {}
+    )
+    _runtime_facts.record_terminal_facts(
+        conn,
+        task_run_id=run_id,
+        worker_exit_kind=str(
+            terminal_metadata.get("worker_exit_kind") or "unobserved"
+        ),
+        worker_exit_code=(
+            int(terminal_metadata["worker_exit_code"])
+            if terminal_metadata.get("worker_exit_code") is not None
+            else None
+        ),
+        worker_protocol_state=str(
+            terminal_metadata.get("worker_protocol_state") or "unobserved"
+        ),
+        end_reason=str(terminal_metadata.get("worker_end_reason") or outcome),
+        board=board_slug_for_conn(conn),
+    )
     conn.execute(
         "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
         (task_id,),
@@ -11902,6 +11938,9 @@ def claim_task(
             task_run_id=run_id,
             claimed_at_seconds=now,
             board=board_slug_for_conn(conn),
+        )
+        _runtime_facts.consume_staged_retry_link(
+            conn, task_id=task_id, task_run_id=int(run_id)
         )
         claimed = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(

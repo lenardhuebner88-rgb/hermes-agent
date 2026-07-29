@@ -57,7 +57,42 @@ CREATE TABLE IF NOT EXISTS worker_run_runtime_locators (
     chain_root_id TEXT,
     profile       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS worker_run_terminal_facts (
+    task_run_id INTEGER PRIMARY KEY,
+    worker_exit_kind TEXT NOT NULL,
+    worker_exit_code INTEGER,
+    worker_protocol_state TEXT NOT NULL,
+    task_outcome TEXT,
+    end_reason TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    board TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worker_run_retry_links (
+    task_run_id INTEGER PRIMARY KEY,
+    retry_of_task_run_id INTEGER NOT NULL,
+    retry_class TEXT NOT NULL CHECK (
+        retry_class IN ('auto', 'integration', 'transient', 'operator')
+    ),
+    triggering_event_id INTEGER NOT NULL,
+    task_id TEXT NOT NULL,
+    board TEXT NOT NULL,
+    CHECK (task_run_id != retry_of_task_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_worker_run_retry_predecessor
+    ON worker_run_retry_links(retry_of_task_run_id);
+
+CREATE TABLE IF NOT EXISTS pending_worker_run_retry_links (
+    task_id TEXT PRIMARY KEY,
+    retry_of_task_run_id INTEGER NOT NULL,
+    retry_class TEXT NOT NULL,
+    triggering_event_id INTEGER NOT NULL,
+    board TEXT NOT NULL
+);
 """
+
+RETRY_CLASSES = frozenset({"auto", "integration", "transient", "operator"})
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
@@ -103,6 +138,190 @@ def _runtime_dimensions(conn: sqlite3.Connection, task_run_id: int, board: str |
         "chain_root_id": str(chain_root[0]) if chain_root is not None else task_id,
         "profile": row["profile"],
     }
+
+
+def record_terminal_facts(
+    conn: sqlite3.Connection,
+    *,
+    task_run_id: int,
+    worker_exit_kind: str,
+    worker_exit_code: int | None,
+    worker_protocol_state: str,
+    end_reason: str,
+    board: str | None = None,
+) -> None:
+    """Persist process, protocol, lifecycle outcome, and end reason separately."""
+    if not worker_exit_kind or not worker_protocol_state or not end_reason:
+        raise ValueError("terminal fact kind, protocol state, and end reason are required")
+    dimensions = _runtime_dimensions(conn, task_run_id, board)
+    run = conn.execute(
+        "SELECT outcome, ended_at FROM task_runs WHERE id = ?", (int(task_run_id),)
+    ).fetchone()
+    if run is None or run["ended_at"] is None:
+        raise ValueError(f"task run {task_run_id} has not ended")
+    conn.execute(
+        """
+        INSERT INTO worker_run_terminal_facts (
+            task_run_id, worker_exit_kind, worker_exit_code,
+            worker_protocol_state, task_outcome, end_reason, task_id, board
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_run_id) DO UPDATE SET
+            worker_exit_kind = excluded.worker_exit_kind,
+            worker_exit_code = excluded.worker_exit_code,
+            worker_protocol_state = excluded.worker_protocol_state,
+            task_outcome = excluded.task_outcome,
+            end_reason = excluded.end_reason
+        """,
+        (
+            int(task_run_id), worker_exit_kind, worker_exit_code,
+            worker_protocol_state, run["outcome"], end_reason,
+            dimensions["task_id"], dimensions["board"],
+        ),
+    )
+
+
+def get_terminal_facts(
+    conn: sqlite3.Connection, *, task_run_id: int
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM worker_run_terminal_facts WHERE task_run_id = ?",
+        (int(task_run_id),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _retry_link_diagnostic(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    finding: str,
+    details: Mapping[str, Any],
+) -> None:
+    import json
+
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+        (
+            task_id,
+            "retry_link_rejected",
+            json.dumps({"finding": finding, **details}, sort_keys=True),
+            int(time.time()),
+        ),
+    )
+
+
+def record_retry_link(
+    conn: sqlite3.Connection,
+    *,
+    task_run_id: int,
+    retry_of_task_run_id: int,
+    retry_class: str,
+    triggering_event_id: int,
+    board: str | None = None,
+) -> None:
+    """Attach a new run to an exact predecessor and exact trigger event."""
+    dimensions = _runtime_dimensions(conn, task_run_id, board)
+    task_id = dimensions["task_id"]
+    details = {
+        "task_run_id": int(task_run_id),
+        "retry_of_task_run_id": int(retry_of_task_run_id),
+        "retry_class": retry_class,
+        "triggering_event_id": int(triggering_event_id),
+    }
+    predecessor = conn.execute(
+        "SELECT task_id, ended_at FROM task_runs WHERE id = ?",
+        (int(retry_of_task_run_id),),
+    ).fetchone()
+    event = conn.execute(
+        "SELECT task_id FROM task_events WHERE id = ?", (int(triggering_event_id),)
+    ).fetchone()
+    finding = None
+    if retry_class not in RETRY_CLASSES:
+        finding = "unsupported_retry_class"
+    elif predecessor is None:
+        finding = "missing_predecessor"
+    elif predecessor["task_id"] != task_id:
+        finding = "foreign_task_predecessor"
+    elif predecessor["ended_at"] is None:
+        finding = "active_predecessor"
+    elif int(retry_of_task_run_id) >= int(task_run_id):
+        finding = "cyclic_or_non_previous_predecessor"
+    elif event is None or event["task_id"] != task_id:
+        finding = "foreign_or_missing_trigger_event"
+    if finding is not None:
+        _retry_link_diagnostic(conn, task_id=task_id, finding=finding, details=details)
+        raise ValueError(f"retry link rejected: {finding}")
+    conn.execute(
+        """
+        INSERT INTO worker_run_retry_links (
+            task_run_id, retry_of_task_run_id, retry_class,
+            triggering_event_id, task_id, board
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_run_id) DO NOTHING
+        """,
+        (
+            int(task_run_id), int(retry_of_task_run_id), retry_class,
+            int(triggering_event_id), task_id, dimensions["board"],
+        ),
+    )
+
+
+def get_retry_link(conn: sqlite3.Connection, *, task_run_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM worker_run_retry_links WHERE task_run_id = ?",
+        (int(task_run_id),),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def stage_retry_link(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    retry_of_task_run_id: int,
+    retry_class: str,
+    triggering_event_id: int,
+    board: str | None = None,
+) -> None:
+    """Stage exact lifecycle evidence for the next run; this owns no retry policy."""
+    if retry_class not in RETRY_CLASSES:
+        raise ValueError(f"unsupported retry class: {retry_class}")
+    conn.execute(
+        """
+        INSERT INTO pending_worker_run_retry_links (
+            task_id, retry_of_task_run_id, retry_class, triggering_event_id, board
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+            retry_of_task_run_id = excluded.retry_of_task_run_id,
+            retry_class = excluded.retry_class,
+            triggering_event_id = excluded.triggering_event_id,
+            board = excluded.board
+        """,
+        (
+            task_id, int(retry_of_task_run_id), retry_class,
+            int(triggering_event_id),
+            board or os.environ.get("HERMES_KANBAN_BOARD") or "default",
+        ),
+    )
+
+
+def consume_staged_retry_link(
+    conn: sqlite3.Connection, *, task_id: str, task_run_id: int
+) -> None:
+    pending = conn.execute(
+        "SELECT * FROM pending_worker_run_retry_links WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    if pending is None:
+        return
+    record_retry_link(
+        conn,
+        task_run_id=task_run_id,
+        retry_of_task_run_id=int(pending["retry_of_task_run_id"]),
+        retry_class=str(pending["retry_class"]),
+        triggering_event_id=int(pending["triggering_event_id"]),
+        board=str(pending["board"]),
+    )
+    conn.execute("DELETE FROM pending_worker_run_retry_links WHERE task_id = ?", (task_id,))
 
 
 def record_event(

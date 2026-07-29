@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_runtime_facts as facts
 
@@ -147,3 +151,115 @@ def test_tmux_locator_contains_session_window_and_pane_without_process_payload(k
         "tmux_window": "3",
         "tmux_pane": "%7",
     }
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "protocol_state", "outcome", "exit_kind"),
+    [
+        (0, "completed", "completed", "exited"),
+        (17, "missing_completion", "crashed", "exited"),
+        (None, "completed", "completed", "unobserved"),
+        (0, "protocol_violation", "blocked", "exited"),
+    ],
+)
+def test_terminal_facts_keep_process_protocol_outcome_and_reason_independent(
+    kanban_home, exit_code, protocol_state, outcome, exit_kind
+):
+    with kb.connect_closing() as conn:
+        _task_id, run_id = _claimed_run(conn)
+        kb._end_run(
+            conn,
+            _task_id,
+            outcome=outcome,
+            metadata={
+                "worker_exit_kind": exit_kind,
+                "worker_exit_code": exit_code,
+                "worker_protocol_state": protocol_state,
+                "worker_end_reason": "worker_process_observed",
+            },
+        )
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert terminal is not None
+    assert terminal["worker_exit_code"] == exit_code
+    assert terminal["worker_protocol_state"] == protocol_state
+    assert terminal["task_outcome"] == outcome
+    assert terminal["end_reason"] == "worker_process_observed"
+
+
+@pytest.mark.parametrize("retry_class", sorted(facts.RETRY_CLASSES))
+def test_retry_class_and_trigger_event_are_exact_run_relationships(
+    kanban_home, retry_class
+):
+    with kb.connect_closing() as conn:
+        task_id, predecessor_id = _claimed_run(conn)
+        kb._end_run(conn, task_id, outcome="crashed")
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+            "claim_expires = NULL WHERE id = ?",
+            (task_id,),
+        )
+        event_id = conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at, run_id) "
+            "VALUES (?, ?, ?, 1, ?)",
+            (task_id, f"{retry_class}_retry", "{}", predecessor_id),
+        ).lastrowid
+        assert event_id is not None
+        facts.stage_retry_link(
+            conn,
+            task_id=task_id,
+            retry_of_task_run_id=predecessor_id,
+            retry_class=retry_class,
+            triggering_event_id=event_id,
+        )
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+        retry_id = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["current_run_id"]
+
+        link = facts.get_retry_link(conn, task_run_id=retry_id)
+
+    assert link is not None
+    assert link["retry_of_task_run_id"] == predecessor_id
+    assert link["retry_class"] == retry_class
+    assert link["triggering_event_id"] == event_id
+
+
+def test_foreign_task_retry_link_is_rejected_with_structured_diagnostic(kanban_home):
+    with kb.connect_closing() as conn:
+        first_task, foreign_run_id = _claimed_run(conn)
+        kb._end_run(conn, first_task, outcome="crashed")
+        second_task, second_run_id = _claimed_run(conn)
+        event_id = conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'operator_retry', '{}', 1)",
+            (second_task,),
+        ).lastrowid
+
+        with pytest.raises(ValueError, match="foreign_task_predecessor"):
+            facts.record_retry_link(
+                conn,
+                task_run_id=second_run_id,
+                retry_of_task_run_id=foreign_run_id,
+                retry_class="operator",
+                triggering_event_id=event_id,
+            )
+        diagnostic = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'retry_link_rejected'",
+            (second_task,),
+        ).fetchone()
+
+    assert json.loads(diagnostic["payload"])["finding"] == "foreign_task_predecessor"
+
+
+def test_worker_session_reuse_does_not_create_or_replace_retry_link(kanban_home):
+    with kb.connect_closing() as conn:
+        _task_id, run_id = _claimed_run(conn)
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ?",
+            ('{"worker_session_id":"claude-session-1"}', run_id),
+        )
+
+        assert facts.get_retry_link(conn, task_run_id=run_id) is None
