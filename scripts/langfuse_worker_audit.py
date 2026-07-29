@@ -29,6 +29,16 @@ CORRELATION_FIELDS = (
     "session_id",
     "correlation_source",
 )
+WORKER_DIMENSION_FIELDS = (
+    "task_run_id",
+    "task_id",
+    "chain_id",
+    "board",
+    "profile",
+    "lane",
+    "session_id",
+    "origin",
+)
 SIGNAL_FIELDS = (
     "provider",
     "model",
@@ -145,6 +155,130 @@ def _board_coverage(
     }
 
 
+def _present(value: Any) -> bool:
+    """Return whether a value is a stored fact rather than an empty placeholder."""
+    return value is not None and bool(str(value).strip())
+
+
+def _worker_release_invariant(
+    usage_connection: sqlite3.Connection,
+    *,
+    usage_columns: set[str],
+    kanban_path: Path | None,
+    since: str,
+    since_epoch: int,
+) -> dict[str, Any]:
+    """Measure only evidence that proves one complete worker-run identity.
+
+    A task or session id alone is deliberately insufficient: retries and chain
+    workers make either ambiguous. This preserves a fail-closed release signal
+    when a partial rollout omits an identity dimension.
+    """
+    missing = sorted(set(WORKER_DIMENSION_FIELDS) - usage_columns)
+    selected = [field for field in WORKER_DIMENSION_FIELDS if field in usage_columns]
+    rows = (
+        [
+            dict(row)
+            for row in usage_connection.execute(
+                "SELECT " + ", ".join(selected)
+                + " FROM run_usage_facts WHERE captured_at >= ?",
+                (since,),
+            )
+        ]
+        if selected
+        else []
+    )
+    observed_run_ids = {
+        str(row["task_run_id"]).strip()
+        for row in rows
+        if _present(row.get("task_run_id"))
+    }
+    sessions: dict[str, set[str]] = defaultdict(set)
+    session_facts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        if _present(row.get("session_id")) and _present(row.get("task_run_id")):
+            session_id = str(row["session_id"]).strip()
+            sessions[session_id].add(str(row["task_run_id"]).strip())
+            session_facts[session_id] += 1
+    ambiguous_sessions = {
+        session_id for session_id, run_ids in sessions.items() if len(run_ids) > 1
+    }
+
+    board_runs: dict[str, str] = {}
+    board_available = False
+    task_identity_available = False
+    if kanban_path is not None and kanban_path.is_file():
+        try:
+            with closing(_read_only(kanban_path)) as board_connection:
+                board_columns = _columns(board_connection, "task_runs")
+                task_identity_available = "task_id" in board_columns
+                projections = "id, task_id" if task_identity_available else "id"
+                board_runs = {
+                    str(row["id"]): (
+                        str(row["task_id"]) if task_identity_available else ""
+                    )
+                    for row in board_connection.execute(
+                        f"SELECT {projections} FROM task_runs WHERE started_at >= ?",
+                        (since_epoch,),
+                    )
+                }
+                board_available = True
+        except sqlite3.Error:
+            # The legacy board summary carries the operational cause. This
+            # invariant remains zero rather than inventing an exact link.
+            pass
+
+    exact_ids: set[str] = set()
+    task_only_count = 0
+    if not missing and board_available and task_identity_available:
+        known_task_ids = set(board_runs.values())
+        for row in rows:
+            run_id = (
+                str(row["task_run_id"]).strip()
+                if _present(row.get("task_run_id"))
+                else ""
+            )
+            task_id = (
+                str(row["task_id"]).strip()
+                if _present(row.get("task_id"))
+                else ""
+            )
+            if not run_id:
+                if task_id and task_id in known_task_ids:
+                    task_only_count += 1
+                continue
+            if all(_present(row.get(field)) for field in WORKER_DIMENSION_FIELDS) and (
+                board_runs.get(run_id) == task_id
+            ):
+                exact_ids.add(run_id)
+
+    denominator = len(board_runs)
+    return {
+        "schema_capable": {"available": not missing, "missing_fields": missing},
+        "observed_worker_runs": {
+            "count": len(observed_run_ids),
+            "denominator_usage_facts": len(rows),
+        },
+        "exact_run_links": {
+            "count": len(exact_ids),
+            "denominator_recent_task_runs": denominator,
+            "coverage_ratio": _ratio(len(exact_ids), denominator),
+        },
+        "exact_task_only_links": {
+            "count": task_only_count,
+            "denominator_usage_facts": len(rows),
+        },
+        "ambiguous_session_ids": {
+            "count": len(ambiguous_sessions),
+            "usage_facts": sum(session_facts[session] for session in ambiguous_sessions),
+        },
+        "unresolved_runs": {
+            "count": len(set(board_runs) - exact_ids),
+            "denominator_recent_task_runs": denominator,
+        },
+    }
+
+
 def _recommendations(
     *,
     schema_missing: Iterable[str],
@@ -221,6 +355,13 @@ def audit(
             else set()
         )
         total_runs = sum(int(data["rows"]) for data in origins.values())
+        worker_release_invariant = _worker_release_invariant(
+            connection,
+            usage_columns=columns,
+            kanban_path=kanban_path,
+            since=since,
+            since_epoch=since_epoch,
+        )
 
     board = _board_coverage(
         kanban_path,
@@ -228,7 +369,7 @@ def audit(
         correlated_run_ids=correlated_run_ids,
     )
     return {
-        "audit_version": 1,
+        "audit_version": 2,
         "window": {
             "days": days,
             "from": since,
@@ -241,6 +382,7 @@ def audit(
         },
         "origins": origins,
         "kanban": board,
+        "worker_release_invariant": worker_release_invariant,
         "recommendations": _recommendations(
             schema_missing=schema_missing,
             origins=origins,
@@ -259,6 +401,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--usage-db", type=Path, default=usage_facts_db_path())
     parser.add_argument("--kanban-db", type=Path, default=kanban_home() / "kanban.db")
     parser.add_argument("--days", type=int, default=7)
+    parser.add_argument(
+        "--require-exact-run-links",
+        action="store_true",
+        help="exit non-zero unless every observed recent board run has a complete exact link",
+    )
     return parser.parse_args(argv)
 
 
@@ -279,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     print(json.dumps(report, indent=2, sort_keys=True))
+    if args.require_exact_run_links:
+        invariant = report["worker_release_invariant"]
+        exact = invariant["exact_run_links"]
+        if not (
+            invariant["schema_capable"]["available"]
+            and exact["denominator_recent_task_runs"] > 0
+            and exact["count"] == exact["denominator_recent_task_runs"]
+        ):
+            return 2
     return 0
 
 
