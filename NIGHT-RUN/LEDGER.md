@@ -454,3 +454,9 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - killed survivors: [K] const_offset L35, [K] bool_op_swap L53, [K] comparison_swap L85
 - probe after: 15/20 = 75%
 - commit: e198d75aa
+
+## 69. hermes_cli/kanban_escalation_class.py — 2026-07-29T05:46:20Z
+- probe before: 17/20 = 85%
+- killed survivors: [K] remove_guard L33, [K] return_none L59; L48 equivalent (isinstance always True at L48)
+- probe after: 19/20 = 95%
+- commit: d62e89551
