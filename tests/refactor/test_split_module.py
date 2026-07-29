@@ -343,3 +343,72 @@ def test_import_name_for_path_returns_dotted_relative(tmp_path, monkeypatch):
     the bare basename — basename imports would collide across packages."""
     monkeypatch.chdir(tmp_path)
     assert split_module._import_name_for_path("pkg/mod.py") == "pkg.mod"
+
+
+# ---------------------------------------------------------------------------
+# Third pass: rewrite offsets + extract edge cases
+# ---------------------------------------------------------------------------
+
+def test_rewrite_backward_refs_applies_right_to_left_on_one_line():
+    """Two references on ONE line are rewritten right-to-left so column
+    offsets stay valid — left-to-right would shift the second hit and
+    abort with an offset mismatch."""
+    import ast as _ast
+
+    node = _ast.parse("def f():\n    return A + A\n").body[0]
+    body = ["    return A + A"]
+    out = split_module._rewrite_backward_refs(body, 2, node, {"A": "mod"}, [])
+    assert out == ["    return mod.A + mod.A"]
+
+
+def test_rewrite_backward_refs_bounds_checks():
+    """Edits whose mapped index falls outside the body window are
+    skipped — never applied at a negative or past-the-end index."""
+    import ast as _ast
+
+    # idx < 0: node line above first_lineno -> skipped
+    node_before = _ast.parse("A\n").body[0]
+    assert split_module._rewrite_backward_refs(
+        ["zzz"], 3, node_before, {"A": "m"}, []
+    ) == ["zzz"]
+
+    # idx == 0: in bounds -> rewritten
+    node_zero = _ast.parse("A\n").body[0]
+    assert split_module._rewrite_backward_refs(
+        ["A"], 1, node_zero, {"A": "m"}, []
+    ) == ["m.A"]
+
+    # idx == len(body): past the end -> skipped
+    node_past = _ast.parse("x\nA\n").body[1]
+    assert split_module._rewrite_backward_refs(
+        ["y"], 1, node_past, {"A": "m"}, []
+    ) == ["y"]
+
+
+def test_extract_tolerates_symbol_listed_twice_in_same_module(tmp_path):
+    """Listing a symbol twice in the SAME target module is a harmless
+    duplicate — only placement in two DIFFERENT modules is refused."""
+    src = tmp_path / "origin.py"
+    src.write_text("A = 1\n")
+    pkg = tmp_path / "origin_ext"
+    split_module.extract_to_package(
+        str(src),
+        {"modules": [{"name": "consts", "symbols": ["A", "A"]}]},
+        str(pkg),
+    )
+    assert (pkg / "consts.py").exists()
+
+
+def test_extract_origin_keeps_single_blank_separator(tmp_path):
+    """Trailing blank lines of the remaining origin survive as exactly
+    one blank separator before the re-export block — the second
+    endswith guard must not add a stacked newline."""
+    src = tmp_path / "origin.py"
+    src.write_text("A = 1\nB = 2\n\n")
+    split_module.extract_to_package(
+        str(src),
+        {"modules": [{"name": "consts", "symbols": ["A"]}]},
+        str(tmp_path / "origin_ext"),
+    )
+    text = src.read_text()
+    assert "B = 2\n\nfrom origin_ext import (" in text
