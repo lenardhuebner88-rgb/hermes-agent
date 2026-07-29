@@ -1286,19 +1286,13 @@ def get_board(
             )
             cost = cost_map.get(t.id)
             if cost is not None:
-                # Per-run cost read-out for the card footer — only attached when
-                # the task actually ran (no runs → no keys → no footer). Same
-                # five fields the chain-graph nodes carry, so one renderer fits both.
+                # Per-run card footer; absent without runs, same fields as chain graph.
                 d["cost_usd"] = cost["cost_usd"]
                 d["input_tokens"] = cost["input_tokens"]
                 d["output_tokens"] = cost["output_tokens"]
                 d["cost_usd_equivalent"] = cost["cost_usd_equivalent"]
-                d["cost_usd_equivalent_confidence"] = cost[
-                    "cost_usd_equivalent_confidence"
-                ]
-                d["cost_usd_equivalent_coverage"] = cost[
-                    "cost_usd_equivalent_coverage"
-                ]
+                for key in ("cost_usd_equivalent_confidence", "cost_usd_equivalent_coverage"):
+                    d[key] = cost[key]
                 d["cost_effective_usd"] = cost["cost_effective_usd"]
             # Slice b: live review-stage pill — only while the task is in review, so
             # a done/blocked task never shows a stale stage. Absent key → schema null.

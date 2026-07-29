@@ -40,6 +40,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE_SCRIPT = REPO_ROOT / "scripts" / "gate-frontend.sh"
 TOKENS_SCRIPT = REPO_ROOT / "scripts" / "check-design-tokens.sh"
+CONTRAST_SCRIPT = REPO_ROOT / "scripts" / "check-contrast.py"
+THEME_CSS = REPO_ROOT / "web" / "src" / "control" / "theme.css"
 
 _EXEC = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
 
@@ -92,6 +94,7 @@ def _make_repo(tmp_path: Path, *, tsc: str) -> tuple[Path, Path, Path]:
     (repo / "scripts" / "gate-frontend.sh").chmod(_EXEC)
     (repo / "scripts" / "check-design-tokens.sh").write_text(TOKENS_SCRIPT.read_text())
     (repo / "scripts" / "check-design-tokens.sh").chmod(_EXEC)
+    (repo / "scripts" / "check-contrast.py").write_text(CONTRAST_SCRIPT.read_text())
     # The real helper checks commit drift against main; the fake repository
     # only needs an executable no-op so the gate can reach the behavior tested.
     _write_exec(repo / "scripts" / "check-branch-age.sh")
@@ -341,6 +344,7 @@ def test_full_gate_uses_local_bins_and_bounded_vitest_workers(tmp_path: Path) ->
     repo, npm_sentinel, npm_dir = _make_repo(tmp_path, tsc="healthy")
     (repo / "web" / "src" / "control").mkdir(parents=True)
     (repo / "web" / "package.json").write_text('{"scripts":{"lint:control":"true"}}\n')
+    (repo / "web" / "src" / "control" / "theme.css").write_text(THEME_CSS.read_text())
     (repo / "scripts" / "design-token-baseline.txt").write_text("0\n")
 
     tool_sentinel = tmp_path / "_tool_called"
