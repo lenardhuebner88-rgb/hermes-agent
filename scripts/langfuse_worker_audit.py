@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+import urllib.error
 from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -403,6 +404,10 @@ _LIFECYCLE_EVENTS = (
 )
 
 
+class LangfuseCredentialsMissing(RuntimeError):
+    """The live probe cannot start without configured endpoint credentials."""
+
+
 def _short_identifier(value: Any) -> str | None:
     text = str(value or "")
     if not text:
@@ -414,8 +419,35 @@ def _configured_langfuse_trace_probe() -> list[dict[str, Any]]:
     """Read the authenticated public trace API without exposing credentials."""
     from hermes_cli.langfuse_scores_export import _credentials, _trace_records
 
-    host, authorization = _credentials(os.environ)
+    try:
+        host, authorization = _credentials(os.environ)
+    except RuntimeError:
+        raise LangfuseCredentialsMissing from None
     return _trace_records(host, authorization)
+
+
+def _langfuse_failure_receipt(exc: Exception) -> dict[str, Any]:
+    """Classify a probe failure without copying exception text or response bodies."""
+    cause: BaseException = exc
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    receipt: dict[str, Any] = {
+        "credentials_configured": None,
+        "tcp_http_reachable": False,
+        "authenticated_public_api_readable": False,
+        "exact_trace_link": False,
+        "trace_id_short": None,
+        "error_type": type(cause).__name__,
+    }
+    if isinstance(exc, LangfuseCredentialsMissing):
+        receipt["credentials_configured"] = False
+    elif isinstance(cause, urllib.error.HTTPError):
+        receipt["credentials_configured"] = True
+        receipt["tcp_http_reachable"] = True
+        receipt["http_status"] = cause.code
+    elif isinstance(cause, urllib.error.URLError):
+        receipt["credentials_configured"] = True
+    return receipt
 
 
 def _trace_metadata(trace: dict[str, Any]) -> dict[str, Any]:
@@ -449,6 +481,7 @@ def build_live_smoke_contract(
                 exact_trace = trace
                 break
         langfuse: dict[str, Any] = {
+            "credentials_configured": True,
             "tcp_http_reachable": True,
             "authenticated_public_api_readable": True,
             "exact_trace_link": exact_trace is not None,
@@ -457,13 +490,7 @@ def build_live_smoke_contract(
             ),
         }
     except Exception as exc:  # fail closed; never serialize a possibly sensitive message
-        langfuse = {
-            "tcp_http_reachable": False,
-            "authenticated_public_api_readable": False,
-            "exact_trace_link": False,
-            "trace_id_short": None,
-            "error_type": type(exc).__name__,
-        }
+        langfuse = _langfuse_failure_receipt(exc)
 
     with closing(_read_only(usage_path)) as connection:
         usage_columns = _columns(connection, "run_usage_facts")
@@ -478,7 +505,7 @@ def build_live_smoke_contract(
 
     with closing(_read_only(kanban_path)) as connection:
         run = connection.execute(
-            "SELECT task_id, outcome, worker_exit_code FROM task_runs WHERE id = ?",
+            "SELECT task_id, outcome, worker_exit_code, metadata FROM task_runs WHERE id = ?",
             (int(task_run_id),),
         ).fetchone()
         if run is None:
@@ -497,12 +524,25 @@ def build_live_smoke_contract(
         ).fetchone()
         board_schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
 
-    first_token_required = "first_llm_request" in observed_events
-    required_events = [
-        event for event in _LIFECYCLE_EVENTS
-        if event != "first_token" or first_token_required
-    ]
-    missing_events = [event for event in required_events if event not in observed_events]
+    try:
+        run_metadata = json.loads(run["metadata"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        run_metadata = {}
+    if not isinstance(run_metadata, dict):
+        run_metadata = {}
+    worker_runtime = str(run_metadata.get("worker_runtime") or "unknown")
+    runtime_eligible = worker_runtime == "hermes"
+    first_token_required = runtime_eligible and "first_llm_request" in observed_events
+    if runtime_eligible:
+        required_events = [
+            event for event in _LIFECYCLE_EVENTS
+            if event != "first_token" or first_token_required
+        ]
+        missing_events = [event for event in required_events if event not in observed_events]
+        lifecycle_assessment = "pass" if not missing_events else "fail"
+    else:
+        missing_events = []
+        lifecycle_assessment = "not_applicable"
     usage_exact = bool(usage_rows) and usage_task_ids == {str(run["task_id"])}
     terminal_report = dict(terminal) if terminal is not None else {
         "worker_exit_kind": None,
@@ -517,6 +557,7 @@ def build_live_smoke_contract(
         langfuse["exact_trace_link"],
         not usage_schema_missing,
         usage_exact,
+        runtime_eligible,
         not missing_events,
         terminal is not None,
         terminal_report["worker_exit_code"] == 0,
@@ -526,6 +567,8 @@ def build_live_smoke_contract(
         "contract_version": 1,
         "status": "pass" if passed else "fail",
         "task_run_id": int(task_run_id),
+        "worker_runtime": worker_runtime,
+        "runtime_eligible": runtime_eligible,
         "schema": {
             "usage_schema_version": usage_schema_version,
             "board_schema_version": board_schema_version,
@@ -537,6 +580,7 @@ def build_live_smoke_contract(
             "schema_missing": usage_schema_missing,
         },
         "lifecycle": {
+            "assessment": lifecycle_assessment,
             "observed_events": [event for event in _LIFECYCLE_EVENTS if event in observed_events],
             "missing_events": missing_events,
             "first_token_required": first_token_required,

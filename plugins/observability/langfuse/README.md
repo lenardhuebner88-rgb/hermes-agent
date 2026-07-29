@@ -119,8 +119,12 @@ the receipt.
    .venv/bin/python scripts/langfuse_worker_audit.py --days 90 > audit-after.json
    ```
 
-3. After an approved real Kanban worker run has completed, run the acceptance
-   gate with its numeric `task_run_id`:
+3. After an approved real Kanban worker run has completed, confirm that its
+   `task_runs.metadata.worker_runtime` is exactly `hermes`. The contract is not
+   applicable to `claude-cli` workers: those runs do not pass through the Hermes
+   conversation loop and therefore emit neither the plugin trace nor its LLM
+   lifecycle observations. Then run the acceptance gate with the numeric
+   `task_run_id` of the eligible Hermes-runtime run:
 
    ```bash
    .venv/bin/python scripts/langfuse_worker_audit.py --live-smoke-run-id "$TASK_RUN_ID" > live-smoke.json
@@ -132,8 +136,10 @@ usage fact agrees on task ID, all required lifecycle observations exist, and the
 worker terminated successfully. It exits `3` for a red contract. Once a model
 request was observed, `first_token` is required; a run that failed before its
 first model request reports the absent observations but does not invent or
-require a first token. Endpoint errors are reduced to an exception type, and
-trace IDs are truncated in the JSON receipt.
+require a first token. The receipt includes `worker_runtime` and marks an
+ineligible runtime's lifecycle assessment as `not_applicable`. Endpoint errors
+separate missing credentials, HTTP responses, and network failures without
+copying exception text; trace IDs are truncated in the JSON receipt.
 
 Archive `audit-before.json`, `backfill-preview.json`, `backfill-applied.json`,
 `audit-after.json`, and `live-smoke.json` together with the exact commands and
