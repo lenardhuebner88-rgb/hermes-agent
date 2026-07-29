@@ -505,5 +505,52 @@ def test_module_defaults_are_pinned():
     assert DEFAULT_CACHE_QUANTIZE_STEP == 8
 
 
+# ---------------------------------------------------------------------------
+# Second pass: config record + quantized boundary
+# ---------------------------------------------------------------------------
+
+def test_elide_config_is_frozen_with_cache_aware_default():
+    """ElideConfig is immutable and cache-aware eliding is ON by default —
+    a silent default flip would change the cache-stability behaviour of
+    every prompt-cached lane."""
+    from agent.tool_result_eliding import ElideConfig
+
+    config = ElideConfig(
+        enabled=True,
+        protect_last_n=14,
+        min_elide_chars=1500,
+        elidable_tools=frozenset({"read_file"}),
+    )
+    assert config.cache_aware_enabled is True
+    with pytest.raises(AttributeError):
+        config.enabled = False
+
+
+def test_cache_stable_boundary_step_two_snaps_odd_raw_down():
+    """step=2 quantizes: a raw elidable span of 9 snaps DOWN to 8 — the
+    boundary only advances on full steps."""
+    from agent.tool_result_eliding import cache_stable_boundary
+
+    assert cache_stable_boundary(11, 2, 2) == 8
+
+
+def test_cache_stable_boundary_negative_raw_returns_zero():
+    """protect >= n means 'elide nothing' — the return is exactly 0, not
+    1 (a single elidable message would otherwise leak through)."""
+    from agent.tool_result_eliding import cache_stable_boundary
+
+    assert cache_stable_boundary(2, 5, 4) == 0
+
+
+def test_negative_protect_last_n_clamps_to_zero_not_one():
+    """A negative protect count clamps to 0 (protect nothing) — clamping
+    to 1 would shield the last message from eliding."""
+    messages = _pair("c1", "read_file", '{"path":"/x"}', _BIG)
+    _out, elided, _saved = elide_stale_tool_results(
+        messages, protect_last_n=-1, min_elide_chars=10
+    )
+    assert elided == 1
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
