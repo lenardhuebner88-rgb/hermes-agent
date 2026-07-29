@@ -97,6 +97,41 @@ def test_k16_backfill_cost_prefers_actual_over_estimated(kanban_home, tmp_path, 
     assert cost == pytest.approx(0.07)
 
 
+def test_equivalent_is_derived_from_raw_facts_not_stored_metadata(monkeypatch):
+    """A pricing change must affect the next read, not require a DB rewrite."""
+    monkeypatch.setattr(
+        kb,
+        "estimate_equivalent_cost_amount",
+        lambda model, **kwargs: 0.123456 if (model, kwargs["provider"]) == ("model-a", "provider-a") else None,
+    )
+
+    value, confidence = kb._run_cost_equivalent_from_facts(
+        {
+            "cost_usd_equivalent": 99.0,  # legacy materialization: ignored
+            "cost_equivalent_model": "model-a",
+            "cost_equivalent_provider": "provider-a",
+        },
+        input_tokens=100,
+        output_tokens=50,
+    )
+
+    assert value == pytest.approx(0.123456)
+    assert confidence == "derived"
+
+
+def test_unpriceable_equivalent_is_unknown_not_zero(monkeypatch):
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: None)
+
+    value, confidence = kb._run_cost_equivalent_from_facts(
+        {"model": "unpriced", "provider": "unknown-provider"},
+        input_tokens=100,
+        output_tokens=50,
+    )
+
+    assert value is None
+    assert confidence == "unknown"
+
+
 def test_k16_backfill_run_costs_sets_cost_and_counts(kanban_home, tmp_path, monkeypatch):
     """K16: an ended run with NULL cost + worker_session_id gets its cost
     backfilled from the run's per-profile state.db; idempotent on re-run."""
@@ -173,7 +208,7 @@ def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
         assert meta["billing_mode"] == "subscription_included"
         assert meta["subscription"] == "kimi"
         assert meta["model"] == "kimi-k2.7"
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.01095)
+        assert "cost_usd_equivalent" not in meta
 
         # Idempotent: K16 already moved the row out of the cost_usd-NULL gate.
         assert kb.backfill_run_costs(conn, limit=50) == 0
@@ -357,7 +392,7 @@ def test_k17_backfill_claude_cli_run_stamps_tokens_from_log(kanban_home, monkeyp
         assert row["cost_usd"] == pytest.approx(0.0)
         meta = _json.loads(row["metadata"])
         assert meta["billing_mode"] == "subscription_included"
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.28)
+        assert "cost_usd_equivalent" not in meta
         assert meta["claude_session_id"] == "sess-claude-1"
         assert meta["usage"]["input_tokens"] == 11529
 
@@ -674,7 +709,7 @@ def test_s1_subscription_match_stamps_equivalent_not_metered(kanban_home, tmp_pa
         assert row["input_tokens"] == 800
         assert row["output_tokens"] == 60
         meta = json.loads(row["metadata"])
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.20)
+        assert "cost_usd_equivalent" not in meta
         assert meta["model"] == "claude-opus-4-8"
         assert meta["billing_mode"] == "subscription_included"
         assert meta["subscription"] == "claude"
@@ -710,7 +745,7 @@ def test_s1_subscription_actual_does_not_leak_into_metered(kanban_home, tmp_path
             (run_id,)).fetchone()
         assert row["cost_usd"] == pytest.approx(0.0)  # NOT 0.40 — no leak
         meta = json.loads(row["metadata"])
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.40)
+        assert "cost_usd_equivalent" not in meta
         assert meta["billing_mode"] == "subscription_included"
 
 
@@ -753,7 +788,7 @@ def test_s1_claude_included_session_priced_despite_mismatched_billing_provider(
         assert row["cost_usd"] == pytest.approx(0.0)
         meta = json.loads(row["metadata"])
         # 1M in × $5 + 0.1M out × $25 + 2M cr × $0.5 + 0.1M cw × $6.25
-        assert meta["cost_usd_equivalent"] == pytest.approx(9.125)
+        assert "cost_usd_equivalent" not in meta
         assert meta["model"] == "claude-opus-4-8"
         assert meta["billing_mode"] == "subscription_included"
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -798,7 +833,7 @@ def test_s1_codex_included_session_priced_from_canonical_feed(kanban_home, tmp_p
         assert row["cost_usd"] == pytest.approx(0.0)  # real metered stays $0
         meta = json.loads(row["metadata"])
         # 1M in × $5 + 0.1M out × $30 = 5.0 + 3.0 = $8.00
-        assert meta["cost_usd_equivalent"] == pytest.approx(8.0)
+        assert "cost_usd_equivalent" not in meta
         assert meta["model"] == "gpt-5.5"
         assert meta["billing_mode"] == "subscription_included"
 
@@ -832,7 +867,7 @@ def test_s1_codex_equivalent_includes_cache_read(kanban_home, tmp_path, monkeypa
         meta = json.loads(conn.execute(
             "SELECT metadata FROM task_runs WHERE id=?", (run_id,)).fetchone()[0])
         # 1M×$5 + 0.1M×$30 + 10M×$0.5 + 0.2M×$6.25 = 5 + 3 + 5 + 1.25 = $14.25
-        assert meta["cost_usd_equivalent"] == pytest.approx(14.25)
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_s1b_audited_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, monkeypatch):
@@ -880,7 +915,7 @@ def test_s1b_audited_claude_equivalent_dry_run_and_apply(kanban_home, tmp_path, 
         meta = json.loads(conn.execute(
             "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
         ).fetchone()[0])
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.953664)
+        assert "cost_usd_equivalent" not in meta
         assert meta["cost_equivalent_model"] == "claude-opus-4-8"
         assert meta["cost_equivalent_provider"] == "anthropic"
         assert meta["provider_model_source"] == "session_log"
@@ -974,7 +1009,7 @@ def test_s1c_audited_non_claude_equivalent_dry_run_and_apply(kanban_home, tmp_pa
         meta = json.loads(conn.execute(
             "SELECT metadata FROM task_runs WHERE id=?", (run_id,)
         ).fetchone()[0])
-        assert meta["cost_usd_equivalent"] == pytest.approx(7.92776)
+        assert "cost_usd_equivalent" not in meta
         assert meta["cost_equivalent_model"] == "gpt-5.5"
         assert meta["cost_equivalent_provider"] == "openai-codex"
         assert meta["provider_model_source"] == "session_log"
@@ -1155,14 +1190,14 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
             (restamp_run, mini_run, csi_run, missing_run, s1b_run),
         ).fetchall()
         by_id = {row["id"]: json.loads(row["metadata"]) for row in rows}
-        assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(3.0055725)
-        assert by_id[restamp_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(6.011145)
+        assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(6.011145)
+        assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[restamp_run]
         assert by_id[restamp_run]["provider_model_source"] == "unknown"
-        assert by_id[mini_run]["cost_usd_equivalent"] == pytest.approx(0.0012)
-        assert by_id[mini_run]["cost_usd_equivalent_s1c_pre_s1d"] == pytest.approx(0.008)
-        assert by_id[csi_run]["cost_usd_equivalent"] == pytest.approx(0.00184)
+        assert by_id[mini_run]["cost_usd_equivalent"] == pytest.approx(0.008)
+        assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[mini_run]
+        assert "cost_usd_equivalent" not in by_id[csi_run]
         assert by_id[csi_run]["provider_model_source"] == "session_log"
-        assert by_id[missing_run]["cost_usd_equivalent"] == pytest.approx(0.0045)
+        assert "cost_usd_equivalent" not in by_id[missing_run]
         assert by_id[missing_run]["provider_model_source"] == "session_log"
         assert by_id[s1b_run]["cost_usd_equivalent"] == pytest.approx(99.0)
         assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[s1b_run]
@@ -1205,7 +1240,7 @@ def test_repair_frozen_equivalent_stamps_codex_lane_tokens(kanban_home, monkeypa
         meta = json.loads(row["metadata"])
         assert row["cost_usd"] == pytest.approx(0.0)
         assert meta["note"] == "frozen-subscription"
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.008)
+        assert "cost_usd_equivalent" not in meta
         assert meta["cost_equivalent_model"] == "gpt-5.5"
         assert meta["cost_equivalent_provider"] == "openai"
         assert meta["billing_mode"] == "subscription_included"

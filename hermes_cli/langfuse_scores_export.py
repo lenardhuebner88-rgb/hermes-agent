@@ -407,7 +407,9 @@ def _trace_events(row: sqlite3.Row, *, board: str, chain_root: str) -> list[dict
     usage = _usage_details(metadata)
     if usage:
         generation_body["usageDetails"] = usage
-    cost = _mapping_value(metadata, ("cost_usd_equivalent", "cost_usd"))
+    # Equivalent spend belongs to /control and must never leave via Langfuse.
+    # ``cost_usd`` remains the independently measured billable-cost contract.
+    cost = _mapping_value(metadata, ("cost_usd",))
     if cost is None:
         cost = _row_value(row, "score_cost_usd", "cost_usd", "run_cost_usd")
     if cost is not None:

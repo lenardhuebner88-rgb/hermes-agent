@@ -8552,8 +8552,6 @@ def backfill_run_costs(
                 if "provider" not in stamped:
                     stamped["provider"] = lane_provider
                 stamped.setdefault("billing_mode", "subscription_included")
-                if c_equiv is not None:
-                    stamped.setdefault("cost_usd_equivalent", c_equiv)
                 claude_sid = result.get("session_id")
                 if claude_sid:
                     stamped.setdefault("claude_session_id", str(claude_sid))
@@ -8624,8 +8622,6 @@ def backfill_run_costs(
                     )
                     or "session_usage"
                 )
-                if equivalent is not None:
-                    stamped.setdefault("cost_usd_equivalent", equivalent)
                 if usage.get("model"):
                     stamped["model"] = str(usage.get("model"))
                 actual_provider = usage.get("billing_provider") or usage.get("provider")
@@ -8746,8 +8742,6 @@ def repair_cost_equivalent_for_frozen_runs(
                 metadata = {}
             if _run_metadata_is_claude_cli(metadata, profile, board=board):
                 continue
-            if metadata.get("cost_usd_equivalent") is not None:
-                continue
             provider, model = _run_metadata_provider_model(
                 metadata, profile, board=board
             )
@@ -8760,7 +8754,6 @@ def repair_cost_equivalent_for_frozen_runs(
             if equivalent is None:
                 continue
             stamped = dict(metadata)
-            stamped.setdefault("cost_usd_equivalent", equivalent)
             stamped.setdefault("cost_equivalent_model", model)
             stamped.setdefault("cost_equivalent_provider", provider)
             stamped.setdefault("billing_mode", "subscription_included")
@@ -9205,7 +9198,6 @@ def audit_claude_cost_equivalent_backfill(
             provider_model_source=provider_model_source,
         )
         stamped = dict(metadata)
-        stamped["cost_usd_equivalent"] = equivalent
         stamped.setdefault("cost_equivalent_model", model)
         stamped.setdefault("cost_equivalent_provider", provider)
         stamped["provider_model_source"] = provider_model_source
@@ -9429,7 +9421,6 @@ def audit_non_claude_cost_equivalent_backfill(
         stamped = dict(metadata)
         if restamp_price and existing_equiv is not None:
             stamped["cost_usd_equivalent_s1c_pre_s1d"] = float(existing_equiv)
-        stamped["cost_usd_equivalent"] = float(equivalent)
         stamped["cost_equivalent_model"] = model
         if provider:
             stamped["cost_equivalent_provider"] = provider
@@ -9788,8 +9779,6 @@ def backfill_run_costs_from_sessions(
             new_meta["cost_source"] = source
             if matched:
                 new_meta["cost_session_ids"] = matched
-            if equivalent is not None:
-                new_meta.setdefault("cost_usd_equivalent", equivalent)
             if model_seen:
                 new_meta["model"] = model_seen
             if provider_seen:
@@ -34694,15 +34683,18 @@ def runs_summary(
             c = task_runs_cost_usd_sum(conn, task_id=mid)
             if c is not None:
                 cost = (cost or 0.0) + c
-            # Subscription lanes stamp cost_usd=0; the API-$ estimate lives in
-            # metadata.cost_usd_equivalent (K17). Mirror runs_costs._burn.
-            e = conn.execute(
-                "SELECT SUM(json_extract(metadata, '$.cost_usd_equivalent')) "
-                "FROM task_runs WHERE task_id = ?",
+            # Equivalent spend is derived at read-time from immutable raw facts.
+            for run in conn.execute(
+                "SELECT input_tokens, output_tokens, metadata FROM task_runs WHERE task_id = ?",
                 (mid,),
-            ).fetchone()[0]
-            if e is not None:
-                equiv = (equiv or 0.0) + float(e)
+            ):
+                value, _confidence = _run_cost_equivalent_from_facts(
+                    _run_meta_dict(run["metadata"]),
+                    input_tokens=run["input_tokens"],
+                    output_tokens=run["output_tokens"],
+                )
+                if value is not None:
+                    equiv = (equiv or 0.0) + value
         if cost is not None:
             total_cost = (total_cost or 0.0) + cost
         # Effective = real + estimated; None only when neither was recorded.
@@ -35461,9 +35453,11 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             try:
                 meta = json.loads(row["metadata"])
                 if isinstance(meta, dict):
-                    raw = meta.get("cost_usd_equivalent")
-                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-                        equiv = float(raw)
+                    equiv, _confidence = _run_cost_equivalent_from_facts(
+                        meta,
+                        input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"],
+                    )
                     neuralwatt_kwh = _numeric_metadata_value(
                         meta, "energy", "energy_kwh"
                     )
@@ -35545,7 +35539,11 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             continue
         bucket = buckets[day]
         meta = _run_meta_dict(row["metadata"])
-        equiv = _numeric_metadata_value(meta, "cost_usd_equivalent")
+        equiv, _confidence = _run_cost_equivalent_from_facts(
+            meta,
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+        )
         neuralwatt_kwh = _numeric_metadata_value(meta, "energy", "energy_kwh")
         neuralwatt_cost = _numeric_metadata_value(meta, "cost", "request_cost_usd")
         _cost_bucket_add(
@@ -35578,7 +35576,7 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         "field_sources": {
             "runs": "task_runs.ended_at rows per local calendar day",
             "tokens": "task_runs.input_tokens/output_tokens/cached_tokens plus metadata fallbacks",
-            "api_equivalent_usd": "task_runs.cost_usd_equivalent plus metadata cost fallbacks",
+            "api_equivalent_usd": "current pricing over task_runs raw usage facts",
         },
     }
 
@@ -39986,13 +39984,55 @@ def _provider_model_with_source(
 
 
 def _run_cost_equivalent_from_meta(meta: dict[str, Any]) -> Optional[float]:
-    value = meta.get("cost_usd_equivalent")
+    """Compatibility wrapper for callers that only have metadata.
+
+    Do not revive the historic ``cost_usd_equivalent`` materialization here:
+    pricing is intentionally re-evaluated from raw model/provider/token facts.
+    Callers with task-run columns should use :func:`_run_cost_equivalent_from_facts`
+    so the token columns take precedence over any metadata fallback.
+    """
+    value, _confidence = _run_cost_equivalent_from_facts(meta)
+    return value
+
+
+def _run_cost_equivalent_from_facts(
+    meta: Mapping[str, Any],
+    *,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> tuple[Optional[float], str]:
+    """Derive an API-equivalent from immutable usage facts and current pricing.
+
+    ``cost_usd_equivalent`` deliberately is *not* consulted.  A missing pricing
+    entry is represented as ``(None, "unknown")`` rather than a misleading $0.
+    """
+    provider = provider or (
+        meta.get("cost_equivalent_provider")
+        or meta.get("provider")
+        or meta.get("billing_provider")
+        or meta.get("api_provider")
+    )
+    model = model or (
+        meta.get("cost_equivalent_model")
+        or meta.get("model")
+        or meta.get("billing_model")
+        or meta.get("api_model")
+    )
+    raw_input = input_tokens if input_tokens is not None else meta.get("input_tokens")
+    raw_output = output_tokens if output_tokens is not None else meta.get("output_tokens")
+    value = estimate_equivalent_cost_amount(
+        str(model) if model else None,
+        provider=str(provider) if provider else None,
+        input_tokens=_coerce_int(raw_input),
+        output_tokens=_coerce_int(raw_output),
+        cache_read_tokens=_coerce_int(meta.get("cache_read_tokens")),
+        cache_write_tokens=_coerce_int(meta.get("cache_write_tokens")),
+    )
     if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+        return None, "unknown"
+    return max(0.0, float(value)), "derived"
 
 
 def runs_windowed_rollup(
