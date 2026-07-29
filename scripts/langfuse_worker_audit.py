@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -396,6 +397,154 @@ def audit(
     }
 
 
+_LIFECYCLE_EVENTS = (
+    "queued", "claimed", "spawn_started", "process_started",
+    "first_llm_request", "first_token", "ended",
+)
+
+
+def _short_identifier(value: Any) -> str | None:
+    text = str(value or "")
+    if not text:
+        return None
+    return text if len(text) <= 12 else f"{text[:8]}…{text[-4:]}"
+
+
+def _configured_langfuse_trace_probe() -> list[dict[str, Any]]:
+    """Read the authenticated public trace API without exposing credentials."""
+    from hermes_cli.langfuse_scores_export import _credentials, _trace_records
+
+    host, authorization = _credentials(os.environ)
+    return _trace_records(host, authorization)
+
+
+def _trace_metadata(trace: dict[str, Any]) -> dict[str, Any]:
+    metadata = trace.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str):
+        try:
+            decoded = json.loads(metadata)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def build_live_smoke_contract(
+    *,
+    task_run_id: int,
+    usage_path: Path,
+    kanban_path: Path,
+    trace_probe: Callable[[], list[dict[str, Any]]] = _configured_langfuse_trace_probe,
+) -> dict[str, Any]:
+    """Build a fail-closed, content-free receipt for one approved worker run."""
+    run_id = str(int(task_run_id))
+    exact_trace: dict[str, Any] | None = None
+    try:
+        for trace in trace_probe():
+            metadata = _trace_metadata(trace)
+            observed = metadata.get("task_run_id", metadata.get("kanban_run_id"))
+            if observed is not None and str(observed) == run_id:
+                exact_trace = trace
+                break
+        langfuse: dict[str, Any] = {
+            "tcp_http_reachable": True,
+            "authenticated_public_api_readable": True,
+            "exact_trace_link": exact_trace is not None,
+            "trace_id_short": _short_identifier(
+                exact_trace.get("id") if exact_trace is not None else None
+            ),
+        }
+    except Exception as exc:  # fail closed; never serialize a possibly sensitive message
+        langfuse = {
+            "tcp_http_reachable": False,
+            "authenticated_public_api_readable": False,
+            "exact_trace_link": False,
+            "trace_id_short": None,
+            "error_type": type(exc).__name__,
+        }
+
+    with closing(_read_only(usage_path)) as connection:
+        usage_columns = _columns(connection, "run_usage_facts")
+        usage_schema_missing = sorted(
+            {"task_run_id", "task_id", "captured_at"} - usage_columns
+        )
+        usage_rows = [] if usage_schema_missing else connection.execute(
+            "SELECT task_id FROM run_usage_facts WHERE task_run_id = ?", (run_id,)
+        ).fetchall()
+        usage_task_ids = {str(row["task_id"]) for row in usage_rows if row["task_id"]}
+        usage_schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+
+    with closing(_read_only(kanban_path)) as connection:
+        run = connection.execute(
+            "SELECT task_id, outcome, worker_exit_code FROM task_runs WHERE id = ?",
+            (int(task_run_id),),
+        ).fetchone()
+        if run is None:
+            raise ValueError(f"unknown task run {task_run_id}")
+        observed_events = {
+            str(row["event_kind"])
+            for row in connection.execute(
+                "SELECT event_kind FROM worker_run_timeline_events WHERE task_run_id = ?",
+                (int(task_run_id),),
+            )
+        }
+        terminal = connection.execute(
+            "SELECT worker_exit_kind, worker_exit_code, worker_protocol_state, "
+            "task_outcome, end_reason FROM worker_run_terminal_facts WHERE task_run_id = ?",
+            (int(task_run_id),),
+        ).fetchone()
+        board_schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+
+    first_token_required = "first_llm_request" in observed_events
+    required_events = [
+        event for event in _LIFECYCLE_EVENTS
+        if event != "first_token" or first_token_required
+    ]
+    missing_events = [event for event in required_events if event not in observed_events]
+    usage_exact = bool(usage_rows) and usage_task_ids == {str(run["task_id"])}
+    terminal_report = dict(terminal) if terminal is not None else {
+        "worker_exit_kind": None,
+        "worker_exit_code": None,
+        "worker_protocol_state": None,
+        "task_outcome": None,
+        "end_reason": None,
+    }
+    passed = all((
+        langfuse["tcp_http_reachable"],
+        langfuse["authenticated_public_api_readable"],
+        langfuse["exact_trace_link"],
+        not usage_schema_missing,
+        usage_exact,
+        not missing_events,
+        terminal is not None,
+        terminal_report["worker_exit_code"] == 0,
+        terminal_report["task_outcome"] == "completed",
+    ))
+    return {
+        "contract_version": 1,
+        "status": "pass" if passed else "fail",
+        "task_run_id": int(task_run_id),
+        "schema": {
+            "usage_schema_version": usage_schema_version,
+            "board_schema_version": board_schema_version,
+        },
+        "langfuse": langfuse,
+        "usage_fact": {
+            "exact_rows": len(usage_rows),
+            "exact_task_match": usage_exact,
+            "schema_missing": usage_schema_missing,
+        },
+        "lifecycle": {
+            "observed_events": [event for event in _LIFECYCLE_EVENTS if event in observed_events],
+            "missing_events": missing_events,
+            "first_token_required": first_token_required,
+        },
+        "terminal": terminal_report,
+    }
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--usage-db", type=Path, default=usage_facts_db_path())
@@ -406,12 +555,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="exit non-zero unless every observed recent board run has a complete exact link",
     )
+    parser.add_argument(
+        "--live-smoke-run-id",
+        type=int,
+        help="emit a fail-closed receipt for one operator-approved real worker run",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
     try:
+        if args.live_smoke_run_id is not None:
+            report = build_live_smoke_contract(
+                task_run_id=args.live_smoke_run_id,
+                usage_path=args.usage_db,
+                kanban_path=args.kanban_db,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0 if report["status"] == "pass" else 3
         report = audit(
             usage_path=args.usage_db,
             kanban_path=args.kanban_db,
