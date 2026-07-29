@@ -444,9 +444,13 @@ def _per_turn_cost(resp: Any, model_label: str | None) -> float:
             out_tok = usage.get("completion_tokens") or usage.get("output_tokens")
         if not in_tok and not out_tok:
             return 0.0
-        from hermes_cli.kanban_db import _equiv_from_tokens
-        est = _equiv_from_tokens(None, model_label, int(in_tok or 0), int(out_tok or 0))
-        return float(est) if est is not None else 0.0
+        from agent.usage_pricing import estimate_equivalent_cost_amount
+        equivalent = estimate_equivalent_cost_amount(
+            model_label,
+            input_tokens=int(in_tok or 0),
+            output_tokens=int(out_tok or 0),
+        )
+        return float(equivalent) if equivalent is not None else 0.0
     except Exception:
         return 0.0
 

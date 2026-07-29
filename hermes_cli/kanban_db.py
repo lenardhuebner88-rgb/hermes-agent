@@ -94,6 +94,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from agent.usage_pricing import estimate_equivalent_cost_amount
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod, kanban_breaker_message as _breaker_message
 from hermes_cli import kanban_context as _kanban_context
@@ -8599,13 +8600,13 @@ def backfill_run_costs(
                 elif actual is not None and actual > 0:
                     equivalent = actual
                 else:
-                    equivalent = _equiv_from_tokens(
-                        usage.get("billing_provider"),
+                    equivalent = estimate_equivalent_cost_amount(
                         usage.get("model"),
-                        b_in,
-                        b_out,
-                        cache_read=_coerce_int(usage.get("cache_read_tokens")),
-                        cache_write=_coerce_int(usage.get("cache_write_tokens")),
+                        provider=usage.get("billing_provider"),
+                        input_tokens=b_in,
+                        output_tokens=b_out,
+                        cache_read_tokens=_coerce_int(usage.get("cache_read_tokens")),
+                        cache_write_tokens=_coerce_int(usage.get("cache_write_tokens")),
                     )
                 stamped = dict(metadata or {})
                 stamped.setdefault("billing_mode", "subscription_included")
@@ -8727,7 +8728,6 @@ def repair_cost_equivalent_for_frozen_runs(
     params.append(int(limit))
     rows = conn.execute(sql, params).fetchall()
 
-    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
     updated = 0
     for row in rows:
         try:
@@ -8746,12 +8746,11 @@ def repair_cost_equivalent_for_frozen_runs(
             provider, model = _run_metadata_provider_model(
                 metadata, profile, board=board
             )
-            equivalent = _equiv_from_tokens(
-                provider,
+            equivalent = estimate_equivalent_cost_amount(
                 model,
-                row["input_tokens"],
-                row["output_tokens"],
-                cache=price_cache,
+                provider=provider,
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
             )
             if equivalent is None:
                 continue
@@ -8881,33 +8880,6 @@ def _read_state_sessions(path: Path) -> list[dict]:
     return out
 
 
-# COST-VISIBILITY-WORKERS-S2: optional static price overrides per model for
-# models models.dev does not list. Each value is a 4-tuple of $/Mtok rates:
-# (input, output, cache_read, cache_write). Empty by default — models.dev already
-# covers our lanes (claude / gpt-5.x+codex / glm); add an entry only for a
-# genuinely unlisted internal model.
-_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
-    # Kimi K2.7 is an internal reviewer-lane alias not yet present in
-    # models.dev. Use the closest public successor-family price known to the
-    # cache at implementation time (OpenRouter moonshotai/Kimi-K2.6:
-    # input=$0.67/M, output=$3.50/M, cache_read=$0.20/M).  cache_write is set
-    # to the input rate as a conservative equivalent until official K2.7 pricing
-    # lands in models.dev.
-    "kimi-k2.7": (0.67, 3.50, 0.20, 0.67),
-    "moonshotai/Kimi-K2.7": (0.67, 3.50, 0.20, 0.67),
-    # GLM-5.2 family (Z.AI / NeuralWatt lane). Source: models.dev GLM pricing
-    # 2026-06-27. Base model glm-5.2: input $0.60/M, output $2.20/M. Variants
-    # (-fast, -short) inherit base pricing; cache rates default to 0.0 (GLM
-    # does not publish separate cache pricing). Entries for the variants are
-    # explicit so the override wins immediately without relying on suffix
-    # truncation in _lookup_model_price_per_mtok.
-    "glm-5.2": (0.60, 2.20, 0.0, 0.0),
-    "glm-5.2-fast": (0.60, 2.20, 0.0, 0.0),
-    "glm-5.2-short": (0.60, 2.20, 0.0, 0.0),
-    "glm-5.2-short-fast": (0.60, 2.20, 0.0, 0.0),
-}
-
-
 def _model_billing_family(value: Optional[str]) -> Optional[str]:
     """Best-effort provider/model family for mismatch warnings.
 
@@ -8952,127 +8924,6 @@ def _warn_model_billing_provider_mismatch(
     )
 
 
-def _lookup_model_price_per_mtok(
-    provider: Optional[str],
-    model: Optional[str],
-) -> Optional[tuple[float, float, float, float]]:
-    """(input, output, cache_read, cache_write) $/Mtok for *model*, or None.
-
-    Source of truth is the community price DB at models.dev (mem+disk cached, no
-    network per call after the first) via :func:`agent.models_dev.get_model_info`
-    — the SAME prices the agent runtime uses, so the equivalent stays consistent.
-    Cache rates a model does not list default to 0.0. A static override wins for
-    unlisted models. Fully fail-soft: any error → None (the caller then leaves the
-    equivalent unset rather than stamp a wrong value).
-    """
-    if not model:
-        return None
-    override = _PRICE_OVERRIDES_PER_MTOK.get(str(model))
-    if override is None:
-        override = _PRICE_OVERRIDES_PER_MTOK.get(str(model).lower())
-    if override is not None:
-        return override
-    lookup_provider = provider
-    model_label = str(model)
-    if not lookup_provider and model_label.lower().startswith("claude-"):
-        lookup_provider = "anthropic"
-    try:
-        from agent.models_dev import get_model_info
-
-        info = get_model_info(lookup_provider or "", model_label)
-        if info is None and model_label.lower().startswith("claude-"):
-            info = get_model_info("anthropic", model_label)
-    except Exception:
-        return None
-    if info is None or not info.has_cost_data():
-        # AC-2: suffix-truncation fallback. If the exact model name is not in
-        # models.dev, strip -short-fast, -fast, -short suffixes and retry with
-        # the base model name. This lets glm-5.2-fast → glm-5.2 base resolve
-        # even when the variant is not separately listed.
-        base_label = _strip_model_variant_suffix(model_label)
-        if base_label is not None:
-            try:
-                info = get_model_info(lookup_provider or "", base_label)
-                if info is None and base_label.lower().startswith("claude-"):
-                    info = get_model_info("anthropic", base_label)
-            except Exception:
-                return None
-            if info is None or not info.has_cost_data():
-                return None
-        else:
-            return None
-    try:
-        return (
-            float(info.cost_input),
-            float(info.cost_output),
-            float(info.cost_cache_read or 0.0),
-            float(info.cost_cache_write or 0.0),
-        )
-    except (TypeError, ValueError):
-        return None
-
-
-def _strip_model_variant_suffix(model_label: str) -> Optional[str]:
-    """Strip -short-fast, -fast, -short suffixes from a model label.
-
-    Returns the base label if a known suffix was stripped, else None (no
-    truncation applicable — caller should not retry).
-
-    Only strips ONE known suffix per call (the longest match first), so
-    ``glm-5.2-short-fast`` → ``glm-5.2`` not ``glm-5.2-short``.
-    """
-    if not model_label:
-        return None
-    lowered = model_label.lower()
-    for suffix in ("-short-fast", "-short", "-fast"):
-        if lowered.endswith(suffix) and len(lowered) > len(suffix):
-            return model_label[: -len(suffix)]
-    return None
-
-
-def _equiv_from_tokens(
-    provider: Optional[str],
-    model: Optional[str],
-    in_tok: Optional[int],
-    out_tok: Optional[int],
-    *,
-    cache_read: Optional[int] = None,
-    cache_write: Optional[int] = None,
-    cache: Optional[dict] = None,
-) -> Optional[float]:
-    """API-equivalent $ = tokens × models.dev price.
-
-    Prices input/output AND cache_read/cache_write at their own rates — these are
-    SEPARATE, additive token classes (prompt = input + cache_read + cache_write
-    per the runtime's CanonicalUsage), so omitting cache under-counts cache-heavy
-    lanes (codex) by ~half. reasoning_tokens are deliberately NOT added (they are
-    already billed inside output_tokens).
-
-    FALLBACK only: used for subscription sessions the runtime left unpriced —
-    notably codex 'included' sessions, which stamp ``estimated_cost_usd=0`` so
-    the lane would otherwise look free despite real token burn. Returns None when
-    price or tokens are unavailable — never fabricates."""
-    if not in_tok and not out_tok and not cache_read and not cache_write:
-        return None
-    price: Optional[tuple[float, float, float, float]]
-    key = (str(provider), str(model))
-    if cache is not None and key in cache:
-        price = cache[key]
-    else:
-        price = _lookup_model_price_per_mtok(provider, model)
-        if cache is not None:
-            cache[key] = price
-    if not price:
-        return None
-    cost_in, cost_out, cost_cr, cost_cw = price
-    return (
-        (in_tok or 0) / 1_000_000.0 * cost_in
-        + (out_tok or 0) / 1_000_000.0 * cost_out
-        + (cache_read or 0) / 1_000_000.0 * cost_cr
-        + (cache_write or 0) / 1_000_000.0 * cost_cw
-    )
-
-
 _S1B_CLASS_KEYS = (
     "worker_receipt_without_cost_stamp",
     "provider_model_without_equiv",
@@ -9088,24 +8939,6 @@ _S1C_CLASS_KEYS = (
     "stampable_with_model_and_price",
     "null_cost_no_cost_evidence",
 )
-
-# Approved S1c PlanSpec prices for non-Claude subscription-equivalent stamps.
-# Kept local to the audited S1c path so older K16 repair semantics stay intact.
-_S1C_PRICE_OVERRIDES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
-    "gpt-5.5": (5.0, 30.0, 0.5, 5.0),
-    "gpt-5.4": (2.5, 10.0, 0.25, 3.125),
-    "gpt-5.4-mini": (0.75, 4.5, 0.075, 0.9375),
-    "kimi-k2.6": (0.55, 2.79, 0.014, 0.55),
-    "kimi-k2.7": (0.55, 2.79, 0.014, 0.55),
-    "kimi-k2.7-code": (0.55, 2.79, 0.014, 0.55),
-    "kimi-for-coding": (0.55, 2.79, 0.014, 0.55),
-    "moonshotai/Kimi-K2.6": (0.55, 2.79, 0.014, 0.55),
-    "moonshotai/Kimi-K2.7": (0.55, 2.79, 0.014, 0.55),
-    "glm-5.2": (0.07, 0.28, 0.007, 0.07),
-    "glm-5.2-fast": (0.07, 0.28, 0.007, 0.07),
-    "glm-5.2-short-fast": (0.07, 0.28, 0.007, 0.07),
-    "gemini-3.5-flash": (0.075, 0.30, 0.01875, 0.075),
-}
 
 _S1D_PRICE_CORRECTION_MODELS = {"gpt-5.4", "gpt-5.4-mini"}
 _S1D_MISSING_MODEL_OVERRIDES = {"glm-5.2", "glm-5.2-short-fast", "kimi-for-coding"}
@@ -9291,7 +9124,6 @@ def audit_claude_cost_equivalent_backfill(
     params.append(scan_limit)
     rows = conn.execute(sql, params).fetchall()
     sessions_by_id = _s1b_session_index(rows, board)
-    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
     stampable: list[tuple[int, str]] = []
 
     def record(kind: str, row: sqlite3.Row, **extra: Any) -> None:
@@ -9342,14 +9174,13 @@ def audit_claude_cost_equivalent_backfill(
         if "claude" not in model_l and "anthropic" not in provider_l:
             record("provider_model_without_equiv", row, model=model, provider=provider)
             continue
-        equivalent = _equiv_from_tokens(
-            provider,
+        equivalent = estimate_equivalent_cost_amount(
             model,
-            usage.get("input_tokens"),
-            usage.get("output_tokens"),
-            cache_read=usage.get("cache_read"),
-            cache_write=usage.get("cache_write"),
-            cache=price_cache,
+            provider=provider,
+            input_tokens=usage.get("input_tokens"),
+            output_tokens=usage.get("output_tokens"),
+            cache_read_tokens=usage.get("cache_read"),
+            cache_write_tokens=usage.get("cache_write"),
         )
         if equivalent is None or equivalent <= 0:
             record(
@@ -9431,7 +9262,6 @@ def audit_non_claude_cost_equivalent_backfill(
     )
     rows = conn.execute(sql, (scan_limit,)).fetchall()
     sessions_by_id = _s1b_session_index(rows, board)
-    price_cache: dict[tuple[str, str], Optional[tuple[float, float, float, float]]] = {}
     updates: list[tuple[int, str]] = []
 
     def add_example(
@@ -9552,17 +9382,13 @@ def audit_non_claude_cost_equivalent_backfill(
         if pms_backfill and not restamp_price:
             equivalent = existing_equiv
         else:
-            plan_price = _S1C_PRICE_OVERRIDES_PER_MTOK.get(model)
-            if plan_price is not None:
-                price_cache[(str(provider), model)] = plan_price
-            equivalent = _equiv_from_tokens(
-                provider,
+            equivalent = estimate_equivalent_cost_amount(
                 model,
-                _coerce_int(usage.get("input_tokens")),
-                _coerce_int(usage.get("output_tokens")),
-                cache_read=_coerce_int(usage.get("cache_read")),
-                cache_write=_coerce_int(usage.get("cache_write")),
-                cache=price_cache,
+                provider=provider,
+                input_tokens=_coerce_int(usage.get("input_tokens")),
+                output_tokens=_coerce_int(usage.get("output_tokens")),
+                cache_read_tokens=_coerce_int(usage.get("cache_read")),
+                cache_write_tokens=_coerce_int(usage.get("cache_write")),
             )
         if equivalent is None:
             classes["null_cost_no_cost_evidence"] += 1
@@ -9751,10 +9577,6 @@ def backfill_run_costs_from_sessions(
     # that resolve to one dir — is consume-once-correct regardless of how it was
     # reached. dbkey is therefore the path string.
     sess_cache: dict[str, list[dict]] = {}
-    # Per-call (provider, model) → price cache so the models.dev fallback does at
-    # most one lookup per distinct model across the whole batch.
-    price_cache: dict[tuple, Optional[tuple[float, float, float, float]]] = {}
-
     def _sessions(dbkey: str, path: Optional[Path]) -> list[dict]:
         if dbkey in sess_cache:
             return sess_cache[dbkey]
@@ -9921,14 +9743,13 @@ def backfill_run_costs_from_sessions(
                             model=model_seen,
                             billing_provider=provider_seen,
                         )
-                        equivalent = _equiv_from_tokens(
-                            provider_seen,
+                        equivalent = estimate_equivalent_cost_amount(
                             model_seen,
-                            in_sum,
-                            out_sum,
-                            cache_read=cread_sum,
-                            cache_write=cwrite_sum,
-                            cache=price_cache,
+                            provider=provider_seen,
+                            input_tokens=in_sum,
+                            output_tokens=out_sum,
+                            cache_read_tokens=cread_sum,
+                            cache_write_tokens=cwrite_sum,
                         )
                 else:
                     # Metered lane: real card cost is actual; fall back to the
@@ -10099,9 +9920,14 @@ def _end_run(
             )
     if cost is None and isinstance(metadata_for_store, dict):
         provider, model = _run_metadata_provider_model(metadata_for_store, profile=None)
-        est = _equiv_from_tokens(provider, model, in_tok, out_tok)
-        if est is not None:
-            cost = est
+        equivalent = estimate_equivalent_cost_amount(
+            model,
+            provider=provider,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+        )
+        if equivalent is not None:
+            cost = equivalent
             if cost_status is None:
                 cost_status = "estimated"
         else:

@@ -5,6 +5,12 @@ import json
 import pytest
 
 from agent.pricing_feed import load_vendored_pricing
+from agent.usage_pricing import (
+    CanonicalUsage,
+    estimate_equivalent_cost,
+    estimate_usage_cost,
+    get_pricing_entry,
+)
 
 
 def _write_feed(tmp_path, payload) -> "object":
@@ -70,6 +76,72 @@ def test_feed_reasoning_rate_is_model_specific(tmp_path):
     assert separate.reasoning_cost_per_million == 3
     assert included.reasoning_billing == "included_in_output"
     assert included.reasoning_cost_per_million is None
+
+
+def test_xai_oauth_equivalent_uses_the_pricing_table_cache_read_rate():
+    """The route and equivalent calculation must read the same canonical row."""
+    usage = CanonicalUsage(cache_read_tokens=1_000_000)
+
+    entry = get_pricing_entry("grok-4.5", provider="xai-oauth")
+    equivalent = estimate_equivalent_cost("grok-4.5", usage, provider="xai-oauth")
+
+    assert entry is not None
+    assert entry.cache_read_cost_per_million == 0.50
+    assert equivalent.amount_usd == entry.cache_read_cost_per_million
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("kimi-coding", "k3"),
+        ("alibaba-token-plan", "qwen3.8-max-preview"),
+    ],
+)
+def test_subscription_lane_equivalents_have_a_canonical_price(provider, model):
+    equivalent = estimate_equivalent_cost(
+        model,
+        CanonicalUsage(input_tokens=1_000_000),
+        provider=provider,
+    )
+
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+
+
+def test_subscription_actual_cost_stays_zero_while_equivalent_is_priced():
+    usage = CanonicalUsage(input_tokens=1_000_000)
+
+    actual = estimate_usage_cost("k3", usage, provider="kimi-coding")
+    equivalent = estimate_equivalent_cost("k3", usage, provider="kimi-coding")
+
+    assert actual.amount_usd == 0
+    assert actual.status == "included"
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+
+
+def test_kanban_db_no_longer_declares_a_second_pricing_table_or_lookup():
+    import ast
+    from pathlib import Path
+
+    source = Path("hermes_cli/kanban_db.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    declared_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assigned_names = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+    assert "_lookup_model_price_per_mtok" not in declared_names
+    assert "_equiv_from_tokens" not in declared_names
+    assert "_PRICE_OVERRIDES_PER_MTOK" not in assigned_names
 
 
 def test_feed_requires_both_meta_and_models_objects(tmp_path):

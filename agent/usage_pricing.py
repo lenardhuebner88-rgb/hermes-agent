@@ -1581,6 +1581,39 @@ def estimate_equivalent_cost(
     )
 
 
+def estimate_equivalent_cost_amount(
+    model_name: Optional[str],
+    *,
+    provider: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    cache_read_tokens: Optional[int] = None,
+    cache_write_tokens: Optional[int] = None,
+) -> Optional[float]:
+    """Return a numeric list-price equivalent for persisted usage, if known.
+
+    This boundary adapts nullable, database-shaped token fields to
+    :class:`CanonicalUsage`. It deliberately delegates all route resolution and
+    pricing to :func:`estimate_equivalent_cost`; callers must not keep a second
+    price table or fallback lookup for reporting-only equivalent values.
+    """
+    if not model_name:
+        return None
+    if not any((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)):
+        return None
+    result = estimate_equivalent_cost(
+        model_name,
+        CanonicalUsage(
+            input_tokens=int(input_tokens or 0),
+            output_tokens=int(output_tokens or 0),
+            cache_read_tokens=int(cache_read_tokens or 0),
+            cache_write_tokens=int(cache_write_tokens or 0),
+        ),
+        provider=provider,
+    )
+    return float(result.amount_usd) if result.amount_usd is not None else None
+
+
 def has_known_pricing(
     model_name: str,
     provider: Optional[str] = None,
