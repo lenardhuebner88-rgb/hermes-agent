@@ -1673,6 +1673,15 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             msg = f"unknown platform '{platform_name}'"
             logger.warning("Job '%s': %s", job["id"], msg)
             delivery_errors.append(msg)
+            # Audit loop 13 / F3: park config-class failures as visible dead
+            # letters (no retries — a replay cannot fix an operator typo).
+            failed_targets.append({
+                "platform": platform_name,
+                "chat_id": str(chat_id),
+                "thread_id": str(thread_id) if thread_id is not None else None,
+                "error_class": "config",
+                "error": msg,
+            })
             continue
 
         from gateway.delivery import resolve_delivery_transport
@@ -1691,6 +1700,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             msg = f"platform '{platform_name}' not configured/enabled"
             logger.warning("Job '%s': %s", job["id"], msg)
             delivery_errors.append(msg)
+            # Audit loop 13 / F3: config class — dead on arrival, visible.
+            failed_targets.append({
+                "platform": platform_name,
+                "chat_id": str(chat_id),
+                "thread_id": str(thread_id) if thread_id is not None else None,
+                "error_class": "config",
+                "error": msg,
+            })
             continue
 
         # Prefer the resolved live transport when the gateway is running. This
@@ -1711,19 +1728,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         delivered = False
         target_errors = []
 
-        def _note_failed_target() -> None:
+        def _note_failed_target(error_class: str = "send", error: Optional[str] = None) -> None:
             """Record this target for the delivery outbox (audit loop 6 / A-H2).
 
             Called only when the target failed on EVERY delivery path (or the
             send was skipped because the interpreter is shutting down — the
-            outbox then replays it after the restart). Relay targets are
-            excluded by the caller: the relay owns the destination credential,
-            so a standalone replay could not authenticate anyway.
+            outbox then replays it after the restart). ``error_class`` (audit
+            loop 13 / F3) is ``send`` for retriable transport failures;
+            relay targets are parked as ``relay`` — visible dead letters with
+            no retries, since the relay owns the destination credential and a
+            standalone replay could not authenticate anyway.
             """
             failed_targets.append({
                 "platform": platform_name,
                 "chat_id": str(chat_id),
                 "thread_id": str(thread_id) if thread_id is not None else None,
+                "error_class": error_class,
+                "error": error,
             })
 
         # Continuable cron surface (D1/D2/D6): resolve the delivery surface for
@@ -2122,6 +2143,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         f"relay delivery to {platform_name}:{chat_id} failed"
                     )
                 delivery_errors.extend(target_errors)
+                # Audit loop 13 / F3: park the payload as a visible relay-class
+                # dead letter — no retries (a standalone replay cannot
+                # authenticate), but the report is no longer silently lost.
+                _note_failed_target(
+                    error_class="relay",
+                    error="; ".join(target_errors),
+                )
                 continue
             # If the interpreter is finalizing (gateway SIGTERM / restart /
             # OOM), scheduling any new delivery is futile — asyncio.run and a
@@ -2258,25 +2286,44 @@ def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: s
     ``last_delivery_error`` exactly as before (that field remains the net of
     last resort). Only the MEDIA-stripped text is replayed; attachments are
     not (their temp paths may not survive until the retry).
+
+    Audit loop 13: entries are keyed per execution (``job["execution_id"]``)
+    so two failed runs of the same job/target never overwrite each other
+    (F1), and each target carries its ``error_class`` — ``send`` retries with
+    backoff, ``config``/``relay`` park as visible dead letters without
+    retries (F3).
     """
     if not failed_targets:
         return
     try:
         from cron.delivery_outbox import enqueue
 
+        execution_id = job.get("execution_id")
         for target in failed_targets:
+            error_class = target.get("error_class") or "send"
             entry = enqueue(
                 job["id"],
                 target,
                 content,
-                error="delivery failed on all paths",
+                error=target.get("error") or "delivery failed on all paths",
+                execution_id=execution_id,
+                error_class=error_class,
             )
-            logger.warning(
-                "Job '%s': delivery to %s:%s parked in outbox (entry %s) — "
-                "will retry with backoff on later ticks",
-                job["id"], target.get("platform"), target.get("chat_id"),
-                entry.get("id"),
-            )
+            if error_class == "send":
+                logger.warning(
+                    "Job '%s': delivery to %s:%s parked in outbox (entry %s) — "
+                    "will retry with backoff on later ticks",
+                    job["id"], target.get("platform"), target.get("chat_id"),
+                    entry.get("id"),
+                )
+            else:
+                logger.error(
+                    "Job '%s': delivery to %s:%s parked in outbox as DEAD "
+                    "letter (entry %s, error_class=%s) — %s",
+                    job["id"], target.get("platform"), target.get("chat_id"),
+                    entry.get("id"), error_class,
+                    target.get("error") or "delivery failed",
+                )
     except Exception as outbox_err:
         logger.warning(
             "Job '%s': delivery outbox unavailable (%s) — failed payload only "
@@ -2345,53 +2392,65 @@ def _send_outbox_entry(entry: dict) -> Optional[str]:
 def _replay_delivery_outbox(verbose: bool = False) -> int:
     """Replay due delivery-outbox entries. Best-effort: never raises.
 
-    Called at the start of every tick (before the due-job scan) so an
-    undelivered report gets retried even on ticks with no due jobs. Entries
-    past the attempt cap are already dead-lettered by the outbox and are not
-    returned as due. Returns the number of entries successfully delivered.
+    Fires from TWO equivalent triggers (audit loop 13 / F2): the start of
+    every built-in tick and the provider-independent ``run_one_job`` body
+    (Chronos fire_due), so an undelivered report gets retried on whichever
+    path runs next. The outbox's non-blocking ``replay_lock`` serializes
+    concurrent passes cross-process — a second trigger while a replay is in
+    flight skips instead of double-sending — and the per-entry
+    ``next_retry_at`` gate makes repeat calls cheap. Entries past the attempt
+    cap (and config/relay-class dead letters) are not returned as due.
+    Returns the number of entries successfully delivered.
     """
     try:
-        from cron.delivery_outbox import due_entries, record_replay_result
-
-        entries = due_entries()
+        from cron.delivery_outbox import due_entries, record_replay_result, replay_lock
     except Exception as e:
-        logger.warning("cron delivery outbox unreadable — skipping replay: %s", e)
+        logger.warning("cron delivery outbox unavailable — skipping replay: %s", e)
         return 0
-    delivered = 0
-    for entry in entries:
-        error = _send_outbox_entry(entry)
+    with replay_lock() as acquired:
+        if not acquired:
+            logger.debug("cron delivery outbox replay skipped — another pass is in flight")
+            return 0
         try:
-            updated = record_replay_result(
-                entry["id"], success=error is None, error=error,
-            )
+            entries = due_entries()
         except Exception as e:
-            logger.warning(
-                "cron delivery outbox: could not record replay result for %s: %s",
-                entry.get("id"), e,
-            )
-            continue
-        if error is None:
-            delivered += 1
-            logger.info(
-                "Outbox entry %s (job '%s') delivered on replay",
-                entry.get("id"), entry.get("job_id"),
-            )
-        elif updated is not None and updated.get("status") == "dead":
-            logger.error(
-                "Outbox entry %s (job '%s') is DEAD after %s attempts — "
-                "report undeliverable: %s",
-                entry.get("id"), entry.get("job_id"),
-                updated.get("attempts"), error,
-            )
-        else:
-            logger.warning(
-                "Outbox entry %s (job '%s') replay failed (attempt %s): %s",
-                entry.get("id"), entry.get("job_id"),
-                (updated or {}).get("attempts"), error,
-            )
-    if verbose and delivered:
-        logger.info("Delivery outbox: replayed %d entr(ies)", delivered)
-    return delivered
+            logger.warning("cron delivery outbox unreadable — skipping replay: %s", e)
+            return 0
+        delivered = 0
+        for entry in entries:
+            error = _send_outbox_entry(entry)
+            try:
+                updated = record_replay_result(
+                    entry["id"], success=error is None, error=error,
+                )
+            except Exception as e:
+                logger.warning(
+                    "cron delivery outbox: could not record replay result for %s: %s",
+                    entry.get("id"), e,
+                )
+                continue
+            if error is None:
+                delivered += 1
+                logger.info(
+                    "Outbox entry %s (job '%s') delivered on replay",
+                    entry.get("id"), entry.get("job_id"),
+                )
+            elif updated is not None and updated.get("status") == "dead":
+                logger.error(
+                    "Outbox entry %s (job '%s') is DEAD after %s attempts — "
+                    "report undeliverable: %s",
+                    entry.get("id"), entry.get("job_id"),
+                    updated.get("attempts"), error,
+                )
+            else:
+                logger.warning(
+                    "Outbox entry %s (job '%s') replay failed (attempt %s): %s",
+                    entry.get("id"), entry.get("job_id"),
+                    (updated or {}).get("attempts"), error,
+                )
+        if verbose and delivered:
+            logger.info("Delivery outbox: replayed %d entr(ies)", delivered)
+        return delivered
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 3600  # seconds (1 hour)
@@ -4257,6 +4316,15 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
     try:
+        # Replay due delivery-outbox entries on the shared firing body too
+        # (audit loop 13 / F2): an external provider's fire_due (Chronos)
+        # reaches this body directly and never passes through tick(), whose
+        # replay hook was its only other chance to recover a lost report.
+        # Idempotent — the outbox gates on next_retry_at and serializes
+        # concurrent replay passes cross-process (replay_lock) — so the
+        # built-in tick hook does not double-send. Never raises.
+        _replay_delivery_outbox()
+
         # Pre-run dispatch claim (issue #38758): atomically commit a finite
         # one-shot's dispatch BEFORE its side effect runs, so a tick that dies
         # mid-execution (gateway kill, OOM, segfault, hard-timeout) cannot
@@ -4464,7 +4532,9 @@ def tick(
         # Replay due delivery-outbox entries FIRST (audit loop 6 / A-H2): a
         # previous run's undeliverable report gets another chance even when
         # no job is due this tick. Best-effort — an outbox I/O error must
-        # never break the tick.
+        # never break the tick. The provider-independent run_one_job body
+        # replays too (audit loop 13 / F2); the outbox's replay_lock +
+        # next_retry_at gate keep the two triggers from double-sending.
         _replay_delivery_outbox()
 
         due_jobs = get_due_jobs()

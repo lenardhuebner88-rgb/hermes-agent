@@ -7,11 +7,15 @@ channel, so report losses were silent and unrecoverable.
 
 The outbox is a durable JSONL store (``cron/outbox.jsonl`` under the active
 cron store): when ``cron.scheduler._deliver_result`` exhausts every delivery
-path for a target, the payload is enqueued here. At the start of every tick,
-due entries are re-sent over the standalone path with exponential backoff
-(5min → 10 → 20 → 40 → 80min cap). After ``MAX_ATTEMPTS`` failed replays an
-entry becomes ``dead`` (dead-letter — it stays in the file and is surfaced by
-``hermes cron status``, never silently dropped).
+path for a target, the payload is enqueued here. Due entries are re-sent over
+the standalone path with exponential backoff (5min → 10 → 20 → 40 → 80min
+cap) by TWO equivalent triggers (audit loop 13 / F2): the start of every
+built-in tick AND the provider-independent ``run_one_job`` body that an
+external provider's ``fire_due`` (Chronos) also runs — both guarded by the
+non-blocking ``replay_lock()`` so they never double-send. After
+``MAX_ATTEMPTS`` failed replays an entry becomes ``dead`` (dead-letter — it
+stays in the file and is surfaced by ``hermes cron status``, never silently
+dropped).
 
 Design notes:
 
@@ -20,10 +24,38 @@ Design notes:
   retry bookkeeping) atomically rewrite the file (tmp + os.replace), which
   doubles as compaction. This keeps the store readable with ``jq``/``tail``
   and avoids a folding log for a workload of a handful of entries.
-- Dedupe: a repeated delivery failure for the same (job_id, target) while an
-  entry is still ``queued`` refreshes that entry's payload/error instead of
-  appending a duplicate — and deliberately does NOT postpone an already
-  scheduled ``next_retry_at``.
+- Dedupe (audit loop 13 / F1 — per-execution idempotency): entries are keyed
+  per RUN, not per job. A repeated delivery failure for the same
+  (execution_id, job_id, target) while the entry is still ``queued``
+  refreshes that entry's payload/error instead of appending a duplicate — and
+  deliberately does NOT postpone an already scheduled ``next_retry_at``.
+  Failures from DIFFERENT executions of the same job/target NEVER collapse:
+  each run's report gets its own entry, so two failed runs before the replay
+  can no longer overwrite each other. Callers that cannot supply an
+  execution_id keep the loop-6 legacy key (job_id, target).
+- Error classes (audit loop 13 / F3): every entry carries ``error_class`` —
+  ``send``   : the payload was attempted on every delivery path and failed;
+               queued and retried with backoff (transient blips recover).
+  ``config`` : operator/configuration error (unknown platform, platform not
+               configured/enabled); dead ON ARRIVAL — no replay can fix a
+               typo'd deliver target, so it is parked as a visible dead
+               letter instead of being retried forever. Repeated failures of
+               the same (job_id, target, class) REFRESH the dead entry so a
+               permanently misconfigured job does not pile up dead letters.
+  ``relay``  : relay-fronted destination; the relay connector owns the
+               platform credential, so a standalone replay could never
+               authenticate — dead on arrival, visible, same refresh dedupe
+               as ``config``.
+- Locking (audit loop 13 / F1): every read-modify-write (enqueue, replay
+  bookkeeping) runs under the in-process RLock PLUS a bounded cross-process
+  advisory flock on ``<outbox>.lock`` — same pattern as cron/jobs.py's
+  ``.jobs.lock`` (#60703: bounded acquisition, degrade to in-process-only on
+  timeout rather than freezing the scheduler). Parallel multiplex profiles
+  and a standalone ``hermes cron`` invocation can no longer torn-write or
+  lose each other's status transitions. ``replay_lock()`` additionally
+  serializes whole replay passes (non-blocking: a second concurrent replay
+  skips) so the tick hook and the provider-independent run_one_job hook never
+  double-send.
 - Store scoping mirrors cron/executions.py: the ContextVar behind
   cron.jobs.use_cron_store() (per-profile multiplex) wins, then a re-pointed
   OUTBOX_FILE constant (test/embedder escape hatch), then the ACTIVE
@@ -36,15 +68,29 @@ Design notes:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# fcntl is Unix-only; on Windows fall back to msvcrt. Either may be absent,
+# in which case _store_lock() degrades to in-process locking only (mirrors
+# cron/jobs.py).
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Unix
+    msvcrt = None
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
@@ -64,6 +110,18 @@ MAX_BACKOFF_SECONDS = 4800
 # letters are exactly what an operator must see.
 DELIVERED_RETENTION_SECONDS = 7 * 86400
 
+# Error classes (audit loop 13 / F3) — see the module docstring. ``send`` is
+# the retriable default; ``config`` and ``relay`` are dead on arrival.
+ERROR_CLASS_SEND = "send"
+ERROR_CLASS_CONFIG = "config"
+ERROR_CLASS_RELAY = "relay"
+_ERROR_CLASSES_NO_RETRY = frozenset({ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY})
+
+# Upper bound on waiting for the cross-process <outbox>.lock flock — same
+# reasoning as cron/jobs.py #60703: a wedged lock holder must not freeze the
+# scheduler, so on timeout we degrade to in-process locking only.
+_STORE_LOCK_TIMEOUT_SECONDS = 30.0
+
 # Like cron/jobs.py and cron/executions.py, the outbox is per-profile by
 # design (#4707): each profile owns its own outbox.jsonl under its own
 # HERMES_HOME, and multiplex_profiles scopes every tick to one profile at a
@@ -76,6 +134,121 @@ OUTBOX_FILE = _IMPORT_HOME / "cron" / "outbox.jsonl"
 _IMPORT_OUTBOX_FILE = OUTBOX_FILE
 
 _lock = threading.RLock()
+# In-process gate for whole replay passes (separate from _lock so a slow
+# replay send never blocks an enqueue in a sibling thread).
+_replay_gate = threading.Lock()
+
+
+@contextlib.contextmanager
+def _store_lock(path: Path):
+    """Serialize one read-modify-write critical section cross-process.
+
+    Advisory flock on ``<outbox>.lock`` next to the store file, mirroring
+    cron/jobs.py's ``.jobs.lock`` (#60703): bounded LOCK_NB acquisition with
+    a deadline; on timeout or when no locking primitive exists, degrade to
+    in-process-only (the caller already holds the module RLock) rather than
+    freezing the scheduler. Critical sections here are field updates on a
+    handful of entries, so contention resolves in milliseconds.
+    """
+    lock_path = path.parent / (path.name + ".lock")
+    lock_fd = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = open(lock_path, "a+", encoding="utf-8")
+        if fcntl is not None:
+            deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (OSError, IOError):
+                    if time.monotonic() >= deadline:
+                        logger.error(
+                            "Timed out after %.0fs waiting for the cron "
+                            "outbox lock (%s) — proceeding with in-process "
+                            "locking only so the scheduler stays alive.",
+                            _STORE_LOCK_TIMEOUT_SECONDS, lock_path,
+                        )
+                        try:
+                            lock_fd.close()
+                        except OSError:
+                            pass
+                        lock_fd = None
+                        break
+                    time.sleep(0.1)
+        elif msvcrt is not None:
+            msvcrt.locking(lock_fd.fileno(), msvcrt.LK_LOCK, 1)
+    except (OSError, IOError) as e:
+        logger.warning(
+            "cron outbox cross-process lock unavailable (%s); "
+            "proceeding with in-process lock only", e,
+        )
+    try:
+        yield
+    finally:
+        if lock_fd is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                elif msvcrt is not None:
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except (OSError, IOError):
+                pass
+            finally:
+                lock_fd.close()
+
+
+@contextlib.contextmanager
+def replay_lock():
+    """Serialize a whole replay pass; a concurrent replay skips (yields False).
+
+    Two replay triggers exist (audit loop 13 / F2): the built-in tick hook and
+    the provider-independent ``run_one_job`` hook (Chronos fire_due). Both may
+    fire concurrently in different threads or processes; sending is NOT
+    covered by the per-transition store lock, so without this gate two
+    replays could read the same due entries and deliver twice. Non-blocking
+    in-process gate + non-blocking flock on ``<outbox>.replay.lock``: the
+    loser yields False and the caller returns without sending. The per-entry
+    ``next_retry_at`` gate makes a skipped retry cheap to rediscover on the
+    next trigger.
+    """
+    if not _replay_gate.acquire(blocking=False):
+        yield False
+        return
+    lock_fd = None
+    acquired = True
+    try:
+        path = _current_outbox_file()
+        lock_path = path.parent / (path.name + ".replay.lock")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            lock_fd = open(lock_path, "a+", encoding="utf-8")
+            if fcntl is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (OSError, IOError):
+                    acquired = False
+            elif msvcrt is not None:
+                try:
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
+                except (OSError, IOError):
+                    acquired = False
+        except (OSError, IOError) as e:
+            # Lock file unusable — proceed with the in-process gate only.
+            logger.debug("cron outbox replay lock unavailable (%s)", e)
+        yield acquired
+    finally:
+        if lock_fd is not None:
+            try:
+                if acquired and fcntl is not None:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                elif acquired and msvcrt is not None:
+                    msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except (OSError, IOError):
+                pass
+            finally:
+                lock_fd.close()
+        _replay_gate.release()
 
 
 def _current_outbox_file() -> Path:
@@ -201,54 +374,85 @@ def enqueue(
     target: Dict[str, Any],
     payload: str,
     error: Optional[str] = None,
+    *,
+    execution_id: Optional[str] = None,
+    error_class: str = ERROR_CLASS_SEND,
 ) -> Dict[str, Any]:
     """Persist an undeliverable payload for later replay.
 
-    Idempotent: while an entry for the same (job_id, target) is still
-    ``queued``, a repeated failure refreshes that entry's payload/error
-    instead of appending a duplicate, and the pending ``next_retry_at`` is
-    kept (a fresh failure must not postpone an already scheduled retry).
+    Idempotent per RUN (audit loop 13 / F1): while an entry for the same
+    (execution_id, job_id, target) is still ``queued``, a repeated failure
+    refreshes that entry's payload/error instead of appending a duplicate,
+    and the pending ``next_retry_at`` is kept (a fresh failure must not
+    postpone an already scheduled retry). Failures from DIFFERENT executions
+    never collapse — each run's report gets its own entry. Without an
+    ``execution_id`` the loop-6 legacy key (job_id, target) applies.
+
+    ``error_class`` (audit loop 13 / F3): ``send`` entries are queued and
+    retried with backoff; ``config``/``relay`` entries are dead ON ARRIVAL
+    (no replay can fix an operator typo or authenticate a relay destination)
+    and dedupe on (job_id, target, class) — a permanently misconfigured job
+    refreshes its single visible dead letter instead of piling up new ones.
     """
+    if error_class not in (ERROR_CLASS_SEND, ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY):
+        error_class = ERROR_CLASS_SEND
     with _lock:
         path = _current_outbox_file()
-        entries = _read_entries(path)
-        key = _dedupe_key(job_id, target)
-        now = _hermes_now().isoformat()
-        for entry in entries:
-            if (
-                entry.get("status") == "queued"
-                and _dedupe_key(entry.get("job_id"), entry.get("target")) == key
-            ):
+        with _store_lock(path):
+            entries = _read_entries(path)
+            key = _dedupe_key(job_id, target)
+            now = _hermes_now().isoformat()
+            no_retry = error_class in _ERROR_CLASSES_NO_RETRY
+            for entry in entries:
+                if _dedupe_key(entry.get("job_id"), entry.get("target")) != key:
+                    continue
+                if no_retry:
+                    # Dead-on-arrival classes refresh the same (job, target,
+                    # class) dead letter — visibility without unbounded growth.
+                    if entry.get("error_class") != error_class:
+                        continue
+                else:
+                    if entry.get("status") != "queued":
+                        continue
+                    # Per-execution idempotency: only a refresh of the SAME
+                    # run may collapse; different runs keep separate entries.
+                    if execution_id is not None or entry.get("execution_id"):
+                        if entry.get("execution_id") != execution_id:
+                            continue
                 entry["payload"] = payload
                 entry["last_error"] = error
                 entry["last_attempt_at"] = now
                 _write_entries(path, entries)
                 return entry
-        entry = {
-            "id": uuid.uuid4().hex[:16],
-            "job_id": str(job_id),
-            "target": {
-                "platform": str(target.get("platform") or ""),
-                "chat_id": str(target.get("chat_id") or ""),
-                "thread_id": (
-                    str(target["thread_id"])
-                    if target.get("thread_id") is not None
-                    else None
-                ),
-            },
-            "payload": payload,
-            "status": "queued",
-            "attempts": 0,
-            "first_failed_at": now,
-            "last_attempt_at": now,
-            # Due immediately: the first replay happens on the next tick
-            # (transient blips recover in ~one tick); later retries back off.
-            "next_retry_at": now,
-            "last_error": error,
-        }
-        entries.append(entry)
-        _write_entries(path, entries)
-        return entry
+            entry = {
+                "id": uuid.uuid4().hex[:16],
+                "job_id": str(job_id),
+                "execution_id": str(execution_id) if execution_id else None,
+                "error_class": error_class,
+                "target": {
+                    "platform": str(target.get("platform") or ""),
+                    "chat_id": str(target.get("chat_id") or ""),
+                    "thread_id": (
+                        str(target["thread_id"])
+                        if target.get("thread_id") is not None
+                        else None
+                    ),
+                },
+                "payload": payload,
+                # Dead on arrival for no-retry classes: visible via
+                # outbox_counts()["dead"], never returned by due_entries().
+                "status": "dead" if no_retry else "queued",
+                "attempts": 0,
+                "first_failed_at": now,
+                "last_attempt_at": now,
+                # Due immediately: the first replay happens on the next tick
+                # (transient blips recover in ~one tick); later retries back off.
+                "next_retry_at": None if no_retry else now,
+                "last_error": error,
+            }
+            entries.append(entry)
+            _write_entries(path, entries)
+            return entry
 
 
 def due_entries(now: Optional[datetime] = None) -> List[Dict[str, Any]]:
@@ -283,28 +487,29 @@ def record_replay_result(
     """
     with _lock:
         path = _current_outbox_file()
-        entries = _read_entries(path)
-        now = _hermes_now()
-        for entry in entries:
-            if entry.get("id") != entry_id:
-                continue
-            if entry.get("status") != "queued":
-                return entry  # terminal or already transitioned — no rewrite
-            entry["last_attempt_at"] = now.isoformat()
-            if success:
-                entry["status"] = "delivered"
-                entry["last_error"] = None
-            else:
-                entry["attempts"] = (entry.get("attempts") or 0) + 1
-                entry["last_error"] = error
-                if entry["attempts"] >= MAX_ATTEMPTS:
-                    entry["status"] = "dead"
+        with _store_lock(path):
+            entries = _read_entries(path)
+            now = _hermes_now()
+            for entry in entries:
+                if entry.get("id") != entry_id:
+                    continue
+                if entry.get("status") != "queued":
+                    return entry  # terminal or already transitioned — no rewrite
+                entry["last_attempt_at"] = now.isoformat()
+                if success:
+                    entry["status"] = "delivered"
+                    entry["last_error"] = None
                 else:
-                    entry["next_retry_at"] = (
-                        now + timedelta(seconds=_backoff_seconds(entry["attempts"]))
-                    ).isoformat()
-            _write_entries(path, entries)
-            return entry
+                    entry["attempts"] = (entry.get("attempts") or 0) + 1
+                    entry["last_error"] = error
+                    if entry["attempts"] >= MAX_ATTEMPTS:
+                        entry["status"] = "dead"
+                    else:
+                        entry["next_retry_at"] = (
+                            now + timedelta(seconds=_backoff_seconds(entry["attempts"]))
+                        ).isoformat()
+                _write_entries(path, entries)
+                return entry
     return None
 
 
