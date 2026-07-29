@@ -324,3 +324,9 @@ MUTIERENDER Code (INSERT INTO) — Reihenfolge „erst Live-Fremd-Arbeit committ
 (inkl. untracked `_kanban_db_guard.py`), dann mergen, dann Jobs" ins Proposal.
 
 **Teststand nach K3-Abarbeitung:** hermes **1100/1100** (61 Dateien) · scripts **81/81**.
+
+**K3 Fix-Verifikation (zweiter K3-Lauf, `eval/k3-fix-verification.md`):** 15/17 sofort
+behoben bestätigt; 2 Punkte + 5 Residuen nachgearbeitet — enabled-Pfad str()-Koercion,
+SENSOR-ERROR:0-Summary, merge-base/patch-id Landed-Beweis in den Go-Kriterien,
+OverflowError-Guard in `_entry_delivery_timeout`, fehlender Union-Import,
+Fallback-Bound-Docstring. Danach: **keine offenen K3-Findings, keine neuen Findings.**
