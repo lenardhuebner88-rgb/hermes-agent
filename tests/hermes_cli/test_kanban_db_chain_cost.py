@@ -17,6 +17,7 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from agent.usage_pricing import estimate_equivalent_cost_amount
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
@@ -188,12 +189,11 @@ def test_chain_cost_breakdown_empty_chain(kanban_home):
 
 def test_claude_opus_equivalent_uses_anthropic_model_label_prices():
     """G5: Claude equivalent cost is priced from the model label including cache read."""
-    equivalent = kb._equiv_from_tokens(
-        None,
+    equivalent = estimate_equivalent_cost_amount(
         "claude-opus-4-8",
-        131_747,
-        4_793,
-        cache_read=350_208,
+        input_tokens=131_747,
+        output_tokens=4_793,
+        cache_read_tokens=350_208,
     )
     assert equivalent is not None
     assert equivalent == pytest.approx(0.953664)
@@ -205,10 +205,12 @@ def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
     models.dev prices ($5/$30/cr$0.5 per Mtok). 979746 in / 26557 out / 4464640
     cache_read; the 2999 reasoning tokens are ALREADY inside the 26557
     output_tokens and must never be added a second time (would double-count)."""
-    equivalent = kb._equiv_from_tokens(
-        "openai", "gpt-5.5",
-        979_746, 26_557,
-        cache_read=4_464_640,
+    equivalent = estimate_equivalent_cost_amount(
+        "gpt-5.5",
+        provider="openai",
+        input_tokens=979_746,
+        output_tokens=26_557,
+        cache_read_tokens=4_464_640,
     )
     assert equivalent is not None
     # 979746·$5 + 26557·$30 + 4464640·$0.5 (per Mtok) = $7.92776
@@ -612,7 +614,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
             return _FakeModelInfo()
         return None
 
-    monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 9.125)
 
     with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}

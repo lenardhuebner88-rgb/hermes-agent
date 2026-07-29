@@ -989,6 +989,10 @@ def resolve_billing_route(
     provider_name = (provider or "").strip().lower()
     base = (base_url or "").strip().lower()
     model = (model_name or "").strip()
+    # Historical Claude CLI rows can contain only a claude-* model label.
+    # Preserve that identity before applying generic provider routing.
+    if not provider_name and model.lower().startswith("claude-"):
+        provider_name = "anthropic"
     if not provider_name and "/" in model:
         inferred_provider, bare_model = model.split("/", 1)
         if inferred_provider in {"anthropic", "openai", "google"}:

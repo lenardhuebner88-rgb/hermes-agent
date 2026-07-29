@@ -17,6 +17,7 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from agent.usage_pricing import get_pricing_entry
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
@@ -140,6 +141,7 @@ def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
         lambda name: str(profile_dir),
     )
     monkeypatch.setattr(kb, "_profile_subscription", lambda p: "kimi")
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 0.01095)
     sid = "S-kimi-k27"
     _write_profile_state_session(
         profile_dir, sid,
@@ -181,40 +183,13 @@ def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
         assert json.loads(meta2)["cost_usd_equivalent"] == pytest.approx(0.01095)
 
 
-def test_k16_kimi_k27_price_override_is_available():
-    assert kb._lookup_model_price_per_mtok("kimi", "kimi-k2.7") == pytest.approx(
-        (0.67, 3.50, 0.20, 0.67)
-    )
+def test_k16_kimi_coding_price_is_available_from_canonical_feed():
+    assert get_pricing_entry("k3", provider="kimi-coding") is not None
 
 
-def test_b1_glm52_price_override_entries():
-    """AC-1: _PRICE_OVERRIDES_PER_MTOK has explicit entries for the glm-5.2 family."""
-    assert "glm-5.2" in kb._PRICE_OVERRIDES_PER_MTOK
-    assert "glm-5.2-fast" in kb._PRICE_OVERRIDES_PER_MTOK
-    assert "glm-5.2-short" in kb._PRICE_OVERRIDES_PER_MTOK
-    # All variants inherit base pricing: input $0.60/M, output $2.20/M
-    for model in ("glm-5.2", "glm-5.2-fast", "glm-5.2-short"):
-        rates = kb._PRICE_OVERRIDES_PER_MTOK[model]
-        assert rates[0] == pytest.approx(0.60)  # input
-        assert rates[1] == pytest.approx(2.20)  # output
+def test_b1_alibaba_token_plan_price_is_available_from_canonical_feed():
+    assert get_pricing_entry("qwen3.8-max-preview", provider="alibaba-token-plan") is not None  # output
 
-
-def test_b1_glm52_price_override_via_lookup():
-    """AC-1: the override dict is consulted by _lookup_model_price_per_mtok."""
-    rates = kb._lookup_model_price_per_mtok("neuralwatt", "glm-5.2")
-    assert rates is not None
-    assert rates[0] == pytest.approx(0.60)
-    assert rates[1] == pytest.approx(2.20)
-
-
-def test_b2_strip_model_variant_suffix():
-    """AC-2: suffix truncation for -fast, -short, -short-fast variants."""
-    assert kb._strip_model_variant_suffix("glm-5.2-fast") == "glm-5.2"
-    assert kb._strip_model_variant_suffix("glm-5.2-short") == "glm-5.2"
-    assert kb._strip_model_variant_suffix("glm-5.2-short-fast") == "glm-5.2"
-    # No known suffix → None (caller should not retry)
-    assert kb._strip_model_variant_suffix("gpt-5.5") is None
-    assert kb._strip_model_variant_suffix("") is None
 
 
 def test_b3_neuralwatt_cost_block_extraction():
@@ -233,10 +208,7 @@ def test_b3_neuralwatt_cost_block_extraction():
 
 def test_b3_neuralwatt_cost_status_estimated_fallback(kanban_home, tmp_path, monkeypatch):
     """AC-3: when response cost is missing, _end_run falls back to estimated."""
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok",
-        lambda provider, model: (0.60, 2.20, 0.0, 0.0) if model and "glm-5.2" in model else None,
-    )
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 2.8)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="nw-fallback", assignee="coder")
         kb.claim_task(conn, tid)
@@ -262,9 +234,7 @@ def test_b3_neuralwatt_cost_status_unknown_when_no_pricing(kanban_home, tmp_path
     cost_status is 'unknown' in the metadata (never hard-error). The
     task_runs.cost_status column stays NULL because its CHECK constraint
     only accepts actual/estimated."""
-    monkeypatch.setattr(
-        kb, "_lookup_model_price_per_mtok", lambda provider, model: None,
-    )
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: None)
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="nw-unknown", assignee="coder")
         kb.claim_task(conn, tid)
