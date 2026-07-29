@@ -801,40 +801,32 @@ def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
 
 
 def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
-    kanban_home, monkeypatch
+    kanban_home,
 ):
-    prices = PricingEntry(
-        input_cost_per_million=Decimal("2"),
-        output_cost_per_million=Decimal("8"),
-        source="official_docs",
-    )
-    seen_models = []
-
-    def fake_get_pricing_entry(model_name, provider=None):
-        seen_models.append((model_name, provider))
-        return prices
-
-    monkeypatch.setattr("agent.usage_pricing.get_pricing_entry", fake_get_pricing_entry)
 
     with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="historical costs")
 
         def insert_run(
             *, input_tokens, output_tokens, cost_usd, cost_status,
-            requested_model=None, active_model=None,
+            requested_provider=None, requested_model=None,
+            active_provider=None, active_model=None,
         ):
             return conn.execute(
                 "INSERT INTO task_runs ("
                 "task_id, profile, status, started_at, ended_at, input_tokens, "
-                "output_tokens, cost_usd, cost_status, requested_model, active_model"
-                ") VALUES (?, 'coder', 'done', 100, 200, ?, ?, ?, ?, ?, ?)",
+                "output_tokens, cost_usd, cost_status, requested_provider, "
+                "requested_model, active_provider, active_model"
+                ") VALUES (?, 'coder', 'done', 100, 200, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     input_tokens,
                     output_tokens,
                     cost_usd,
                     cost_status,
+                    requested_provider,
                     requested_model,
+                    active_provider,
                     active_model,
                 ),
             ).lastrowid
@@ -844,15 +836,18 @@ def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
             output_tokens=500,
             cost_usd=0.0,
             cost_status=None,
-            requested_model="priced-requested",
-            active_model="ignored-active",
+            requested_provider="openai-codex",
+            requested_model="gpt-5.5",
+            active_provider="unmapped-provider",
+            active_model="not-in-feed",
         )
         active_id = insert_run(
             input_tokens=2000,
             output_tokens=1000,
             cost_usd=None,
             cost_status="estimated",
-            active_model="priced-active",
+            active_provider="openai-codex",
+            active_model="gpt-5.5",
         )
         actual_id = insert_run(
             input_tokens=1000,
@@ -868,6 +863,14 @@ def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
             cost_status=None,
             requested_model="missing-tokens",
         )
+        unpriced_id = insert_run(
+            input_tokens=1000,
+            output_tokens=500,
+            cost_usd=None,
+            cost_status=None,
+            requested_provider="unmapped-provider",
+            requested_model="not-in-feed",
+        )
         existing_id = insert_run(
             input_tokens=1000,
             output_tokens=1000,
@@ -878,7 +881,7 @@ def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
         conn.commit()
 
         dry_run = kb.backfill_run_costs_from_tokens(conn, dry_run=True)
-        assert dry_run == {"rows_affected": 2, "total_cost_usd": 0.018}
+        assert dry_run == {"rows_affected": 2, "total_cost_usd": 0.06}
         assert tuple(
             conn.execute(
                 "SELECT cost_usd, cost_status FROM task_runs WHERE id = ?",
@@ -887,7 +890,7 @@ def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
         ) == (0.0, None)
 
         applied = kb.backfill_run_costs_from_tokens(conn)
-        assert applied == {"rows_affected": 2, "total_cost_usd": 0.018}
+        assert applied == {"rows_affected": 2, "total_cost_usd": 0.06}
         assert kb.backfill_run_costs_from_tokens(conn) == {
             "rows_affected": 0,
             "total_cost_usd": 0.0,
@@ -895,21 +898,25 @@ def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
 
         rows = conn.execute(
             "SELECT id, cost_usd, cost_status FROM task_runs "
-            "WHERE id IN (?, ?, ?, ?, ?) ORDER BY id",
-            (requested_id, active_id, actual_id, no_tokens_id, existing_id),
+            "WHERE id IN (?, ?, ?, ?, ?, ?) ORDER BY id",
+            (
+                requested_id,
+                active_id,
+                actual_id,
+                no_tokens_id,
+                unpriced_id,
+                existing_id,
+            ),
         ).fetchall()
 
     assert [(row["cost_usd"], row["cost_status"]) for row in rows] == [
-        (0.006, "estimated"),
-        (0.012, "estimated"),
+        (0.02, "estimated"),
+        (0.04, "estimated"),
         (0.0, "actual"),
         (0.0, None),
+        (None, None),
         (0.5, "estimated"),
     ]
-    assert {model for model, _provider in seen_models} == {
-        "priced-requested",
-        "priced-active",
-    }
 
 
 def test_backfill_costs_cli_dry_run_reports_without_writing(

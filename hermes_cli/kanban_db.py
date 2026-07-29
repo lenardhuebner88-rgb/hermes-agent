@@ -8371,14 +8371,16 @@ def backfill_run_costs_from_tokens(
 
     Only rows without an actual cost are candidates.  A positive, complete
     pricing entry is required so zero-price or unpriced routes remain untouched
-    and can be retried after pricing data improves.  ``requested_model`` wins
-    over ``active_model`` because it is the immutable claim-time route.
+    and can be retried after pricing data improves.  ``requested_model`` and
+    ``requested_provider`` win over their active-route counterparts because
+    they are the immutable claim-time route.
     """
     from agent.usage_pricing import get_pricing_entry
 
     sql = (
         "SELECT id, input_tokens, output_tokens, "
-        "COALESCE(requested_model, active_model) AS model "
+        "COALESCE(requested_model, active_model) AS model, "
+        "COALESCE(requested_provider, active_provider) AS provider "
         "FROM task_runs "
         "WHERE ended_at IS NOT NULL "
         "AND input_tokens IS NOT NULL "
@@ -8401,7 +8403,10 @@ def backfill_run_costs_from_tokens(
     updates: list[tuple[float, int]] = []
     total = Decimal("0")
     for row in candidates:
-        pricing = get_pricing_entry(str(row["model"]))
+        provider = row["provider"]
+        pricing = get_pricing_entry(
+            str(row["model"]), provider=str(provider) if provider else None
+        )
         if pricing is None:
             continue
         input_tokens = int(row["input_tokens"])
