@@ -82,4 +82,4 @@ def test_deep_audit_accumulates_cost_for_all_turns(monkeypatch):
 
     result = deep_audit.run_deep_audit(subsystem="unit-cost", llm_call=fake_llm)
     assert result["ok"] is True
-    assert result["cost"]["request_cost_usd"] == pytest.approx(2.80)
+    assert result["cost"]["request_cost_usd"] == pytest.approx(5.80)

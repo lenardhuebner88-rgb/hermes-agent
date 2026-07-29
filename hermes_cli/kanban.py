@@ -1168,24 +1168,24 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Opt-in repair for closed non-claude-cli subscription runs frozen "
-            "at cost_usd=0.0: set metadata.cost_usd_equivalent from "
-            "input/output tokens and active lane model without changing cost_usd"
+            "at cost_usd=0.0: stamp raw pricing facts from input/output tokens "
+            "and active lane model without changing cost_usd"
         ),
     )
     p_bfcost.add_argument(
         "--audited-claude-equivalent",
         action="store_true",
-        help="S1b audited dry-run/classification for missing Claude cost_usd_equivalent stamps",
+        help="S1b audited dry-run/classification for missing Claude raw pricing facts",
     )
     p_bfcost.add_argument(
         "--audited-non-claude-equivalent",
         action="store_true",
-        help="S1c audited dry-run/classification for missing non-Claude cost_usd_equivalent stamps",
+        help="S1c audited dry-run/classification for missing non-Claude raw pricing facts",
     )
     p_bfcost.add_argument(
         "--apply",
         action="store_true",
-        help="Apply audited equivalent stamps; only use after explicit operator approval",
+        help="Apply audited raw-pricing-fact repairs; only use after explicit operator approval",
     )
 
     # --- backfill-metrics ---
@@ -4787,7 +4787,7 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             f"{token_report['rows_affected'] + n + n_sessions} run(s)."
         )
         if n_repair:
-            print(f"Repaired cost_usd_equivalent for {n_repair} frozen closed run(s).")
+            print(f"Repaired cost-equivalent raw facts for {n_repair} frozen closed run(s).")
     return 0
 
 

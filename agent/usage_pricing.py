@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Literal, Mapping, Optional
+from typing import Any, Dict, Iterable, Literal, Mapping, Optional
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
 from utils import base_url_host_matches
@@ -115,6 +115,46 @@ class CostResult:
     fetched_at: Optional[datetime] = None
     pricing_version: Optional[str] = None
     notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PricingCoverageSample:
+    """Aggregated runs and tokens for one observed provider/model pair."""
+
+    provider: Optional[str]
+    model: Optional[str]
+    run_count: int
+    token_count: int
+
+
+@dataclass(frozen=True)
+class PricingCoverage:
+    """Measured priceability without treating unknown routes as zero-cost."""
+
+    total_runs: int
+    priced_runs: int
+    total_tokens: int
+    priced_tokens: int
+
+    @property
+    def unpriced_runs(self) -> int:
+        return self.total_runs - self.priced_runs
+
+    @property
+    def unpriced_tokens(self) -> int:
+        return self.total_tokens - self.priced_tokens
+
+    @property
+    def run_coverage_fraction(self) -> Optional[float]:
+        if not self.total_runs:
+            return None
+        return self.priced_runs / self.total_runs
+
+    @property
+    def token_coverage_fraction(self) -> Optional[float]:
+        if not self.total_tokens:
+            return None
+        return self.priced_tokens / self.total_tokens
 
 
 _UTC_NOW = lambda: datetime.now(timezone.utc)
@@ -989,6 +1029,14 @@ def resolve_billing_route(
     provider_name = (provider or "").strip().lower()
     base = (base_url or "").strip().lower()
     model = (model_name or "").strip()
+    # Historical Claude CLI rows can contain only a claude-* model label.
+    # Preserve that identity before applying generic provider routing.
+    if not provider_name and model.lower().startswith("claude-"):
+        provider_name = "anthropic"
+    # Deep-audit responses carry only this bare model label.  Preserve the
+    # historical priced-reporting behavior through the canonical Z.AI row.
+    if not provider_name and model.lower() == "glm-5.2":
+        provider_name = "zai"
     if not provider_name and "/" in model:
         inferred_provider, bare_model = model.split("/", 1)
         if inferred_provider in {"anthropic", "openai", "google"}:
@@ -1008,7 +1056,9 @@ def resolve_billing_route(
 
     subscription_aliases = {
         "claude-cli": "anthropic",
+        "kimi-code": "moonshot",
         "kimi-coding": "moonshot",
+        "qwen": "alibaba",
         "xai-oauth": "xai",
         "alibaba-token-plan": "alibaba",
     }
@@ -1561,9 +1611,9 @@ def estimate_equivalent_cost(
 
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     entry = get_pricing_entry(
-        model_name,
-        provider=provider,
-        base_url=base_url,
+        route.model,
+        provider=route.provider,
+        base_url=route.base_url,
         api_key=api_key,
     )
     if not entry:
@@ -1581,6 +1631,99 @@ def estimate_equivalent_cost(
     )
 
 
+def estimate_equivalent_cost_amount(
+    model_name: Optional[str],
+    *,
+    provider: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    cache_read_tokens: Optional[int] = None,
+    cache_write_tokens: Optional[int] = None,
+) -> Optional[float]:
+    """Return a numeric list-price equivalent for persisted usage, if known.
+
+    This boundary adapts nullable, database-shaped token fields to
+    :class:`CanonicalUsage`. It deliberately delegates all route resolution and
+    pricing to :func:`estimate_equivalent_cost`; callers must not keep a second
+    price table or fallback lookup for reporting-only equivalent values.
+    """
+    if not model_name:
+        return None
+    if not any((input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)):
+        return None
+    result = estimate_equivalent_cost(
+        model_name,
+        CanonicalUsage(
+            input_tokens=int(input_tokens or 0),
+            output_tokens=int(output_tokens or 0),
+            cache_read_tokens=int(cache_read_tokens or 0),
+            cache_write_tokens=int(cache_write_tokens or 0),
+        ),
+        provider=provider,
+    )
+    return float(result.amount_usd) if result.amount_usd is not None else None
+
+
+def estimate_equivalent_cost_amounts(
+    facts: Iterable[Mapping[str, Any]],
+) -> list[Optional[float]]:
+    """Value persisted usage facts in one request-scoped pricing pass.
+
+    Pricing entries are resolved once per distinct canonical route for this
+    call, then discarded. This is deliberately not a cross-request cache:
+    replacing the vendored feed or an override affects the very next read.
+    """
+    missing = object()
+    entries: dict[
+        tuple[str, str, str],
+        PricingEntry | None,
+    ] = {}
+    amounts: list[Optional[float]] = []
+    for fact in facts:
+        model_name = fact.get("model")
+        if not model_name:
+            amounts.append(None)
+            continue
+        usage = CanonicalUsage(
+            input_tokens=int(fact.get("input_tokens") or 0),
+            output_tokens=int(fact.get("output_tokens") or 0),
+            cache_read_tokens=int(fact.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(fact.get("cache_write_tokens") or 0),
+        )
+        if not usage.total_tokens:
+            amounts.append(None)
+            continue
+        provider = fact.get("provider")
+        base_url = fact.get("base_url")
+        route = resolve_billing_route(
+            str(model_name),
+            provider=str(provider) if provider else None,
+            base_url=str(base_url) if base_url else None,
+        )
+        key = (route.provider, route.model, route.base_url)
+        entry = entries.get(key, missing)
+        if entry is missing:
+            entry = get_pricing_entry(
+                route.model,
+                provider=route.provider,
+                base_url=route.base_url,
+            )
+            entries[key] = entry
+        if entry is None:
+            amounts.append(None)
+            continue
+        result = _estimate_priced_usage(
+            route=route,
+            usage=usage,
+            entry=entry,
+            result_status="equivalent",
+        )
+        amounts.append(
+            float(result.amount_usd) if result.amount_usd is not None else None
+        )
+    return amounts
+
+
 def has_known_pricing(
     model_name: str,
     provider: Optional[str] = None,
@@ -1593,10 +1736,36 @@ def has_known_pricing(
     pipeline — avoids creating dummy usage objects just to check status.
     """
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
-    if route.billing_mode == "subscription_included":
-        return True
-    entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
+    entry = get_pricing_entry(
+        route.model,
+        provider=route.provider,
+        base_url=route.base_url,
+        api_key=api_key,
+    )
     return entry is not None
+
+
+def pricing_coverage(samples: Iterable[PricingCoverageSample]) -> PricingCoverage:
+    """Aggregate priced run/token coverage for observed provider/model pairs.
+
+    A missing model or pricing row is intentionally counted as unpriced.  This
+    makes an incomplete route visible to reporting instead of converting it to
+    a plausible-looking zero-cost value.
+    """
+
+    total_runs = priced_runs = total_tokens = priced_tokens = 0
+    for sample in samples:
+        total_runs += sample.run_count
+        total_tokens += sample.token_count
+        if sample.model and has_known_pricing(sample.model, provider=sample.provider):
+            priced_runs += sample.run_count
+            priced_tokens += sample.token_count
+    return PricingCoverage(
+        total_runs=total_runs,
+        priced_runs=priced_runs,
+        total_tokens=total_tokens,
+        priced_tokens=priced_tokens,
+    )
 
 
 

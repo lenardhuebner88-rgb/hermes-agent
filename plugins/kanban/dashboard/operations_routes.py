@@ -704,8 +704,9 @@ def get_runs_costs(
 ):
     """F4 (Statistik): cost view — today + rolling window totals and a
     per-profile breakdown over the window. Reads only stamped task_runs
-    columns plus ``metadata.cost_usd_equivalent`` (K17 subscription lanes
-    carry an honest $0 in ``cost_usd``).
+    columns plus a derived ``cost_usd_equivalent`` (K17 subscription lanes
+    retain raw model/provider/token facts for this read-time calculation).
+    Cost is exposed as both real provider USD and the separate equivalent.
 
     Registered BEFORE ``/runs/{run_id}`` so the literal segment isn't
     captured as a run id.

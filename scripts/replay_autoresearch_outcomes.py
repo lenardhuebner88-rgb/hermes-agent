@@ -28,6 +28,49 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _provider_cost_summary(run_evidence: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize replay costs without treating an unknown equivalent as zero."""
+    subscription_runs = [
+        item
+        for item in run_evidence
+        if item.get("billing_mode") == "subscription_included"
+    ]
+    equivalent_covered = [
+        item for item in subscription_runs if item.get("cost_usd_equivalent") is not None
+    ]
+    equivalent_complete = len(equivalent_covered) == len(subscription_runs)
+    equivalent_coverage = (
+        len(equivalent_covered) / len(subscription_runs) if subscription_runs else 1.0
+    )
+    costs_complete = all(item.get("cost_usd") is not None for item in run_evidence)
+    effective_complete = costs_complete and equivalent_complete
+    equivalent = (
+        round(
+            sum(float(item["cost_usd_equivalent"]) for item in equivalent_covered),
+            8,
+        )
+        if subscription_runs and equivalent_complete
+        else None
+    )
+    known_cost = round(
+        sum(float(item["cost_usd"] or 0.0) for item in run_evidence),
+        8,
+    )
+    return {
+        "provider_cost_status": "complete" if effective_complete else "partial",
+        "known_provider_cost_usd": known_cost,
+        "provider_cost_usd": known_cost if costs_complete else None,
+        "provider_cost_usd_equivalent": equivalent,
+        "provider_cost_usd_equivalent_confidence": (
+            "derived" if equivalent is not None else "unknown"
+        ),
+        "provider_cost_usd_equivalent_coverage": round(equivalent_coverage, 8),
+        "provider_effective_cost_usd": (
+            round(known_cost + (equivalent or 0.0), 8) if effective_complete else None
+        ),
+    }
+
+
 def _configure(root: Path, state: Path, *, repo_root: Path | None = None) -> None:
     sys.path.insert(0, str(root))
     scripts = root / "scripts"
@@ -728,8 +771,9 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
             cost_backfilled_runs += kb.backfill_run_costs(conn, limit=10)
             task = kb.get_task(conn, task_id)
             runs = conn.execute(
-                "SELECT id, status, profile, cost_usd, cost_status, requested_provider, "
-                "requested_model, metadata FROM task_runs WHERE task_id=? ORDER BY id",
+                "SELECT id, status, profile, input_tokens, output_tokens, cost_usd, cost_status, "
+                "requested_provider, requested_model, metadata "
+                "FROM task_runs WHERE task_id=? ORDER BY id",
                 (task_id,),
             ).fetchall()
             review_skips = conn.execute(
@@ -757,6 +801,15 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
             metadata = json.loads(row["metadata"] or "{}")
         except (TypeError, ValueError):
             metadata = {}
+        billing_mode = metadata.get("billing_mode") if isinstance(metadata, dict) else None
+        if billing_mode == "subscription_included":
+            equivalent, equivalent_confidence = kb._run_cost_equivalent_from_facts(
+                metadata,
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+            )
+        else:
+            equivalent, equivalent_confidence = None, "unknown"
         run_evidence.append(
             {
                 "id": int(row["id"]),
@@ -773,13 +826,9 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                     )
                     or ("actual" if row["cost_usd"] is not None else "unknown")
                 ),
-                "cost_usd_equivalent": (
-                    float(metadata["cost_usd_equivalent"])
-                    if isinstance(metadata.get("cost_usd_equivalent"), (int, float))
-                    and not isinstance(metadata.get("cost_usd_equivalent"), bool)
-                    else None
-                ),
-                "billing_mode": metadata.get("billing_mode"),
+                "cost_usd_equivalent": equivalent,
+                "cost_usd_equivalent_confidence": equivalent_confidence,
+                "billing_mode": billing_mode,
                 "requested_provider": row["requested_provider"],
                 "requested_model": row["requested_model"],
                 "commit": metadata.get("commit") if isinstance(metadata, dict) else None,
@@ -796,60 +845,7 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 "review_skipped_deterministic": len(review_skips),
                 "provider_calls": len(run_evidence),
                 "cost_backfilled_runs": int(cost_backfilled_runs),
-                "provider_cost_status": (
-                    "complete"
-                    if all(
-                        item["cost_usd"] is not None
-                        and (
-                            item["billing_mode"] != "subscription_included"
-                            or item["cost_usd_equivalent"] is not None
-                        )
-                        for item in run_evidence
-                    )
-                    else "partial"
-                ),
-                "known_provider_cost_usd": round(
-                    sum(float(item["cost_usd"] or 0.0) for item in run_evidence), 8
-                ),
-                "provider_cost_usd": (
-                    round(sum(float(item["cost_usd"] or 0.0) for item in run_evidence), 8)
-                    if all(item["cost_usd"] is not None for item in run_evidence)
-                    else None
-                ),
-                "provider_cost_usd_equivalent": (
-                    round(
-                        sum(
-                            float(item["cost_usd_equivalent"] or 0.0)
-                            for item in run_evidence
-                        ),
-                        8,
-                    )
-                    if all(
-                        item["billing_mode"] != "subscription_included"
-                        or item["cost_usd_equivalent"] is not None
-                        for item in run_evidence
-                    )
-                    else None
-                ),
-                "provider_effective_cost_usd": (
-                    round(
-                        sum(float(item["cost_usd"] or 0.0) for item in run_evidence)
-                        + sum(
-                            float(item["cost_usd_equivalent"] or 0.0)
-                            for item in run_evidence
-                        ),
-                        8,
-                    )
-                    if all(
-                        item["cost_usd"] is not None
-                        and (
-                            item["billing_mode"] != "subscription_included"
-                            or item["cost_usd_equivalent"] is not None
-                        )
-                        for item in run_evidence
-                    )
-                    else None
-                ),
+                **_provider_cost_summary(run_evidence),
             }
         )
     )

@@ -480,7 +480,8 @@ def test_finalize_attempt_charges_cost_and_emits_event_once(outcome_home: Path) 
     assert json.loads(event_rows[0]["payload"])["cost_breakdown"]["delivery_usd"] == 0.15
 
 
-def test_measurement_accounting_includes_every_component_once(outcome_home: Path) -> None:
+def test_measurement_accounting_includes_every_component_once(outcome_home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 0.40)
     with kb.connect() as conn:
         task_id = kb.create_task(conn, title="accounting", created_by="autoresearch")
         conn.execute(
@@ -504,7 +505,8 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
                 json.dumps(
                     {
                         "billing_mode": "subscription_included",
-                        "cost_usd_equivalent": 0.40,
+                        "cost_equivalent_model": "claude-fable-5",
+                        "cost_equivalent_provider": "anthropic",
                     }
                 ),
             ),

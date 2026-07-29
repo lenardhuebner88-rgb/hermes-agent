@@ -127,6 +127,8 @@ def test_chain_summaries_publish_state_identity_age_and_aggregate_costs(
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cost_usd_equivalent": 0.25,
+                "cost_usd_equivalent_confidence": "derived",
+                "cost_usd_equivalent_coverage": 1.0,
                 "cost_effective_usd": 0.25,
             }
             for task_id in task_ids
@@ -212,6 +214,8 @@ def test_chain_summary_stations_are_topological_capped_and_card_ready(
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cost_usd_equivalent": 0.5,
+                "cost_usd_equivalent_confidence": "derived",
+                "cost_usd_equivalent_coverage": 1.0,
                 "cost_effective_usd": 0.5,
             }
             for task_id in task_ids

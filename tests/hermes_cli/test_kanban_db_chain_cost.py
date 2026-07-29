@@ -17,6 +17,7 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from agent.usage_pricing import estimate_equivalent_cost_amount
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
@@ -188,12 +189,11 @@ def test_chain_cost_breakdown_empty_chain(kanban_home):
 
 def test_claude_opus_equivalent_uses_anthropic_model_label_prices():
     """G5: Claude equivalent cost is priced from the model label including cache read."""
-    equivalent = kb._equiv_from_tokens(
-        None,
+    equivalent = estimate_equivalent_cost_amount(
         "claude-opus-4-8",
-        131_747,
-        4_793,
-        cache_read=350_208,
+        input_tokens=131_747,
+        output_tokens=4_793,
+        cache_read_tokens=350_208,
     )
     assert equivalent is not None
     assert equivalent == pytest.approx(0.953664)
@@ -205,10 +205,12 @@ def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
     models.dev prices ($5/$30/cr$0.5 per Mtok). 979746 in / 26557 out / 4464640
     cache_read; the 2999 reasoning tokens are ALREADY inside the 26557
     output_tokens and must never be added a second time (would double-count)."""
-    equivalent = kb._equiv_from_tokens(
-        "openai", "gpt-5.5",
-        979_746, 26_557,
-        cache_read=4_464_640,
+    equivalent = estimate_equivalent_cost_amount(
+        "gpt-5.5",
+        provider="openai",
+        input_tokens=979_746,
+        output_tokens=26_557,
+        cache_read_tokens=4_464_640,
     )
     assert equivalent is not None
     # 979746·$5 + 26557·$30 + 4464640·$0.5 (per Mtok) = $7.92776
@@ -217,8 +219,7 @@ def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
 
 
 def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
-    """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
-    by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""
+    """Legacy materialized equivalents are ignored when raw facts are absent."""
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sub-chain", assignee="orchestrator",
                               triage=True)
@@ -245,13 +246,16 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
 
     lane = next(l for l in result["by_lane"] if l["profile"] == "claude-cli")
     assert lane["cost_usd"] == pytest.approx(0.0)
-    assert lane["cost_usd_equivalent"] == pytest.approx(0.42)
-    assert lane["cost_effective_usd"] == pytest.approx(0.42)
+    assert lane["cost_usd_equivalent"] is None
+    assert lane["cost_usd_equivalent_confidence"] == "unknown"
+    assert lane["cost_usd_equivalent_coverage"] == 0.0
+    assert lane["cost_effective_usd"] is None
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.0)
-    assert totals["cost_usd_equivalent"] == pytest.approx(0.42)
-    assert totals["cost_effective_usd"] == pytest.approx(0.42)
+    assert totals["cost_usd_equivalent"] is None
+    assert totals["cost_usd_equivalent_confidence"] == "unknown"
+    assert totals["cost_effective_usd"] is None
 
 
 def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkeypatch):
@@ -469,12 +473,12 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
     assert neuralwatt["billing_neuralwatt_kwh"] == pytest.approx(0.03)
     assert neuralwatt["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
     assert neuralwatt["actual_cost_usd"] == pytest.approx(0.12)
-    assert neuralwatt["api_equivalent_usd"] == pytest.approx(0.90)
+    assert neuralwatt["api_equivalent_usd"] is None
 
     totals = result["totals"]
     assert totals["actual_cost_usd"] == pytest.approx(0.52)
     assert totals["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
-    assert totals["api_equivalent_usd"] == pytest.approx(0.90)
+    assert totals["api_equivalent_usd"] is None
 
 
 def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
@@ -496,18 +500,24 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
 
     lane = result["by_lane"][0]
     assert lane["cost_usd"] == pytest.approx(0.03)
-    assert lane["cost_usd_equivalent"] == pytest.approx(0.0)
-    assert lane["cost_effective_usd"] == pytest.approx(0.03)
+    assert lane["cost_usd_equivalent"] is None
+    assert lane["cost_usd_equivalent_confidence"] == "unknown"
+    assert lane["cost_effective_usd"] is None
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.03)
-    assert totals["cost_usd_equivalent"] == pytest.approx(0.0)
-    assert totals["cost_effective_usd"] == pytest.approx(0.03)
+    assert totals["cost_usd_equivalent"] is None
+    assert totals["cost_effective_usd"] is None
 
 
-def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
+def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
     """by_lane is sorted descending by cost_effective_usd so subscription lanes
     with cost_usd=0 but positive equivalent rank above zero-cost API lanes."""
+    monkeypatch.setattr(
+        kb,
+        "estimate_equivalent_cost_amounts",
+        lambda facts: [1.00 for _ in facts],
+    )
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sort-chain", assignee="orchestrator",
                               triage=True)
@@ -523,14 +533,17 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
         )
         sub_task, api_task = child_ids
         with kb.write_txn(conn):
-            # subscription run: cost_usd=0, equivalent=1.00 → effective=1.00
+            # subscription raw facts derive to 1.00 → effective=1.00
             _insert_run_cost_with_meta(
                 conn, sub_task,
                 profile="claude-cli",
                 input_tokens=2000,
                 output_tokens=400,
                 cost_usd=0.0,
-                metadata={"cost_usd_equivalent": 1.00},
+                metadata={
+                    "cost_equivalent_model": "claude-fable-5",
+                    "cost_equivalent_provider": "anthropic",
+                },
             )
             # API run: cost_usd=0.005, no equivalent → effective=0.005
             _insert_run_cost_with_meta(
@@ -546,9 +559,11 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
         result = kb.chain_cost_breakdown(conn, root)
 
     by_lane = result["by_lane"]
-    # claude-cli (effective=1.00) must rank above openrouter (effective=0.005)
+    # The subscription lane carries a derived equivalent independently of the
+    # stored legacy field and therefore ranks above the smaller metered lane.
     assert by_lane[0]["profile"] == "claude-cli"
-    assert by_lane[1]["profile"] == "openrouter"
+    assert by_lane[0]["cost_usd_equivalent"] == pytest.approx(1.00)
+    assert by_lane[0]["cost_usd_equivalent_confidence"] == "derived"
 
 
 def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanban_home):
@@ -585,7 +600,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     """Claude subscription sessions can be unpriced and omit billing_provider.
 
     ``task_runs`` deliberately has no cache-token columns; the fallback must use
-    the matched state.db session's model/tokens plus models.dev pricing and infer
+    the matched state.db session's model/tokens plus canonical pricing and infer
     Anthropic for bare ``claude-*`` model names.
     """
     profile_dir = tmp_path / "profiles" / "coder-claude"
@@ -595,24 +610,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     monkeypatch.setattr(kb, "_profile_subscription",
                         lambda p: "claude" if p == "coder-claude" else None)
 
-    calls: list[tuple[str, str]] = []
-
-    class _FakeModelInfo:
-        cost_input = 15.0
-        cost_output = 75.0
-        cost_cache_read = 1.50
-        cost_cache_write = 18.75
-
-        def has_cost_data(self):
-            return True
-
-    def fake_get_model_info(provider, model):
-        calls.append((provider, model))
-        if (provider, model) == ("anthropic", "claude-opus-4-8"):
-            return _FakeModelInfo()
-        return None
-
-    monkeypatch.setattr("agent.models_dev.get_model_info", fake_get_model_info)
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 9.125)
 
     with kb.connect_closing() as conn:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(task_runs)")}
@@ -638,11 +636,15 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     assert row["input_tokens"] == 1_000_000
     assert row["output_tokens"] == 100_000
     meta = json.loads(row["metadata"])
-    assert meta["cost_usd_equivalent"] == pytest.approx(22.5)
+    assert "cost_usd_equivalent" not in meta
+    equivalent, confidence = kb._run_cost_equivalent_from_facts(
+        meta, input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
+    )
+    assert equivalent == pytest.approx(9.125)
+    assert confidence == "derived"
     assert meta["model"] == "claude-opus-4-8"
     assert meta["billing_mode"] == "subscription_included"
     assert meta["subscription"] == "claude"
-    assert calls == [("anthropic", "claude-opus-4-8")]
 
 
 def test_s1_openrouter_estimated_cost_status_propagates(kanban_home, tmp_path, monkeypatch):
@@ -729,7 +731,7 @@ def test_k17_backfill_claude_cli_uses_spawn_identity_after_lane_switch(
         assert meta["worker_runtime"] == "claude-cli"
         assert meta["model"] == "claude-fable-5"
         assert meta["provider"] is None
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lane_switch(
@@ -778,7 +780,7 @@ def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lan
         assert meta["worker_runtime"] == "claude-cli"
         assert meta["model"] == "claude-opus-4-1"
         assert meta["provider"] is None
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.55)
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
@@ -818,5 +820,4 @@ def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
         assert meta["provider"] is None
         assert meta["fallback_used"] is True
         assert meta["billing_mode"] == "subscription_included"
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)
-
+        assert "cost_usd_equivalent" not in meta

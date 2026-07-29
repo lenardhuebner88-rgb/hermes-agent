@@ -5,6 +5,16 @@ import json
 import pytest
 
 from agent.pricing_feed import load_vendored_pricing
+from agent.usage_pricing import (
+    CanonicalUsage,
+    estimate_equivalent_cost,
+    estimate_usage_cost,
+    get_pricing_entry,
+    has_known_pricing,
+    PricingCoverageSample,
+    pricing_coverage,
+    resolve_billing_route,
+)
 
 
 def _write_feed(tmp_path, payload) -> "object":
@@ -70,6 +80,123 @@ def test_feed_reasoning_rate_is_model_specific(tmp_path):
     assert separate.reasoning_cost_per_million == 3
     assert included.reasoning_billing == "included_in_output"
     assert included.reasoning_cost_per_million is None
+
+
+def test_xai_oauth_equivalent_uses_the_pricing_table_cache_read_rate():
+    """The route and equivalent calculation must read the same canonical row."""
+    usage = CanonicalUsage(cache_read_tokens=1_000_000)
+
+    entry = get_pricing_entry("grok-4.5", provider="xai-oauth")
+    equivalent = estimate_equivalent_cost("grok-4.5", usage, provider="xai-oauth")
+
+    assert entry is not None
+    assert entry.cache_read_cost_per_million == 0.50
+    assert equivalent.amount_usd == entry.cache_read_cost_per_million
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("kimi-coding", "k3"),
+        ("alibaba-token-plan", "qwen3.8-max-preview"),
+        ("qwen", "qwen3.8-max-preview"),
+    ],
+)
+def test_subscription_lane_equivalents_have_a_canonical_price(provider, model):
+    equivalent = estimate_equivalent_cost(
+        model,
+        CanonicalUsage(input_tokens=1_000_000),
+        provider=provider,
+    )
+
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+
+
+def test_subscription_actual_cost_stays_zero_while_equivalent_is_priced():
+    usage = CanonicalUsage(input_tokens=1_000_000)
+
+    actual = estimate_usage_cost("k3", usage, provider="kimi-coding")
+    equivalent = estimate_equivalent_cost("k3", usage, provider="kimi-coding")
+
+    assert actual.amount_usd == 0
+    assert actual.status == "included"
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+
+
+def test_kimi_code_harvester_tag_uses_the_kimi_coding_route():
+    """The observed Kimi CLI tag is a subscription route, not a new vendor."""
+    route = resolve_billing_route("kimi-code/k3", provider="kimi-code")
+    equivalent = estimate_equivalent_cost(
+        "kimi-code/k3",
+        CanonicalUsage(input_tokens=1_000_000),
+        provider="kimi-code",
+    )
+
+    assert route.provider == "moonshot"
+    assert route.model == "k3"
+    assert route.billing_mode == "subscription_included"
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+    assert not has_known_pricing("kimi-for-coding", provider="kimi-code")
+
+
+def test_pricing_coverage_keeps_unknown_pairs_unpriced_and_visible():
+    known = PricingCoverageSample(
+        provider="kimi-code",
+        model="kimi-code/k3",
+        run_count=3,
+        token_count=150,
+    )
+    unknown = PricingCoverageSample(
+        provider="unknown-provider",
+        model="unknown-model",
+        run_count=1,
+        token_count=50,
+    )
+
+    fully_priced = pricing_coverage([known])
+    with_unknown = pricing_coverage([known, unknown])
+    unknown_equivalent = estimate_equivalent_cost(
+        unknown.model,
+        CanonicalUsage(input_tokens=1_000_000),
+        provider=unknown.provider,
+    )
+
+    assert fully_priced.run_coverage_fraction == 1
+    assert fully_priced.token_coverage_fraction == 1
+    assert with_unknown.priced_runs == 3
+    assert with_unknown.unpriced_runs == 1
+    assert with_unknown.priced_tokens == 150
+    assert with_unknown.unpriced_tokens == 50
+    assert with_unknown.run_coverage_fraction == 0.75
+    assert with_unknown.token_coverage_fraction == 0.75
+    assert unknown_equivalent.amount_usd is None
+
+
+def test_kanban_db_no_longer_declares_a_second_pricing_table_or_lookup():
+    import ast
+    from pathlib import Path
+
+    source = Path("hermes_cli/kanban_db.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    declared_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assigned_names = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+
+    assert "_lookup_model_price_per_mtok" not in declared_names
+    assert "_equiv_from_tokens" not in declared_names
+    assert "_PRICE_OVERRIDES_PER_MTOK" not in assigned_names
 
 
 def test_feed_requires_both_meta_and_models_objects(tmp_path):

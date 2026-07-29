@@ -190,6 +190,8 @@ def get_board_archive(
                     "input_tokens",
                     "output_tokens",
                     "cost_usd_equivalent",
+                    "cost_usd_equivalent_confidence",
+                    "cost_usd_equivalent_coverage",
                     "cost_effective_usd",
                 ):
                     card[field] = cost[field]

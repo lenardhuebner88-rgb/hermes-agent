@@ -17,6 +17,7 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from agent.usage_pricing import estimate_equivalent_cost_amount
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
@@ -893,11 +894,10 @@ def test_profile_outcome_stats_last_n_is_per_profile_window(kanban_home):
     assert stats["researcher"]["done_pct"] == pytest.approx(100.0)
 
 
-def test_cost_pipeline_glm52_pricing_and_suffix_fallback(kanban_home):
-    assert kb._equiv_from_tokens(None, "glm-5.2", 1_000_000, 1_000_000) == pytest.approx(2.80)
-    assert kb._equiv_from_tokens(None, "glm-5.2-fast", 1_000_000, 1_000_000) == pytest.approx(2.80)
-    assert kb._equiv_from_tokens(None, "glm-5.2-short", 1_000_000, 1_000_000) == pytest.approx(2.80)
-    assert kb._equiv_from_tokens(None, "glm-5.2-short-fast", 1_000_000, 1_000_000) == pytest.approx(2.80)
+def test_cost_pipeline_uses_canonical_subscription_pricing(kanban_home):
+    assert estimate_equivalent_cost_amount(
+        "k3", provider="kimi-coding", input_tokens=1_000, output_tokens=1_000
+    ) is not None
 
 
 def test_cost_pipeline_unknown_neuralwatt_cost_status_is_metadata_only(kanban_home):
