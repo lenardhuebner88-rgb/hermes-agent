@@ -164,3 +164,37 @@ def test_weakness_keys_treats_score_three_as_healthy():
     healthy = {k: "3" for k in ("safety", "output", "activation", "workflow", "eval", "maintain")}
     assert module.weakness_keys(healthy) == []
     assert module.weakness_keys(dict(healthy, safety="2")) == ["safety_gates"]
+
+
+# ---------------------------------------------------------------------------
+# Second pass: trend svg, action cap, audit dir
+# ---------------------------------------------------------------------------
+
+def test_trend_svg_two_points_and_flat_series():
+    """Two points are already a trend (boundary '< 2'); a flat series
+    (span 0) must still render via the span-1.0 fallback, never a
+    ZeroDivisionError."""
+    module = load_module()
+    assert module.trend_svg([1.0, 2.0]).startswith("<svg")
+    assert module.trend_svg([5.0, 5.0]).startswith("<svg")
+
+
+def test_recommended_actions_keeps_area_and_caps_at_eight():
+    """Actions keep the row's area verbatim (not coerced to 'all') and
+    stop at exactly 8 entries."""
+    module = load_module()
+    rows = [
+        {"area": f"area{i}", "weaknesses": ["safety_gates"], "skill": f"s{i}"}
+        for i in range(9)
+    ]
+    actions = module.recommended_actions(rows)
+    assert len(actions) == 8
+    assert actions[0]["area"] == "area0"
+
+
+def test_main_tolerates_existing_audit_dir():
+    """AUDIT already exists on a real checkout — main() must not fail on
+    mkdir(exist_ok)."""
+    module = load_module()
+    module.AUDIT.mkdir(parents=True, exist_ok=True)
+    assert module.main() == 0
