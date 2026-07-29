@@ -967,6 +967,131 @@ def get_ticker_last_error() -> Optional[str]:
 # Job CRUD Operations
 # =============================================================================
 
+# =============================================================================
+# jobs.json backup rotation + corruption recovery (A-H4)
+# =============================================================================
+
+# Number of rotating backup copies kept next to jobs.json. Rotation happens on
+# every successful atomic save, so bak.1 is always the most recent KNOWN-GOOD
+# write — exactly what a corruption recovery needs.
+JOBS_BACKUP_COUNT = 3
+
+
+def _jobs_backup_path(jobs_file: Path, index: int) -> Path:
+    return jobs_file.with_name(f"{jobs_file.name}.bak.{index}")
+
+
+def _rotate_jobs_backups(jobs_file: Path) -> None:
+    """Rotate jobs.json backups after a successful atomic save. Best-effort.
+
+    jobs.json.bak.1 is the newest copy, bak.N the oldest; the oldest is
+    dropped. A failure here must NEVER break the save that just succeeded —
+    warn loudly and move on.
+    """
+    try:
+        for index in range(JOBS_BACKUP_COUNT, 1, -1):
+            older = _jobs_backup_path(jobs_file, index - 1)
+            if older.exists():
+                os.replace(older, _jobs_backup_path(jobs_file, index))
+        newest = _jobs_backup_path(jobs_file, 1)
+        shutil.copy2(jobs_file, newest)
+        _secure_file(newest)
+    except OSError as e:
+        logger.warning(
+            "Could not rotate jobs.json backups (%s); the save itself "
+            "succeeded, but corruption recovery may have no valid backup", e,
+        )
+
+
+def _read_jobs_backup(path: Path) -> Optional[List[Dict[str, Any]]]:
+    """Return the job list from a backup file, or None if it is not usable.
+
+    A backup only counts as a recovery source when it parses as JSON and has
+    the expected top-level shape (a dict with a ``jobs`` list, or a bare list
+    like load_jobs() tolerates). Anything else is skipped so recovery never
+    restores garbage over garbage.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("jobs"), list):
+        return data["jobs"]
+    if isinstance(data, list):
+        return data
+    return None
+
+
+def _recover_jobs_from_backup(
+    jobs_file: Path,
+    cause: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Quarantine a corrupt jobs.json and restore the newest valid backup.
+
+    Returns the recovered job list, or None when no backup validates (caller
+    then keeps the previous fail-closed behaviour). The corrupt file is only
+    moved aside once a valid replacement EXISTS — renaming it without a
+    restore would make the next load_jobs() silently see "no file" and run
+    with an empty store, which is exactly the silent-data-loss outcome this
+    recovery exists to prevent.
+    """
+    for index in range(1, JOBS_BACKUP_COUNT + 1):
+        backup = _jobs_backup_path(jobs_file, index)
+        if not backup.exists():
+            continue
+        recovered = _read_jobs_backup(backup)
+        if recovered is None:
+            logger.warning(
+                "jobs.json backup %s is not a valid recovery source; trying older",
+                backup,
+            )
+            continue
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        quarantine = jobs_file.with_name(f"{jobs_file.name}.corrupt-{timestamp}")
+        try:
+            os.replace(jobs_file, quarantine)
+        except OSError as e:
+            logger.error(
+                "jobs.json is corrupt (%s) but could not be quarantined to %s: "
+                "%s — refusing to restore over it",
+                cause, quarantine, e,
+            )
+            return None
+        # Restore atomically so a crash mid-recovery cannot leave a torn
+        # jobs.json that the NEXT load would again treat as corrupt.
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(jobs_file.parent), suffix=".tmp", prefix=".jobs_recover_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"jobs": recovered, "updated_at": _hermes_now().isoformat()},
+                    f, indent=2,
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            atomic_replace(tmp_path, jobs_file)
+            _secure_file(jobs_file)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        message = (
+            f"jobs.json was corrupt ({cause}); quarantined to {quarantine.name} "
+            f"and restored {len(recovered)} job(s) from backup {backup.name}. "
+            f"Inspect the quarantined file for lost edits."
+        )
+        logger.error(message)
+        # Surface through the established status channel so `hermes cron
+        # status` shows the recovery instead of a silently healthy store.
+        record_ticker_error(message)
+        return recovered
+    return None
+
+
 def load_jobs() -> List[Dict[str, Any]]:
     """Load all jobs from storage."""
     jobs_file = _current_cron_store().jobs_file
@@ -990,6 +1115,9 @@ def load_jobs() -> List[Dict[str, Any]]:
                 data = json.loads(f.read(), strict=False)
         except Exception as e:
             logger.error("Failed to auto-repair jobs.json: %s", e)
+            recovered = _recover_jobs_from_backup(jobs_file, f"unparseable JSON: {e}")
+            if recovered is not None:
+                return recovered
             raise RuntimeError(f"Cron database corrupted and unrepairable: {e}") from e
     except IOError as e:
         logger.error("IOError reading jobs.json: %s", e)
@@ -1014,6 +1142,11 @@ def load_jobs() -> List[Dict[str, Any]]:
             logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
         return data
 
+    recovered = _recover_jobs_from_backup(
+        jobs_file, f"unexpected top-level type {type(data).__name__}"
+    )
+    if recovered is not None:
+        return recovered
     raise RuntimeError(
         f"Cron database corrupted: expected {{'jobs': [...]}}, got {type(data).__name__}"
     )
@@ -1045,6 +1178,9 @@ def _save_jobs_unlocked(jobs: List[Dict[str, Any]]):
         atomic_replace(tmp_path, jobs_file)
         _secure_file(jobs_file)
         _preserve_file_ownership(jobs_file, _stat_before)
+        # Only now — after the replace succeeded — snapshot the known-good
+        # bytes into the rotating backup series (A-H4). Best-effort.
+        _rotate_jobs_backups(jobs_file)
     except BaseException:
         try:
             os.unlink(tmp_path)
