@@ -993,6 +993,10 @@ def resolve_billing_route(
     # Preserve that identity before applying generic provider routing.
     if not provider_name and model.lower().startswith("claude-"):
         provider_name = "anthropic"
+    # Deep-audit responses carry only this bare model label.  Preserve the
+    # historical priced-reporting behavior through the canonical Z.AI row.
+    if not provider_name and model.lower() == "glm-5.2":
+        provider_name = "zai"
     if not provider_name and "/" in model:
         inferred_provider, bare_model = model.split("/", 1)
         if inferred_provider in {"anthropic", "openai", "google"}:
@@ -1565,9 +1569,9 @@ def estimate_equivalent_cost(
 
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     entry = get_pricing_entry(
-        model_name,
-        provider=provider,
-        base_url=base_url,
+        route.model,
+        provider=route.provider,
+        base_url=route.base_url,
         api_key=api_key,
     )
     if not entry:
