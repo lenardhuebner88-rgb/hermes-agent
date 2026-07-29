@@ -33527,6 +33527,30 @@ def _render_parent_results_and_role_history(
                     pass
             return body_lines
 
+        def _parent_attachment_lines(parent_id: str) -> list[str]:
+            """Render explicitly registered durable documents for one parent."""
+            attachments = list_attachments(conn, parent_id)
+            body_lines: list[str] = []
+            if attachments:
+                body_lines.append("_Parent attachments (explicit task_attachments only)_:")
+                for attachment in attachments:
+                    sha256 = (
+                        f"; sha256={attachment.sha256}"
+                        if attachment.sha256 else ""
+                    )
+                    body_lines.append(
+                        f"- id={attachment.id}; name={attachment.filename}; "
+                        f"size={attachment.size}{sha256}; "
+                        f"path={attachment.stored_path}"
+                    )
+            body_lines.append(
+                "_Lossless parent run handoff: "
+                f"`hermes kanban show {parent_id} --json` or, for Hermes "
+                f"workers, `kanban_show(task_id=\"{parent_id}\", mode=\"full\")` "
+                "returns all run summaries and metadata._"
+            )
+            return body_lines
+
         # A read-only scout parent produces recon hints, NOT an authoritative
         # result. Routing it into a separate "Advisory scout notes" section (vs
         # the equal-weight "Parent task results") stops a scout's off-scope
@@ -33561,6 +33585,7 @@ def _render_parent_results_and_role_history(
             age = _relative_age(done_ts, _now)
             lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
             lines.extend(_parent_result_lines(pt, run))
+            lines.extend(_parent_attachment_lines(pid))
             # PlanSpec reviewer children consume code-task handoffs through this
             # parent-results block. A deterministic review skip has no
             # submitted_for_review event, so include its persisted snapshot too.
@@ -33607,6 +33632,7 @@ def _render_parent_results_and_role_history(
                     f"### {pid} (scout)" + (f" (completed {age})" if age else "")
                 )
                 lines.extend(_parent_result_lines(pt, run))
+                lines.extend(_parent_attachment_lines(pid))
                 lines.append("")
 
     # Cross-task role history: what else has THIS assignee completed
@@ -33999,12 +34025,31 @@ def _worker_brief_input(
     if attachments:
         assignment.append(_kanban_context.BriefRecord(text="## Attachments", key="attachments"))
     for att in attachments:
+        sha256 = f"; sha256={att.sha256}" if att.sha256 else ""
         assignment.append(
             _kanban_context.BriefRecord(
-                text=f"Attachment `{att.filename}` ({att.content_type or 'unknown type'}, {att.size} bytes): `{att.stored_path}`",
+                text=(
+                    f"Attachment id={att.id}; name=`{att.filename}`; "
+                    f"type={att.content_type or 'unknown type'}; size={att.size}"
+                    f"{sha256}; path=`{att.stored_path}`"
+                ),
                 key=f"attachment:{att.id}",
             )
         )
+    assignment.append(
+        _kanban_context.BriefRecord(
+            text=(
+                "## Lossless run handoff retrieval\n"
+                "Completion documents are limited to explicit task_attachments and "
+                "declared metadata.artifacts; task prose is not scraped for paths or URLs.\n"
+                f"For this task's complete prior-run summaries and metadata use "
+                f"`hermes kanban show {task.id} --json`; Hermes workers may instead call "
+                f"`kanban_show(task_id=\"{task.id}\", mode=\"full\")`. "
+                "Parent-specific commands are listed with each completed parent."
+            ),
+            key="lossless-run-handoff",
+        )
+    )
     if int(task.continuation_count or 0) > 0:
         assignment.insert(
             0,

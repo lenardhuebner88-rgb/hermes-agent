@@ -486,6 +486,7 @@ def _handle_show(args: dict, **kw) -> str:
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
             children = kb.child_ids(conn, tid)
+            attachments = kb.list_attachments(conn, tid)
 
             def _task_dict(t):
                 return {
@@ -529,6 +530,18 @@ def _handle_show(args: dict, **kw) -> str:
                     "created_at": e.created_at, "run_id": e.run_id,
                 }
 
+            def _attachment_dict(attachment):
+                return {
+                    "id": attachment.id,
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                    "size": attachment.size,
+                    "sha256": attachment.sha256,
+                    "uploaded_by": attachment.uploaded_by,
+                    "stored_path": attachment.stored_path,
+                    "created_at": attachment.created_at,
+                }
+
             mode = str(args.get("mode") or "worker_slim").strip()
             if mode not in {"worker_slim", "full"}:
                 return tool_error("mode must be one of: worker_slim, full")
@@ -554,6 +567,7 @@ def _handle_show(args: dict, **kw) -> str:
                     },
                     "parents": parents,
                     "children": children,
+                    "attachments": [_attachment_dict(a) for a in attachments],
                     "comments": [_comment_dict(c) for c in comments[-8:]],
                     "events": [_event_dict(e) for e in events[-10:]],
                     "runs": [_run_dict(r) for r in runs[-3:]],
@@ -573,6 +587,7 @@ def _handle_show(args: dict, **kw) -> str:
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
+                "attachments": [_attachment_dict(a) for a in attachments],
                 "comments": [_comment_dict(c) for c in comments],
                 "events": [_event_dict(e) for e in events[-50:]],   # cap; full log via CLI
                 "runs": [_run_dict(r) for r in runs],
@@ -1338,6 +1353,7 @@ def _handle_attachments(args: dict, **kw) -> str:
                             "filename": attachment.filename,
                             "content_type": attachment.content_type,
                             "size": attachment.size,
+                            "sha256": attachment.sha256,
                             "uploaded_by": attachment.uploaded_by,
                             "stored_path": attachment.stored_path,
                             "created_at": attachment.created_at,
