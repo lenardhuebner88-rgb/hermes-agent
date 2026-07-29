@@ -156,17 +156,12 @@ def test_build_payload_uses_now_when_fetched_at_is_absent():
     assert datetime.fromisoformat(payload["_meta"]["fetched_at"])
 
 
-def test_pricing_version_is_the_sorted_key_hash():
-    """pricing_version must hash the SORTED-KEY serialization — dropping
-    sort_keys would flip the version string every time a field order
-    changes, even with identical prices."""
-    import hashlib
-    import json as _json
-
-    # input + cache_read: field-insertion order (input first) differs
-    # from alphabetical order (cache_read first), so dropping sort_keys
-    # would change the hash
-    feed = {
+def test_pricing_version_is_stable_under_field_insertion_order():
+    """pricing_version must be stable under field-insertion order — the
+    same prices inserted in a different order (input first vs. cache_read
+    first) must hash identically, or a metadata-only feed reshuffle would
+    flip the version string with no price change behind it."""
+    feed_input_first = {
         "xai/grok-test": {
             "litellm_provider": "xai",
             "mode": "chat",
@@ -174,12 +169,16 @@ def test_pricing_version_is_the_sorted_key_hash():
             "cache_read_input_token_cost": 0.0000001,
         }
     }
-    models = sync_model_prices.select_models(feed)
-    expected = hashlib.sha256(
-        _json.dumps(
-            sync_model_prices.price_snapshot(models),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    assert sync_model_prices.pricing_version(models) == f"litellm-{expected}"
+    feed_cache_read_first = {
+        "xai/grok-test": {
+            "litellm_provider": "xai",
+            "mode": "chat",
+            "cache_read_input_token_cost": 0.0000001,
+            "input_cost_per_token": 0.000001,
+        }
+    }
+    models_input_first = sync_model_prices.select_models(feed_input_first)
+    models_cache_read_first = sync_model_prices.select_models(feed_cache_read_first)
+    assert sync_model_prices.pricing_version(
+        models_input_first
+    ) == sync_model_prices.pricing_version(models_cache_read_first)
