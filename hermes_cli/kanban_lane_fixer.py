@@ -16,7 +16,11 @@ import time
 from collections.abc import Iterable
 from typing import Any, Optional
 
-from hermes_cli.kanban_chain_status import is_settled_fixer_card
+from hermes_cli.kanban_chain_status import (
+    blocked_event_kind,
+    is_integration_park,
+    is_settled_fixer_card,
+)
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
 
@@ -109,7 +113,15 @@ def current_lane_scope_park_fingerprint(
     refusing when the reason is not a lane-scope integration park.
     """
     reason = str(current_reason or "")
-    if not reason.startswith("integration parked:"):
+    blocked = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (parent_id,),
+    ).fetchone()
+    if not is_integration_park(
+        reason=reason,
+        block_kind=blocked_event_kind(blocked["payload"] if blocked else None),
+    ):
         return ""
     if "lane-scope" not in reason.lower():
         return ""
@@ -354,7 +366,12 @@ def resume_parent_for_completed_lane_fixer(
         if (
             parent is None
             or parent["status"] != "blocked"
-            or not current_reason.startswith("integration parked:")
+            or not is_integration_park(
+                reason=current_reason,
+                block_kind=blocked_event_kind(
+                    blocked["payload"] if blocked else None,
+                ),
+            )
             or "lane-scope" not in current_reason.lower()
         ):
             return False

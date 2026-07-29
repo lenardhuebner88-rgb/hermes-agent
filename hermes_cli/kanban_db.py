@@ -101,6 +101,7 @@ from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
 from hermes_cli import kanban_review_policy as _review_policy
 from hermes_cli.kanban_chain_status import (
+    _matching_conflict_fixer_attempts,
     blocked_event_kind,
     is_integration_park,
     is_settled_fixer_card,
@@ -26068,10 +26069,11 @@ def _resume_parent_for_completed_conflict_fixer(
         except (TypeError, ValueError):
             return False
         parent_id = str(payload.get("parent_id") or "").strip()
+        root_id = str(payload.get("root_id") or parent_id).strip()
         expected_fingerprint = str(
             payload.get("conflict_fingerprint") or ""
         ).strip()
-        if not parent_id or not expected_fingerprint:
+        if not parent_id or not root_id or not expected_fingerprint:
             return False
 
         parent = conn.execute(
@@ -26089,7 +26091,18 @@ def _resume_parent_for_completed_conflict_fixer(
         if (
             parent is None
             or parent["status"] != "blocked"
-            or not current_reason.startswith("integration parked:")
+            or not is_integration_park(
+                reason=current_reason,
+                block_kind=blocked_event_kind(
+                    blocked["payload"] if blocked else None,
+                ),
+            )
+            or _operator_escalation_is_active(conn, parent_id)
+            or _matching_conflict_fixer_attempts(
+                conn,
+                root_id=root_id,
+                conflict_fingerprint=expected_fingerprint,
+            ) >= CONFLICT_FIXER_MAX_ATTEMPTS
             or _conflict_fingerprint(current_reason) != expected_fingerprint
         ):
             return False
@@ -26681,7 +26694,6 @@ def no_silent_stall_sweep(
             reason=reason,
             block_kind=blocked_event_kind(
                 blocked_event["payload"] if blocked_event else None,
-                fallback=row["block_kind"],
             ),
         ):
             continue
@@ -36365,7 +36377,6 @@ def decision_queue(
                 reason=reason,
                 block_kind=blocked_event_kind(
                     lb[0] if lb else None,
-                    fallback=row["block_kind"],
                 ),
             ):
                 continue
