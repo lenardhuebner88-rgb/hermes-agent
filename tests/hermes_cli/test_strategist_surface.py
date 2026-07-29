@@ -297,7 +297,7 @@ def test_other_proposal_source_no_planspec_prefix(kanban_home):
 
 
 def test_parse_json_form_skips_none_and_empty_values():
-    """Kill comparison_flip L177: `not in` → `in` would keep None/empty values."""
+    """None/empty roi and counter_metric values must be dropped, not kept."""
     body = '<!-- strategist-meta {"target_metric": "uptime", "roi": null, "counter_metric": ""} -->'
     result = ss.parse_annotation(body)
     assert result["target_metric"] == "uptime"
@@ -340,7 +340,7 @@ def test_receipt_proposal_resolves_origin_title(kanban_home):
 
 
 def test_receipt_proposal_origin_none_when_row_missing(kanban_home):
-    """Kill comparison_flip L343: `if origin_row` → `if not origin_row` would invert."""
+    """Kill negate_if L343: `if origin_row` -> `if not origin_row` would invert."""
     with kb.connect() as conn:
         _make_held(conn, title="PlanSpec receipt-nonexistent-id: Fix the thing")
         proposals = ss.held_operator_proposals(conn)

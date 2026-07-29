@@ -158,7 +158,7 @@ def test_slice_id_starts_at_s1():
 
 
 def test_compile_valid_dep_does_not_raise():
-    """Kill identity_swap L181 (is -> is not): valid dep must not raise CompileBlocked."""
+    """Kill comparison_swap L181 (is -> is not): valid dep must not raise CompileBlocked."""
     plan = parse_prose_plan(
         "# Plan\n**Goal:** G\n\n## Slice: Alpha\n- done-when: A done.\n\n## Slice: Beta\n- done-when: B done.\n- deps: Alpha\n"
     )

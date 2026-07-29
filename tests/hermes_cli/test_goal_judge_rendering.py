@@ -304,7 +304,7 @@ def test_explicit_limit_is_enforced_independently_of_config(monkeypatch):
 
 
 def test_resolve_goal_chars_caps_at_maximum():
-    """Kill comparison_flip L76: flipped min() would return value above cap."""
+    """Kill return_none L76: mutating the return to None would fail the max-cap assertion."""
     from hermes_cli.goal_judge_rendering import MAX_GOAL_JUDGE_GOAL_CHARS, resolve_goal_chars
 
     loader = lambda: {"auxiliary": {"goal_judge": {"goal_chars": MAX_GOAL_JUDGE_GOAL_CHARS + 100}}}
@@ -312,7 +312,8 @@ def test_resolve_goal_chars_caps_at_maximum():
 
 
 def test_acceptance_section_ends_at_same_level_heading():
-    """Kill comparison_flip L89: flipped <= to > would not stop at same-level heading."""
+    """Kill comparison_swap L89: <= -> < would no longer stop at a same-level heading
+    (only a strictly higher-level heading would)."""
     from hermes_cli.goal_judge_rendering import acceptance_criteria_section
 
     goal = "## Acceptance Criteria\n- AC-1: test\n## Next Section\ncontent"
@@ -323,7 +324,8 @@ def test_acceptance_section_ends_at_same_level_heading():
 
 
 def test_truncate_prefix_small_limit():
-    """Kill comparison_flip L114: flipped <= would compute negative slice index."""
+    """Kill remove_guard L114: dropping the `if limit <= len(suffix): return text[:limit]`
+    guard would compute a negative slice index (limit - len(suffix))."""
     from hermes_cli.goal_judge_rendering import GOAL_TRUNCATION_SUFFIX, _truncate_prefix
 
     limit = len(GOAL_TRUNCATION_SUFFIX) - 1
@@ -334,7 +336,8 @@ def test_truncate_prefix_small_limit():
 
 
 def test_truncate_middle_small_limit():
-    """Kill comparison_flip L126: flipped <= would compute negative available space."""
+    """Kill remove_guard L126: dropping the `if limit <= len(marker): return text[:limit]`
+    guard would compute a negative available-space budget."""
     from hermes_cli.goal_judge_rendering import GOAL_MIDDLE_OMITTED_MARKER, _truncate_middle
 
     limit = len(GOAL_MIDDLE_OMITTED_MARKER) - 1
@@ -345,7 +348,8 @@ def test_truncate_middle_small_limit():
 
 
 def test_acceptance_item_empty_id_falls_back_to_index():
-    """Kill comparison_flip L286: flipped or would use empty string instead of index."""
+    """Kill bool_op_swap L286: `or` -> `and` would use an empty string instead of the
+    fallback index."""
     from hermes_cli.goal_judge_rendering import _acceptance_item
 
     item = {"id": "ac-", "statement": "do the thing"}
@@ -355,7 +359,7 @@ def test_acceptance_item_empty_id_falls_back_to_index():
 
 
 def test_acceptance_item_includes_verification_detail():
-    """Kill comparison_flip L294: flipped truthiness would skip non-empty details."""
+    """Kill negate_if L294: `if value:` -> `if not value:` would skip non-empty details."""
     from hermes_cli.goal_judge_rendering import _acceptance_item
 
     item = {"statement": "do it", "verification": "run pytest"}
@@ -365,8 +369,8 @@ def test_acceptance_item_includes_verification_detail():
 
 
 def test_render_task_goal_skips_criterion_present_in_body():
-    """Kill comparison_flip L344/L350: flipped 'not in' or skip condition would
-    render criteria already present in the body's acceptance section."""
+    """Criteria already present in the body's acceptance section must not be
+    re-rendered as a duplicate line."""
     from hermes_cli.goal_judge_rendering import render_task_goal
 
     task = SimpleNamespace(

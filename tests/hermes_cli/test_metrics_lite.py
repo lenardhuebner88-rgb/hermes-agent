@@ -147,7 +147,11 @@ def test_percentile_empty_returns_zero() -> None:
 
 
 def test_percentile_single_value_returns_it() -> None:
-    """Kill const_offset L67 (1 -> 2): single-element list must return that element."""
+    """A single-element list must return that element.
+
+    Note: this does not kill the const_offset L67 (1 -> 2) mutant — a probe run
+    showed it survives, since the general-case formula degenerates to
+    sorted_values[0] for a one-element list too. Kept as a correctness check."""
     assert ml._percentile([42.0], 50) == 42.0
     assert ml._percentile([7.5], 0) == 7.5
     assert ml._percentile([7.5], 100) == 7.5

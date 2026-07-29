@@ -646,7 +646,8 @@ def test_draft_dict_operator_edited_false_for_plain_draft(conn):
 
 
 def test_revision_title_no_double_prefix(conn):
-    """Kill negation L278: if->if not would double-prefix already-prefixed titles."""
+    """Kill bool_op_swap L278: `title or ""` -> `title and ""` would double-prefix
+    already-prefixed titles."""
     tid = _make_done_draft(conn, title="Überarbeiten: alter Titel")
     new_id = funnel.request_revision(
         conn, tid, draft_text="# Rev\n" + "r" * 150,

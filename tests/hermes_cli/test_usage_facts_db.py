@@ -493,7 +493,7 @@ def test_retention_deletes_only_expired_trace_rows(tmp_path):
 
 
 def test_call_kind_main_loop_is_sticky(tmp_path):
-    """Kill cmp_swap L396: == -> !=.
+    """Kill comparison_swap L396: == -> !=.
 
     The upsert logic makes call_kind='main_loop' sticky: once a run is
     tagged main_loop, a later upsert with a different call_kind must NOT
@@ -511,7 +511,7 @@ def test_call_kind_main_loop_is_sticky(tmp_path):
 
 
 def test_record_llm_call_accepts_zero_call_index(tmp_path):
-    """Kill cmp_swap L497: < -> <=.
+    """Kill comparison_swap L497: < -> <=.
 
     call_index=0 is the first valid call.  With the mutant, the guard
     ``call_index < 0`` becomes ``call_index <= 0`` and rejects index 0.
@@ -525,7 +525,7 @@ def test_record_llm_call_accepts_zero_call_index(tmp_path):
 
 
 def test_increment_tool_call_accepts_zero_duration(tmp_path):
-    """Kill cmp_swap L545: < -> <=.
+    """Kill comparison_swap L545: < -> <=.
 
     tool_duration_ms=0 is a valid measurement (instant tool).  With the
     mutant, the guard ``tool_duration_ms < 0`` becomes ``<= 0`` and
