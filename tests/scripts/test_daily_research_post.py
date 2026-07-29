@@ -180,3 +180,82 @@ def test_xml_link_falls_back_to_element_text_without_href():
 
     rss = ET.fromstring("<item><link>https://example.com/a</link></item>")
     assert _xml_link(rss) == "https://example.com/a"
+
+
+# ---------------------------------------------------------------------------
+# Second pass: normalisation, formatting fallbacks, config defaults
+# ---------------------------------------------------------------------------
+
+def test_normalize_url_and_title_tolerate_none_and_schemeless():
+    """None and scheme-less inputs normalise to '' — never a crash, never
+    a half-URL that would survive dedupe as unique."""
+    from scripts import daily_research_post as drp
+
+    assert drp._normalize_url(None) == ""
+    assert drp._normalize_url("http://") == ""
+    assert drp._normalize_title(None) == ""
+
+
+def test_format_daily_post_falls_back_for_missing_url_and_impact():
+    """An item without url renders 'n/a'; an item without system_impact
+    renders the derived default impact — empty strings would ship blank
+    lines to Discord."""
+    from scripts import daily_research_post as drp
+
+    item = drp.ResearchItem(
+        title="Neutral news item",
+        source="src",
+        url="",
+        priority="P3",
+        summary="nothing special here",
+        system_impact="",
+        score=0.0,
+    )
+    post = drp.format_daily_post([item], generated_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    assert "Link: n/a" in post
+    assert "Was bringt uns das im System? " in post
+    assert "Allgemeines Signal für die Roadmap" in post
+
+
+def test_source_from_dict_defaults_empty_fields():
+    """Missing name/url/priority normalise to ''/''/'P2' — the literal
+    string 'None' would pass the name-and-url filter and fetch garbage."""
+    from scripts import daily_research_post as drp
+
+    source = drp._source_from_dict({})
+    assert source.name == ""
+    assert source.url == ""
+    assert source.priority == "P2"
+
+
+def test_load_job_config_defaults_without_env_or_file(monkeypatch):
+    """With neither env override nor config file the defaults apply —
+    str(None) must not leak into channel id or schedule."""
+    from scripts import daily_research_post as drp
+
+    for key in (
+        "HERMES_DAILY_RESEARCH_CHANNEL_ID",
+        "HERMES_DAILY_RESEARCH_SCHEDULE",
+        "HERMES_DAILY_RESEARCH_MAX_ITEMS",
+        "HERMES_DAILY_RESEARCH_LOOKBACK_HOURS",
+        "HERMES_DAILY_RESEARCH_CONFIG",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    config = drp.load_job_config(None)
+    assert config.channel_id == drp.DEFAULT_CHANNEL_ID
+    assert config.schedule == drp.DEFAULT_SCHEDULE
+    assert config.max_items == drp.DEFAULT_MAX_ITEMS
+    assert config.lookback_hours == drp.DEFAULT_LOOKBACK_HOURS
+
+
+def test_score_item_empty_priority_falls_back_to_p2():
+    """An empty priority string scores as P2 — the reason trail must say
+    P2, not carry an empty label."""
+    from scripts import daily_research_post as drp
+
+    item = drp.ResearchItem(
+        title="x", source="s", url="https://e.example/a", priority=""
+    )
+    _score, reasons = drp._score_item(item, now=datetime(2026, 7, 1, tzinfo=timezone.utc))
+    assert reasons[0] == "P2"
