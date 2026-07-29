@@ -167,3 +167,42 @@ def test_reminder_approval_card_uses_german_local_time() -> None:
     assert "02.01.2999 um 10:30 Uhr" in question
     assert "Titel: Termin" in question
     assert "Grund: Wichtig" in question
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_reminder_id_is_exactly_28_chars(reminder_home: Path) -> None:
+    """Kill const_offset L35 (12 -> 13): token_hex(12) yields 24 hex chars,
+    so the id must be 'rem_' + 24 = 28 chars total."""
+    rid = create_reminder(
+        due_at_utc=_future_iso(), title="Länge", store=PAStore(reminder_home / "pa" / "pa.db"),
+    )
+    assert rid.startswith("rem_")
+    assert len(rid) == 28  # rem_ (4) + token_hex(12) (24)
+
+
+def test_mark_fired_returns_true_for_pending(reminder_home: Path) -> None:
+    """Kill comparison_swap L85 (== -> !=): marking a pending reminder
+    via conn= must return True, not False."""
+    store = PAStore(reminder_home / "pa" / "pa.db")
+    rid = create_reminder(
+        due_at_utc=_future_iso(), title="Pending", store=store,
+    )
+    with store.connect() as conn:
+        result = mark_fired(rid, datetime.now(tz=timezone.utc), conn=conn)
+    assert result is True
+
+
+def test_due_reminders_uses_passed_store(reminder_home: Path) -> None:
+    """Kill bool_op_swap L53 (or -> and): passing store= must actually
+    query that store, not fall through to a default PAStore()."""
+    custom = PAStore(reminder_home / "pa" / "custom.db")
+    now = datetime.now(tz=timezone.utc)
+    create_reminder(
+        due_at_utc=(now - timedelta(minutes=5)).isoformat(),
+        title="Im Custom Store", store=custom,
+    )
+    due = due_reminders(now_utc=now, store=custom)
+    assert len(due) == 1
+    assert due[0]["title"] == "Im Custom Store"
