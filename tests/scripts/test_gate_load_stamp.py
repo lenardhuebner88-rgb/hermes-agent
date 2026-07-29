@@ -515,3 +515,59 @@ def test_zero_serial_prediction_does_not_divide() -> None:
         workers=8,
     )
     assert "zero serial-pred" in line
+
+
+# ---------------------------------------------------------------------------
+# Second pass: guards and fallbacks
+# ---------------------------------------------------------------------------
+
+def test_repo_relative_test_key_rejects_empty_and_absolute():
+    mod = _load_stamp_module()
+    assert mod.is_repo_relative_test_key("") is False
+    assert mod.is_repo_relative_test_key("/abs/tests/x.py") is False
+    assert mod.is_repo_relative_test_key("tests/x.py") is True
+
+
+def test_cpu_count_is_none_for_non_positive(monkeypatch):
+    """A non-positive cpu count (0 or negative) is 'unknown' (None) —
+    never 0 or a negative core count in the stamp."""
+    mod = _load_stamp_module()
+    monkeypatch.setattr(mod.os, "cpu_count", lambda: 0)
+    assert mod.cpu_count() is None
+    monkeypatch.setattr(mod.os, "cpu_count", lambda: -1)
+    assert mod.cpu_count() is None
+
+
+def test_stamp_line_unknown_prediction_with_wall_is_plain_na():
+    """predicted=None with a measured wall reads as the plain
+    'dilation n/a (parallel×N)' — NOT the zero-serial-pred variant,
+    which is reserved for an actual 0.0 prediction."""
+    mod = _load_stamp_module()
+    line = mod.format_stamp_line(
+        file_count=1,
+        predicted_serial=None,
+        missing_count=0,
+        actual_wall=5.0,
+        load_before=1.0,
+        load_after=1.0,
+        cores=4,
+        workers=8,
+    )
+    assert "dilation n/a (parallel×8)" in line
+    assert "zero serial-pred" not in line
+
+
+def test_cmd_finish_falls_back_to_files_list_length(tmp_path, capsys):
+    """A state without file_count derives the count from the files list —
+    int(None) must never crash the finish stamp."""
+    import types
+
+    mod = _load_stamp_module()
+    state = {"files": ["tests/a.py", "tests/b.py"], "t0": time.monotonic() - 3.0}
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    rc = mod.cmd_finish(types.SimpleNamespace(state=path, durations=None))
+
+    assert rc == 0
+    assert "2 files" in capsys.readouterr().out
