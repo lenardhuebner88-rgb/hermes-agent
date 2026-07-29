@@ -327,3 +327,105 @@ def test_cli_gate_fix_check_triggered_without_ingested_block(
     out = capsys.readouterr().out
     assert "gate-fix-check: gate 'python' red 3 nights" in out
     assert "ingested HELD" in out
+
+
+# ---------------------------------------------------------------------------
+# Human-readable output is the default (never silent JSON-by-default)
+# ---------------------------------------------------------------------------
+
+def test_strategist_reflect_human_output_is_not_json(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """Without --json the reflect summary prints as a human line with raw
+    Umlauts — a JSON-by-default flip would break the cron journal grep."""
+    from hermes_cli import strategist as _strategist
+
+    monkeypatch.setattr(
+        _strategist,
+        "run_reflect",
+        lambda args: {
+            "mode": "reflect",
+            "note": {
+                "approved": 1,
+                "vetoed": 0,
+                "shipped": 2,
+                "vetoed_levers": ["größe"],
+            },
+        },
+    )
+    rc = _run_cli(
+        ["vision", "strategist", "--mode", "reflect"],
+        monkeypatch,
+        tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.startswith("strategist reflect: 1 approved")
+    assert "größe" in out
+    assert not out.strip().startswith("{")
+
+
+def test_gate_fix_check_idle_human_output_is_not_json(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """The idle line of gate-fix-check is human text with raw Umlauts,
+    not JSON."""
+    from hermes_cli import strategist as _strategist
+
+    monkeypatch.setattr(
+        _strategist,
+        "run_gate_fix",
+        lambda args: {"triggered": False, "reason": "nichts rot gewesen"},
+    )
+    rc = _run_cli(["vision", "gate-fix-check"], monkeypatch, tmp_path / "kanban.db")
+    assert rc == 0
+    assert "gate-fix-check: idle — nichts rot gewesen" in capsys.readouterr().out
+
+
+def test_triage_check_triggered_without_ingested_block_still_renders(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """A triggered triage result without an 'ingested' payload must still
+    render (key None) instead of crashing on None.get()."""
+    from hermes_cli import strategist as _strategist
+
+    monkeypatch.setattr(
+        _strategist,
+        "run_persistent_red_triage",
+        lambda args: {
+            "triggered": True,
+            "gate": "python",
+            "red_count": 3,
+            "window": 5,
+            "key": "k",
+            "fingerprint": "f",
+        },
+    )
+    rc = _run_cli(["vision", "triage-check"], monkeypatch, tmp_path / "kanban.db")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "triage-check: gate 'python' red 3 of 5 nights" in out
+    assert "ingested HELD" in out
+
+
+def test_deflake_check_triggered_with_empty_filed_still_renders(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    """A triggered deflake result without 'filed' degrades to zero opened
+    tasks — it must not crash iterating None."""
+    from hermes_cli import strategist as _strategist
+
+    monkeypatch.setattr(
+        _strategist,
+        "run_deflake_check",
+        lambda args: {
+            "triggered": True,
+            "candidates": [{"file": "tests/x.py"}],
+            "recurring": [],
+        },
+    )
+    rc = _run_cli(["vision", "deflake-check"], monkeypatch, tmp_path / "kanban.db")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "deflake-check: 1 flaky file(s)" in out
+    assert "0 de-flake task(s) opened" in out
