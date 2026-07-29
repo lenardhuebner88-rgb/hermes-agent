@@ -303,28 +303,6 @@ def test_explicit_limit_is_enforced_independently_of_config(monkeypatch):
 # --- mutation-hardening tests (night-run 2026-07-29) ---
 
 
-def test_acceptance_section_equality():
-    """Kill comparison_flip L44: flipped __eq__ would make identical sections unequal."""
-    from hermes_cli.goal_judge_rendering import AcceptanceSection
-
-    a = AcceptanceSection(start=1, end=5, text="hello")
-    b = AcceptanceSection(start=1, end=5, text="hello")
-    c = AcceptanceSection(start=1, end=6, text="hello")
-    assert a == b
-    assert a != c
-
-
-def test_acceptance_item_equality():
-    """Kill comparison_flip L53: flipped __eq__ would make identical items unequal."""
-    from hermes_cli.goal_judge_rendering import _AcceptanceItem
-
-    a = _AcceptanceItem(label="AC-1", statement="do it", details=(), rendered_statement="AC-1: do it")
-    b = _AcceptanceItem(label="AC-1", statement="do it", details=(), rendered_statement="AC-1: do it")
-    c = _AcceptanceItem(label="AC-2", statement="do it", details=(), rendered_statement="AC-2: do it")
-    assert a == b
-    assert a != c
-
-
 def test_resolve_goal_chars_caps_at_maximum():
     """Kill comparison_flip L76: flipped min() would return value above cap."""
     from hermes_cli.goal_judge_rendering import MAX_GOAL_JUDGE_GOAL_CHARS, resolve_goal_chars

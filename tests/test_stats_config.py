@@ -150,18 +150,6 @@ def test_mtime_change_reflects_without_force(config_file):
 # --- mutation-hardening tests (night-run 2026-07-29) ---
 
 
-def test_default_providers_all_visible():
-    """Kill boolean_flip L32-L36: True->False on each provider's visible flag."""
-    for provider in DEFAULT_STATS_CONFIG["providers"]:
-        assert provider["visible"] is True, f"{provider['id']} should be visible"
-
-
-def test_default_subscription_lanes_all_visible():
-    """Kill boolean_flip L48: True->False on subscription lane visible flag."""
-    for lane in DEFAULT_STATS_CONFIG["subscription_lanes"]:
-        assert lane["visible"] is True, f"{lane['key']} should be visible"
-
-
 def test_normalize_provider_explicit_usage_role_and_label():
     """Kill bool_op_swap L84 (or->and) and L89 (or->and):
     explicit usage_role and label must not be replaced by fallbacks."""

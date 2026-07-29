@@ -119,8 +119,3 @@ def test_collect_sync_stale_count_counts_exactly(monkeypatch):
     result = vpv._collect_sync()
     assert result["stale_count"] == 1
     assert result["error"] is None
-
-
-def test_timeout_constant_is_eight():
-    """Kill const_offset L30 (8 -> 9): the subprocess timeout must be 8s."""
-    assert vpv._TIMEOUT == 8

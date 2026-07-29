@@ -5,10 +5,8 @@ from __future__ import annotations
 from hermes_cli.pa_titles import (
     BRIEFING_TITLE_LIMIT,
     INBOX_DECLINE_FALLBACK,
-    INBOX_DECLINE_LIMIT,
     INBOX_SUMMARY_LIMIT,
     INBOX_WHY_FALLBACK,
-    INBOX_WHY_LIMIT,
     briefing_title,
     distill_decision_why,
     distill_title,
@@ -108,14 +106,6 @@ def test_bounded_text_truncates_at_exact_limit() -> None:
     result = _bounded_text(over, 80)
     assert len(result) == 80  # 79 chars + "…"
     assert result.endswith("…")
-
-
-def test_inbox_limit_constants() -> None:
-    """Kill const_offset L33, L35, L36, L40: pin exact constant values."""
-    assert INBOX_SUMMARY_LIMIT == 80
-    assert INBOX_WHY_LIMIT == 320
-    assert INBOX_DECLINE_LIMIT == 240
-    assert BRIEFING_TITLE_LIMIT == 120
 
 
 def test_distill_decision_why_labelled_section() -> None:

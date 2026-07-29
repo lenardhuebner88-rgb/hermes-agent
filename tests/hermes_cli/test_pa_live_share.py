@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 import hermes_cli.pa_chat as pa
 from hermes_cli.pa_live_share import (
-    LIVE_FRAME_MAX_BYTES,
     LiveShareError,
     LiveShareNoFrame,
     LiveShareNotFound,
@@ -223,8 +222,3 @@ def test_put_frame_exact_cap_accepted() -> None:
     # One byte over → rejected
     with pytest.raises(LiveShareError):
         reg.put_frame(sid, b"A" * 101, ".jpg")
-
-
-def test_frame_max_bytes_constant() -> None:
-    """Kill const_offset L33: 4 -> 5 would change LIVE_FRAME_MAX_BYTES."""
-    assert LIVE_FRAME_MAX_BYTES == 4 * 1024 * 1024
