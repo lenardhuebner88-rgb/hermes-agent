@@ -236,3 +236,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 7/20 = 35%
 - gate: narrow pytest 24 passed | ruff clean
 - commit: 1abc7678a
+
+## 34. hermes_cli/strategist_surface.py — 2026-07-29T01:58:04Z
+- probe before: 13/20 = 65%
+- killed survivors: [K] comparison_flip L177, [K] bool_op_swap L188, [K] comparison_swap L300, [K] boolean_flip L300, [K] bool_op_swap L323
+- equivalent survivors: bool_op_swap L338 (and→or unreachable for non-receipt), const_offset L280 (default param), const_offset L300 (slice offset)
+- probe after: 17/20 = 85%
+- commit: 80af88a9f
