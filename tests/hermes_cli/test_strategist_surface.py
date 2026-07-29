@@ -8,6 +8,7 @@ metrics-snapshot read (the H1 contract), and the held-operator-proposal builder
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -289,4 +290,59 @@ def test_other_proposal_source_no_planspec_prefix(kanban_home):
         proposals = ss.held_operator_proposals(conn)
     assert proposals[0]["source"] == "other"
     assert proposals[0]["display_title"] == full_title
+    assert proposals[0]["origin"] is None
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_parse_json_form_skips_none_and_empty_values():
+    """Kill comparison_flip L177: `not in` → `in` would keep None/empty values."""
+    body = '<!-- strategist-meta {"target_metric": "uptime", "roi": null, "counter_metric": ""} -->'
+    result = ss.parse_annotation(body)
+    assert result["target_metric"] == "uptime"
+    assert result["roi"] is None
+    assert result["counter_metric"] is None
+
+
+def test_parse_keyvalue_skips_unknown_keys():
+    """Kill bool_op_swap L188: `and` → `or` would accept unknown keys."""
+    body = "<!-- strategist-meta\nunknown_key: some_value\ntarget_metric: latency\n-->"
+    result = ss.parse_annotation(body)
+    assert result["target_metric"] == "latency"
+    assert "unknown_key" not in result
+    assert None not in result
+    assert len(result) == 4  # only canonical keys
+    assert result["roi"] is None
+
+
+def test_read_lever_outcomes_sorted_newest_first(kanban_home):
+    """Kill comparison_swap L300: reverse=True → False would sort oldest first."""
+    state_dir = Path(os.environ["HERMES_HOME"]) / "state" / "strategist"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    outcomes_file = state_dir / "lever-outcomes.json"
+    outcomes_file.write_text(
+        '[{"proposed_at": 100, "lever": "old"}, {"proposed_at": 300, "lever": "new"}, {"proposed_at": 200, "lever": "mid"}]',
+        encoding="utf-8",
+    )
+    records = ss.read_lever_outcomes()
+    assert [r["lever"] for r in records] == ["new", "mid", "old"]
+
+
+def test_receipt_proposal_resolves_origin_title(kanban_home):
+    """Kill bool_op_swap L338: `and` → `or` would skip origin lookup for receipt source."""
+    with kb.connect() as conn:
+        origin = kb.create_task(conn, title="Origin Task Title", assignee="coder")
+        _make_held(conn, title=f"PlanSpec receipt-{origin}: Fix the thing")
+        proposals = ss.held_operator_proposals(conn)
+    assert proposals[0]["source"] == "receipt"
+    assert proposals[0]["origin"] == "Origin Task Title"
+
+
+def test_receipt_proposal_origin_none_when_row_missing(kanban_home):
+    """Kill comparison_flip L343: `if origin_row` → `if not origin_row` would invert."""
+    with kb.connect() as conn:
+        _make_held(conn, title="PlanSpec receipt-nonexistent-id: Fix the thing")
+        proposals = ss.held_operator_proposals(conn)
+    assert proposals[0]["source"] == "receipt"
     assert proposals[0]["origin"] is None
