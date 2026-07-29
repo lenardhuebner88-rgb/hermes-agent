@@ -47,18 +47,17 @@ The additive migration preserves existing rows. Pre-migration/read-only
 databases are valid audit inputs and report the absent fields instead of
 failing or treating them as zero coverage.
 
-After the additive schema is present,
-`hermes kanban export-langfuse-worker-facts --dry-run --limit 100` previews the
-separate exact-correlation adapter. Before migration it fails closed with the
-missing column names. It exports only exact-correlated foreign facts, excludes
-native Hermes origins to avoid duplicate traces, emits no raw
-prompts/tool arguments/results, and uses deterministic trace/generation IDs
-plus the dedicated `kanban-worker-usage` tag and a local ledger for
-idempotency. The native `kanban-worker` tag remains reserved for real worker
-run traces, so the throughput tile never double-counts call-level backfill.
-The default limit is a streaming canary guard; a missing ledger starts empty,
-while an unreadable or malformed ledger or a per-event ingestion error aborts
-without advancing the checkpoint.
+Exact-correlated worker facts are read into `/control`; they are deliberately
+NOT pushed back into Langfuse. The binding operator decision
+`vault/00-Canon/decisions/2026-07-27-kosten-ssot-im-lesepfad.md` (rule 4) states:
+"Langfuse ist nicht das Auswertungsziel. Kein Export, kein zweites Dashboard.
+Kennzahlen gehören ins `/control`." An export adapter written against this
+contract was removed before landing for exactly that reason — do not
+reintroduce one without a new operator decision.
+
+`scripts/langfuse_worker_audit.py` reports the correlation coverage read-only
+and mutates neither Hermes nor Langfuse; it is the supported way to inspect
+how many worker runs are exactly correlated.
 
 `scripts/langfuse_worker_audit.py` is the source of truth for rollout coverage.
 It reports explicit per-origin denominators, structural unknowns and matched

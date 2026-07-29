@@ -1150,23 +1150,6 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         help="Explicit backfill canary cap: post at most N total ingestion events",
     )
 
-    p_export_worker_facts = sub.add_parser(
-        "export-langfuse-worker-facts",
-        help="Export exact-correlated foreign worker usage facts to Langfuse",
-    )
-    p_export_worker_facts.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Report exact correlation and pending rows without network writes",
-    )
-    p_export_worker_facts.add_argument(
-        "--limit",
-        type=int,
-        default=100,
-        metavar="N",
-        help="Canary cap in worker runs (default: 100)",
-    )
-
     p_bfcost = sub.add_parser(
         "backfill-costs",
         help="Deferred profile-aware cost backfill for closed runs with NULL "
@@ -4523,22 +4506,6 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_export_langfuse_worker_facts(args: argparse.Namespace) -> int:
-    """Export metadata-only foreign worker facts; never duplicates live Hermes."""
-    from hermes_cli.langfuse_worker_export import export_worker_facts
-
-    try:
-        result = export_worker_facts(
-            dry_run=bool(args.dry_run),
-            run_limit=int(args.limit),
-        )
-    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    print(json.dumps(result, sort_keys=True))
-    return 0
-
-
 def _fmt_pct(value: Optional[float]) -> str:
     """Format a 0..1 float as percentage string, or 'n/a'."""
     return f"{value:.1%}" if value is not None else "n/a"
@@ -5308,7 +5275,6 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "stats":    _cmd_stats,
     "scores":   _cmd_scores,
     "export-langfuse-scores": _cmd_export_langfuse_scores,
-    "export-langfuse-worker-facts": _cmd_export_langfuse_worker_facts,
     "backfill-costs": _cmd_backfill_costs,
     "backfill-metrics": _cmd_backfill_metrics,
     "log":      _cmd_log,
