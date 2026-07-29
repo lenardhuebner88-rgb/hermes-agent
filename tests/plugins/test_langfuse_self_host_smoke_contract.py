@@ -232,6 +232,7 @@ def test_control_surface_smoke_requires_fresh_usage_with_known_fact_rows() -> No
     assert report["langfuse"]["state"] == "fresh"
     assert report["dashboard"]["budget"]["passed"] is True
     assert report["dashboard"]["usage_acceptable"] is False
+    assert report["dashboard"]["sample_count"] >= 10
     assert report["status"] == "fail"
 
 
@@ -281,6 +282,7 @@ def test_control_surface_smoke_runbook_uses_canonical_cookie_login() -> None:
     assert "scripts/smoke_health_status_auth.py" in readme
     assert "in-memory cookie" in readme
     assert "HERMES_DASHBOARD_PASSWORD" in readme
+    assert "--warm-calls 10" in readme
     assert "HERMES_DASHBOARD_TOKEN" not in readme
     assert "127.0.0.1:8642" not in readme
 

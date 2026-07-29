@@ -643,7 +643,7 @@ def build_control_surface_live_smoke(
     *,
     dashboard_base_url: str,
     days: int = 7,
-    warm_calls: int = 5,
+    warm_calls: int = 10,
     page_size: int = 100,
     env: Mapping[str, str] | None = None,
     langfuse_request: Callable[..., dict[str, Any]] | None = None,
@@ -784,6 +784,7 @@ def build_control_surface_live_smoke(
         report["dashboard"] = {
             "authenticated": True,
             "warm_calls": warm_calls,
+            "sample_count": len(wall_samples),
             "wall_ms": {
                 "median": statistics.median(wall_samples),
                 "maximum": max(wall_samples),
@@ -992,6 +993,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         default=os.environ.get("HERMES_DASHBOARD_USERNAME", ""),
     )
     parser.add_argument("--dashboard-password-env", default="HERMES_DASHBOARD_PASSWORD")
+    parser.add_argument(
+        "--warm-calls",
+        type=int,
+        default=10,
+        help="authenticated measured reads after warm-up (minimum 5, default 10)",
+    )
     parser.add_argument("--no-prompt", action="store_true")
     return parser.parse_args(argv)
 
@@ -1000,6 +1007,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
     try:
         if args.control_surface_smoke_url is not None:
+            if args.warm_calls < 5:
+                raise ValueError("warm_calls_below_minimum")
             dashboard_probe = _authenticated_dashboard_request(
                 args.control_surface_smoke_url,
                 provider=args.dashboard_auth_provider,
@@ -1010,6 +1019,7 @@ def main(argv: list[str] | None = None) -> int:
             report = build_control_surface_live_smoke(
                 dashboard_base_url=args.control_surface_smoke_url,
                 days=args.days,
+                warm_calls=args.warm_calls,
                 dashboard_request=dashboard_probe,
             )
             print(json.dumps(report, indent=2, sort_keys=True))

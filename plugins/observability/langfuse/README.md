@@ -147,13 +147,15 @@ the receipt.
        --control-surface-smoke-url http://127.0.0.1:9119 \
        --dashboard-auth-provider basic \
        --dashboard-username "$DASHBOARD_USERNAME" \
+       --warm-calls 10 \
        --no-prompt \
        --days 7 > control-surface-smoke.json
    ```
 
    This performs a configured-host check, an authenticated Langfuse Public API
    page, a complete pagination scan, an intentionally one-page-limited scan,
-   one dashboard warm-up, and five measured authenticated dashboard reads. A
+   one dashboard warm-up, and ten measured authenticated dashboard reads. The
+   CLI enforces the PlanSpec minimum of five reads. A
    complete scan can report `fresh` only after an explicit total-page boundary
    or a short final page. The limited scan always reports `partial`, count
    lower bounds, and unknown total-window coverage. The complete scan is bounded
