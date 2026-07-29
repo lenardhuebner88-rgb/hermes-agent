@@ -37,15 +37,36 @@ Design notes:
   ``send``   : the payload was attempted on every delivery path and failed;
                queued and retried with backoff (transient blips recover).
   ``config`` : operator/configuration error (unknown platform, platform not
-               configured/enabled); dead ON ARRIVAL — no replay can fix a
-               typo'd deliver target, so it is parked as a visible dead
-               letter instead of being retried forever. Repeated failures of
-               the same (job_id, target, class) REFRESH the dead entry so a
-               permanently misconfigured job does not pile up dead letters.
+               configured/enabled, gateway config unloadable); dead ON
+               ARRIVAL — no replay can fix a typo'd deliver target, so it is
+               parked as a visible dead letter instead of being retried
+               forever.
   ``relay``  : relay-fronted destination; the relay connector owns the
                platform credential, so a standalone replay could never
-               authenticate — dead on arrival, visible, same refresh dedupe
-               as ``config``.
+               authenticate — dead on arrival, visible.
+  Dead-letter entries are APPEND-ONLY per execution (audit loop 17 / F2):
+  the dedupe key includes the execution_id, so two failed runs of the same
+  job/target keep BOTH payloads — the loop-13 refresh dedupe used to let a
+  newer run's config/relay failure overwrite an older run's payload. As the
+  anti-pile-up guard for a permanently misconfigured job, at most
+  ``MAX_DEAD_PER_TARGET`` (3) config/relay entries per (job_id, target,
+  class) are kept: a new entry past the cap replaces the OLDEST one
+  (documented cap, not silent growth). Legacy callers without an
+  execution_id keep the loop-13 refresh collapse (their key cannot
+  distinguish runs).
+- Send lease + delivery receipt (audit loop 17 / F3): a replay persists
+  status ``sending`` (with ``lease_ts``, ``lease_pid`` and the
+  ``send_attempt`` number) BEFORE the send goes out, and records
+  ``delivered`` with a ``receipt`` (the platform-side message_id when the
+  send path returns one, else a payload hash + timestamp) immediately after.
+  At replay start, a ``sending`` entry whose lease is older than
+  ``HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS`` (default 600s) is orphaned — its
+  holder died mid-send — and is retried; a fresh ``sending`` entry belongs
+  to a live process and is skipped. HONEST REMAINING GAP: a crash between
+  the successful send and the receipt write still redelivers once after the
+  lease expires — that is at-least-once with a visible receipt as proof,
+  not a silent loss; exactly-once would require platform-side idempotency
+  keys the send APIs do not offer.
 - Locking (audit loop 13 / F1): every read-modify-write (enqueue, replay
   bookkeeping) runs under the in-process RLock PLUS a bounded cross-process
   advisory flock on ``<outbox>.lock`` — same pattern as cron/jobs.py's
@@ -116,6 +137,18 @@ ERROR_CLASS_SEND = "send"
 ERROR_CLASS_CONFIG = "config"
 ERROR_CLASS_RELAY = "relay"
 _ERROR_CLASSES_NO_RETRY = frozenset({ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY})
+
+# Anti-pile-up cap for dead-on-arrival classes (audit loop 17 / F2): at most
+# this many config/relay entries per (job_id, target, class) are kept; a new
+# entry past the cap replaces the OLDEST. Dead-letter payloads are append-only
+# per execution below this cap — visibility without unbounded growth.
+MAX_DEAD_PER_TARGET = 3
+
+# Send-lease TTL (audit loop 17 / F3): a ``sending`` entry whose lease is
+# older than this is orphaned (its holder crashed mid-send) and retried; a
+# fresher lease belongs to a live process and is skipped. Env-overridable,
+# read per call so tests and operators can tune without a restart.
+_DEFAULT_LEASE_TTL_SECONDS = 600.0
 
 # Upper bound on waiting for the cross-process <outbox>.lock flock — same
 # reasoning as cron/jobs.py #60703: a wedged lock holder must not freeze the
@@ -351,6 +384,24 @@ def _write_entries(path: Path, entries: List[Dict[str, Any]]) -> None:
         raise
 
 
+def _lease_ttl_seconds() -> float:
+    """Effective send-lease TTL; env-tunable, invalid values fall back."""
+    try:
+        return float(os.environ.get(
+            "HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", _DEFAULT_LEASE_TTL_SECONDS
+        ))
+    except (TypeError, ValueError):
+        return _DEFAULT_LEASE_TTL_SECONDS
+
+
+def _lease_is_stale(entry: Dict[str, Any], now: datetime) -> bool:
+    """True when a ``sending`` entry's lease holder must be presumed dead."""
+    lease = _parse_ts(entry.get("lease_ts"))
+    if lease is None:
+        return True  # sending without a lease timestamp cannot be fresh
+    return (now - lease).total_seconds() > _lease_ttl_seconds()
+
+
 def _dedupe_key(job_id: Any, target: Any) -> str:
     target = target if isinstance(target, dict) else {}
     return "|".join([
@@ -390,12 +441,25 @@ def enqueue(
 
     ``error_class`` (audit loop 13 / F3): ``send`` entries are queued and
     retried with backoff; ``config``/``relay`` entries are dead ON ARRIVAL
-    (no replay can fix an operator typo or authenticate a relay destination)
-    and dedupe on (job_id, target, class) — a permanently misconfigured job
-    refreshes its single visible dead letter instead of piling up new ones.
+    (no replay can fix an operator typo or authenticate a relay destination).
+    Audit loop 17 / F2: dead-letter entries are append-only per execution —
+    the key includes the execution_id, so different runs keep BOTH payloads.
+    A permanently misconfigured job is still bounded: past
+    ``MAX_DEAD_PER_TARGET`` entries per (job_id, target, class) the OLDEST
+    entry is replaced. Legacy callers without an execution_id keep the
+    loop-13 refresh collapse and are marked with a warning on send-class
+    enqueues (audit loop 17 / F1 — productive run paths are expected to
+    carry an execution_id since run_one_job now wires it).
     """
     if error_class not in (ERROR_CLASS_SEND, ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY):
         error_class = ERROR_CLASS_SEND
+    if execution_id is None and error_class == ERROR_CLASS_SEND:
+        logger.warning(
+            "cron outbox: send-class enqueue for job %s WITHOUT execution_id "
+            "(legacy loop-6 caller) — per-run idempotency disabled; productive "
+            "run paths should carry job['execution_id']",
+            job_id,
+        )
     with _lock:
         path = _current_outbox_file()
         with _store_lock(path):
@@ -403,13 +467,19 @@ def enqueue(
             key = _dedupe_key(job_id, target)
             now = _hermes_now().isoformat()
             no_retry = error_class in _ERROR_CLASSES_NO_RETRY
+            normalized_execution_id = str(execution_id) if execution_id else None
             for entry in entries:
                 if _dedupe_key(entry.get("job_id"), entry.get("target")) != key:
                     continue
                 if no_retry:
-                    # Dead-on-arrival classes refresh the same (job, target,
-                    # class) dead letter — visibility without unbounded growth.
+                    # Dead-on-arrival classes (audit loop 17 / F2): only a
+                    # repeat of the SAME execution refreshes; a different
+                    # execution appends so its payload is never overwritten.
+                    # Legacy callers (no execution_id on either side) keep the
+                    # loop-13 collapse — their key cannot distinguish runs.
                     if entry.get("error_class") != error_class:
+                        continue
+                    if entry.get("execution_id") != normalized_execution_id:
                         continue
                 else:
                     if entry.get("status") != "queued":
@@ -427,7 +497,7 @@ def enqueue(
             entry = {
                 "id": uuid.uuid4().hex[:16],
                 "job_id": str(job_id),
-                "execution_id": str(execution_id) if execution_id else None,
+                "execution_id": normalized_execution_id,
                 "error_class": error_class,
                 "target": {
                     "platform": str(target.get("platform") or ""),
@@ -451,20 +521,43 @@ def enqueue(
                 "last_error": error,
             }
             entries.append(entry)
+            if no_retry:
+                # Anti-pile-up cap (audit loop 17 / F2): keep at most
+                # MAX_DEAD_PER_TARGET dead letters per (job, target, class);
+                # list order is append order, so the head is the oldest.
+                siblings = [
+                    e for e in entries
+                    if e.get("error_class") == error_class
+                    and _dedupe_key(e.get("job_id"), e.get("target")) == key
+                ]
+                overflow = len(siblings) - MAX_DEAD_PER_TARGET
+                if overflow > 0:
+                    drop_ids = {e["id"] for e in siblings[:overflow]}
+                    entries = [e for e in entries if e.get("id") not in drop_ids]
             _write_entries(path, entries)
             return entry
 
 
 def due_entries(now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Return queued entries whose retry time has come (oldest first)."""
+    """Return entries whose send is due (oldest first).
+
+    Queued entries past their ``next_retry_at`` gate — plus, audit loop 17 /
+    F3, ``sending`` entries whose lease has gone stale (holder crashed
+    mid-send): those are orphaned and due for a retry. A ``sending`` entry
+    with a FRESH lease belongs to a live process and is not returned.
+    """
     with _lock:
         entries = _read_entries(_current_outbox_file())
     now = now or _hermes_now()
     due = []
     for entry in entries:
-        if entry.get("status") != "queued":
-            continue
         if (entry.get("attempts") or 0) >= MAX_ATTEMPTS:
+            continue
+        if entry.get("status") == "sending":
+            if _lease_is_stale(entry, now):
+                due.append(entry)
+            continue
+        if entry.get("status") != "queued":
             continue
         next_retry = _parse_ts(entry.get("next_retry_at"))
         if next_retry is None or next_retry <= now:
@@ -472,18 +565,15 @@ def due_entries(now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     return due
 
 
-def record_replay_result(
-    entry_id: str,
-    *,
-    success: bool,
-    error: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """Record the outcome of one replay attempt.
+def begin_replay(entry_id: str) -> Optional[Dict[str, Any]]:
+    """Take the send lease on a due entry: persist ``sending`` BEFORE the send.
 
-    Success → ``delivered``. Failure increments ``attempts`` and either
-    schedules the next retry (exponential backoff) or, past ``MAX_ATTEMPTS``,
-    marks the entry ``dead`` (dead-letter; never retried again, never
-    auto-pruned). Returns the updated entry, or None if the id is unknown.
+    Audit loop 17 / F3 — crash-visible sends. Transitions a ``queued`` entry
+    (or a ``sending`` entry with a STALE lease — its holder died between the
+    send and the status record) to ``sending``, stamping ``lease_ts``,
+    ``lease_pid`` and the ``send_attempt`` number (attempts + 1). Returns a
+    copy of the leased entry, or None when the entry is terminal/unknown or
+    its FRESH lease belongs to a live process (skip — never double-send).
     """
     with _lock:
         path = _current_outbox_file()
@@ -493,13 +583,63 @@ def record_replay_result(
             for entry in entries:
                 if entry.get("id") != entry_id:
                     continue
-                if entry.get("status") != "queued":
+                status = entry.get("status")
+                if status == "sending":
+                    if not _lease_is_stale(entry, now):
+                        return None  # fresh lease — a live process owns the send
+                    # Orphaned lease: holder crashed mid-send. Retake below;
+                    # if the original send DID land, the retry is the
+                    # documented at-least-once redelivery.
+                elif status != "queued":
+                    return None  # delivered/dead — terminal
+                entry["status"] = "sending"
+                entry["lease_ts"] = now.isoformat()
+                entry["lease_pid"] = os.getpid()
+                entry["send_attempt"] = (entry.get("attempts") or 0) + 1
+                _write_entries(path, entries)
+                return dict(entry)
+    return None
+
+
+def record_replay_result(
+    entry_id: str,
+    *,
+    success: bool,
+    error: Optional[str] = None,
+    receipt: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Record the outcome of one replay attempt.
+
+    Success → ``delivered``; the delivery ``receipt`` (audit loop 17 / F3 —
+    platform-side message_id when the send path returns one, else a payload
+    hash + timestamp) is stored on the entry as visible proof. Failure
+    increments ``attempts`` and either schedules the next retry (exponential
+    backoff) or, past ``MAX_ATTEMPTS``, marks the entry ``dead`` (dead-letter;
+    never retried again, never auto-pruned). Accepts entries in ``sending``
+    (the normal post-``begin_replay`` flow) and ``queued`` (loop-6/13 legacy
+    direct callers); the send-lease fields are cleared on the transition.
+    Returns the updated entry, or None if the id is unknown.
+    """
+    with _lock:
+        path = _current_outbox_file()
+        with _store_lock(path):
+            entries = _read_entries(path)
+            now = _hermes_now()
+            for entry in entries:
+                if entry.get("id") != entry_id:
+                    continue
+                if entry.get("status") not in ("queued", "sending"):
                     return entry  # terminal or already transitioned — no rewrite
                 entry["last_attempt_at"] = now.isoformat()
+                for lease_field in ("lease_ts", "lease_pid", "send_attempt"):
+                    entry.pop(lease_field, None)
                 if success:
                     entry["status"] = "delivered"
                     entry["last_error"] = None
+                    if receipt:
+                        entry["receipt"] = receipt
                 else:
+                    entry["status"] = "queued"
                     entry["attempts"] = (entry.get("attempts") or 0) + 1
                     entry["last_error"] = error
                     if entry["attempts"] >= MAX_ATTEMPTS:

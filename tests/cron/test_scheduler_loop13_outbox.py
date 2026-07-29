@@ -350,9 +350,12 @@ class TestErrorClasses:
                 assert s._replay_delivery_outbox() == 0
             assert sends == []
 
-            # A permanently misconfigured job does NOT pile up dead letters:
-            # the next run's failure refreshes the same visible entry — even
-            # from a different execution.
+            # A permanently misconfigured job does NOT pile up dead letters
+            # unboundedly — but audit loop 17 / F2 made dead letters
+            # APPEND-ONLY per execution: a different execution's config
+            # failure keeps BOTH payloads instead of overwriting the older
+            # run's report. (The anti-pile-up cap of MAX_DEAD_PER_TARGET is
+            # covered by the loop-17 tests.)
             job2 = _origin_job(
                 origin={"platform": "no_such_platform_xyz", "chat_id": "1"},
                 execution_id="exec-cfg-2",
@@ -360,11 +363,13 @@ class TestErrorClasses:
             with patch("gateway.config.load_gateway_config", return_value=_telegram_gateway_cfg()):
                 _deliver_result(job2, "config report v2")
             entries = outbox.list_entries()
-            assert len(entries) == 1
-            assert entries[0]["id"] == entry["id"]
-            assert "config report v2" in entries[0]["payload"]
+            assert len(entries) == 2
+            assert {e["execution_id"] for e in entries} == {"exec-cfg-1", "exec-cfg-2"}
+            by_execution = {e["execution_id"]: e for e in entries}
+            assert "config report v1" in by_execution["exec-cfg-1"]["payload"]
+            assert "config report v2" in by_execution["exec-cfg-2"]["payload"]
             # Still visible to `hermes cron status`.
-            assert outbox.outbox_counts()["dead"] == 1
+            assert outbox.outbox_counts()["dead"] == 2
 
     def test_disabled_platform_parks_config_dead_letter(self, tmp_path):
         home = tmp_path / "home"

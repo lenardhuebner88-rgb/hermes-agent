@@ -1627,6 +1627,28 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     except Exception as e:
         msg = f"failed to load gateway config: {e}"
         logger.error("Job '%s': %s", job["id"], msg)
+        # Audit loop 17 / F4: this failure used to return BEFORE
+        # _enqueue_failed_deliveries, so the report survived only in
+        # last_delivery_error. Park it per target as a config-class dead
+        # letter (a replay cannot fix an unloadable config either) — visible
+        # via `hermes cron status` instead of silently lost. Fail-closed:
+        # _enqueue_failed_deliveries never raises into this path.
+        _enqueue_failed_deliveries(
+            job,
+            [
+                {
+                    "platform": str(t.get("platform") or ""),
+                    "chat_id": str(t.get("chat_id") or ""),
+                    "thread_id": (
+                        str(t["thread_id"]) if t.get("thread_id") is not None else None
+                    ),
+                    "error_class": "config",
+                    "error": msg,
+                }
+                for t in targets
+            ],
+            cleaned_delivery_content,
+        )
         return msg
 
     delivery_errors = []
@@ -2332,8 +2354,14 @@ def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: s
         )
 
 
-def _send_outbox_entry(entry: dict) -> Optional[str]:
-    """Send one outbox entry over the standalone path. Returns None or an error.
+def _send_outbox_entry(entry: dict) -> tuple:
+    """Send one outbox entry over the standalone path.
+
+    Returns ``(error, receipt)``: ``error`` is None on success, else a string.
+    ``receipt`` (audit loop 17 / F3) is the delivery proof persisted on the
+    entry — the platform-side message_id when the send path returns one
+    (Telegram/plugin standalone senders do), else a payload hash + timestamp
+    so a delivered entry always carries *some* verifiable evidence.
 
     Uses the same bounded standalone transport as ``_deliver_result``
     (``asyncio.wait_for`` with the delivery timeout, audit A-H1) so a wedged
@@ -2346,9 +2374,11 @@ def _send_outbox_entry(entry: dict) -> Optional[str]:
     platform_name = str(target.get("platform") or "")
     chat_id = target.get("chat_id")
     if not platform_name or not chat_id:
-        return "outbox entry has no resolvable target"
+        return "outbox entry has no resolvable target", None
     if _interpreter_shutting_down():
-        return "replay skipped — interpreter is shutting down"
+        return "replay skipped — interpreter is shutting down", None
+
+    import hashlib
 
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
@@ -2356,18 +2386,19 @@ def _send_outbox_entry(entry: dict) -> Optional[str]:
     try:
         platform = Platform(platform_name.lower())
     except (ValueError, KeyError):
-        return f"unknown platform '{platform_name}'"
+        return f"unknown platform '{platform_name}'", None
     try:
         config = load_gateway_config()
     except Exception as e:
-        return f"failed to load gateway config: {e}"
+        return f"failed to load gateway config: {e}", None
     pconfig = config.platforms.get(platform)
     if not pconfig or not pconfig.enabled:
-        return f"platform '{platform_name}' not configured/enabled"
+        return f"platform '{platform_name}' not configured/enabled", None
 
     delivery_timeout = _get_delivery_timeout()
+    payload = entry.get("payload", "")
     coro = _send_to_platform(
-        platform, pconfig, chat_id, entry.get("payload", ""),
+        platform, pconfig, chat_id, payload,
         thread_id=target.get("thread_id"),
     )
     timed_coro = asyncio.wait_for(coro, timeout=delivery_timeout)
@@ -2379,14 +2410,23 @@ def _send_outbox_entry(entry: dict) -> Optional[str]:
         # the NEXT retry attempt the send instead of crashing the replay.
         timed_coro.close()
         coro.close()
-        return "replay send could not start (no usable event loop)"
+        return "replay send could not start (no usable event loop)", None
     except (asyncio.TimeoutError, TimeoutError):
-        return f"replay delivery timed out after {delivery_timeout}s"
+        return f"replay delivery timed out after {delivery_timeout}s", None
     except Exception as e:
-        return f"replay delivery failed: {e}"
+        return f"replay delivery failed: {e}", None
     if result and result.get("error"):
-        return f"delivery error: {result['error']}"
-    return None
+        return f"delivery error: {result['error']}", None
+    # Delivery proof: prefer the platform-side message_id (Telegram and
+    # plugin standalone senders return one); fall back to a payload hash +
+    # timestamp so the receipt is never empty.
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if message_id:
+        receipt = f"platform-message:{message_id}"
+    else:
+        digest = hashlib.sha256(str(payload).encode("utf-8")).hexdigest()[:16]
+        receipt = f"payload-sha256:{digest}@{_hermes_now().isoformat()}"
+    return None, receipt
 
 
 def _replay_delivery_outbox(verbose: bool = False) -> int:
@@ -2400,10 +2440,23 @@ def _replay_delivery_outbox(verbose: bool = False) -> int:
     flight skips instead of double-sending — and the per-entry
     ``next_retry_at`` gate makes repeat calls cheap. Entries past the attempt
     cap (and config/relay-class dead letters) are not returned as due.
+
+    Audit loop 17 / F3: each send runs under a persisted lease — the entry
+    goes to ``sending`` (lease_ts + attempt number) BEFORE the send and to
+    ``delivered`` with a receipt immediately after. A crash between send and
+    status record leaves a ``sending`` entry whose lease expires (default
+    10min, HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS) and is then retried:
+    at-least-once with a visible receipt, never a silent loss.
+
     Returns the number of entries successfully delivered.
     """
     try:
-        from cron.delivery_outbox import due_entries, record_replay_result, replay_lock
+        from cron.delivery_outbox import (
+            begin_replay,
+            due_entries,
+            record_replay_result,
+            replay_lock,
+        )
     except Exception as e:
         logger.warning("cron delivery outbox unavailable — skipping replay: %s", e)
         return 0
@@ -2418,10 +2471,26 @@ def _replay_delivery_outbox(verbose: bool = False) -> int:
             return 0
         delivered = 0
         for entry in entries:
-            error = _send_outbox_entry(entry)
+            try:
+                leased = begin_replay(entry["id"])
+            except Exception as e:
+                logger.warning(
+                    "cron delivery outbox: could not take send lease for %s: %s",
+                    entry.get("id"), e,
+                )
+                continue
+            if leased is None:
+                # Fresh sending lease of a live process, or the entry reached
+                # a terminal state between due_entries() and now — skip.
+                logger.debug(
+                    "Outbox entry %s skipped — lease held or already terminal",
+                    entry.get("id"),
+                )
+                continue
+            error, receipt = _send_outbox_entry(leased)
             try:
                 updated = record_replay_result(
-                    entry["id"], success=error is None, error=error,
+                    entry["id"], success=error is None, error=error, receipt=receipt,
                 )
             except Exception as e:
                 logger.warning(
@@ -4315,6 +4384,12 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
     execution_id = job.get("execution_id")
     if not execution_id:
         execution_id = create_execution(job["id"], source="direct")["id"]
+        # Audit loop 17 / F1: persist the freshly created execution id ON the
+        # job dict. _deliver_result → _enqueue_failed_deliveries reads
+        # job["execution_id"] to key the delivery outbox per RUN; without this
+        # wiring, direct/tool runs enqueued with execution_id=None and several
+        # failed runs of the same job collapsed onto one legacy outbox entry.
+        job["execution_id"] = execution_id
     try:
         # Replay due delivery-outbox entries on the shared firing body too
         # (audit loop 13 / F2): an external provider's fire_due (Chronos)
