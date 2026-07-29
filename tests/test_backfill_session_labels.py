@@ -276,3 +276,54 @@ def test_cli_main_dry_run(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "dry-run" in out
     assert "labeled" in out
+
+
+# ---------------------------------------------------------------------------
+# Edge pinning
+# ---------------------------------------------------------------------------
+
+def test_iter_candidates_limit_zero_returns_nothing(tmp_path):
+    """limit=0 means 'no candidates at all' (LIMIT 0), not unlimited — an
+    off-by-one here would label the whole board when the operator asked
+    for zero rows."""
+    db_path = tmp_path / "state.db"
+    _seed_sweep_db(db_path)
+    conn = backfill._open_ro(db_path)
+    try:
+        assert backfill.iter_candidates(conn, limit=0) == []
+        assert len(backfill.iter_candidates(conn, limit=1)) == 1
+    finally:
+        conn.close()
+
+
+def test_format_examples_caps_at_exactly_max_examples():
+    """The example list stops AT the cap (default 20) — 25 labeled
+    candidates print exactly 20 lines, and a smaller cap is inclusive."""
+    cands = [(f"s{i}", "x", f"label {i}") for i in range(25)]
+    assert len(backfill._format_examples(cands)) == 20
+    assert len(backfill._format_examples(cands[:3], max_examples=2)) == 2
+
+
+def test_backup_state_db_tolerates_existing_backups_dir(tmp_path, monkeypatch):
+    """The second backfill of the night meets an EXISTING backups dir —
+    mkdir must not raise, or the apply run aborts before writing."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(backfill, "get_hermes_home", lambda: tmp_path)
+    (tmp_path / "backups").mkdir()
+    src = tmp_path / "state.db"
+    conn = sqlite3.connect(src)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    dst = backfill.backup_state_db(
+        src, now=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    )
+    assert dst.exists()
+
+
+def test_run_missing_state_db_returns_exit_code_two(tmp_path):
+    """A missing state db is a usage error with exit code 2 — scripts
+    key off that code to distinguish 'nothing to do' from 'crashed'."""
+    assert backfill.run(state_db=tmp_path / "missing.db") == 2
