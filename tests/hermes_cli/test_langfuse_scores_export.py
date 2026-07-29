@@ -651,7 +651,9 @@ def _make_trace_db(path: Path) -> None:
         INSERT INTO task_runs VALUES
           (1, 'child', 'coder', 'done', 1764028800, 'completed',
            '{"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 2,
-             "reasoning_tokens": 1, "cost_usd_equivalent": 0.25}', 'model-x', 0.1);
+             "reasoning_tokens": 1, "cost_usd_equivalent": 0.25,
+             "cost_usd_equivalent_confidence": 0.8,
+             "cost_usd_equivalent_coverage": 0.6}', 'model-x', 0.1);
         INSERT INTO task_runs VALUES
           (2, 'root', 'reviewer', 'done', 1764028801, 'completed', '{}', 'model-y', 0.0);
     """)
@@ -690,6 +692,10 @@ def test_synthesize_traces_is_deterministic_and_uses_generation_observation(tmp_
     assert trace["body"]["timestamp"] == "2025-11-25T00:00:00Z"
     assert {"kanban-worker", "board:default", "profile:coder", "model:model-x",
             "outcome:completed"}.issubset(trace["body"]["tags"])
+    trace_metadata = trace["body"]["metadata"]
+    assert "cost_usd_equivalent" not in trace_metadata
+    assert "cost_usd_equivalent_confidence" not in trace_metadata
+    assert "cost_usd_equivalent_coverage" not in trace_metadata
     assert generation["type"] == "generation-create"
     assert generation["body"]["usageDetails"] == {
         "input": 10, "output": 4, "cache_read_input_tokens": 2, "reasoning_tokens": 1}
@@ -698,6 +704,45 @@ def test_synthesize_traces_is_deterministic_and_uses_generation_observation(tmp_
     assert second["synthesized"] == 0
     assert second["skipped_seen"] == 1
     assert len(requests) == 1
+
+
+def test_synthesize_traces_supports_legacy_task_runs_without_cost_usd(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "legacy-kanban.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, tenant TEXT);
+        CREATE TABLE task_links (parent_id TEXT NOT NULL, child_id TEXT NOT NULL);
+        CREATE TABLE task_runs (
+          id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT,
+          started_at INTEGER, outcome TEXT, metadata TEXT, active_model TEXT
+        );
+        INSERT INTO tasks VALUES ('legacy', 'default');
+        INSERT INTO task_runs VALUES
+          (1, 'legacy', 'coder', 'done', 1764028800, 'completed',
+           '{"cost_usd_equivalent": 0.25}', 'model-x');
+    """)
+    conn.close()
+    requests: list[dict] = []
+
+    def fake_request(url: str, *_args, **kwargs):
+        payload = kwargs.get("payload")
+        if url.endswith("/retention"):
+            return {"active": False}
+        if "/traces?" in url:
+            return {"data": [], "meta": {"totalPages": 1}}
+        assert payload is not None
+        requests.append(payload)
+        return {}
+
+    monkeypatch.setattr(langfuse_export, "_request", fake_request)
+    env = {"HERMES_LANGFUSE_BASE_URL": "http://fake", "HERMES_LANGFUSE_PUBLIC_KEY": "pk",
+           "HERMES_LANGFUSE_SECRET_KEY": "sk"}
+    report = synthesize_traces(db_path=db_path, env=env)
+
+    assert report["synthesized"] == 1
+    trace, generation = requests[0]["batch"]
+    assert "cost_usd_equivalent" not in trace["body"]["metadata"]
+    assert "costDetails" not in generation["body"]
 
 
 def test_synthesize_traces_batches_and_resumes(tmp_path: Path, monkeypatch) -> None:
