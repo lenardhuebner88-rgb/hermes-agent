@@ -100,16 +100,47 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 def _metric(
     value: float | int | None,
     *,
-    denominator: int,
+    sample_denominator: int,
     observed: int,
     source: str,
     captured_at: str,
+    truncation_reason: str | None = None,
+    aggregate_kind: str = "statistic",
 ) -> dict[str, Any]:
+    window_denominator = (
+        sample_denominator if truncation_reason is None else None
+    )
+    sample_coverage = (
+        observed / sample_denominator if sample_denominator else None
+    )
+    window_coverage = (
+        sample_coverage if window_denominator is not None else None
+    )
+    if aggregate_kind == "count":
+        completeness = "complete" if truncation_reason is None else "partial"
+        value_semantics = "exact" if truncation_reason is None else "lower_bound"
+    elif observed == 0:
+        completeness = "unknown"
+        value_semantics = "unknown"
+    elif truncation_reason is not None or observed < sample_denominator:
+        completeness = "partial"
+        value_semantics = (
+            "lower_bound" if aggregate_kind == "sum" else "sample_statistic"
+        )
+    else:
+        completeness = "complete"
+        value_semantics = "exact"
     return {
         "value": value,
-        "denominator": denominator,
+        "denominator": window_denominator,
+        "sample_denominator": sample_denominator,
         "observed": observed,
-        "coverage": observed / denominator if denominator else None,
+        "coverage": window_coverage,
+        "sample_coverage": sample_coverage,
+        "coverage_reason": truncation_reason,
+        "completeness": completeness,
+        "value_semantics": value_semantics,
+        "truncation_reason": truncation_reason,
         "source": source,
         "captured_at": captured_at,
     }
@@ -216,6 +247,8 @@ def _all_pages(
         )
         page_rows = _page_data(payload)
         rows.extend(page_rows)
+        if time.monotonic() >= deadline_monotonic:
+            return _PageScan(rows, True, "deadline", page)
         meta = payload.get("meta")
         total_pages = (
             meta.get("totalPages")
@@ -322,7 +355,13 @@ def _build_remote_snapshot(
         for row in scan.rows
         if _observation_is_worker(row)
     ]
-    payload = _aggregate(selected, days=days, generated_at=_iso(now))
+    truncation_reason = f"scan_{scan.reason}" if scan.truncated else None
+    payload = _aggregate(
+        selected,
+        days=days,
+        generated_at=_iso(now),
+        truncation_reason=truncation_reason,
+    )
     payload["coverage"].update({
         "scanned_generations": len(scan.rows),
         "scan_pages": scan.pages,
@@ -330,7 +369,7 @@ def _build_remote_snapshot(
     })
     if scan.truncated:
         payload["state"] = "partial"
-        payload["reason"] = f"scan_{scan.reason}"
+        payload["reason"] = truncation_reason
     return payload
 
 
@@ -339,6 +378,7 @@ def _aggregate(
     *,
     days: int,
     generated_at: str,
+    truncation_reason: str | None = None,
 ) -> dict[str, Any]:
     captured_times = [
         parsed
@@ -396,18 +436,58 @@ def _aggregate(
             for row in rows
             if (value := _observation_cost(row)) is not None
         ]
+        model_sample_cost_coverage = len(model_cost) / len(rows) if rows else None
+        model_sample_latency_coverage = (
+            len(model_latency) / len(rows) if rows else None
+        )
+        model_sample_ttft_coverage = len(model_ttft) / len(rows) if rows else None
         models.append(
             {
                 "name": name,
                 "calls": len(rows),
+                "denominator": len(rows) if truncation_reason is None else None,
+                "sample_denominator": len(rows),
+                "observed": len(rows),
+                "completeness": (
+                    "complete" if truncation_reason is None else "partial"
+                ),
+                "calls_semantics": (
+                    "exact" if truncation_reason is None else "lower_bound"
+                ),
+                "truncation_reason": truncation_reason,
+                "source": "langfuse.generations",
+                "captured_at": captured_at,
                 "known_cost_usd": sum(model_cost) if model_cost else None,
-                "cost_coverage": len(model_cost) / len(rows) if rows else None,
+                "known_cost_semantics": (
+                    "unknown"
+                    if not model_cost
+                    else "exact"
+                    if truncation_reason is None and len(model_cost) == len(rows)
+                    else "lower_bound"
+                ),
+                "cost_coverage": (
+                    model_sample_cost_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_cost_coverage": model_sample_cost_coverage,
                 "latency_p50_ms": _percentile(model_latency, 0.50),
                 "latency_p95_ms": _percentile(model_latency, 0.95),
-                "latency_coverage": len(model_latency) / len(rows) if rows else None,
+                "latency_coverage": (
+                    model_sample_latency_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_latency_coverage": model_sample_latency_coverage,
                 "ttft_p50_ms": _percentile(model_ttft, 0.50),
                 "ttft_p95_ms": _percentile(model_ttft, 0.95),
-                "ttft_coverage": len(model_ttft) / len(rows) if rows else None,
+                "ttft_coverage": (
+                    model_sample_ttft_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_ttft_coverage": model_sample_ttft_coverage,
+                "coverage_reason": truncation_reason,
             }
         )
     models.sort(key=lambda row: (-int(row["calls"]), str(row["name"])))
@@ -424,56 +504,77 @@ def _aggregate(
         "metrics": {
             "generation_calls": _metric(
                 total,
-                denominator=total,
+                sample_denominator=total,
                 observed=total,
                 source="langfuse.generations",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="count",
             ),
             "known_cost_usd": _metric(
                 sum(cost) if cost else None,
-                denominator=total,
+                sample_denominator=total,
                 observed=len(cost),
                 source="langfuse.generations.cost",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="sum",
             ),
             "latency_p50_ms": _metric(
                 _percentile(latency, 0.50),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(latency),
                 source="langfuse.generations.time",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "latency_p95_ms": _metric(
                 _percentile(latency, 0.95),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(latency),
                 source="langfuse.generations.time",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "ttft_p50_ms": _metric(
                 _percentile(ttft, 0.50),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(ttft),
                 source="langfuse.generations.completionStartTime",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "ttft_p95_ms": _metric(
                 _percentile(ttft, 0.95),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(ttft),
                 source="langfuse.generations.completionStartTime",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "tokens_total": _metric(
                 sum(tokens) if tokens else None,
-                denominator=total,
+                sample_denominator=total,
                 observed=len(tokens),
                 source="langfuse.generations.usageDetails",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="sum",
             ),
         },
         "coverage": {
             "worker_traces": total,
+            "worker_traces_semantics": (
+                "exact" if truncation_reason is None else "lower_bound"
+            ),
+            "counts_semantics": (
+                "exact" if truncation_reason is None else "lower_bound"
+            ),
+            "sample_denominator": total,
+            "window_denominator": (
+                total if truncation_reason is None else None
+            ),
+            "truncation_reason": truncation_reason,
             "model_known": total - unknown_model,
             "model_unknown": unknown_model,
             "latency_known": len(latency),

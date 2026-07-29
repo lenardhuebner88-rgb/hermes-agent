@@ -45,8 +45,14 @@ def test_aggregate_exposes_denominators_and_never_raw_payloads():
     assert payload["metrics"]["latency_p50_ms"] == {
         "value": 2000.0,
         "denominator": 2,
+        "sample_denominator": 2,
         "observed": 2,
         "coverage": 1.0,
+        "sample_coverage": 1.0,
+        "coverage_reason": None,
+        "completeness": "complete",
+        "value_semantics": "exact",
+        "truncation_reason": None,
         "source": "langfuse.generations.time",
         "captured_at": "2026-07-29T00:01:06Z",
     }
@@ -210,6 +216,179 @@ def test_page_limit_degrades_to_partial_scan(monkeypatch):
     assert scan.reason == "page_limit"
     assert scan.pages == 2
     assert len(scan.rows) == 2 * read_model._PAGE_SIZE
+
+
+def test_truncated_snapshot_never_claims_full_window_coverage(monkeypatch):
+    row = {
+        "metadata": {"kanban_task_id": "worker"},
+        "model": "model-a",
+        "startTime": "2026-07-29T00:00:00Z",
+        "completionStartTime": "2026-07-29T00:00:00.100Z",
+        "endTime": "2026-07-29T00:00:01Z",
+        "calculatedTotalCost": 0.25,
+        "usageDetails": {"total": 10},
+    }
+
+    monkeypatch.setattr(
+        read_model,
+        "_all_pages",
+        lambda *_args, **_kwargs: read_model._PageScan(
+            rows=[row], truncated=True, reason="page_limit", pages=20
+        ),
+    )
+    payload = read_model._build_remote_snapshot(
+        days=7,
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "https://langfuse.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public",
+            "HERMES_LANGFUSE_SECRET_KEY": "secret",
+        },
+    )
+
+    assert payload["state"] == "partial"
+    assert payload["reason"] == "scan_page_limit"
+    for metric in payload["metrics"].values():
+        assert metric["sample_denominator"] == 1
+        assert metric["sample_coverage"] == 1.0
+        assert metric["denominator"] is None
+        assert metric["coverage"] is None
+        assert metric["coverage_reason"] == "scan_page_limit"
+        assert metric["truncation_reason"] == "scan_page_limit"
+        assert metric["completeness"] == "partial"
+    assert payload["metrics"]["generation_calls"]["value_semantics"] == "lower_bound"
+    assert payload["metrics"]["known_cost_usd"]["value_semantics"] == "lower_bound"
+    assert payload["coverage"]["worker_traces_semantics"] == "lower_bound"
+    assert payload["models"][0]["completeness"] == "partial"
+    assert payload["models"][0]["sample_denominator"] == 1
+    assert payload["models"][0]["truncation_reason"] == "scan_page_limit"
+    assert payload["models"][0]["cost_coverage"] is None
+    assert payload["models"][0]["sample_cost_coverage"] == 1.0
+    assert payload["models"][0]["latency_coverage"] is None
+    assert payload["models"][0]["sample_latency_coverage"] == 1.0
+    assert payload["models"][0]["coverage_reason"] == "scan_page_limit"
+    assert payload["models"][0]["known_cost_semantics"] == "lower_bound"
+
+
+def test_deadline_after_page_response_preserves_rows_but_marks_scan_partial(
+    monkeypatch,
+):
+    moments = iter((10.0, 14.1))
+    monkeypatch.setattr(read_model.time, "monotonic", lambda: next(moments))
+    monkeypatch.setattr(
+        read_model,
+        "_request_json",
+        lambda *_args, **_kwargs: {
+            "data": [{"id": "observed"}],
+            "meta": {"totalPages": 1},
+        },
+    )
+
+    scan = read_model._all_pages(
+        "https://langfuse.example",
+        "Basic redacted",
+        "/api/public/observations",
+        {},
+        deadline_monotonic=14.0,
+    )
+
+    assert scan.rows == [{"id": "observed"}]
+    assert scan.pages == 1
+    assert scan.truncated is True
+    assert scan.reason == "deadline"
+
+
+def test_unknown_total_pages_paginates_until_short_page(monkeypatch):
+    pages = iter(
+        (
+            {"data": [{"id": "first"}] * read_model._PAGE_SIZE, "meta": {}},
+            {"data": [{"id": "last"}], "meta": {}},
+        )
+    )
+    monkeypatch.setattr(
+        read_model, "_request_json", lambda *_args, **_kwargs: next(pages)
+    )
+
+    scan = read_model._all_pages(
+        "https://langfuse.example",
+        "Basic redacted",
+        "/api/public/observations",
+        {},
+        deadline_monotonic=read_model.time.monotonic() + 10,
+    )
+
+    assert scan.truncated is False
+    assert scan.pages == 2
+    assert len(scan.rows) == read_model._PAGE_SIZE + 1
+
+
+def test_known_total_pages_finishes_without_an_extra_request(monkeypatch):
+    requested = 0
+
+    def page(_url, _authorization, **_kwargs):
+        nonlocal requested
+        requested += 1
+        return {
+            "data": [{"id": requested}] * read_model._PAGE_SIZE,
+            "meta": {"totalPages": 2},
+        }
+
+    monkeypatch.setattr(read_model, "_request_json", page)
+    scan = read_model._all_pages(
+        "https://langfuse.example",
+        "Basic redacted",
+        "/api/public/observations",
+        {},
+        deadline_monotonic=read_model.time.monotonic() + 10,
+    )
+
+    assert scan.truncated is False
+    assert scan.pages == 2
+    assert requested == 2
+
+
+def test_empty_complete_scan_has_exact_zero_calls_but_unknown_sums(monkeypatch):
+    monkeypatch.setattr(
+        read_model,
+        "_all_pages",
+        lambda *_args, **_kwargs: read_model._PageScan(
+            rows=[], truncated=False, reason=None, pages=1
+        ),
+    )
+    payload = read_model._build_remote_snapshot(
+        days=7,
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "https://langfuse.example",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "public",
+            "HERMES_LANGFUSE_SECRET_KEY": "secret",
+        },
+    )
+
+    calls = payload["metrics"]["generation_calls"]
+    assert calls["value"] == 0
+    assert calls["completeness"] == "complete"
+    assert calls["denominator"] == 0
+    assert payload["metrics"]["known_cost_usd"]["value"] is None
+    assert payload["metrics"]["known_cost_usd"]["completeness"] == "unknown"
+    assert payload["metrics"]["tokens_total"]["value"] is None
+    assert payload["metrics"]["tokens_total"]["completeness"] == "unknown"
+
+
+def test_missing_cost_and_tokens_remain_null_with_observed_denominator():
+    payload = read_model._aggregate(
+        [{"model": "model-a"}],
+        days=7,
+        generated_at="2026-07-29T01:00:00Z",
+    )
+
+    for name in ("known_cost_usd", "tokens_total"):
+        metric = payload["metrics"][name]
+        assert metric["value"] is None
+        assert metric["sample_denominator"] == 1
+        assert metric["observed"] == 0
+        assert metric["sample_coverage"] == 0.0
+        assert metric["coverage"] == 0.0
+        assert metric["completeness"] == "unknown"
+        assert metric["value_semantics"] == "unknown"
 
 
 def test_single_flight_waiter_ignores_foreign_cache_key_notifications(
