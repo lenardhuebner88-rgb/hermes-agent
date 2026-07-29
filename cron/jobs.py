@@ -101,6 +101,17 @@ _JOBS_LOCK_TIMEOUT_SECONDS = 30.0
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
 
+# Per-job run retry (opt-in, audit loop 6 / A-M8): a job may carry a
+# ``retry`` field of the shape {"max_attempts": N, "backoff_seconds": [..]}.
+# On a FAILED run with retries left, mark_job_run re-arms the job at
+# now + backoff instead of advancing the regular schedule. Hard-capped at 3
+# attempts — cron is background work, and an unbounded retry loop against a
+# broken provider would be its own outage.
+MAX_RUN_RETRY_ATTEMPTS = 3
+# Default delay when retry.backoff_seconds is missing/invalid (5 min, same
+# scale as the delivery-outbox initial backoff).
+DEFAULT_RUN_RETRY_BACKOFF_SECONDS = 300.0
+
 
 @dataclass(frozen=True)
 class _CronStorePaths:
@@ -1382,6 +1393,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    retry: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -1426,6 +1438,13 @@ def create_job(
                 and deliver its stdout directly. Empty stdout = silent (no
                 delivery). Requires ``script`` to be set. Ideal for classic
                 watchdogs and periodic alerts that don't need LLM reasoning.
+        retry: Optional run-retry policy (audit loop 6 / A-M8):
+                {"max_attempts": N (capped at MAX_RUN_RETRY_ATTEMPTS),
+                 "backoff_seconds": [d1, d2, ...]}. On a FAILED run with
+                retries left, mark_job_run re-arms the job at now + backoff
+                instead of advancing the regular schedule, so transient API
+                failures are retried. Default None = no retry (old behaviour).
+                See mark_job_run's docstring for the full semantics.
 
     Returns:
         The created job dict
@@ -1458,6 +1477,7 @@ def create_job(
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    normalized_retry = _normalize_retry(retry)
 
     # no_agent jobs are meaningless without a script — the script IS the job.
     # Surface this as a clear ValueError at create time so bad configs never
@@ -1553,6 +1573,10 @@ def create_job(
     # global cron.mirror_delivery config, default off).
     if normalized_attach is not None:
         job["attach_to_session"] = normalized_attach
+    # Same byte-identical-by-default rule for the opt-in run-retry policy
+    # (audit loop 6): absent key => no retry, old behaviour.
+    if normalized_retry is not None:
+        job["retry"] = normalized_retry
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -1807,16 +1831,100 @@ def remove_job(job_id: str) -> bool:
     return False
 
 
+def _normalize_retry(retry: Any) -> Optional[Dict[str, Any]]:
+    """Normalize the opt-in per-job run-retry policy (audit loop 6 / A-M8).
+
+    Accepts {"max_attempts": N, "backoff_seconds": [d1, d2, ...]} and returns
+    a cleaned dict, or None when the policy is absent/disabled. max_attempts
+    is hard-capped at MAX_RUN_RETRY_ATTEMPTS; invalid/missing backoff entries
+    fall back to DEFAULT_RUN_RETRY_BACKOFF_SECONDS at fire time.
+    """
+    if not isinstance(retry, dict):
+        return None
+    try:
+        max_attempts = int(retry.get("max_attempts") or 0)
+    except (TypeError, ValueError):
+        return None
+    max_attempts = min(max(max_attempts, 0), MAX_RUN_RETRY_ATTEMPTS)
+    if max_attempts <= 0:
+        return None
+    normalized: Dict[str, Any] = {"max_attempts": max_attempts}
+    backoff = retry.get("backoff_seconds")
+    if isinstance(backoff, (list, tuple)):
+        delays: List[float] = []
+        for value in backoff:
+            try:
+                delay = float(value)
+            except (TypeError, ValueError):
+                continue
+            if delay > 0:
+                delays.append(delay)
+        if delays:
+            normalized["backoff_seconds"] = delays
+    return normalized
+
+
+def _next_run_retry_delay(job: Dict[str, Any]) -> Optional[float]:
+    """Return the retry delay (seconds) for a FAILED run, or None.
+
+    None means: no retry policy on the job, or the policy is exhausted —
+    the caller then advances the regular schedule exactly as before. When a
+    delay is returned, the job's ``retry_attempts`` counter has already been
+    incremented (consecutive failures only; reset on success).
+    """
+    retry = job.get("retry")
+    if not isinstance(retry, dict):
+        return None
+    try:
+        max_attempts = int(retry.get("max_attempts") or 0)
+    except (TypeError, ValueError):
+        return None
+    max_attempts = min(max(max_attempts, 0), MAX_RUN_RETRY_ATTEMPTS)
+    if max_attempts <= 0:
+        return None
+    attempts = job.get("retry_attempts") or 0
+    if not isinstance(attempts, int) or attempts < 0:
+        attempts = 0
+    if attempts >= max_attempts:
+        return None
+    backoff = retry.get("backoff_seconds")
+    delay = DEFAULT_RUN_RETRY_BACKOFF_SECONDS
+    if isinstance(backoff, (list, tuple)) and backoff:
+        # attempts is 0-based into the ladder; a short list reuses its last
+        # entry for the remaining attempts.
+        index = min(attempts, len(backoff) - 1)
+        try:
+            candidate = float(backoff[index])
+            if candidate > 0:
+                delay = candidate
+        except (TypeError, ValueError):
+            pass
+    job["retry_attempts"] = attempts + 1
+    return delay
+
+
 def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                  delivery_error: Optional[str] = None):
     """
     Mark a job as having been run.
-    
+
     Updates last_run_at, last_status, increments completed count,
     computes next_run_at, and auto-deletes if repeat limit reached.
 
     ``delivery_error`` is tracked separately from the agent error — a job
     can succeed (agent produced output) but fail delivery (platform down).
+
+    Per-job run retry (opt-in, audit loop 6 / A-M8): when the job carries a
+    ``retry`` field — {"max_attempts": N (capped at MAX_RUN_RETRY_ATTEMPTS),
+    "backoff_seconds": [d1, d2, ...]} — a FAILED run with retries left does
+    NOT advance the regular schedule; instead ``next_run_at`` is re-armed to
+    now + backoff_seconds[attempt] (default DEFAULT_RUN_RETRY_BACKOFF_SECONDS)
+    so a transient API failure is retried rather than silently lost to the
+    next scheduled slot. The consecutive-attempt counter lives in the job's
+    ``retry_attempts`` field and resets on the first successful run. Jobs
+    without a ``retry`` field keep the exact old behaviour (no retry). For
+    finite one-shots, claim_dispatch's at-most-times claim still wins — the
+    retry re-arm only helps recurring jobs and direct-fire callers.
     """
     with _jobs_lock():
         jobs = load_jobs()
@@ -1864,6 +1972,36 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         save_jobs(jobs)
                         return
                 
+                # Per-job run retry (opt-in): a failed run with retries left
+                # is re-armed at now + backoff INSTEAD of advancing the
+                # regular schedule — the scheduled slot is not consumed by a
+                # transient failure. See the docstring for the field shape.
+                if not success:
+                    retry_delay = _next_run_retry_delay(job)
+                    if retry_delay is not None:
+                        retry_at = (
+                            _hermes_now() + timedelta(seconds=retry_delay)
+                        ).isoformat()
+                        job["next_run_at"] = retry_at
+                        if job.get("state") != "paused":
+                            job["state"] = "scheduled"
+                        logger.info(
+                            "Job '%s': run failed — retry %d/%d scheduled at %s",
+                            job.get("name", job.get("id", "?")),
+                            job.get("retry_attempts", 0),
+                            min(
+                                int((job.get("retry") or {}).get("max_attempts") or 0),
+                                MAX_RUN_RETRY_ATTEMPTS,
+                            ),
+                            retry_at,
+                        )
+                        save_jobs(jobs)
+                        return
+                elif job.get("retry_attempts"):
+                    # Successful run: clear the consecutive-failure counter so
+                    # a LATER failure starts the backoff ladder fresh.
+                    job["retry_attempts"] = 0
+
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
 

@@ -498,9 +498,27 @@ class _ReadWriteLock:
 _terminal_cwd_lock = _ReadWriteLock()
 
 
+# Default parallelism cap when NEITHER HERMES_CRON_MAX_PARALLEL NOR
+# cron.max_parallel_jobs is set (audit loop 6 / A-M5). Previously an unset
+# value meant max_workers=None — ThreadPoolExecutor's own default
+# (min(32, cpu+4)) with no real ceiling on how many due jobs fire at once,
+# so a backlog of due jobs became a thread/API storm against the model
+# provider. 4 is deliberately conservative: cron jobs are background work
+# that must not starve the interactive gateway, and genuinely parallel
+# setups can still opt into more via the env var or config override.
+_DEFAULT_MAX_PARALLEL = 4
+
+
 def _get_parallel_pool(max_workers: Optional[int]) -> concurrent.futures.ThreadPoolExecutor:
-    """Return (or create) the persistent parallel pool."""
+    """Return (or create) the persistent parallel pool.
+
+    ``max_workers=None`` (no env/config override) resolves to
+    ``_DEFAULT_MAX_PARALLEL`` — there is no longer an unbounded mode unless
+    the operator explicitly configures one.
+    """
     global _parallel_pool, _parallel_pool_max_workers
+    if max_workers is None:
+        max_workers = _DEFAULT_MAX_PARALLEL
     if _parallel_pool is None or _parallel_pool_max_workers != max_workers:
         if _parallel_pool is not None:
             _parallel_pool.shutdown(wait=False, cancel_futures=False)
@@ -1531,7 +1549,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     the standalone HTTP path cannot encrypt.  Falls back to standalone send if
     the adapter path fails or is unavailable.
 
-    Returns None on success, or an error string on failure.
+    Returns None on success, or an error string on failure.  When one or more
+    targets failed on EVERY path (live adapter + standalone fallback), the
+    payload is additionally parked in the persistent delivery outbox
+    (``cron/delivery_outbox.py``) for replay with backoff on later ticks —
+    best-effort, so an outbox failure never changes the return value.
     """
     targets = _resolve_delivery_targets(job)
     if not targets:
@@ -1608,6 +1630,10 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         return msg
 
     delivery_errors = []
+    # Targets whose delivery failed on EVERY path (live adapter + standalone
+    # fallback) — enqueued into the persistent delivery outbox at the end so
+    # the report is replayed instead of silently lost (audit loop 6 / A-H2).
+    failed_targets: List[dict] = []
 
     for target in targets:
         platform_name = target["platform"]
@@ -1684,6 +1710,21 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         )
         delivered = False
         target_errors = []
+
+        def _note_failed_target() -> None:
+            """Record this target for the delivery outbox (audit loop 6 / A-H2).
+
+            Called only when the target failed on EVERY delivery path (or the
+            send was skipped because the interpreter is shutting down — the
+            outbox then replays it after the restart). Relay targets are
+            excluded by the caller: the relay owns the destination credential,
+            so a standalone replay could not authenticate anyway.
+            """
+            failed_targets.append({
+                "platform": platform_name,
+                "chat_id": str(chat_id),
+                "thread_id": str(thread_id) if thread_id is not None else None,
+            })
 
         # Continuable cron surface (D1/D2/D6): resolve the delivery surface for
         # this platform generically from its config ``extra``. Default "thread"
@@ -2093,6 +2134,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 logger.warning("Job '%s': %s", job["id"], msg)
                 target_errors.append(msg)
                 delivery_errors.extend(target_errors)
+                # Not a real failure — but the payload would be lost across
+                # the restart, so park it in the outbox for replay.
+                _note_failed_target()
                 continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
@@ -2123,6 +2167,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     logger.warning("Job '%s': %s", job["id"], msg)
                     target_errors.append(msg)
                     delivery_errors.extend(target_errors)
+                    _note_failed_target()
                     continue
                 # The thread-pool fallback can itself raise (SMTP ConnectionError,
                 # future.result timeout, etc.). An exception raised inside this
@@ -2147,11 +2192,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         logger.warning("Job '%s': %s", job["id"], msg)
                         target_errors.append(msg)
                         delivery_errors.extend(target_errors)
+                        _note_failed_target()
                         continue
                     msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
                     logger.error("Job '%s': %s", job["id"], msg, exc_info=True)
                     target_errors.extend([msg])
                     delivery_errors.extend(target_errors)
+                    _note_failed_target()
                     continue
             except (asyncio.TimeoutError, TimeoutError):
                 # The wait_for bound fired: the send coroutine was cancelled
@@ -2166,12 +2213,14 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 logger.error("Job '%s': %s", job["id"], msg)
                 target_errors.extend([msg])
                 delivery_errors.extend(target_errors)
+                _note_failed_target()
                 continue
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
                 logger.error("Job '%s': %s", job["id"], msg, exc_info=True)
                 target_errors.extend([msg])
                 delivery_errors.extend(target_errors)
+                _note_failed_target()
                 continue
 
             if result and result.get("error"):
@@ -2179,6 +2228,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 logger.error("Job '%s': %s", job["id"], msg)
                 target_errors.extend([msg])
                 delivery_errors.extend(target_errors)
+                _note_failed_target()
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
@@ -2189,8 +2239,159 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             )
 
     if delivery_errors:
+        _enqueue_failed_deliveries(job, failed_targets, cleaned_delivery_content)
         return "; ".join(delivery_errors)
     return None
+
+
+def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: str) -> None:
+    """Park undeliverable cron payloads in the persistent delivery outbox.
+
+    Audit loop 6 (A-H2/A-M8): before the outbox, a total delivery failure
+    survived only as ``last_delivery_error`` — and the error summary itself
+    went over the same possibly-broken channel, so report losses were silent.
+    Now every target that failed on ALL delivery paths (live adapter +
+    standalone fallback) is enqueued for replay with backoff on later ticks.
+
+    Best-effort and fail-closed: an outbox I/O error must never break the
+    delivery path or the tick — the payload still lands in
+    ``last_delivery_error`` exactly as before (that field remains the net of
+    last resort). Only the MEDIA-stripped text is replayed; attachments are
+    not (their temp paths may not survive until the retry).
+    """
+    if not failed_targets:
+        return
+    try:
+        from cron.delivery_outbox import enqueue
+
+        for target in failed_targets:
+            entry = enqueue(
+                job["id"],
+                target,
+                content,
+                error="delivery failed on all paths",
+            )
+            logger.warning(
+                "Job '%s': delivery to %s:%s parked in outbox (entry %s) — "
+                "will retry with backoff on later ticks",
+                job["id"], target.get("platform"), target.get("chat_id"),
+                entry.get("id"),
+            )
+    except Exception as outbox_err:
+        logger.warning(
+            "Job '%s': delivery outbox unavailable (%s) — failed payload only "
+            "survives in last_delivery_error",
+            job.get("id", "?"), outbox_err,
+        )
+
+
+def _send_outbox_entry(entry: dict) -> Optional[str]:
+    """Send one outbox entry over the standalone path. Returns None or an error.
+
+    Uses the same bounded standalone transport as ``_deliver_result``
+    (``asyncio.wait_for`` with the delivery timeout, audit A-H1) so a wedged
+    platform send cannot pin the replay. Live-adapter routing is deliberately
+    NOT used: replays fire from the ticker thread where no gateway loop is
+    guaranteed, and the standalone path is exactly what the outbox exists to
+    make durable.
+    """
+    target = entry.get("target") or {}
+    platform_name = str(target.get("platform") or "")
+    chat_id = target.get("chat_id")
+    if not platform_name or not chat_id:
+        return "outbox entry has no resolvable target"
+    if _interpreter_shutting_down():
+        return "replay skipped — interpreter is shutting down"
+
+    from tools.send_message_tool import _send_to_platform
+    from gateway.config import load_gateway_config, Platform
+
+    try:
+        platform = Platform(platform_name.lower())
+    except (ValueError, KeyError):
+        return f"unknown platform '{platform_name}'"
+    try:
+        config = load_gateway_config()
+    except Exception as e:
+        return f"failed to load gateway config: {e}"
+    pconfig = config.platforms.get(platform)
+    if not pconfig or not pconfig.enabled:
+        return f"platform '{platform_name}' not configured/enabled"
+
+    delivery_timeout = _get_delivery_timeout()
+    coro = _send_to_platform(
+        platform, pconfig, chat_id, entry.get("payload", ""),
+        thread_id=target.get("thread_id"),
+    )
+    timed_coro = asyncio.wait_for(coro, timeout=delivery_timeout)
+    try:
+        result = asyncio.run(timed_coro)
+    except RuntimeError:
+        # asyncio.run refused (e.g. a running loop in this thread) before
+        # either coroutine started — close both so they don't warn, and let
+        # the NEXT retry attempt the send instead of crashing the replay.
+        timed_coro.close()
+        coro.close()
+        return "replay send could not start (no usable event loop)"
+    except (asyncio.TimeoutError, TimeoutError):
+        return f"replay delivery timed out after {delivery_timeout}s"
+    except Exception as e:
+        return f"replay delivery failed: {e}"
+    if result and result.get("error"):
+        return f"delivery error: {result['error']}"
+    return None
+
+
+def _replay_delivery_outbox(verbose: bool = False) -> int:
+    """Replay due delivery-outbox entries. Best-effort: never raises.
+
+    Called at the start of every tick (before the due-job scan) so an
+    undelivered report gets retried even on ticks with no due jobs. Entries
+    past the attempt cap are already dead-lettered by the outbox and are not
+    returned as due. Returns the number of entries successfully delivered.
+    """
+    try:
+        from cron.delivery_outbox import due_entries, record_replay_result
+
+        entries = due_entries()
+    except Exception as e:
+        logger.warning("cron delivery outbox unreadable — skipping replay: %s", e)
+        return 0
+    delivered = 0
+    for entry in entries:
+        error = _send_outbox_entry(entry)
+        try:
+            updated = record_replay_result(
+                entry["id"], success=error is None, error=error,
+            )
+        except Exception as e:
+            logger.warning(
+                "cron delivery outbox: could not record replay result for %s: %s",
+                entry.get("id"), e,
+            )
+            continue
+        if error is None:
+            delivered += 1
+            logger.info(
+                "Outbox entry %s (job '%s') delivered on replay",
+                entry.get("id"), entry.get("job_id"),
+            )
+        elif updated is not None and updated.get("status") == "dead":
+            logger.error(
+                "Outbox entry %s (job '%s') is DEAD after %s attempts — "
+                "report undeliverable: %s",
+                entry.get("id"), entry.get("job_id"),
+                updated.get("attempts"), error,
+            )
+        else:
+            logger.warning(
+                "Outbox entry %s (job '%s') replay failed (attempt %s): %s",
+                entry.get("id"), entry.get("job_id"),
+                (updated or {}).get("attempts"), error,
+            )
+    if verbose and delivered:
+        logger.info("Delivery outbox: replayed %d entr(ies)", delivered)
+    return delivered
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 3600  # seconds (1 hour)
@@ -4260,6 +4461,12 @@ def tick(
             logger.debug("Cron dispatch paused while gateway drains existing work")
             return 0
 
+        # Replay due delivery-outbox entries FIRST (audit loop 6 / A-H2): a
+        # previous run's undeliverable report gets another chance even when
+        # no job is due this tick. Best-effort — an outbox I/O error must
+        # never break the tick.
+        _replay_delivery_outbox()
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
@@ -4277,7 +4484,8 @@ def tick(
         for job in due_jobs:
             advance_next_run(job["id"])
 
-        # Resolve max parallel workers: env var > config.yaml > unbounded.
+        # Resolve max parallel workers: env var > config.yaml > default cap
+        # (_DEFAULT_MAX_PARALLEL, applied inside _get_parallel_pool).
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
         try:
@@ -4285,7 +4493,10 @@ def tick(
             if _env_par:
                 _max_workers = int(_env_par) or None
         except (ValueError, TypeError):
-            logger.warning("Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to unbounded")
+            logger.warning(
+                "Invalid HERMES_CRON_MAX_PARALLEL value; defaulting to cap of %d",
+                _DEFAULT_MAX_PARALLEL,
+            )
         if _max_workers is None:
             try:
                 _ucfg = load_config() or {}
@@ -4301,7 +4512,7 @@ def tick(
             logger.info(
                 "Running %d job(s) in parallel (max_workers=%s)",
                 len(due_jobs),
-                _max_workers if _max_workers else "unbounded",
+                _max_workers if _max_workers else f"default {_DEFAULT_MAX_PARALLEL}",
             )
 
         def _process_job(job: dict) -> bool:

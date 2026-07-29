@@ -376,6 +376,37 @@ def _print_active_jobs_summary(jobs) -> None:
             print(f"  Next run: {min(next_runs)}")
     else:
         print("  No active jobs")
+    _print_outbox_summary()
+
+
+def _print_outbox_summary() -> None:
+    """Show delivery-outbox queued/dead counts when non-zero (audit A-H2).
+
+    Queued entries are retried automatically with backoff; dead entries are
+    dead letters — reports that could not be delivered after all retries and
+    would otherwise have been lost silently. Best-effort: an unreadable
+    outbox must never break `cron status`.
+    """
+    try:
+        from cron.delivery_outbox import outbox_counts
+
+        counts = outbox_counts()
+    except Exception:
+        return
+    queued = counts.get("queued", 0)
+    dead = counts.get("dead", 0)
+    if queued:
+        print(color(
+            f"  ⏳ Delivery outbox: {queued} report(s) queued — "
+            "will retry with backoff",
+            Colors.YELLOW,
+        ))
+    if dead:
+        print(color(
+            f"  ⚠ Delivery outbox: {dead} DEAD report(s) — undeliverable "
+            "after all retries, inspect ~/.hermes/cron/outbox.jsonl",
+            Colors.RED,
+        ))
 
 
 def cron_create(args):
