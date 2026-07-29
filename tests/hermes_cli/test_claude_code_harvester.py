@@ -476,6 +476,141 @@ def test_task_level_recorrelation_never_downgrades_an_exact_run(
     )
 
 
+def test_explicit_correlation_backfill_reports_before_after_and_board_errors(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    sessions = {
+        "run": "session-exact-run",
+        "task": "session-exact-task",
+        "ambiguous": "session-ambiguous",
+        "unresolved": "session-unresolved",
+    }
+    for name, session_id in sessions.items():
+        upsert_run_facts(
+            f"claude-{name}",
+            {
+                "origin": "claude_code",
+                "session_id": session_id,
+                "captured_at": "2026-07-29T00:00:00Z",
+            },
+            path=db_path,
+        )
+
+    board = tmp_path / "kanban.db"
+    with sqlite3.connect(board) as connection:
+        connection.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, metadata TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO task_runs VALUES (?, ?, ?, ?)",
+            [
+                (1, "task-run", "coder", json.dumps({"claude_session_id": sessions["run"]})),
+                (2, "task-only", "coder", json.dumps({"claude_session_id": sessions["task"]})),
+                (3, "task-only", "coder", json.dumps({"claude_session_id": sessions["task"]})),
+                (4, "task-a", "coder", json.dumps({"claude_session_id": sessions["ambiguous"]})),
+                (5, "task-b", "coder", json.dumps({"claude_session_id": sessions["ambiguous"]})),
+            ],
+        )
+    old_board = tmp_path / "old.db"
+    with sqlite3.connect(old_board) as connection:
+        connection.execute("CREATE TABLE legacy_only (id INTEGER PRIMARY KEY)")
+
+    report = harvester_mod.backfill_existing_correlations(
+        db_path=db_path,
+        kanban_paths=[board, old_board],
+        apply=True,
+    )
+
+    assert report["before"] == {
+        "candidate_sessions": 4,
+        "exact_run_links": 0,
+        "task_only_links": 0,
+        "ambiguous_sessions": 1,
+        "unresolved_sessions": 4,
+    }
+    assert report["after"] == {
+        "candidate_sessions": 4,
+        "exact_run_links": 1,
+        "task_only_links": 1,
+        "ambiguous_sessions": 1,
+        "unresolved_sessions": 2,
+    }
+    assert report["updated_facts"] == 2
+    assert report["applied"] is True
+    assert [item["status"] for item in report["board_databases"]] == ["ok", "error"]
+    assert report["board_databases"][1]["error"] == "OperationalError"
+    assert "session" not in json.dumps(report["board_databases"])
+
+    second = harvester_mod.backfill_existing_correlations(
+        db_path=db_path,
+        kanban_paths=[board, old_board],
+        apply=True,
+    )
+    assert second["updated_facts"] == 0
+    assert second["after"] == report["after"]
+
+
+def test_correlation_backfill_dry_run_is_read_only(db_path: Path, tmp_path: Path) -> None:
+    session_id = "dry-run-session"
+    upsert_run_facts(
+        "claude-dry-run",
+        {
+            "origin": "claude_code",
+            "session_id": session_id,
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+    board = tmp_path / "kanban.db"
+    with sqlite3.connect(board) as connection:
+        connection.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO task_runs VALUES (?, ?, ?, ?)",
+            (1, "task-one", "coder", json.dumps({"claude_session_id": session_id})),
+        )
+
+    report = harvester_mod.backfill_existing_correlations(
+        db_path=db_path,
+        kanban_paths=[board],
+        apply=False,
+    )
+
+    assert report["applied"] is False
+    assert report["updated_facts"] == 1
+    assert report["after"]["exact_run_links"] == 1
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id FROM run_usage_facts "
+            "WHERE run_id='claude-dry-run'"
+        ).fetchone()
+    assert tuple(row) == (None, None)
+
+
+def test_backfill_cli_is_explicit_and_preview_only_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_backfill(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"applied": kwargs["apply"], "updated_facts": 7}
+
+    monkeypatch.setattr(harvester_mod, "backfill_existing_correlations", fake_backfill)
+
+    assert harvester_mod.main(["--backfill-correlations"]) == 0
+    assert calls == [{"db_path": None, "apply": False}]
+    assert json.loads(capsys.readouterr().out) == {
+        "applied": False,
+        "updated_facts": 7,
+    }
+
+
 def test_explicit_raw_billing_mode_is_preserved() -> None:
     record = {
         "type": "assistant",
