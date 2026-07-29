@@ -104,6 +104,7 @@ from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
 from hermes_cli import kanban_review_policy as _review_policy
+from hermes_cli import kanban_runtime_facts as _runtime_facts
 from hermes_cli.kanban_chain_status import (
     _matching_conflict_fixer_attempts,
     blocked_event_kind,
@@ -2607,7 +2608,10 @@ _CORRUPT_BACKUP_RETENTION = 10
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 9  # Immutable handoff attachments (sha256/kind/unique)
+# gen 9: immutable handoff attachments gained sha256/kind/unique constraints.
+# gen 10: fork-owned worker runtime-facts tables are installed alongside the
+# base schema, so already-stamped boards need one full migration pass.
+_SCHEMA_GENERATION = 10
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -3523,6 +3527,7 @@ def connect(
                 conn.executescript(SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
                 _migrate_refresh_review_gate_trigger(conn)
+                _runtime_facts.init_schema(conn)
                 # Persist the cross-process stamp LAST: a stamp is only ever
                 # written over a schema that completed the full pass.
                 conn.execute(f"PRAGMA user_version={_SCHEMA_STAMP}")
@@ -9907,6 +9912,14 @@ def _end_run(
         "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
         (task_id,),
     )
+    _runtime_facts.record_event(
+        conn,
+        task_run_id=run_id,
+        event_kind="ended",
+        observed_at_ms=now * 1000,
+        source="kanban_db._end_run",
+        board=board_slug_for_conn(conn),
+    )
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
     _record_run_metric_scores(conn, run_id, task_id, created_at=now)
     return run_id
@@ -11884,6 +11897,12 @@ def claim_task(
             },
             run_id=run_id,
         )
+        _runtime_facts.record_claimed_timeline(
+            conn,
+            task_run_id=run_id,
+            claimed_at_seconds=now,
+            board=board_slug_for_conn(conn),
+        )
         claimed = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_claimed",
@@ -12024,6 +12043,12 @@ def claim_review_task(
                 "source_status": "review",
             },
             run_id=run_id,
+        )
+        _runtime_facts.record_claimed_timeline(
+            conn,
+            task_run_id=run_id,
+            claimed_at_seconds=now,
+            board=board_slug_for_conn(conn),
         )
         return get_task(conn, task_id)
 
@@ -24621,6 +24646,15 @@ def _set_worker_pid(
                 f"active run {run_id} disappeared while attaching worker pid for {task_id}"
             )
         _append_event(conn, task_id, "spawned", {"pid": int(pid)}, run_id=run_id)
+        _runtime_facts.record_locator(conn, task_run_id=run_id, pid=int(pid))
+        _runtime_facts.record_event(
+            conn,
+            task_run_id=run_id,
+            event_kind="process_started",
+            observed_at_ms=int(time.time() * 1000),
+            source="kanban_db._set_worker_pid",
+            board=board_slug_for_conn(conn),
+        )
         return True
 
 
@@ -31799,6 +31833,11 @@ def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
     _rotate_worker_log(spec.log_path, rotate_bytes, backup_count)
     log_f = open(spec.log_path, "ab")
     try:
+        _runtime_facts.record_event_from_environment(
+            "spawn_started",
+            source="kanban_db._launch_worker_process",
+            env=spec.env,
+        )
         proc = subprocess.Popen(  # noqa: S603 -- argv is a resolved fixed list
             _maybe_scope_worker_cmd(list(spec.argv)),
             cwd=spec.cwd,

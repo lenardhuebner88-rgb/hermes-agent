@@ -2049,7 +2049,20 @@ def run_conversation(
                 # support it.
                 def _stop_spinner():
                     nonlocal first_token_at, thinking_spinner
-                    first_token_at = first_token_at or time.time()
+                    if first_token_at is None:
+                        first_token_at = time.time()
+                        try:
+                            from hermes_cli.kanban_runtime_facts import (
+                                record_event_from_environment,
+                            )
+
+                            record_event_from_environment(
+                                "first_token",
+                                source="agent.conversation_loop",
+                                preserve_first=True,
+                            )
+                        except Exception:
+                            pass
                     if thinking_spinner:
                         thinking_spinner.stop("")
                         thinking_spinner = None
@@ -2108,6 +2121,18 @@ def run_conversation(
                     # not the profile/lane route from conversation startup.
                     _request_model_route["provider"] = agent.provider
                     _request_model_route["model"] = agent.model
+                    try:
+                        from hermes_cli.kanban_runtime_facts import (
+                            record_event_from_environment,
+                        )
+
+                        record_event_from_environment(
+                            "first_llm_request",
+                            source="agent.conversation_loop",
+                            preserve_first=True,
+                        )
+                    except Exception:
+                        pass
                     try:
                         from tools.kanban_tools import (
                             record_current_worker_model_route_from_env,
