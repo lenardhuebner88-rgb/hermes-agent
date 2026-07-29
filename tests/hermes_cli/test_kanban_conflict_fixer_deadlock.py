@@ -17,6 +17,9 @@ from hermes_cli.kanban_chain_status import (
 
 
 _PARK_REASON = "integration parked: merge conflict/failure (aborted): foo.py"
+_BASE_PREP_REASON = (
+    "worker base preparation: clean stale worktree could not rebase onto main"
+)
 FIXER_FAILURE_PUBLISH_FAILED_EVENT = "fixer_failure_publish_failed"
 
 
@@ -142,6 +145,298 @@ def _claim_at_runtime_limit(conn, task_id: str, *, now: int) -> None:
         (now - 1, task_id),
     )
     conn.commit()
+
+
+def _base_prep_route_with_system_escalation(
+    conn,
+    tmp_path: Path,
+    *,
+    now: int,
+) -> tuple[str, str]:
+    parent_id = kb.create_task(conn, title="base-prep parent", assignee="coder")
+    worktree = tmp_path / "repo" / ".worktrees" / "kanban" / parent_id
+    worktree.mkdir(parents=True)
+    kb.set_workspace_path(conn, parent_id, str(worktree))
+    assert kb.claim_task(conn, parent_id) is not None
+    assert kb._route_base_prep_conflict_fixer(
+        conn,
+        parent_id,
+        reason=_BASE_PREP_REASON,
+        now=now,
+    )
+    first_dispatch = next(
+        event
+        for event in kb.list_events(conn, parent_id)
+        if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+    )
+
+    sweep = kb.no_silent_stall_sweep(conn, now=now)
+    escalation = next(
+        event
+        for event in kb.list_events(conn, parent_id)
+        if event.kind == kb.OPERATOR_ESCALATION_EVENT
+    )
+    assert escalation.payload["escalation_class"] == kb.HEILER_CLASS_TRANSIENT
+    assert {"task_id": parent_id, "class": kb.INTEGRATION_PARKED_STALL_CLASS} in (
+        sweep["parked"]
+    )
+    return parent_id, first_dispatch.payload["child_id"]
+
+
+def _timeout_fixer_at_limit(
+    conn,
+    fixer_id: str,
+    *,
+    now: int,
+    monkeypatch,
+) -> None:
+    _claim_at_runtime_limit(conn, fixer_id, now=now)
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    monkeypatch.setattr(
+        kb,
+        "_terminate_reclaimed_worker",
+        lambda *_args, **_kwargs: {
+            "host_local": True,
+            "termination_attempted": True,
+            "terminated": True,
+            "sigkill": False,
+        },
+    )
+    assert kb.enforce_max_runtime(conn) == [fixer_id]
+
+
+def test_base_prep_timeout_routes_second_fixer_despite_system_escalation(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    with kb.connect_closing() as conn:
+        parent_id, first_child = _base_prep_route_with_system_escalation(
+            conn,
+            tmp_path,
+            now=now,
+        )
+        _timeout_fixer_at_limit(
+            conn,
+            first_child,
+            now=now,
+            monkeypatch=monkeypatch,
+        )
+
+        child_failures = [
+            event
+            for event in kb.list_events(conn, first_child)
+            if event.kind == CONFLICT_FIXER_FAILED_EVENT
+        ]
+        parent_failures = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == CONFLICT_FIXER_FAILED_EVENT
+        ]
+        sweep = kb.no_silent_stall_sweep(
+            conn,
+            now=now + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
+        )
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert len(child_failures) == 1
+    assert len(parent_failures) == 1
+    assert child_failures[0].payload == parent_failures[0].payload
+    assert len(dispatched) == 2
+    assert dispatched[-1].payload["attempt"] == 2
+    assert dispatched[-1].payload["child_id"] != first_child
+    assert sweep["conflict_fixer_dispatched"] == [
+        {
+            "task_id": parent_id,
+            "child_id": dispatched[-1].payload["child_id"],
+            "attempt": 2,
+        }
+    ]
+
+
+def test_base_prep_fixer_budget_exhaustion_settles_after_repeated_sweeps(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    with kb.connect_closing() as conn:
+        parent_id, first_child = _base_prep_route_with_system_escalation(
+            conn,
+            tmp_path,
+            now=now,
+        )
+        _timeout_fixer_at_limit(
+            conn,
+            first_child,
+            now=now,
+            monkeypatch=monkeypatch,
+        )
+        after_first = now + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1
+        kb.no_silent_stall_sweep(conn, now=after_first)
+        second_child = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ][-1].payload["child_id"]
+        _timeout_fixer_at_limit(
+            conn,
+            second_child,
+            now=after_first,
+            monkeypatch=monkeypatch,
+        )
+
+        escalations_before_exhaustion = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        first_exhausted_sweep = kb.no_silent_stall_sweep(
+            conn,
+            now=after_first + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
+        )
+        events_after_exhaustion = kb.list_events(conn, parent_id)
+
+        def fail_if_routed_again(*_args, **_kwargs):
+            raise AssertionError("settled exhausted park re-entered fixer routing")
+
+        monkeypatch.setattr(
+            kb,
+            "_maybe_route_conflict_park_fixer",
+            fail_if_routed_again,
+        )
+        repeated_sweeps = [
+            kb.no_silent_stall_sweep(
+                conn,
+                now=after_first + kb.CONFLICT_FIXER_BACKOFF_SECONDS + offset,
+            )
+            for offset in (2, 3, 4)
+        ]
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        escalations = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        exhaustion_escalations = [
+            event
+            for event in escalations
+            if event.payload["evidence"].get("fixer_exhausted") is True
+        ]
+        events_after_repeated_sweeps = kb.list_events(conn, parent_id)
+
+    assert len(dispatched) == kb.CONFLICT_FIXER_MAX_ATTEMPTS
+    assert first_exhausted_sweep["conflict_fixer_dispatched"] == []
+    assert len(escalations) - len(escalations_before_exhaustion) == 1
+    assert len(exhaustion_escalations) == 1
+    assert exhaustion_escalations[0].payload["evidence"]["attempts"] == (
+        kb.CONFLICT_FIXER_MAX_ATTEMPTS
+    )
+    assert all(sweep["conflict_fixer_dispatched"] == [] for sweep in repeated_sweeps)
+    assert events_after_repeated_sweeps == events_after_exhaustion
+
+
+def test_base_prep_retry_never_bypasses_integration_retry_exhaustion(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    with kb.connect_closing() as conn:
+        parent_id, first_child = _base_prep_route_with_system_escalation(
+            conn,
+            tmp_path,
+            now=now,
+        )
+        _timeout_fixer_at_limit(
+            conn,
+            first_child,
+            now=now,
+            monkeypatch=monkeypatch,
+        )
+        with kb.write_txn(conn):
+            kb._append_stall_marker(
+                conn,
+                parent_id,
+                stall_class=kb.INTEGRATION_RETRY_EXHAUSTED_CLASS,
+                action="parked",
+                reason="transient integration retry budget exhausted",
+                now=now,
+            )
+
+        sweep = kb.no_silent_stall_sweep(
+            conn,
+            now=now + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
+        )
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert len(dispatched) == 1
+    assert sweep["conflict_fixer_dispatched"] == []
+
+
+def test_base_prep_operator_hold_still_blocks_second_fixer(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    with kb.connect_closing() as conn:
+        parent_id, first_child = _base_prep_route_with_system_escalation(
+            conn,
+            tmp_path,
+            now=now,
+        )
+        _timeout_fixer_at_limit(
+            conn,
+            first_child,
+            now=now,
+            monkeypatch=monkeypatch,
+        )
+        kb._emit_operator_escalation(
+            conn,
+            parent_id,
+            None,
+            "operator_hold",
+            "operator hold: await explicit approval",
+        )
+        latest_escalation = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.OPERATOR_ESCALATION_EVENT
+        ][-1]
+
+        sweep = kb.no_silent_stall_sweep(
+            conn,
+            now=now + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
+        )
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert latest_escalation.payload["escalation_class"] == (
+        kb.HEILER_CLASS_OPERATOR_GATED
+    )
+    assert len(dispatched) == 1
+    assert sweep["conflict_fixer_dispatched"] == []
 
 
 def test_gave_up_conflict_fixer_releases_in_flight_guard_for_second_attempt(
