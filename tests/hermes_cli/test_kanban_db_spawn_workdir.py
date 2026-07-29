@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import gate_evidence
+from hermes_cli import kanban_runtime_facts as runtime_facts
 
 def _make_task(**overrides) -> "kb.Task":
     """Minimal Task with all required fields filled in. Override anything."""
@@ -1459,3 +1460,24 @@ def test_worker_gate_stamps_executed_test_counts(kanban_home, tmp_path, monkeypa
         {"command_index": 0, "test_files": 2, "tests_passed": 13},
     ]
     gate_evidence._assert_raw_free(stamp)
+
+
+def test_set_worker_pid_records_direct_locator_and_process_end(kanban_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="runtime", assignee="coder", kind="code")
+        assert kb.claim_task(conn, task_id) is not None
+        run_id = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["current_run_id"]
+        assert kb._set_worker_pid(conn, task_id, 4242) is True
+        assert kb._end_run(conn, task_id, outcome="completed") == run_id
+
+        locator = runtime_facts.get_locator(conn, task_run_id=run_id)
+        event_kinds = [
+            item["event_kind"]
+            for item in runtime_facts.list_timeline(conn, task_run_id=run_id)
+        ]
+
+    assert locator == {"locator_type": "pid", "pid": 4242}
+    assert {"queued", "claimed", "process_started", "ended"} <= set(event_kinds)

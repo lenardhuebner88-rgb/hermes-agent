@@ -85,3 +85,67 @@ leaves the Hermes result unchanged.
 `OPERATOR_LIVE_SMOKE_PENDING`: this code task does not start Docker or a
 Langfuse service. The deterministic `docker compose ... config` command above
 is the local configuration gate; live startup is a chain-end operator action.
+
+## Operator live-smoke acceptance (fail closed)
+
+Contract tests prepare this sequence but do not run it. An operator must approve
+the real Kanban run and all live mutations. Do not start containers, expose an
+ingress, or print keys, cookies, headers, prompts, or transcripts while collecting
+the receipt.
+
+1. Record the pre-change read-only audit and create a transaction-consistent
+   backup before any schema initialization or correlation backfill:
+
+   ```bash
+   .venv/bin/python scripts/langfuse_worker_audit.py --days 90 > audit-before.json
+   .venv/bin/python - "$HERMES_USAGE_FACTS_DB" "$HERMES_USAGE_FACTS_DB.pre-smoke.bak" <<'PY'
+   import sqlite3, sys
+   source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+   destination = sqlite3.connect(sys.argv[2])
+   source.backup(destination)
+   destination.close()
+   source.close()
+   PY
+   ```
+
+2. Initialize only missing schema objects, preview the exact-session backfill,
+   and inspect both JSON results. Initialization is idempotent; on an already
+   current DB it performs no rewrite. Apply only after operator approval:
+
+   ```bash
+   .venv/bin/python -c 'from hermes_cli.usage_facts_db import initialize_usage_facts_db; import sys; print(initialize_usage_facts_db(sys.argv[1]))' "$HERMES_USAGE_FACTS_DB"
+   .venv/bin/python -m hermes_cli.claude_code_harvester --db "$HERMES_USAGE_FACTS_DB" --backfill-correlations > backfill-preview.json
+   .venv/bin/python -m hermes_cli.claude_code_harvester --db "$HERMES_USAGE_FACTS_DB" --backfill-correlations --apply > backfill-applied.json
+   .venv/bin/python scripts/langfuse_worker_audit.py --days 90 > audit-after.json
+   ```
+
+3. After an approved real Kanban worker run has completed, confirm that its
+   preserved `task_runs.metadata.worker_runtime` is exactly `hermes`. Claim-time
+   spawn identity is retained when terminal completion metadata is stored. The
+   contract is not applicable to `claude-cli` workers: those runs do not pass
+   through the Hermes conversation loop and therefore emit neither the plugin
+   trace nor its LLM lifecycle observations. Then run the acceptance gate with
+   the numeric `task_run_id` of the eligible Hermes-runtime run:
+
+   ```bash
+   .venv/bin/python scripts/langfuse_worker_audit.py --live-smoke-run-id "$TASK_RUN_ID" > live-smoke.json
+   ```
+
+The command exits `0` only when the authenticated public trace API is readable,
+an explicit trace metadata field and a usage fact carry that exact run ID, the
+usage fact agrees on task ID, all required lifecycle observations exist, and the
+worker terminated successfully. It exits `3` for a red contract. Once a model
+request was observed, `first_token` is required; a run that failed before its
+first model request reports the absent observations but does not invent or
+require a first token. The receipt includes `worker_runtime` and marks an
+ineligible runtime's lifecycle assessment as `not_applicable`. Endpoint errors
+separate missing credentials, HTTP responses (including invalid JSON), and
+network failures without copying exception text or response bodies; trace IDs
+are truncated in the JSON receipt. `schema` reports the versioned
+worker-runtime-facts and exact-usage-correlation contracts rather than SQLite's
+internal DDL counter.
+
+Archive `audit-before.json`, `backfill-preview.json`, `backfill-applied.json`,
+`audit-after.json`, and `live-smoke.json` together with the exact commands and
+their exit codes. A green contract test is only evidence that this acceptance
+logic works; it is never a substitute for a green operator live-smoke receipt.

@@ -14,6 +14,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from hermes_cli.kanban_runtime_facts import SPAWN_IDENTITY_METADATA_FIELDS
+
+
+def _completion_payload(metadata):
+    assert metadata["worker_runtime"] == "hermes"
+    ignored = SPAWN_IDENTITY_METADATA_FIELDS | {"cost"}
+    return {key: value for key, value in metadata.items() if key not in ignored}
+
 
 @pytest.fixture(autouse=True)
 def _reset_check_fn_cache():
@@ -584,7 +592,7 @@ def test_complete_happy_path(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
         assert run.summary == "got the thing done"
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        md = _completion_payload(run.metadata)
         assert md == {"files": 2}
     finally:
         conn.close()
@@ -667,7 +675,7 @@ def test_complete_metadata_round_trips_through_show(worker_env):
     shown = json.loads(show_out)
     assert shown["task"]["status"] == "done"
     assert shown["runs"][-1]["summary"] == "finished with structured evidence"
-    shown_md = {k: v for k, v in shown["runs"][-1]["metadata"].items() if k != "cost"}
+    shown_md = _completion_payload(shown["runs"][-1]["metadata"])
     assert shown_md == handoff
 
 
@@ -688,7 +696,7 @@ def test_complete_stamps_worker_session_id_from_env(monkeypatch, worker_env):
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        md = _completion_payload(run.metadata)
         assert md == {
             "files": 2,
             "worker_session_id": "session-trusted",
@@ -716,7 +724,7 @@ def test_complete_does_not_stamp_worker_session_id_without_scoped_task(
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        md = _completion_payload(run.metadata)
         assert md == {
             "files": 2,
             "worker_session_id": "user-provided",
@@ -2746,7 +2754,7 @@ def test_worker_lifecycle_through_tools(worker_env):
         assert parent.current_run_id is None
         run = kb.latest_run(conn, worker_env)
         assert run.outcome == "completed"
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        md = _completion_payload(run.metadata)
         assert md == {"child_task": child_out["task_id"]}
         # Child is todo (parent just finished, but recompute_ready may
         # have promoted it — complete_task runs recompute internally).
