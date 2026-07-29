@@ -5,6 +5,7 @@ three sessions: open+fresh, open+stale (old messages), already-ended.
 """
 from __future__ import annotations
 
+import sqlite3
 import subprocess
 import sys
 import time
@@ -341,3 +342,103 @@ class TestReapStaleSessionsScript:
         assert old_sweeps[0] not in remaining
         assert old_sweeps[1] not in remaining
         assert foreign.exists()
+
+
+# ---------------------------------------------------------------------------
+# Unit + CLI-contract pinning
+# ---------------------------------------------------------------------------
+
+def test_label_prefers_title_then_display_name():
+    """The fallback ladder is title -> display_name -> (untitled); a
+    missing title must not skip the display name."""
+    from scripts import reap_stale_sessions as reap
+
+    assert reap._label({"title": "T", "display_name": "D"}) == "T"
+    assert reap._label({"title": "", "display_name": "D"}) == "D"
+    assert reap._label({"title": "", "display_name": ""}) == "(untitled)"
+
+
+def test_safe_copy_db_produces_a_complete_backup(tmp_path):
+    """The backup must carry the real database through the ro-URI backup
+    API — a raw-file misconnect would snapshot an empty db and the sweep
+    would run without a usable rollback."""
+    from scripts import reap_stale_sessions as reap
+
+    src = tmp_path / "src.db"
+    conn = sqlite3.connect(src)
+    conn.execute("CREATE TABLE probe (x INTEGER)")
+    conn.execute("INSERT INTO probe VALUES (41)")
+    conn.commit()
+    conn.close()
+
+    dst = tmp_path / "dst.db"
+    assert reap._safe_copy_db(src, dst) is True
+    check = sqlite3.connect(dst)
+    try:
+        assert check.execute("SELECT x FROM probe").fetchone()[0] == 41
+    finally:
+        check.close()
+
+
+def test_backup_path_tolerates_existing_backups_dir(tmp_path):
+    """The second sweep of the night meets an existing backups dir —
+    mkdir must not raise."""
+    from scripts import reap_stale_sessions as reap
+
+    (tmp_path / "backups").mkdir()
+    path = reap._backup_path(tmp_path)
+    assert path.parent == tmp_path / "backups"
+    assert "before-stale-sweep" in path.name
+
+
+def test_days_zero_is_allowed(tmp_path):
+    """--days 0 is a legitimate 'sweep everything stale now' request —
+    only negative values are a usage error."""
+    from scripts import reap_stale_sessions as reap
+
+    state_db = tmp_path / "state.db"
+    session_db = SessionDB(db_path=state_db)
+    try:
+        _seed_three(session_db)
+    finally:
+        session_db.close()
+
+    assert reap.main(
+        ["--state-db", str(state_db), "--days", "0", "--now", str(_NOW)]
+    ) == 0
+
+
+class TestNotifyGating:
+    def test_notify_fires_only_on_apply_with_candidates_and_int_days(
+        self, tmp_path, monkeypatch
+    ):
+        """Discord notify needs ALL of --notify, --apply and n>0 — and the
+        day count goes out as an int, never '7.0'."""
+        from scripts import reap_stale_sessions as reap
+
+        state_db = tmp_path / "state.db"
+        session_db = SessionDB(db_path=state_db)
+        try:
+            _seed_three(session_db)
+        finally:
+            session_db.close()
+
+        calls: list[tuple[int, object]] = []
+        monkeypatch.setattr(
+            reap, "_notify_discord", lambda n, days: calls.append((n, days))
+        )
+
+        base = ["--state-db", str(state_db), "--days", "7", "--now", str(_NOW)]
+
+        # dry-run + --notify with a candidate: still no notification
+        assert reap.main([*base, "--notify"]) == 0
+        assert calls == []
+
+        # apply + --notify with one candidate: exactly one int-days call
+        assert reap.main([*base, "--apply", "--notify"]) == 0
+        assert calls == [(1, 7)]
+        assert all(isinstance(days, int) for _, days in calls)
+
+        # apply + --notify with ZERO candidates: no further notification
+        assert reap.main([*base, "--apply", "--notify"]) == 0
+        assert len(calls) == 1
