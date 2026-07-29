@@ -123,7 +123,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 # fcntl is Unix-only; on Windows fall back to msvcrt. Either may be absent,
 # in which case _store_lock() degrades to in-process locking only (mirrors

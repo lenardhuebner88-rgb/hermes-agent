@@ -2402,9 +2402,12 @@ def _entry_delivery_timeout(entry: dict) -> int:
 
     The failed first attempt persists its resolved timeout as
     ``delivery_timeout_seconds`` on the entry at enqueue time; the replay
-    must use that SAME bound — re-resolving from env/default here would
-    dead-letter a job whose legitimate per-job timeout exceeds the CURRENT
-    default. Entries without a valid field (older stores, hand-written
+    must use that same persisted bound — re-resolving from env/default here
+    would dead-letter a job whose legitimate per-job timeout exceeds the
+    CURRENT default. (Note: in the RuntimeError thread-pool fallback the
+    first attempt is additionally bounded by the 30s pool budget, so a
+    per-job timeout above 30s is effectively capped there — documented in
+    _deliver_result.) Entries without a valid field (older stores, hand-written
     rows) fall back to the global ``_get_delivery_timeout()`` resolution.
     The result is clamped strictly below the send-lease TTL (loop 24 / L2):
     a replay send allowed to outrun its lease looks orphaned mid-send and a
@@ -2417,7 +2420,8 @@ def _entry_delivery_timeout(entry: dict) -> int:
             value = int(float(raw))
             if value > 0:
                 delivery_timeout = value
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError: hand-edited rows carrying inf/nan (K3 residue).
             delivery_timeout = None
     if delivery_timeout is None:
         delivery_timeout = _get_delivery_timeout()
