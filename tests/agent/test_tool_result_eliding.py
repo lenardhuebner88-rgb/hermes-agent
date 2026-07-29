@@ -451,5 +451,59 @@ def _convo_reads(num_pairs):
     return out
 
 
+# --------------------------------------------------------------------------
+# Boundary + constant pinning
+# --------------------------------------------------------------------------
+
+def test_int_env_accepts_zero_as_a_valid_value():
+    """An explicit 0 is a legitimate knob setting (e.g. quantize off) —
+    only negatives and garbage fall back to the default."""
+    import agent.tool_result_eliding as tre
+
+    assert tre._int_env({"K": "0"}, "K", 5) == 0
+    assert tre._int_env({"K": "-1"}, "K", 5) == 5
+
+
+def test_cache_stable_boundary_negative_step_is_plain_boundary():
+    """A negative quantize step is garbage and must degrade to the plain
+    end-relative boundary, never quantise by a negative divisor (which
+    would move the boundary OUTWARDS)."""
+    assert cache_stable_boundary(20, 4, -3) == 16
+
+
+def test_tool_result_at_boundary_index_stays_protected():
+    """The elidable range is [0, boundary) — a tool result sitting exactly
+    AT the boundary index is already inside the protected tail and must
+    stay verbatim."""
+    msgs = []
+    msgs += _padding(2)                                  # idx 0..3
+    msgs.append({"role": "user", "content": "u"})        # idx 4
+    msgs.append(_tool("c1", "read_file", _BIG))          # idx 5 == boundary
+    msgs.append({"role": "user", "content": "v"})        # idx 6
+    # n=7, protect_last_n=2, quantize off → boundary 5
+    out, elided, _saved = elide_stale_tool_results(
+        msgs, protect_last_n=2, quantize_step=0
+    )
+    assert elided == 0
+    assert out[5]["content"] == _BIG
+
+
+def test_content_at_exactly_min_elide_chars_stays():
+    """The length floor is inclusive: content of EXACTLY min_elide_chars
+    is not worth the churn and stays verbatim."""
+    exact = "Y" * DEFAULT_MIN_ELIDE_CHARS
+    msgs = _pair("c1", "read_file", '{"path": "a"}', exact) + _padding(20)
+    out, elided, _saved = elide_stale_tool_results(msgs, protect_last_n=2)
+    assert elided == 0
+    assert out[1]["content"] == exact
+
+
+def test_module_defaults_are_pinned():
+    """The eliding floor (1500) and the cache-quantize step (8 ≈ 4 worker
+    turns) are cost-tuned constants — pin them against silent drift."""
+    assert DEFAULT_MIN_ELIDE_CHARS == 1500
+    assert DEFAULT_CACHE_QUANTIZE_STEP == 8
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
