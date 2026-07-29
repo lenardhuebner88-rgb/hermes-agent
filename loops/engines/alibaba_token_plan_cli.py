@@ -5,6 +5,20 @@ but execution intentionally uses the installed ``qwen`` subscription CLI rather
 than a Hermes API-key provider. ``--safe-mode`` disables user context, hooks,
 extensions, skills, and MCP servers; ``--sandbox`` keeps tool execution isolated.
 Authentication and credential configuration are left untouched.
+
+Zwei Flags sind Pflicht, damit die Bau-Phase ueberhaupt arbeiten kann — beide
+gelernt am Nachtlauf 2026-07-29 (dashboard-experience), der 270s lief und 0
+Zeilen schrieb:
+
+* ``-y`` (YOLO): ohne das verweigert die CLI im nicht-interaktiven Modus JEDES
+  Tool — auch ``read_file`` — mit "requires user approval but cannot execute in
+  non-interactive mode". Die anderen Bau-Engines setzen das Aequivalent
+  (``codex --sandbox workspace-write``, ``claude --permission-mode``).
+* ``SANDBOX_MOUNTS``: ``--sandbox`` startet einen Docker-Container, der per
+  Default nur cwd mountet. Der Builder-Vertrag lebt aber daneben — der Runner
+  haelt ``wt = state/"wt"`` und ``status_path = state/"last-status"``. Ohne den
+  State-Mount kann der Builder weder Plan noch before_evidence lesen noch
+  ``last-status`` schreiben; der Runner meldet dann fail-closed "build-fail: ?".
 """
 
 from __future__ import annotations
@@ -32,6 +46,7 @@ def run(
         model,
         "--safe-mode",
         "--sandbox",
+        "-y",
         "--output-format",
         "text",
         "-p",
@@ -39,6 +54,7 @@ def run(
     ]
     env = dict(os.environ)
     env["HERMES_SANDBOX_MODE"] = "1"
+    _mount_loop_state(env, cwd)
     try:
         proc = subprocess.run(
             cmd,
@@ -59,6 +75,26 @@ def run(
     return EngineResult(
         rc=proc.returncode, output=out, usage_limit=detect_usage_limit(out)
     )
+
+
+def _mount_loop_state(env: dict[str, str], cwd: Path) -> None:
+    """Mount den Loop-State-Ordner rw in die Docker-Sandbox.
+
+    Gekoppelt an den Runner-Vertrag ``self.wt = self.state / "wt"``: nur wenn cwd
+    wirklich so heisst, ist der Parent der State-Ordner. Sonst fail-soft nichts
+    mounten, statt ein fremdes Verzeichnis in den Container zu reichen.
+    Der Pfad wird identisch gemappt, weil der Prompt absolute Pfade transportiert.
+    """
+    if cwd.name != "wt":
+        return
+    state = cwd.parent
+    if not state.is_dir():
+        return
+    spec = f"{state}:{state}:rw"
+    existing = env.get("SANDBOX_MOUNTS", "").strip()
+    if spec in existing:
+        return
+    env["SANDBOX_MOUNTS"] = f"{existing},{spec}" if existing else spec
 
 
 def _decode(raw: bytes | str | None) -> str:

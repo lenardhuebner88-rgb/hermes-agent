@@ -517,8 +517,10 @@ def test_alibaba_token_plan_engine_registered_and_command_shape(tmp_path, monkey
 
     monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
     monkeypatch.setattr(alibaba_token_plan_cli, "QWEN_BIN", "/opt/qwen-bin")
+    wt = tmp_path / "wt"
+    wt.mkdir()
     result = alibaba_token_plan_cli.run(
-        "qwen3.8-max-preview", "do work", tmp_path, 90
+        "qwen3.8-max-preview", "do work", wt, 90
     )
 
     assert result.rc == 0
@@ -528,13 +530,116 @@ def test_alibaba_token_plan_engine_registered_and_command_shape(tmp_path, monkey
         "qwen3.8-max-preview",
         "--safe-mode",
         "--sandbox",
+        "-y",
         "--output-format",
         "text",
         "-p",
         "do work",
     ]
     assert captured["env"].get("HERMES_SANDBOX_MODE") == "1"
-    assert captured["cwd"] == str(tmp_path)
+    assert captured["cwd"] == str(wt)
+
+
+def test_alibaba_token_plan_yolo_flag_enables_tools_non_interactively(
+    tmp_path, monkeypatch
+):
+    """Ohne -y verweigert die Qwen-CLI JEDES Tool im nicht-interaktiven Modus.
+
+    Belegt am Nachtlauf 2026-07-29 (dashboard-experience): der Builder lief 270s,
+    schrieb 0 Zeilen und die CLI meldete je Tool woertlich "requires user approval
+    but cannot execute in non-interactive mode ... use the -y flag (YOLO mode)".
+    Der Loop wertete das als build-fail ohne Grund, weil last-status leer blieb.
+    """
+    from loops.engines import alibaba_token_plan_cli
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    alibaba_token_plan_cli.run("qwen3.8-max-preview", "build it", wt, 90)
+
+    assert "-y" in captured["cmd"], (
+        "ohne -y kann der Builder im Loop kein einziges Tool aufrufen"
+    )
+
+
+def test_alibaba_token_plan_mounts_loop_state_dir_into_sandbox(tmp_path, monkeypatch):
+    """Der Builder-Vertrag verlangt Schreibzugriff AUSSERHALB des Worktrees.
+
+    Der Runner haelt wt = state/"wt" und status_path = state/"last-status". Die
+    Docker-Sandbox mountet per Default nur cwd, also den Worktree — Plan-Datei
+    (queue/10-building/), before_evidence und last-status liegen daneben und sind
+    unerreichbar. Ohne diesen Mount kann der Builder den Vertrag nicht erfuellen,
+    selbst wenn er alle Tools haette.
+    """
+    from loops.engines import alibaba_token_plan_cli
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
+    monkeypatch.delenv("SANDBOX_MOUNTS", raising=False)
+    state = tmp_path / "dashboard-experience"
+    wt = state / "wt"
+    wt.mkdir(parents=True)
+
+    alibaba_token_plan_cli.run("qwen3.8-max-preview", "build it", wt, 90)
+
+    mounts = captured["env"].get("SANDBOX_MOUNTS", "")
+    assert f"{state}:{state}:rw" in mounts, (
+        f"Loop-State {state} muss rw in die Sandbox gemountet sein, ist: {mounts!r}"
+    )
+
+
+def test_alibaba_token_plan_keeps_existing_sandbox_mounts(tmp_path, monkeypatch):
+    """Ein vom Operator gesetzter Mount darf nicht still ueberschrieben werden."""
+    from loops.engines import alibaba_token_plan_cli
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
+    monkeypatch.setenv("SANDBOX_MOUNTS", "/opt/data:/opt/data:ro")
+    state = tmp_path / "pack"
+    wt = state / "wt"
+    wt.mkdir(parents=True)
+
+    alibaba_token_plan_cli.run("qwen3.8-max-preview", "build it", wt, 90)
+
+    mounts = captured["env"]["SANDBOX_MOUNTS"]
+    assert "/opt/data:/opt/data:ro" in mounts
+    assert f"{state}:{state}:rw" in mounts
+
+
+def test_alibaba_token_plan_skips_mount_when_parent_missing(tmp_path, monkeypatch):
+    """Fail-soft: ist cwd kein <state>/wt, wird nichts Fremdes gemountet."""
+    from loops.engines import alibaba_token_plan_cli
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
+    monkeypatch.delenv("SANDBOX_MOUNTS", raising=False)
+    lone = tmp_path / "not-a-worktree"
+    lone.mkdir()
+
+    alibaba_token_plan_cli.run("qwen3.8-max-preview", "build it", lone, 90)
+
+    assert captured["env"].get("SANDBOX_MOUNTS", "") == ""
 
 
 def test_models_yaml_lists_kimi_k3_and_alibaba_qwen():
