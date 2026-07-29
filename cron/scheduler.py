@@ -1459,6 +1459,69 @@ def _is_channel_dm_topic(
     return is_channel
 
 
+_DEFAULT_DELIVERY_TIMEOUT = 60  # seconds — hard bound for standalone sends
+# Backward-compatible module override used by tests and emergency monkeypatches.
+_DELIVERY_TIMEOUT: Optional[int] = None
+
+
+def _get_delivery_timeout(job: Optional[dict] = None) -> int:
+    """Resolve the standalone-delivery timeout in seconds.
+
+    Precedence:
+      1. Per-job ``delivery_timeout_seconds`` (optional job-record field) — a
+         valid value is a positive number; anything else falls through to the
+         env/default with a warning.
+      2. Module override ``_DELIVERY_TIMEOUT`` (tests / emergency monkeypatch).
+      3. ``HERMES_CRON_DELIVERY_TIMEOUT`` env var.
+      4. ``_DEFAULT_DELIVERY_TIMEOUT`` (60s).
+
+    Why this exists (audit A-H1): the standalone delivery path runs the async
+    platform send via ``asyncio.run`` in the cron worker thread, which has no
+    natural upper bound. A wedged platform send blocked the worker forever,
+    pinning the job in ``_running_job_ids`` so every later tick skipped it
+    with "already running — skipping". Bounding the send keeps the job's
+    finally block (and its delivery-error bookkeeping) reachable.
+    """
+    if job:
+        raw = job.get("delivery_timeout_seconds")
+        if raw is not None:
+            try:
+                value = int(float(raw))
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+            logger.warning(
+                "Job '%s': invalid delivery_timeout_seconds=%r; using env/default",
+                job.get("id", "?"), raw,
+            )
+
+    if _DELIVERY_TIMEOUT is not None:
+        try:
+            timeout = int(float(_DELIVERY_TIMEOUT))
+            if timeout > 0:
+                return timeout
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid patched _DELIVERY_TIMEOUT=%r; using env/default",
+                _DELIVERY_TIMEOUT,
+            )
+
+    env_value = os.getenv("HERMES_CRON_DELIVERY_TIMEOUT", "").strip()
+    if env_value:
+        try:
+            timeout = int(float(env_value))
+            if timeout > 0:
+                return timeout
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid HERMES_CRON_DELIVERY_TIMEOUT=%r; using default",
+                env_value,
+            )
+
+    return _DEFAULT_DELIVERY_TIMEOUT
+
+
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
     """
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
@@ -2033,13 +2096,24 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
             # Standalone path: run the async send in a fresh event loop (safe from any thread)
             coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+            # Bound the send with asyncio.wait_for (audit A-H1): an unbounded
+            # asyncio.run would let a wedged platform send block this worker
+            # thread forever, pinning the job in _running_job_ids so every
+            # later tick skips it with "already running — skipping". On timeout
+            # wait_for cancels the coroutine before the loop is torn down, the
+            # failure is recorded as a normal delivery error, and the worker
+            # returns so the job's finally block releases the running guard.
+            delivery_timeout = _get_delivery_timeout(job)
+            timed_coro = asyncio.wait_for(coro, timeout=delivery_timeout)
             try:
-                result = asyncio.run(coro)
+                result = asyncio.run(timed_coro)
             except RuntimeError as run_err:
                 # asyncio.run() checks for a running loop before awaiting the coroutine;
-                # when it raises, the original coro was never started — close it to
-                # prevent "coroutine was never awaited" RuntimeWarning, then retry in a
-                # fresh thread that has no running loop.
+                # when it raises, neither the wait_for wrapper nor the original coro
+                # was ever started — close both to prevent "coroutine was never
+                # awaited" RuntimeWarnings, then retry in a fresh thread that has
+                # no running loop.
+                timed_coro.close()
                 coro.close()
                 # If the RuntimeError is the interpreter-finalization signal,
                 # the fresh-thread fallback would fail identically — skip
@@ -2079,6 +2153,20 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                     target_errors.extend([msg])
                     delivery_errors.extend(target_errors)
                     continue
+            except (asyncio.TimeoutError, TimeoutError):
+                # The wait_for bound fired: the send coroutine was cancelled
+                # inside the fresh loop. Record it as a normal delivery error
+                # (same semantics as any other failed send) so it lands in
+                # last_delivery_error — and, crucially, the worker thread
+                # returns instead of hanging (audit A-H1).
+                msg = (
+                    f"delivery to {platform_name}:{chat_id} timed out after "
+                    f"{delivery_timeout}s (standalone send cancelled)"
+                )
+                logger.error("Job '%s': %s", job["id"], msg)
+                target_errors.extend([msg])
+                delivery_errors.extend(target_errors)
+                continue
             except Exception as e:
                 msg = f"delivery to {platform_name}:{chat_id} failed: {e}"
                 logger.error("Job '%s': %s", job["id"], msg, exc_info=True)
@@ -2108,11 +2196,21 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 _DEFAULT_SCRIPT_TIMEOUT = 3600  # seconds (1 hour)
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
+# Hard cap for the per-job ``timeout_seconds`` override (2 hours) — keeps a
+# hand-edited or LLM-supplied job record from disabling the bound entirely.
+_MAX_PER_JOB_SCRIPT_TIMEOUT = 7200
 _RUN_CLAIM_HEARTBEAT_SECONDS = 60.0
 
 
 def _get_script_timeout() -> int:
-    """Resolve cron pre-run script timeout from module/env/config with a safe default."""
+    """Resolve the GLOBAL cron pre-run script timeout (module/env/config/default).
+
+    This is the fallback for jobs without their own bound. Jobs may carry an
+    optional ``timeout_seconds`` field in their record (seconds, > 0, capped
+    at ``_MAX_PER_JOB_SCRIPT_TIMEOUT`` = 7200); when set and valid it takes
+    precedence over this global value — see ``_resolve_script_timeout``.
+    Invalid per-job values are ignored with a warning and fall back here.
+    """
     if _SCRIPT_TIMEOUT != _DEFAULT_SCRIPT_TIMEOUT:
         try:
             timeout = int(float(_SCRIPT_TIMEOUT))
@@ -2142,6 +2240,42 @@ def _get_script_timeout() -> int:
         logger.debug("Failed to load cron script timeout from config: %s", exc)
 
     return _DEFAULT_SCRIPT_TIMEOUT
+
+
+def _resolve_script_timeout(job: Optional[dict]) -> int:
+    """Resolve the effective script timeout for one cron job.
+
+    Precedence:
+      1. Per-job ``timeout_seconds`` (optional job-record field). A valid
+         value is a positive number of seconds, hard-capped at
+         ``_MAX_PER_JOB_SCRIPT_TIMEOUT`` (7200s) so a single job cannot
+         disable the bound entirely. Invalid values (non-numeric, <= 0) are
+         rejected with a warning and fall back to the global default —
+         minimal validation, never a hard failure.
+      2. ``_get_script_timeout()`` — module override ``_SCRIPT_TIMEOUT`` /
+         ``HERMES_CRON_SCRIPT_TIMEOUT`` / config.yaml
+         ``cron.script_timeout_seconds`` / 3600s default.
+    """
+    if job:
+        raw = job.get("timeout_seconds")
+        if raw is not None:
+            try:
+                value = int(float(raw))
+                if value > 0:
+                    if value > _MAX_PER_JOB_SCRIPT_TIMEOUT:
+                        logger.warning(
+                            "Job '%s': timeout_seconds=%s exceeds cap %ds; clamping",
+                            job.get("id", "?"), raw, _MAX_PER_JOB_SCRIPT_TIMEOUT,
+                        )
+                        return _MAX_PER_JOB_SCRIPT_TIMEOUT
+                    return value
+            except (TypeError, ValueError):
+                pass
+            logger.warning(
+                "Job '%s': invalid timeout_seconds=%r; using global script timeout",
+                job.get("id", "?"), raw,
+            )
+    return _get_script_timeout()
 
 
 def _read_windows_pyvenv_cfg(venv_dir: Path) -> dict[str, str]:
@@ -2205,6 +2339,7 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
 def _run_job_script(
     script_path: str,
     workdir: Optional[str] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
@@ -2237,6 +2372,12 @@ def _run_job_script(
             mutated, avoiding the global-side-effect bug where a cron
             job's ``os.chdir()`` leaks into concurrent gateway sessions
             (#69396).
+        timeout_seconds: Optional per-job script timeout (from the job
+            record's ``timeout_seconds`` field, resolved via
+            ``_resolve_script_timeout``). When None, the global
+            ``_get_script_timeout()`` applies. The field lets individual
+            jobs (e.g. reporting scripts) be bounded tighter than the
+            global 1h default without touching shared configuration.
 
     Returns:
         (success, output) — on failure *output* contains the error message so the
@@ -2294,7 +2435,7 @@ def _run_job_script(
     if not path.is_file():
         return False, f"Script path is not a file: {path}"
 
-    script_timeout = _get_script_timeout()
+    script_timeout = timeout_seconds if timeout_seconds is not None else _get_script_timeout()
 
     # Pick an interpreter by extension.  Bash for .sh/.bash, Python for
     # everything else.  We deliberately do NOT honour the file's own
@@ -2400,7 +2541,12 @@ def _run_job_script_with_claim_heartbeat(
     The claim owner is captured from the dispatched job and never re-read from
     storage.  ``heartbeat_run_claim`` compares that stable owner before every
     refresh, so a stale runner cannot extend a replacement owner's claim.
+
+    The job's optional per-job script timeout (``timeout_seconds``) is
+    resolved once here and applied to every internal ``_run_job_script``
+    call, so heartbeat and non-heartbeat paths share the same bound.
     """
+    script_timeout = _resolve_script_timeout(job)
     schedule = job.get("schedule")
     claim = job.get("run_claim")
     owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
@@ -2409,7 +2555,7 @@ def _run_job_script_with_claim_heartbeat(
         and schedule.get("kind") == "once"
         and owner
     ):
-        return _run_job_script(script_path, workdir=workdir)
+        return _run_job_script(script_path, workdir=workdir, timeout_seconds=script_timeout)
 
     job_id = str(job.get("id") or "")
     stop = threading.Event()
@@ -2440,10 +2586,10 @@ def _run_job_script_with_claim_heartbeat(
             job_id,
             exc_info=True,
         )
-        return _run_job_script(script_path, workdir=workdir)
+        return _run_job_script(script_path, workdir=workdir, timeout_seconds=script_timeout)
 
     try:
-        return _run_job_script(script_path, workdir=workdir)
+        return _run_job_script(script_path, workdir=workdir, timeout_seconds=script_timeout)
     finally:
         stop.set()
         # Event.wait() wakes immediately.  Keep completion bounded if the
@@ -2504,7 +2650,9 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
         if prerun_script is not None:
             success, script_output = prerun_script
         else:
-            success, script_output = _run_job_script(script_path)
+            success, script_output = _run_job_script(
+                script_path, timeout_seconds=_resolve_script_timeout(job),
+            )
         if success:
             if script_output:
                 prompt = (

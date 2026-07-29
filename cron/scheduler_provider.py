@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import threading
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 
 
 class CronScheduler(ABC):
@@ -313,7 +313,14 @@ class InProcessCronScheduler(CronScheduler):
                 reset_hermes_home_override(home_token)
 
         while not stop_event.is_set():
-            ok = False
+            # Per-profile outcome for THIS tick cycle: profile-home string ->
+            # error string, or None when that profile's tick succeeded. The
+            # point of the per-profile map (audit A-H3): one broken profile
+            # must neither abort the remaining profiles' ticks nor poison
+            # their status attribution — before this, an exception in profile
+            # A broke out of the whole profile loop and the resulting
+            # _tick_error / success=False was recorded against ALL profiles.
+            tick_errors: dict[str, Optional[str]] = {}
             try:
                 if can_dispatch is not None and not can_dispatch():
                     logger.debug("Cron dispatch paused while gateway drains existing work")
@@ -330,28 +337,53 @@ class InProcessCronScheduler(CronScheduler):
                                     sync=False,
                                     can_dispatch=can_dispatch,
                                 )
+                            tick_errors[str(home)] = None
+                        except Exception as e:
+                            # Isolate: record the failure against THIS profile
+                            # only and keep ticking the rest. BaseException
+                            # (KeyboardInterrupt/SystemExit) is deliberately NOT
+                            # caught here — it is process-global, not
+                            # attributable to one profile, and propagates to
+                            # the outer safety net below (same handling the
+                            # whole-cycle catch provided before).
+                            logger.error(
+                                "Cron tick error for profile at %s: %s",
+                                home, e, exc_info=True,
+                            )
+                            tick_errors[str(home)] = f"{type(e).__name__}: {e}"
                         finally:
                             reset_hermes_home_override(home_token)
-                ok = True
             except BaseException as e:
+                # Safety net for a BaseException escaping a profile tick
+                # (SystemExit from a misbehaving provider SDK / agent retry
+                # path, #32612). Keep the ticker alive — shutdown is driven by
+                # stop_event, not by an exception in this daemon thread — and
+                # attribute the cycle failure to every profile that did not
+                # already record its own outcome this cycle (matching the
+                # previous whole-cycle behavior for the un-ticked remainder).
                 logger.error("Cron tick error: %s", e, exc_info=True)
-                _tick_error = f"{type(e).__name__}: {e}"
-            else:
-                _tick_error = None
-            # Record per-profile heartbeat after each tick cycle.
+                cycle_error = f"{type(e).__name__}: {e}"
+                for entry in profile_homes:
+                    home = entry[1] if isinstance(entry, tuple) else entry
+                    tick_errors.setdefault(str(home), cycle_error)
+            # Record per-profile heartbeat after each tick cycle: success and
+            # error attribution are per profile, so `hermes cron status` shows
+            # WHICH profile's ticks fail instead of blaming them all (#68483,
+            # audit A-H3).
             for entry in profile_homes:
                 home = entry[1] if isinstance(entry, tuple) else entry
+                tick_error = tick_errors.get(str(home))
                 home_token = set_hermes_home_override(str(home))
                 try:
                     with use_cron_store(home):
-                        record_ticker_heartbeat(success=ok)
+                        record_ticker_heartbeat(success=tick_error is None)
                         # Surface the failure reason (or clear it) per profile
                         # so `hermes cron status` can show WHY ticks fail
                         # (#68483).
-                        if ok:
+                        if tick_error is None:
                             clear_ticker_error()
-                        elif _tick_error:
-                            record_ticker_error(_tick_error)
+                        else:
+                            record_ticker_error(tick_error)
                 finally:
                     reset_hermes_home_override(home_token)
             stop_event.wait(interval)
