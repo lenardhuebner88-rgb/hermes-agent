@@ -89,3 +89,30 @@ def test_derive_card_status(board):
     assert board.derive_card_status(["done"]) == "addressed"
     assert board.derive_card_status(["done", "running"]) == "in_progress"
     assert board.derive_card_status(["done", "archived"]) == "addressed"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_write_json_preserves_unicode(board):
+    """Kill boolean_flip L34: ensure_ascii=False -> True would escape non-ASCII."""
+    cid = board.create_card(kind="bug", title="Übersicht")
+    raw = board._card_json(cid).read_text(encoding="utf-8")
+    assert "Übersicht" in raw  # mutant would write \u00dcbersicht
+
+
+def test_list_cards_newest_first(board, monkeypatch):
+    """Kill boolean_flip L74: reverse=True -> False would sort ascending."""
+    times = iter([100, 200])
+    monkeypatch.setattr(board, "_now", lambda: next(times))
+    cid_a = board.create_card(kind="bug", title="A")
+    cid_b = board.create_card(kind="wish", title="B")
+    cards = board.list_cards()
+    assert [c["id"] for c in cards] == [cid_b, cid_a]  # B (ts=200) first
+
+
+def test_card_id_is_ten_chars(board):
+    """Kill const_offset L46: hex[:8] -> hex[:9] would make id 11 chars."""
+    cid = board.create_card(kind="bug", title="x")
+    assert cid.startswith("c_")
+    assert len(cid) == 10  # "c_" + 8 hex chars
