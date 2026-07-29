@@ -10,6 +10,10 @@ from agent.usage_pricing import (
     estimate_equivalent_cost,
     estimate_usage_cost,
     get_pricing_entry,
+    has_known_pricing,
+    PricingCoverageSample,
+    pricing_coverage,
+    resolve_billing_route,
 )
 
 
@@ -95,6 +99,7 @@ def test_xai_oauth_equivalent_uses_the_pricing_table_cache_read_rate():
     [
         ("kimi-coding", "k3"),
         ("alibaba-token-plan", "qwen3.8-max-preview"),
+        ("qwen", "qwen3.8-max-preview"),
     ],
 )
 def test_subscription_lane_equivalents_have_a_canonical_price(provider, model):
@@ -118,6 +123,56 @@ def test_subscription_actual_cost_stays_zero_while_equivalent_is_priced():
     assert actual.status == "included"
     assert equivalent.amount_usd is not None
     assert equivalent.amount_usd > 0
+
+
+def test_kimi_code_harvester_tag_uses_the_kimi_coding_route():
+    """The observed Kimi CLI tag is a subscription route, not a new vendor."""
+    route = resolve_billing_route("kimi-code/k3", provider="kimi-code")
+    equivalent = estimate_equivalent_cost(
+        "kimi-code/k3",
+        CanonicalUsage(input_tokens=1_000_000),
+        provider="kimi-code",
+    )
+
+    assert route.provider == "moonshot"
+    assert route.model == "k3"
+    assert route.billing_mode == "subscription_included"
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+    assert not has_known_pricing("kimi-for-coding", provider="kimi-code")
+
+
+def test_pricing_coverage_keeps_unknown_pairs_unpriced_and_visible():
+    known = PricingCoverageSample(
+        provider="kimi-code",
+        model="kimi-code/k3",
+        run_count=3,
+        token_count=150,
+    )
+    unknown = PricingCoverageSample(
+        provider="unknown-provider",
+        model="unknown-model",
+        run_count=1,
+        token_count=50,
+    )
+
+    fully_priced = pricing_coverage([known])
+    with_unknown = pricing_coverage([known, unknown])
+    unknown_equivalent = estimate_equivalent_cost(
+        unknown.model,
+        CanonicalUsage(input_tokens=1_000_000),
+        provider=unknown.provider,
+    )
+
+    assert fully_priced.run_coverage_fraction == 1
+    assert fully_priced.token_coverage_fraction == 1
+    assert with_unknown.priced_runs == 3
+    assert with_unknown.unpriced_runs == 1
+    assert with_unknown.priced_tokens == 150
+    assert with_unknown.unpriced_tokens == 50
+    assert with_unknown.run_coverage_fraction == 0.75
+    assert with_unknown.token_coverage_fraction == 0.75
+    assert unknown_equivalent.amount_usd is None
 
 
 def test_kanban_db_no_longer_declares_a_second_pricing_table_or_lookup():

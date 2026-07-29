@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Literal, Mapping, Optional
+from typing import Any, Dict, Iterable, Literal, Mapping, Optional
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
 from utils import base_url_host_matches
@@ -115,6 +115,46 @@ class CostResult:
     fetched_at: Optional[datetime] = None
     pricing_version: Optional[str] = None
     notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PricingCoverageSample:
+    """Aggregated runs and tokens for one observed provider/model pair."""
+
+    provider: Optional[str]
+    model: Optional[str]
+    run_count: int
+    token_count: int
+
+
+@dataclass(frozen=True)
+class PricingCoverage:
+    """Measured priceability without treating unknown routes as zero-cost."""
+
+    total_runs: int
+    priced_runs: int
+    total_tokens: int
+    priced_tokens: int
+
+    @property
+    def unpriced_runs(self) -> int:
+        return self.total_runs - self.priced_runs
+
+    @property
+    def unpriced_tokens(self) -> int:
+        return self.total_tokens - self.priced_tokens
+
+    @property
+    def run_coverage_fraction(self) -> Optional[float]:
+        if not self.total_runs:
+            return None
+        return self.priced_runs / self.total_runs
+
+    @property
+    def token_coverage_fraction(self) -> Optional[float]:
+        if not self.total_tokens:
+            return None
+        return self.priced_tokens / self.total_tokens
 
 
 _UTC_NOW = lambda: datetime.now(timezone.utc)
@@ -1016,7 +1056,9 @@ def resolve_billing_route(
 
     subscription_aliases = {
         "claude-cli": "anthropic",
+        "kimi-code": "moonshot",
         "kimi-coding": "moonshot",
+        "qwen": "alibaba",
         "xai-oauth": "xai",
         "alibaba-token-plan": "alibaba",
     }
@@ -1634,10 +1676,36 @@ def has_known_pricing(
     pipeline — avoids creating dummy usage objects just to check status.
     """
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
-    if route.billing_mode == "subscription_included":
-        return True
-    entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
+    entry = get_pricing_entry(
+        route.model,
+        provider=route.provider,
+        base_url=route.base_url,
+        api_key=api_key,
+    )
     return entry is not None
+
+
+def pricing_coverage(samples: Iterable[PricingCoverageSample]) -> PricingCoverage:
+    """Aggregate priced run/token coverage for observed provider/model pairs.
+
+    A missing model or pricing row is intentionally counted as unpriced.  This
+    makes an incomplete route visible to reporting instead of converting it to
+    a plausible-looking zero-cost value.
+    """
+
+    total_runs = priced_runs = total_tokens = priced_tokens = 0
+    for sample in samples:
+        total_runs += sample.run_count
+        total_tokens += sample.token_count
+        if sample.model and has_known_pricing(sample.model, provider=sample.provider):
+            priced_runs += sample.run_count
+            priced_tokens += sample.token_count
+    return PricingCoverage(
+        total_runs=total_runs,
+        priced_runs=priced_runs,
+        total_tokens=total_tokens,
+        priced_tokens=priced_tokens,
+    )
 
 
 
