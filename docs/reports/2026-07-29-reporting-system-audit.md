@@ -135,7 +135,7 @@ per-job), maschineller Docstring↔Live-Job-Konsistenzcheck (→ Loop 12, script
 
 | Loop | Commit(s) | Ergebnis |
 |---|---|---|
-| 1 | `0e2498f3f9` | executions.py: ContextVar-Store-Scoping (gespiegelt von jobs.py, 4-stufige Präzedenz) + per-job Retention (N=50/Job, globale Kappe 1000→20000) + 11 neue Tests |
+| 1 | `0e2498f3f9` | executions.py: ContextVar-Store-Scoping (gespiegelt von jobs.py, 4-stufige Präzedenz) + per-job Retention (N=50/Job; ab Loop 18: 30d-Zeithorizont + horizon-aware Überlauf-Warnung — die globale 20000er-Kappe ist seitdem ein ALARM bei Dauerüberlauf, kein hartes Bound mehr; davor Default 1000→20000) + 11 neue Tests |
 | 2/3/10 | `eb812ceede` | Delivery-Timeout `asyncio.wait_for` (Default 60s, Job-Feld `delivery_timeout_seconds`, Cancel-Semantik, `_running_job_ids`-Freigabe e2e-getestet); per-Profil-Fehlerisolation in `_start_multiplex`; per-Job `timeout_seconds` (Cap 7200) + 28 neue Tests |
 | 4 | `3321c08e86` | jobs.json: Backup-Rotation (.bak.1–3) + Quarantäne (`jobs.json.corrupt-<ts>`) + validierter Auto-Restore |
 | 5 | `fc446ba639` | Ticker-Konstanten live; Lifecycle-Guard kanonisiert (single source in cron/lifecycle_guard.py, CLI = Wrapper); 35 String-Konsistenz-Tests |
@@ -286,4 +286,4 @@ Kategorien final: delivery_reliability 9.1 · failure_handling 8.9 · scheduler_
 observability 9.1 · code_quality 9.0 · test_coverage 9.5 · documentation_truth 8.8.
 
 **Tests final:** hermes **1065/1065** (57 Dateien) + tool-nah **228/228** · scripts **64/64**.
-**Loops:** 23 (12 geplant + 11 Schärf-Loops auf Codex-Findings). **Commits:** 15 (hermes) + 14 (scripts).
+**Loops:** 23 (12 geplant + 11 Schärf-Loops auf Codex-Findings). **Commits:** 20 (hermes: 12 Code + 8 Doku/Eval) + 15 (scripts) — Stand nach Loop 23, `git rev-list --count` eb942ca905..HEAD bzw. aae76ed..HEAD.
