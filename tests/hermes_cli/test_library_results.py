@@ -13,6 +13,7 @@ eingefügt, um den ``status='done'``-Filter gegen etwas Falsches zu beweisen.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -272,3 +273,82 @@ def test_db_is_opened_read_only(client, monkeypatch):
     assert res.status_code == 200
     assert seen_uris, "expected at least one uri=True sqlite3.connect call"
     assert all("mode=ro" in u for u in seen_uris)
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_truncate_exact_limit_not_cut():
+    """Kill comparison_swap L77: <= -> < would truncate a string exactly at limit."""
+    text = "a" * 280
+    assert lr._truncate_word_boundary(text, 280) == text
+
+
+def test_truncate_word_boundary_no_space():
+    """Verify no-space path: cut stays at limit when no space found."""
+    result = lr._truncate_word_boundary("abcdef", 4)
+    assert result == "abcd"
+
+
+def test_validated_artifact_rejects_relative_md():
+    """Kill bool_op_swap L205: or -> and would accept relative .md paths."""
+    vault = Path("/tmp/vault")
+    assert lr._validated_artifact_path("relative/file.md", vault_root=vault) is None
+
+
+def test_validated_artifact_rejects_non_md():
+    """Kill comparison_swap L205: != -> == would accept non-.md absolute paths."""
+    vault = Path("/tmp/vault")
+    assert lr._validated_artifact_path("/tmp/vault/file.txt", vault_root=vault) is None
+
+
+def test_artifacts_result_md_gets_plain_title(tmp_path, monkeypatch):
+    """Kill comparison_swap L227: == -> != would swap RESULT.md title treatment."""
+    task_dir = tmp_path / "reports" / "by-task" / "task-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "RESULT.md").write_text("result", encoding="utf-8")
+    (task_dir / "extra.md").write_text("extra", encoding="utf-8")
+    monkeypatch.setattr(lr, "_reports_dir_for_task", lambda tid: task_dir)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE task_runs (task_id TEXT, metadata TEXT, id INTEGER)")
+    artifacts = lr._artifacts_for_task(conn, "task-1", "My Task")
+    titles = {a["id"]: a["title"] for a in artifacts}
+    assert titles["deliverable::task-1::RESULT.md"] == "My Task"
+    assert titles["deliverable::task-1::extra.md"] == "My Task · extra.md"
+
+
+def test_artifacts_sorted_newest_first(tmp_path, monkeypatch):
+    """Kill boolean_flip L222: reverse=True -> False would sort oldest first."""
+    task_dir = tmp_path / "reports" / "by-task" / "task-2"
+    task_dir.mkdir(parents=True)
+    old = task_dir / "old.md"
+    new = task_dir / "new.md"
+    old.write_text("old", encoding="utf-8")
+    new.write_text("new", encoding="utf-8")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (2000, 2000))
+    monkeypatch.setattr(lr, "_reports_dir_for_task", lambda tid: task_dir)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE task_runs (task_id TEXT, metadata TEXT, id INTEGER)")
+    artifacts = lr._artifacts_for_task(conn, "task-2", "T")
+    ids = [a["id"] for a in artifacts]
+    assert ids == ["deliverable::task-2::new.md", "deliverable::task-2::old.md"]
+
+
+def test_md_digest_empty_profile_and_completed_at():
+    """Kill bool_op_swap L278/L279: or -> and would show empty string instead of '-'."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE tasks (id TEXT, title TEXT, kind TEXT, profile TEXT, "
+        "completed_at TEXT, result TEXT, verdict TEXT, outcome TEXT, "
+        "cost_usd REAL, run_count INTEGER, status TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO tasks VALUES ('t1','Title','code','',NULL,'res',NULL,NULL,NULL,1,'done')"
+    )
+    conn.execute("CREATE TABLE task_runs (task_id TEXT, metadata TEXT, id INTEGER)")
+    rows = conn.execute("SELECT * FROM tasks").fetchall()
+    md = lr._render_md_digest(rows, conn)
+    # Empty profile and NULL completed_at should render as "-"
+    assert " · - · - · " in md
