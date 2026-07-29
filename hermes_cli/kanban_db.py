@@ -15029,6 +15029,32 @@ def _zero_diff_review_snapshot(diff_snapshot: dict) -> bool:
     )
 
 
+_WORKER_GATE_RUNNER_SUMMARY_RE = re.compile(
+    r"^=== Summary: (?P<test_files>\d+) files, "
+    r"(?P<tests_passed>\d+) tests passed,",
+    re.MULTILINE,
+)
+_WORKER_GATE_NO_TESTS_RE = re.compile(
+    r"^run-affected: no applicable Python production paths for this diff "
+    r"— skipping pytest",
+    re.MULTILINE,
+)
+
+
+def _worker_gate_test_count(output: str, command_index: int) -> Optional[dict]:
+    """Extract raw-free test counts from known successful test-runner summaries."""
+    summary = _WORKER_GATE_RUNNER_SUMMARY_RE.search(output)
+    if summary:
+        return {
+            "command_index": command_index,
+            "test_files": int(summary["test_files"]),
+            "tests_passed": int(summary["tests_passed"]),
+        }
+    if _WORKER_GATE_NO_TESTS_RE.search(output):
+        return {"command_index": command_index, "test_files": 0, "tests_passed": 0}
+    return None
+
+
 def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
     """Run the enforced light worker gate (``kanban.worker_gate``) for *task_id*.
 
@@ -15036,6 +15062,7 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
     is disabled, the assignee is not code-bearing, the workspace is missing, or
     no commands match the repo; ``{"passed": True, "commands": [...],
     "exit_codes": [...], "ts": ..., "commit": ...}`` when every command exited 0.
+    Recognized test-runner output additionally yields raw-free ``test_counts``.
     On the first non-zero command a ``worker_gate_blocked`` audit event is
     written in its own short txn and :class:`WorkerGateError` is raised — the
     caller must NOT have an open write txn (subprocesses run outside the lock).
@@ -15077,7 +15104,7 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
         "ts": _wg_run_ts,
         "commit": _wg_commit,
     }
-    for _cmd in _wg_cmds:
+    for _cmd_index, _cmd in enumerate(_wg_cmds):
         try:
             _proc = subprocess.run(
                 shlex.split(_cmd),
@@ -15119,6 +15146,11 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
                     },
                 )
             raise WorkerGateError(_cmd, _proc.returncode, _tail)
+        _test_count = _worker_gate_test_count(
+            (_proc.stdout or "") + (_proc.stderr or ""), _cmd_index,
+        )
+        if _test_count is not None:
+            _wg_stamp.setdefault("test_counts", []).append(_test_count)
     return _wg_stamp
 
 
