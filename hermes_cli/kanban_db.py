@@ -23458,14 +23458,32 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+def _run_brief_comment_id_watermark(
+    conn: sqlite3.Connection, task_id: str, run_id: int
+) -> Optional[int]:
+    """Return the persisted delivery baseline for one launched worker run."""
+    row = conn.execute(
+        "SELECT metadata FROM task_runs WHERE id = ? AND task_id = ?",
+        (run_id, task_id),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        metadata = json.loads(row["metadata"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    return _validated_comment_id_watermark(metadata.get("brief"))
+
+
 def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
-    """Restart locally owned live workers once for newly-added directives.
+    """Restart locally owned workers for directives beyond their delivered brief.
 
     A worker has no stdin control channel, so a directive can only be delivered
     deterministically by ending the owned worker group and returning the task
-    to the dispatcher.  The ``directive_redelivered`` event stores the highest
-    consumed comment id, making retries idempotent and batching directives that
-    arrive before the next sweep.
+    to the dispatcher.  The current run's persisted brief watermark is the
+    delivery baseline; historical redelivery events remain audit evidence only.
     """
 
     local_host = _claimer_id().split(":", 1)[0]
@@ -23490,25 +23508,12 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
         if not _pid_alive(worker_pid):
             continue
 
-        watermark = 0
-        prior_events = conn.execute(
-            """
-            SELECT payload
-              FROM task_events
-             WHERE task_id = ? AND kind = 'directive_redelivered'
-             ORDER BY id DESC
-            """,
-            (task_id,),
-        ).fetchall()
-        for event in prior_events:
-            try:
-                payload = json.loads(event["payload"] or "{}")
-            except (TypeError, ValueError):
-                continue
-            watermark = _validated_comment_id_watermark(payload) or 0
-            if watermark:
-                break
-
+        delivered_watermark = _run_brief_comment_id_watermark(conn, task_id, run_id)
+        if delivered_watermark is None:
+            # A running record without a persisted launch brief has no proof of
+            # what the worker received.  Do not infer a boundary from historical
+            # redelivery events and risk a needless restart.
+            continue
         directives = conn.execute(
             """
             SELECT id
@@ -23516,12 +23521,10 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
              WHERE task_id = ? AND kind = 'directive' AND id > ?
              ORDER BY id
             """,
-            (task_id, watermark),
+            (task_id, delivered_watermark),
         ).fetchall()
         if not directives:
             continue
-        directive_ids = [int(row["id"]) for row in directives]
-        next_watermark = directive_ids[-1]
 
         termination = _terminate_reclaimed_worker(worker_pid, claim_lock)
         if _worker_survived_termination(termination):
@@ -23558,6 +23561,22 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
             )
             if updated.rowcount != 1:
                 continue
+            # Re-read after termination to bundle a directive that arrived
+            # while the worker group was exiting.  The follow-up brief will
+            # record this same boundary, avoiding a second restart.
+            directives = conn.execute(
+                """
+                SELECT id
+                  FROM task_comments
+                 WHERE task_id = ? AND kind = 'directive' AND id > ?
+                 ORDER BY id
+                """,
+                (task_id, delivered_watermark),
+            ).fetchall()
+            directive_ids = [int(row["id"]) for row in directives]
+            if not directive_ids:
+                continue
+            next_watermark = directive_ids[-1]
             closed_run_id = _end_run(
                 conn,
                 task_id,
@@ -23570,6 +23589,7 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
                 metadata={
                     "reason": "operator_directive",
                     "directive_ids": directive_ids,
+                    "delivered_comment_id_watermark": delivered_watermark,
                     "comment_id_watermark": next_watermark,
                 },
             )
@@ -23580,6 +23600,7 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
                 {
                     "reason": "operator_directive",
                     "directive_ids": directive_ids,
+                    "delivered_comment_id_watermark": delivered_watermark,
                     "comment_id_watermark": next_watermark,
                     "ended_run_id": closed_run_id,
                     "worker_pid": worker_pid,
