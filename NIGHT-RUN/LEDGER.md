@@ -460,3 +460,7 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - killed survivors: [K] remove_guard L33, [K] return_none L59; L48 equivalent (isinstance always True at L48)
 - probe after: 19/20 = 95%
 - commit: d62e89551
+
+## 70. hermes_cli/oneshot_service_tier.py — REJECTED
+- probe before: 19/20 = 95%
+- REJECTED: only survivor L43 (remove_guard) is equivalent — empty service_tier falls through to _parse_service_tier_config("") which returns None, caught by L49 guard; no measurable improvement possible
