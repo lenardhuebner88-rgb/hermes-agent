@@ -1031,3 +1031,45 @@ def test_inbox_aging_emits_warning_once_for_old_waiting(
         store, events=again, state_updates={}, now=now + 1
     )
     assert inserted2 == 0
+
+
+# ---------------------------------------------------------------------------
+# _gate_match classification (pure)
+# ---------------------------------------------------------------------------
+
+def _gate_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "kind": "",
+        "block_kind": None,
+        "status": "",
+        "freigabe": "",
+        "live_test_depth": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_gate_match_blocked_block_kind_fallbacks() -> None:
+    """block_kind falls back to the payload kind; an empty block_kind with
+    a review_revision payload labels as 'gate'; a GATE_BLOCK_KINDS value
+    alone is enough to match."""
+    assert watcher._gate_match(
+        _gate_row(kind="blocked"), {"kind": "integration"}
+    ) == "blocked:integration"
+    assert watcher._gate_match(
+        _gate_row(kind="blocked"), {"review_revision": {"x": 1}}
+    ) == "blocked:gate"
+    assert watcher._gate_match(
+        _gate_row(kind="blocked", block_kind="review_revision"), {}
+    ) == "blocked:review_revision"
+
+
+def test_gate_match_guards_kind_and_held_preconditions() -> None:
+    """Gate markers on a NON-blocked event must not match; 'scheduled'
+    status alone is not held — it needs the operator/ui-real marker; and
+    a held task only matches on created/decomposed/status."""
+    assert watcher._gate_match(_gate_row(kind="created"), {"gate_output": "red"}) is None
+    assert watcher._gate_match(_gate_row(kind="created", status="scheduled"), {}) is None
+    assert watcher._gate_match(
+        _gate_row(kind="created", status="scheduled", freigabe="operator"), {}
+    ) == "operator_release_required"
