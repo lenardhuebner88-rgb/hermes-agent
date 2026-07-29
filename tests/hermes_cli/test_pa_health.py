@@ -302,3 +302,38 @@ def test_endpoint_returns_200_instead_of_500_on_catastrophic_failure(
     assert payload["ok"] is False
     assert payload["degraded"][0]["check"] == "self_check"
     assert "collector exploded" in payload["degraded"][0]["reason"]
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_engine_last_error_prefers_updated_ts_over_ts(
+    isolated_health_sources: dict[str, Path],
+) -> None:
+    """Kill bool_op_swap L99: or -> and would fall through to ts."""
+    now = 2_000_000_000
+    _add_turn(now=now - 10, failed=True, text="boom")
+    # Make updated_ts differ from ts so the or/and distinction matters.
+    store = pa_chat.PAStore()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE pa_turns SET updated_ts = ? WHERE status = 'error'",
+            (now - 5,),
+        )
+    _set_fresh_world(isolated_health_sources, now=now)
+
+    payload = health.build_pa_health(now=now)
+    engine = payload["checks"]["engine"]
+
+    # or picks updated_ts (truthy); and would pick ts
+    assert engine["last_error"]["ts"] == now - 5
+
+
+def test_kanban_event_returns_none_on_empty_table(
+    isolated_health_sources: dict[str, Path],
+) -> None:
+    """Kill bool_op_swap L124: or -> and would skip the None guard."""
+    # task_events table exists but is empty → MAX(created_at) is NULL,
+    # row is not None but row["latest_ts"] is None.
+    result = health._collect_latest_kanban_event()
+    assert result is None
