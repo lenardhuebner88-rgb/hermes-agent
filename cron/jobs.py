@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import logging
+import math
 import shutil
 import tempfile
 import threading
@@ -1020,6 +1021,35 @@ def get_ticker_last_error() -> Optional[str]:
 # write — exactly what a corruption recovery needs.
 JOBS_BACKUP_COUNT = 3
 
+# Quarantine retention (loop 24 / L6): every successful corruption recovery
+# renames the corrupt store to jobs.json.corrupt-<timestamp>; without
+# retention those pile up forever. Aged quarantine files (mtime older than
+# this) are deleted best-effort after a successful recovery.
+QUARANTINE_RETENTION_SECONDS = 7 * 86400
+
+
+def _prune_quarantined_stores(jobs_file: Path) -> None:
+    """Best-effort retention for quarantined corrupt stores (loop 24 / L6).
+
+    Deletes jobs.json.corrupt-* files older than QUARANTINE_RETENTION_SECONDS
+    (by mtime) next to the live store. Best-effort like the bak rotation: a
+    failure here must never break the recovery that just succeeded.
+    """
+    try:
+        cutoff = time.time() - QUARANTINE_RETENTION_SECONDS
+        for candidate in jobs_file.parent.glob(f"{jobs_file.name}.corrupt-*"):
+            try:
+                if candidate.stat().st_mtime < cutoff:
+                    candidate.unlink()
+                    logger.info(
+                        "Removed aged quarantined jobs store %s (retention %ds)",
+                        candidate, QUARANTINE_RETENTION_SECONDS,
+                    )
+            except OSError:
+                pass
+    except OSError:
+        pass
+
 
 def _jobs_backup_path(jobs_file: Path, index: int) -> Path:
     return jobs_file.with_name(f"{jobs_file.name}.bak.{index}")
@@ -1366,6 +1396,10 @@ def _recover_jobs_from_backup(
         # Surface through the established status channel so `hermes cron
         # status` shows the recovery instead of a silently healthy store.
         record_ticker_error(message)
+        # Loop 24 / L6: quarantine files never rotated away — drop the ones
+        # past the retention window. Best-effort; the fresh quarantine from
+        # THIS recovery is of course kept.
+        _prune_quarantined_stores(jobs_file)
         return recovered
     return None
 
@@ -1401,7 +1435,23 @@ def _recover_corrupt_store(
 
 
 def load_jobs() -> List[Dict[str, Any]]:
-    """Load all jobs from storage."""
+    """Load all jobs from storage.
+
+    Race semantics (loops 19 + 24): the store can transiently VANISH while a
+    sibling process holds it inside its quarantine→restore window (file
+    renamed away). Both windows are guarded: a missing file at entry is
+    re-checked under _jobs_lock() before "missing" is authoritative (loop
+    19), and a FileNotFoundError between that exists() check and open() —
+    e.g. a foreign quarantine rename landing exactly in between — re-checks
+    under the lock again (loop 24 / L4): a file that came back is loaded
+    normally, one that is still gone yields an honest [].
+
+    Restgrenze degraded mode: _jobs_lock() bounds its cross-process flock
+    acquisition (#60703) and degrades to in-process-only locking on timeout
+    so a wedged lock holder cannot freeze the scheduler; the guards above
+    then still serialize within THIS process but cannot wait out a foreign
+    process's recovery window.
+    """
     jobs_file = _current_cron_store().jobs_file
     ensure_dirs()
     if not jobs_file.exists():
@@ -1422,6 +1472,16 @@ def load_jobs() -> List[Dict[str, Any]]:
         # JSONDecodeError("Unexpected UTF-8 BOM") and takes down cron.
         with open(jobs_file, 'r', encoding='utf-8-sig') as f:
             data = json.load(f)
+    except FileNotFoundError:
+        # Race guard (loop 24 / L4): exists() was true above, but a foreign
+        # quarantine rename pulled the file between the check and open().
+        # Same re-check semantics as the loop-19 guard: under _jobs_lock() a
+        # concurrent recovery finishes first — a restored file is loaded
+        # normally, a still-missing one is an honest empty store.
+        with _jobs_lock():
+            if not jobs_file.exists():
+                return []
+        return load_jobs()
     except json.JSONDecodeError:
         # Retry with strict=False to handle bare control chars in string values
         _strict_retry = True
@@ -2242,7 +2302,11 @@ def _normalize_retry(retry: Any) -> Optional[Dict[str, Any]]:
                 delay = float(value)
             except (TypeError, ValueError):
                 continue
-            if delay > 0:
+            # Loop 24 / L5: non-finite values (inf passes a bare `> 0` check
+            # and json.dump would then write bare `Infinity` into the store;
+            # nan fails `> 0` but is excluded explicitly for clarity) are
+            # discarded like any other invalid entry.
+            if math.isfinite(delay) and delay > 0:
                 delays.append(delay)
         if delays:
             normalized["backoff_seconds"] = delays

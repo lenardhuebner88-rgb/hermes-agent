@@ -11,8 +11,8 @@ import json
 import logging
 import os
 import sqlite3
-import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import timedelta
@@ -47,7 +47,10 @@ EXECUTIONS_FILE = _IMPORT_HOME / "cron" / "executions.db"
 # horizon (oldest first, until the ledger is back under the cap), so the cap
 # can no longer silently eat the time guarantee at high run volume. When the
 # overflow consists entirely of in-horizon rows, nothing is deleted for the
-# cap and a loud one-per-prune warning makes the overflow visible instead. All limits are
+# cap and a loud warning makes the overflow visible instead. Since loop 24
+# (M3) that warning is logger-only (no print to stderr from library code)
+# and time-deduplicated to at most one per hour per process — the overflow
+# condition itself is still evaluated on every prune. All limits are
 # DELETE-based and self-healing — changing any value takes effect on the
 # next prune, no migration needed.
 KEEP_TERMINAL_EXECUTIONS_PER_JOB = 50
@@ -56,6 +59,15 @@ MAX_TERMINAL_EXECUTIONS = 20000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
+
+# Loop 24 / M3: the horizon-cap overflow alarm used to fire on EVERY prune
+# (i.e. every finish_execution) and additionally print() to stderr from
+# library code. It is now logger-only and deduplicated: at most one warning
+# per _CAP_OVERFLOW_WARNING_MIN_INTERVAL_SECONDS per process; the condition
+# itself is still evaluated every prune, so nothing is hidden — only the
+# repeat noise is. Tests may reset _last_cap_overflow_warning to None.
+_last_cap_overflow_warning: Optional[float] = None
+_CAP_OVERFLOW_WARNING_MIN_INTERVAL_SECONDS = 3600.0
 
 # Import-time snapshot of the compatibility constant, so deliberate re-pointing
 # (monkeypatched EXECUTIONS_FILE — the documented escape hatch existing
@@ -193,6 +205,21 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_executions_status_claimed "
         "ON executions(status, claimed_at DESC, id DESC)"
     )
+    # Loop 24 / M4: expression indexes on the julianday() ordering the
+    # read/prune paths actually use (list_executions, latest_executions,
+    # _prune_unlocked's window ORDER BY). Without them every julianday-ordered
+    # query computes the expression per row and sorts from a full scan —
+    # the plain claimed_at indexes above cannot serve an ORDER BY over an
+    # expression. IF NOT EXISTS ⇒ no migration; existing stores pick the
+    # indexes up on their next connect.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_job_jd "
+        "ON executions(job_id, julianday(claimed_at) DESC, id DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_jd "
+        "ON executions(julianday(claimed_at) DESC, id DESC)"
+    )
 
 
 @contextmanager
@@ -271,9 +298,13 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
     needed). When the ledger exceeds the cap, the OLDEST out-of-horizon rows
     are deleted until the ledger is back under the cap or no deletable rows
     remain; if it still overflows — i.e. the excess consists entirely of
-    in-horizon rows — nothing further is deleted and a loud one-per-prune
-    warning on the log and stderr makes the overflow visible so the operator
-    can raise HERMES_CRON_EXECUTIONS_MAX_TERMINAL or shorten the horizon.
+    in-horizon rows — nothing further is deleted and a loud warning makes
+    the overflow visible so the operator can raise
+    HERMES_CRON_EXECUTIONS_MAX_TERMINAL or shorten the horizon. Since loop
+    24 (M3) the warning is logger-only (no print to stderr from library
+    code) and time-deduplicated to at most one per hour per process — the
+    overflow condition itself is still evaluated on EVERY prune, only the
+    repeat noise is deduplicated.
     With KEEP_DAYS=0 the horizon is "now" and the cap degenerates to the old
     pure count-based global bound.
     """
@@ -315,16 +346,28 @@ def _prune_unlocked(conn: sqlite3.Connection) -> None:
                WHERE status IN ('completed','failed','unknown')"""
         ).fetchone()[0]
         if remaining > cap:
-            message = (
-                f"cron executions ledger holds {remaining} terminal rows, "
-                f"exceeding the global cap of {cap}; the excess is entirely "
-                f"inside the keep-days horizon, so no rows were deleted for "
-                f"the cap (the time-based retention guarantee wins). Raise "
-                f"HERMES_CRON_EXECUTIONS_MAX_TERMINAL or lower "
-                f"HERMES_CRON_EXECUTIONS_KEEP_DAYS to bound the ledger again."
-            )
-            logger.warning(message)
-            print(f"WARNING: {message}", file=sys.stderr)
+            # Loop 24 / M3: logger-only (no print to stderr from library
+            # code) and time-deduplicated per process — finish_execution
+            # prunes on every run, so an undrained overflow used to warn
+            # (and print) on every single job finish.
+            global _last_cap_overflow_warning
+            now_mono = time.monotonic()
+            if (
+                _last_cap_overflow_warning is None
+                or now_mono - _last_cap_overflow_warning
+                >= _CAP_OVERFLOW_WARNING_MIN_INTERVAL_SECONDS
+            ):
+                _last_cap_overflow_warning = now_mono
+                logger.warning(
+                    "cron executions ledger holds %d terminal rows, "
+                    "exceeding the global cap of %d; the excess is entirely "
+                    "inside the keep-days horizon, so no rows were deleted for "
+                    "the cap (the time-based retention guarantee wins). Raise "
+                    "HERMES_CRON_EXECUTIONS_MAX_TERMINAL or lower "
+                    "HERMES_CRON_EXECUTIONS_KEEP_DAYS to bound the ledger "
+                    "again. (This warning repeats at most once per hour.)",
+                    remaining, cap,
+                )
 
 
 def create_execution(job_id: str, *, source: str) -> Dict[str, Any]:

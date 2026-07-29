@@ -11,7 +11,9 @@ ISO-string comparisons that misorder mixed offsets. Since loop 18:
 - the cap may only delete rows already OUTSIDE the keep-days horizon (oldest
   first, until the ledger is back under the cap); when the overflow consists
   entirely of in-horizon rows, nothing is deleted for the cap and a loud
-  one-per-prune warning hits the log and stderr instead.
+  warning makes the overflow visible instead. Since loop 24 (M3) that
+  warning is logger-only (no stderr print) and deduplicated to at most one
+  per hour per process — the tests reset the dedup state explicitly.
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ def _point_ledger(monkeypatch, tmp_path):
     monkeypatch.setattr(
         executions, "EXECUTIONS_FILE", tmp_path / "cron" / "executions.db"
     )
+    # Loop 24 / M3: the overflow warning is time-deduplicated per process —
+    # reset the state so each test sees its own warning.
+    monkeypatch.setattr(executions, "_last_cap_overflow_warning", None)
     return executions
 
 
@@ -61,7 +66,8 @@ class TestHorizonAwareCap:
         self, monkeypatch, tmp_path, caplog, capsys
     ):
         """Rows inside the 30d horizon stay even beyond keep-N AND the global
-        cap; the overflow is surfaced via log + stderr, not silently pruned."""
+        cap; the overflow is surfaced via the log — since loop 24 (M3)
+        logger-only, no stderr print from library code."""
         executions = _point_ledger(monkeypatch, tmp_path)
         monkeypatch.setenv("HERMES_CRON_EXECUTIONS_KEEP_PER_JOB", "2")
         monkeypatch.setenv("HERMES_CRON_EXECUTIONS_MAX_TERMINAL", "5")
@@ -72,7 +78,8 @@ class TestHorizonAwareCap:
         records = executions.list_executions(job_id="hot", limit=500)
         assert len(records) == 10  # nothing deleted: the guarantee wins
         assert "exceeding the global cap of 5" in caplog.text
-        assert "WARNING" in capsys.readouterr().err
+        # Loop 24 / M3: no print() to stderr from library code.
+        assert capsys.readouterr().err == ""
 
     def test_cap_prunes_old_rows_until_back_under_cap(
         self, monkeypatch, tmp_path

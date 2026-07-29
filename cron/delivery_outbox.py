@@ -68,11 +68,28 @@ Design notes:
   whose lease is older than
   ``HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS`` (default 600s) is orphaned — its
   holder died mid-send — and is retried; a fresh ``sending`` entry belongs
-  to a live process and is skipped. HONEST REMAINING GAP: a crash between
-  the successful send and the receipt write still redelivers once after the
-  lease expires — that is at-least-once with a visible receipt/witness,
-  not a silent loss; exactly-once would require platform-side idempotency
-  keys the send APIs do not offer.
+  to a live process and is skipped. Loop 24: a stale lease TIMESTAMP alone
+  no longer proves the holder gone — ``begin_replay`` additionally checks
+  the lease PID's liveness (fail-safe like
+  ``cron/executions.py::_owner_is_live``: inability to prove death reads as
+  ALIVE and the retake is skipped — a duplicate send is worse than a
+  delayed retry; residual risk: a REUSED pid can mask a dead holder, which
+  leaves the entry visibly stuck in ``sending``/``sending_expired`` rather
+  than double-sent). A retake against a provably dead holder counts as an
+  attempt (a crash in the send window IS an attempt — a reproducible crash
+  otherwise resent forever and never dead-lettered). HONEST REMAINING GAP:
+  a crash between the successful send and the receipt write still
+  redelivers once after the lease expires — that is at-least-once with a
+  visible receipt/witness, not a silent loss; exactly-once would require
+  platform-side idempotency keys the send APIs do not offer.
+- Delivery timeout persistence (loop 24 / M2+L2): ``enqueue`` stores the
+  delivery timeout the failed first attempt resolved as
+  ``delivery_timeout_seconds`` on the entry, so a replay uses the SAME
+  bound (a per-job ``delivery_timeout_seconds`` must not silently degrade
+  to the env/default on replay). The value is clamped strictly below the
+  send-lease TTL (``clamp_delivery_timeout_to_lease``) — a send allowed to
+  outrun its lease looks orphaned mid-send and would be retaken by a
+  second process ⇒ duplicate.
 - Locking (audit loop 13 / F1): every read-modify-write (enqueue, replay
   bookkeeping) runs under the in-process RLock PLUS a bounded cross-process
   advisory flock on ``<outbox>.lock`` — same pattern as cron/jobs.py's
@@ -474,6 +491,62 @@ def _lease_is_stale(entry: Dict[str, Any], now: datetime) -> bool:
     return (now - lease).total_seconds() > _lease_ttl_seconds()
 
 
+def _lease_holder_is_live(pid: Any) -> bool:
+    """PID liveness for a stale-looking send lease (loop 24 / L2).
+
+    Fail-safe direction mirrors ``cron/executions.py::_owner_is_live``: the
+    inability to prove death must NOT retake the lease (a retake against a
+    living sender double-sends), so any check failure reads as ALIVE. A
+    missing/unparseable pid has no holder to protect — retake allowed.
+    """
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False  # no usable pid — nothing to protect
+    try:
+        from gateway.status import _pid_exists
+        return bool(_pid_exists(pid_int))
+    except Exception:
+        return True  # fail safe: cannot prove death ⇒ treat as live
+
+
+def _normalize_delivery_timeout(value: Any) -> Optional[int]:
+    """Validate a per-entry delivery timeout (loop 24 / M2): positive finite
+    numbers become int seconds; anything else means "no per-entry override"
+    (the replay then falls back to the global resolution)."""
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(timeout) or timeout <= 0:
+        return None
+    return max(1, int(timeout))
+
+
+def clamp_delivery_timeout_to_lease(timeout: Union[int, float]) -> Union[int, float]:
+    """Clamp a delivery timeout strictly below the send-lease TTL (loop 24 / L2).
+
+    A send allowed to run as long as (or longer than) the lease TTL looks
+    orphaned mid-send: a second process would retake the "stale" lease and
+    re-send while the first send is still legitimately running — a
+    duplicate. Returns the timeout unchanged when it is already below the
+    TTL; otherwise clamps with a warning.
+    """
+    ttl = _lease_ttl_seconds()
+    if timeout < ttl:
+        return timeout
+    clamped = max(1.0, ttl - 1.0)
+    logger.warning(
+        "cron outbox: delivery timeout %ss >= send-lease TTL %ss would make "
+        "a legitimately running send look orphaned (stale-lease retake ⇒ "
+        "duplicate send) — clamping the delivery timeout to %ss",
+        timeout, ttl, clamped,
+    )
+    return clamped
+
+
 def _dedupe_key(job_id: Any, target: Any) -> str:
     target = target if isinstance(target, dict) else {}
     return "|".join([
@@ -500,6 +573,7 @@ def enqueue(
     *,
     execution_id: Optional[str] = None,
     error_class: str = ERROR_CLASS_SEND,
+    delivery_timeout_seconds: Optional[Any] = None,
     _allow_legacy_no_execution: bool = False,
 ) -> Dict[str, Any]:
     """Persist an undeliverable payload for later replay.
@@ -533,6 +607,14 @@ def enqueue(
     was made PRIVATE (audit loop 23b / F4) precisely because a public
     ``allow_legacy_no_execution`` flag was an easy bypass of the fail-closed
     contract: productive callers must pass ``execution_id``.
+
+    ``delivery_timeout_seconds`` (loop 24 / M2): the delivery timeout the
+    failed first attempt resolved, persisted on the entry so the REPLAY
+    uses the same bound — re-resolving from env/default at replay time
+    would dead-letter a job whose legitimate per-job timeout exceeds the
+    current default. Valid values are clamped strictly below the send-lease
+    TTL (loop 24 / L2, ``clamp_delivery_timeout_to_lease``); invalid values
+    are ignored (no per-entry override).
     """
     if error_class not in (ERROR_CLASS_SEND, ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY):
         error_class = ERROR_CLASS_SEND
@@ -551,6 +633,9 @@ def enqueue(
             "run paths should carry job['execution_id']",
             job_id,
         )
+    normalized_timeout = _normalize_delivery_timeout(delivery_timeout_seconds)
+    if normalized_timeout is not None:
+        normalized_timeout = int(clamp_delivery_timeout_to_lease(normalized_timeout))
     with _lock:
         path = _current_outbox_file()
         with _store_lock(path):
@@ -583,6 +668,8 @@ def enqueue(
                 entry["payload"] = payload
                 entry["last_error"] = error
                 entry["last_attempt_at"] = now
+                if normalized_timeout is not None:
+                    entry["delivery_timeout_seconds"] = normalized_timeout
                 _write_entries(path, entries)
                 return entry
             entry = {
@@ -611,6 +698,8 @@ def enqueue(
                 "next_retry_at": None if no_retry else now,
                 "last_error": error,
             }
+            if normalized_timeout is not None:
+                entry["delivery_timeout_seconds"] = normalized_timeout
             entries.append(entry)
             if no_retry:
                 # Anti-pile-up cap (audit loop 17 / F2): keep at most
@@ -664,7 +753,23 @@ def begin_replay(entry_id: str) -> Optional[Dict[str, Any]]:
     send and the status record) to ``sending``, stamping ``lease_ts``,
     ``lease_pid`` and the ``send_attempt`` number (attempts + 1). Returns a
     copy of the leased entry, or None when the entry is terminal/unknown or
-    its FRESH lease belongs to a live process (skip — never double-send).
+    its lease belongs to a live process (skip — never double-send).
+
+    Loop 24 / L2: a stale lease TIMESTAMP alone does not prove the holder is
+    gone — a slow but living sender (send window > lease TTL) must not be
+    double-sent. A stale lease is retaken only when its PID is provably
+    dead; the liveness check is fail-safe (``_lease_holder_is_live`` —
+    inability to prove death reads as ALIVE and the retake is skipped).
+    Residual risk: a REUSED pid can mask a dead holder — the entry then
+    stays visibly stuck in ``sending`` (``outbox_status`` alarms via
+    ``sending_expired``) instead of being double-sent; the safe direction
+    was chosen deliberately.
+
+    Loop 24 / L1: a retake against a provably dead holder counts the lost
+    send as an attempt (a crash in the send window IS an attempt) — a
+    reproducible crash otherwise resent forever and never dead-lettered.
+    Once ``attempts`` reaches ``MAX_ATTEMPTS`` the entry is marked ``dead``
+    instead of being leased again.
     """
     with _lock:
         path = _current_outbox_file()
@@ -678,9 +783,37 @@ def begin_replay(entry_id: str) -> Optional[Dict[str, Any]]:
                 if status == "sending":
                     if not _lease_is_stale(entry, now):
                         return None  # fresh lease — a live process owns the send
-                    # Orphaned lease: holder crashed mid-send. Retake below;
-                    # if the original send DID land, the retry is the
-                    # documented at-least-once redelivery.
+                    if _lease_holder_is_live(entry.get("lease_pid")):
+                        logger.warning(
+                            "cron outbox: entry %s has a stale send lease but "
+                            "its holder pid %s is still alive — skipping the "
+                            "retake (a duplicate send is worse than a delayed "
+                            "retry)",
+                            entry.get("id"), entry.get("lease_pid"),
+                        )
+                        return None
+                    # Orphaned lease, holder provably gone mid-send. Count the
+                    # lost send as an attempt (loop 24 / L1); past the cap the
+                    # entry dead-letters instead of resending forever.
+                    entry["attempts"] = (entry.get("attempts") or 0) + 1
+                    if entry["attempts"] >= MAX_ATTEMPTS:
+                        entry["status"] = "dead"
+                        entry["last_error"] = (
+                            "send window crashed repeatedly "
+                            "(stale-lease retakes exhausted)"
+                        )
+                        for lease_field in ("lease_ts", "lease_pid", "send_attempt"):
+                            entry.pop(lease_field, None)
+                        _write_entries(path, entries)
+                        logger.error(
+                            "cron outbox: entry %s (job '%s') is DEAD after %s "
+                            "crashed send attempts — report undeliverable",
+                            entry.get("id"), entry.get("job_id"),
+                            entry["attempts"],
+                        )
+                        return None
+                    # Retake below; if the original send DID land, the retry
+                    # is the documented at-least-once redelivery.
                 elif status != "queued":
                     return None  # delivered/dead — terminal
                 entry["status"] = "sending"

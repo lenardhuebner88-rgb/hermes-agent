@@ -60,6 +60,31 @@ def _target(chat_id="123"):
     return {"platform": "telegram", "chat_id": chat_id, "thread_id": None}
 
 
+def _dead_pid():
+    """A PID that is provably not alive (spawned and immediately reaped).
+
+    Loop 24 / L2: a stale lease is only retaken when its holder PID is
+    provably DEAD — the stale-lease tests below therefore stamp the lease
+    with a genuinely dead pid instead of this process's own (live) one.
+    """
+    import subprocess
+    import sys
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _rewrite_lease_pid(entry_id, pid):
+    """Overwrite the persisted lease_pid of a sending entry in the store."""
+    path = outbox._current_outbox_file()
+    entries = outbox._read_entries(path)
+    for stored in entries:
+        if stored.get("id") == entry_id:
+            stored["lease_pid"] = pid
+    outbox._write_entries(path, entries)
+
+
 def _ok_send(calls, result=None):
     async def _send(platform, pconfig, chat_id, content, **kwargs):
         calls.append({"chat_id": chat_id, "content": content, "kwargs": kwargs})
@@ -255,7 +280,11 @@ class TestSendLease:
             # Lease expired (holder crashed mid-send) ⇒ due again, replay
             # retakes the lease and delivers. Loop 20 / F6: TTL=0 is invalid
             # input and falls back to the default — expire the lease by
-            # moving the clock past a small positive TTL instead.
+            # moving the clock past a small positive TTL instead. Loop 24 /
+            # L2: the retake additionally requires a provably DEAD holder
+            # pid (the entry was leased by THIS live process, so stamp the
+            # lease with a dead pid to simulate the crash honestly).
+            _rewrite_lease_pid(entry["id"], _dead_pid())
             real_now = outbox._hermes_now
             monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "60")
             monkeypatch.setattr(
@@ -329,12 +358,16 @@ class TestSendLease:
                 assert s._replay_delivery_outbox() == 0
             # The send DID go out once; the entry is stuck in sending.
             assert len(sends) == 1
+            stuck_id = outbox.list_entries()[0]["id"]
             assert outbox.list_entries()[0]["status"] == "sending"
 
             # After the lease expires the orphaned entry is retried and
             # delivered — the duplicate is the honest at-least-once price.
             # Loop 20 / F6: TTL=0 is invalid input; expire the lease by
-            # moving the clock past a small positive TTL instead.
+            # moving the clock past a small positive TTL instead. Loop 24 /
+            # L2: the retake requires a provably dead holder pid — stamp the
+            # lease with one (the entry was leased by THIS live process).
+            _rewrite_lease_pid(stuck_id, _dead_pid())
             real_now = outbox._hermes_now
             monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "60")
             monkeypatch.setattr(

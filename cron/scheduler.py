@@ -2228,10 +2228,48 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 # try/except so a per-target failure is logged and the loop
                 # continues to the next target.
                 try:
+                    # Loop 24 / M1: the fallback send used to run UNBOUNDED in
+                    # the pool thread (raw coroutine, hardcoded 30s pool
+                    # budget, delivery_timeout ignored). On the 30s budget the
+                    # wedged send kept running in the pool thread and its LATE
+                    # send landed after the failure path had already parked
+                    # the payload in the outbox — the replay then delivered a
+                    # guaranteed duplicate. The fallback coroutine now gets
+                    # the SAME resolved delivery-timeout bound via wait_for,
+                    # and when the 30s pool budget fires first the wrapper
+                    # task is cancelled thread-safe, so nothing sends late.
+                    fallback_coro = _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files)
+                    timed_fallback = asyncio.wait_for(fallback_coro, timeout=delivery_timeout)
+                    runner: dict = {}
+
+                    def _run_fallback_send():
+                        loop = asyncio.new_event_loop()
+                        runner["loop"] = loop
+                        task = loop.create_task(timed_fallback)
+                        runner["task"] = task
+                        try:
+                            return loop.run_until_complete(task)
+                        finally:
+                            loop.close()
+
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
-                        result = future.result(timeout=30)
+                        future = pool.submit(_run_fallback_send)
+                        try:
+                            result = future.result(timeout=30)
+                        except BaseException:
+                            # Pool budget fired (or the send raised): cancel
+                            # the wrapper inside the fallback loop so wait_for
+                            # cancels the send coroutine instead of letting it
+                            # complete late in the pool thread.
+                            fb_loop = runner.get("loop")
+                            fb_task = runner.get("task")
+                            if fb_loop is not None and fb_task is not None and not fb_task.done():
+                                try:
+                                    fb_loop.call_soon_threadsafe(fb_task.cancel)
+                                except RuntimeError:
+                                    pass  # loop already closed — nothing left to cancel
+                            raise
                     finally:
                         pool.shutdown(wait=False)
                 except Exception as e:
@@ -2320,6 +2358,10 @@ def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: s
     try:
         from cron.delivery_outbox import enqueue
 
+        # Loop 24 / M2: persist the delivery timeout THIS attempt resolved so
+        # the replay uses the same bound (a per-job delivery_timeout_seconds
+        # must not silently degrade to the env/default on replay).
+        delivery_timeout = _get_delivery_timeout(job)
         execution_id = job.get("execution_id")
         for target in failed_targets:
             error_class = target.get("error_class") or "send"
@@ -2330,6 +2372,7 @@ def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: s
                 error=target.get("error") or "delivery failed on all paths",
                 execution_id=execution_id,
                 error_class=error_class,
+                delivery_timeout_seconds=delivery_timeout,
             )
             if error_class == "send":
                 logger.warning(
@@ -2352,6 +2395,34 @@ def _enqueue_failed_deliveries(job: dict, failed_targets: List[dict], content: s
             "survives in last_delivery_error",
             job.get("id", "?"), outbox_err,
         )
+
+
+def _entry_delivery_timeout(entry: dict) -> int:
+    """Resolve the delivery timeout for one outbox REPLAY (loop 24 / M2+L2).
+
+    The failed first attempt persists its resolved timeout as
+    ``delivery_timeout_seconds`` on the entry at enqueue time; the replay
+    must use that SAME bound — re-resolving from env/default here would
+    dead-letter a job whose legitimate per-job timeout exceeds the CURRENT
+    default. Entries without a valid field (older stores, hand-written
+    rows) fall back to the global ``_get_delivery_timeout()`` resolution.
+    The result is clamped strictly below the send-lease TTL (loop 24 / L2):
+    a replay send allowed to outrun its lease looks orphaned mid-send and a
+    second process would retake the "stale" lease ⇒ duplicate send.
+    """
+    delivery_timeout: Optional[int] = None
+    raw = entry.get("delivery_timeout_seconds")
+    if raw is not None:
+        try:
+            value = int(float(raw))
+            if value > 0:
+                delivery_timeout = value
+        except (TypeError, ValueError):
+            delivery_timeout = None
+    if delivery_timeout is None:
+        delivery_timeout = _get_delivery_timeout()
+    from cron.delivery_outbox import clamp_delivery_timeout_to_lease
+    return int(clamp_delivery_timeout_to_lease(delivery_timeout))
 
 
 def _send_outbox_entry(entry: dict) -> tuple:
@@ -2400,7 +2471,7 @@ def _send_outbox_entry(entry: dict) -> tuple:
     if not pconfig or not pconfig.enabled:
         return f"platform '{platform_name}' not configured/enabled", None
 
-    delivery_timeout = _get_delivery_timeout()
+    delivery_timeout = _entry_delivery_timeout(entry)
     payload = entry.get("payload", "")
     coro = _send_to_platform(
         platform, pconfig, chat_id, payload,
@@ -2494,7 +2565,20 @@ def _replay_delivery_outbox(verbose: bool = False) -> int:
                     entry.get("id"),
                 )
                 continue
-            error, receipt = _send_outbox_entry(leased)
+            try:
+                error, receipt = _send_outbox_entry(leased)
+            except Exception as send_err:
+                # Loop 24 / L3: a SYNCHRONOUS send failure must not abort the
+                # whole replay pass (this function promises "never raises" —
+                # an escaping exception would break the tick before every
+                # remaining entry AND before all due jobs). Record it as a
+                # normal failed attempt — the backoff/dead-letter bookkeeping
+                # stays intact — and continue with the next entry.
+                error, receipt = f"replay send raised: {send_err}", None
+                logger.warning(
+                    "cron delivery outbox: send for %s raised synchronously: %s",
+                    entry.get("id"), send_err,
+                )
             try:
                 updated = record_replay_result(
                     entry["id"], success=error is None, error=error, receipt=receipt,
