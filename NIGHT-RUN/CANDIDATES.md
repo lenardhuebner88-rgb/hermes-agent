@@ -74,7 +74,7 @@ Fork-owned = present in HEAD, absent from `origin/main`. Reproduce with:
 - [x] `hermes_cli/operator_digest_view.py` (168 LoC) — `tests/hermes_cli/test_operator_digest_view.py`
 - [x] `hermes_cli/pa_live_share.py` (143 LoC) — `tests/hermes_cli/test_pa_live_share.py`
 - [x] `hermes_cli/pa_push.py` (140 LoC) — `tests/hermes_cli/test_pa_push.py`
-- [ ] `hermes_cli/design_board_cli.py` (126 LoC) — `tests/test_design_board_cli.py`
+- [x] `hermes_cli/design_board_cli.py` (126 LoC) — `tests/test_design_board_cli.py`
 
 ## Band B — <120 LoC
 
