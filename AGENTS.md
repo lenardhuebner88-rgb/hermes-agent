@@ -218,6 +218,29 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   if a rebase may have reminted it). A `done` card is never revisited by the
   board, so unlanded work there is silent and permanent.
 
+- `ruff` here does **not** catch dead imports — `pyproject.toml` selects a narrow
+  rule set and `F401` is off. After removing a function, `rg` for its imports
+  yourself; `All checks passed!` will happily keep an orphan `import` alive.
+- Never render a measured value through a formatter that floors below its own
+  unit. `derive.ts::fmtDur` does `Math.floor(sec)`, so a measured 250 ms TTFT
+  read as `0s` — and TTFT is essentially always sub-second, so the column showed
+  zero permanently. Milliseconds go through `fmtMillis` (`StatistikView.tsx`).
+- `z.coerce.number().catch(0)` on a cost or token field is a bug, not a default.
+  When a read path fails the backend returns an empty `summary` and the schema
+  fills every missing field with `0`; "0 Context Tokens" then reads as "no
+  activity" instead of "not readable". Canon
+  `00-Canon/decisions/2026-07-27-kosten-ssot-im-lesepfad.md` rule 3: unknown
+  stays unknown, never `0`. Same for `?? 0` / `.catch(() => 0)` at render sites.
+- A legacy/fallback shape must not assert what the old payload never carried.
+  `ScorecardView::legacyQuality` set numerator = denominator for review coverage,
+  producing a permanent 100 % with a green check where the real figure is ~29 %.
+  Fallbacks fire exactly in the deploy-skew window (new `web_dist`, service not
+  yet restarted), so nobody sees them in tests.
+- `expect(markup).toContain("<word>")` is tautological when the word also appears
+  in unconditional copy. A thin-sample test passed on `"dünn"` while the panel
+  footer renders "dünne Nenner bleiben sichtbar" — it stayed green with the
+  guarded logic deleted. Assert the marker in context plus a negative case.
+
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 
