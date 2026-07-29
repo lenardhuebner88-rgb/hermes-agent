@@ -8,27 +8,132 @@ proved gone. Terminal states are immutable.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
-EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
-MAX_TERMINAL_EXECUTIONS = 1000
+logger = logging.getLogger(__name__)
+
+# Like cron/jobs.py, the ledger is per-profile by design (#4707): each profile
+# owns its own executions.db under its own HERMES_HOME, and multiplex_profiles
+# scopes every tick/recovery to one profile at a time. EXECUTIONS_FILE remains
+# the import-time default-profile fallback and a compatibility surface for
+# existing callers/tests that deliberately re-point it; the ACTIVE store is
+# resolved per call by _current_executions_file() — never read EXECUTIONS_FILE
+# directly for I/O.
+_IMPORT_HOME = get_hermes_home().resolve()
+EXECUTIONS_FILE = _IMPORT_HOME / "cron" / "executions.db"
+
+# Retention (see _prune_unlocked): keep the newest N terminal executions PER
+# JOB so high-frequency jobs only evict their own history instead of pushing
+# rare report jobs out of the ledger (the old global FIFO cap did exactly
+# that), plus a global safety cap bounding total ledger size. Both limits are
+# DELETE-based and self-healing — changing either value takes effect on the
+# next prune, no migration needed.
+KEEP_TERMINAL_EXECUTIONS_PER_JOB = 50
+MAX_TERMINAL_EXECUTIONS = 20000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
 _PROCESS_ID = uuid.uuid4().hex
 
+# Import-time snapshot of the compatibility constant, so deliberate re-pointing
+# (monkeypatched EXECUTIONS_FILE — the documented escape hatch existing
+# tests/embedders use) is distinguishable from the constant merely being stale.
+_IMPORT_EXECUTIONS_FILE = EXECUTIONS_FILE
+
+
+def _current_executions_file() -> Path:
+    """Return the ledger path pinned to this execution context's profile.
+
+    Precedence mirrors cron/jobs.py::_current_cron_store(), most explicit
+    first:
+
+    1. an active cron-store override — the ContextVar behind
+       cron.jobs.use_cron_store(), which multiplex_profiles sets per profile
+       around tick/recovery/heartbeat;
+    2. a deliberately re-pointed EXECUTIONS_FILE module constant — if it no
+       longer matches its import-time value, someone chose the documented
+       process-wide compatibility surface; honor it;
+    3. the ACTIVE profile home, resolved fresh via get_hermes_home()
+       (context-local override, then the HERMES_HOME env var) — so a caller
+       that re-points HERMES_HOME after this module was imported writes ITS
+       OWN ledger, not whatever executions.db the import happened to freeze;
+    4. the import-time constant (home unchanged since import — the common
+       path, returned unchanged).
+    """
+    # Lazy import: cron/jobs.py imports this module lazily too, so a
+    # module-level import here would be circular.
+    from cron.jobs import _cron_store_override
+
+    store = _cron_store_override.get()
+    if store is not None:
+        return store.cron_dir / "executions.db"
+    if EXECUTIONS_FILE != _IMPORT_EXECUTIONS_FILE:
+        return EXECUTIONS_FILE
+    home = get_hermes_home().resolve()
+    if home == _IMPORT_HOME:
+        return EXECUTIONS_FILE
+    return home / "cron" / "executions.db"
+
+
+@contextmanager
+def use_executions_store(home: Union[str, Path]) -> Iterator[None]:
+    """Route the executions ledger to ``home`` without mutating globals.
+
+    Thin alias over cron.jobs.use_cron_store() so a single context manager
+    scopes the jobs store, output dir, and executions ledger together.
+    """
+    from cron.jobs import use_cron_store
+
+    with use_cron_store(home):
+        yield
+
+
+def _int_env_override(name: str, fallback: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return fallback
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid %s=%r (expected integer); using %d",
+            name, raw, fallback,
+        )
+        return fallback
+
+
+def _keep_terminal_per_job() -> int:
+    return max(
+        0,
+        _int_env_override(
+            "HERMES_CRON_EXECUTIONS_KEEP_PER_JOB",
+            KEEP_TERMINAL_EXECUTIONS_PER_JOB,
+        ),
+    )
+
+
+def _max_terminal_executions() -> int:
+    return max(
+        0,
+        _int_env_override(
+            "HERMES_CRON_EXECUTIONS_MAX_TERMINAL", MAX_TERMINAL_EXECUTIONS
+        ),
+    )
+
 
 def _connect() -> sqlite3.Connection:
-    EXECUTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(EXECUTIONS_FILE, timeout=5)
+    executions_file = _current_executions_file()
+    executions_file.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(executions_file, timeout=5)
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
@@ -111,14 +216,34 @@ def _owner_is_live(pid: int, started_at: Optional[int]) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
-    limit = max(0, int(MAX_TERMINAL_EXECUTIONS))
+    """Trim terminal history: per-job retention first, then the global cap.
+
+    Per-job retention keeps the newest N terminal executions of EVERY job, so
+    high-frequency jobs evict only their own history and can no longer push
+    rare report jobs out of the ledger. The global cap is a safety bound on
+    total ledger size. In-flight (claimed/running) rows are never pruned.
+    """
+    conn.execute(
+        """DELETE FROM executions WHERE id IN (
+             SELECT id FROM (
+               SELECT id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY job_id
+                        ORDER BY claimed_at DESC, id DESC
+                      ) AS rn
+               FROM executions
+               WHERE status IN ('completed','failed','unknown')
+             ) WHERE rn > ?
+           )""",
+        (_keep_terminal_per_job(),),
+    )
     conn.execute(
         """DELETE FROM executions WHERE id IN (
              SELECT id FROM executions
              WHERE status IN ('completed','failed','unknown')
              ORDER BY claimed_at DESC, id DESC LIMIT -1 OFFSET ?
            )""",
-        (limit,),
+        (_max_terminal_executions(),),
     )
 
 
