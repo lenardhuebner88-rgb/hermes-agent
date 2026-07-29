@@ -15,6 +15,8 @@ import sqlite3
 from hermes_cli.kanban_dispatch_policy import (
     capped_profiles_for_window,
     per_task_input_usage,
+    positive_int,
+    positive_number,
     profile_running_counts,
     task_is_read_only,
 )
@@ -196,3 +198,42 @@ def test_task_is_read_only_contract():
     assert task_is_read_only("research", "researcher-a")
     assert task_is_read_only("code", "critic")
     assert not task_is_read_only("code", "coder")
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_positive_int_zero_and_boundary():
+    """Kill comparison_swap L14 (> -> >=) and bool_op_swap L14 (and -> or)."""
+    assert positive_int(0) is None
+    assert positive_int(1) == 1
+    assert positive_int(True) is None
+    assert positive_int(-1) is None
+
+
+def test_positive_number_zero_and_boundary():
+    """Kill comparison_swap L23 (> -> >=) and bool_op_swap L23 (and -> or)."""
+    assert positive_number(0) is None
+    assert positive_number(0.5) == 0.5
+    assert positive_number(True) is None
+    assert positive_number(-0.1) is None
+
+
+def test_capped_profiles_exact_token_and_cost_boundary():
+    """Kill comparison_swap L132 (>= -> >) and L140 (>= -> >)."""
+    conn = _make_conn()
+    now = 1_000_000
+    _add_run(conn, "t1", "coder", 50, 50, 0.5, now)
+    _add_run(conn, "t2", "coder", 0, 0, 0.5, now)
+
+    capped, cost_exceeded = capped_profiles_for_window(
+        conn, token_cap=100, cost_cap=1.0, now=now
+    )
+    assert "coder" in capped
+    assert cost_exceeded is True
+
+    capped2, cost2 = capped_profiles_for_window(
+        conn, token_cap=101, cost_cap=1.01, now=now
+    )
+    assert "coder" not in capped2
+    assert cost2 is False
