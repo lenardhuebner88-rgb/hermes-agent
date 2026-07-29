@@ -40,6 +40,10 @@ def _stub_chromium(monkeypatch):
     monkeypatch.setenv("HERMES_DESIGN_BOARD_DASHBOARD_BASE_URL", "http://127.0.0.1:9119")
 
 
+# Save the real function before the autouse fixture replaces it.
+_real_render_dashboard_view = dbk._render_dashboard_view
+
+
 def _create_done_task(conn, task_id: str, completed_at: int, metadata: dict | None = None):
     kanban_db.create_task(
         conn,
@@ -293,3 +297,81 @@ def test_commit_from_payload_variants():
     assert dbk._commit_from_payload('{"metadata": {"worker_gate": {"commit": "mno"}}}') == "mno"
     assert dbk._commit_from_payload("not-json") is None
     assert dbk._commit_from_payload('["commit"]') is None
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_has_after_entry_rejects_non_dict_entry():
+    """Kill bool_op_swap L159: and -> or would accept non-dict entries."""
+    marker = f"{dbk._AFTER_MARKER_PREFIX}t1"
+    card = {"entries": ["not-a-dict", {"note": marker}]}
+    assert dbk._has_after_entry(card, "t1") is True
+    # Non-dict entry alone must NOT match
+    card2 = {"entries": [marker]}
+    assert dbk._has_after_entry(card2, "t1") is False
+
+
+def test_has_receipt_entry_rejects_non_dict_entry():
+    """Kill bool_op_swap L167: and -> or would accept non-dict entries."""
+    marker = f"{dbk._RECEIPT_MARKER_PREFIX}t1"
+    card = {"entries": ["not-a-dict", {"note": marker}]}
+    assert dbk._has_receipt_entry(card, "t1") is True
+    card2 = {"entries": [marker]}
+    assert dbk._has_receipt_entry(card2, "t1") is False
+
+
+def test_commit_from_payload_rejects_non_string_commit():
+    """Kill bool_op_swap L271: and -> or would accept non-string commit."""
+    assert dbk._commit_from_payload('{"worker_gate": {"commit": 123}}') is None
+
+
+def test_commit_from_payload_rejects_non_string_nested_commit():
+    """Kill bool_op_swap L278: and -> or would accept non-string nested commit."""
+    assert dbk._commit_from_payload('{"metadata": {"worker_gate": {"commit": 456}}}') is None
+
+
+def test_render_dashboard_view_stderr_empty_stdout_fallback(monkeypatch, tmp_path):
+    """Kill bool_op_swap L308: or -> and would lose stdout when stderr is empty."""
+    exe = tmp_path / "chromium-shot"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(dbk, "_CHROMIUM_SHOT", str(exe))
+
+    import subprocess as sp
+
+    class FakeResult:
+        returncode = 1
+        stderr = ""
+        stdout = "stdout-error-detail"
+
+    monkeypatch.setattr(sp, "run", lambda *a, **kw: FakeResult())
+    with pytest.raises(RuntimeError, match="stdout-error-detail"):
+        _real_render_dashboard_view({"target": {"view": "/x"}})
+
+
+def test_render_dashboard_view_empty_tail_falls_back_to_returncode(monkeypatch, tmp_path):
+    """Kill bool_op_swap L309: or -> and would lose returncode when tail is empty."""
+    exe = tmp_path / "chromium-shot"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setattr(dbk, "_CHROMIUM_SHOT", str(exe))
+
+    import subprocess as sp
+
+    class FakeResult:
+        returncode = 42
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(sp, "run", lambda *a, **kw: FakeResult())
+    with pytest.raises(RuntimeError, match="42"):
+        _real_render_dashboard_view({"target": {"view": "/x"}})
+
+
+def test_dashboard_url_rejects_scheme_without_netloc(monkeypatch):
+    """Kill bool_op_swap L323: and -> or would accept http: without netloc."""
+    monkeypatch.setenv("HERMES_DESIGN_BOARD_DASHBOARD_BASE_URL", "http://127.0.0.1:9119")
+    # "http:relative" has scheme=http but no netloc → must NOT be returned raw
+    result = dbk._dashboard_url_for_card({"target": {"view": "http:relative"}})
+    assert result == "http://127.0.0.1:9119/http:relative"

@@ -274,3 +274,34 @@ def test_nightly_main_runs_reconciler_after_lane(monkeypatch):
 
     assert mod.main() == 0
     assert order == ["code", "reconcile", "shadow"]
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_append_run_default_at_gets_timestamp(audit):
+    """Kill bool_op_swap L96 (or -> and): at=None must produce a real
+    UTC timestamp, not None."""
+    autoresearch_runs.append_run(lane="skill", request_id="r1", tokens=10)
+    runs = autoresearch_runs.read_runs()
+    assert len(runs) == 1
+    # With the mutant (or -> and), at would be None.
+    assert runs[0]["at"] is not None
+    assert isinstance(runs[0]["at"], str)
+    assert len(runs[0]["at"]) > 0
+
+
+def test_append_run_default_tokens_is_zero(audit):
+    """Kill const_offset L82 (0 -> 1): omitting tokens must store 0."""
+    autoresearch_runs.append_run(lane="skill", request_id="r1")
+    runs = autoresearch_runs.read_runs()
+    assert len(runs) == 1
+    assert runs[0]["tokens"] == 0
+
+
+def test_read_runs_limit_one_returns_exactly_one(audit):
+    """Kill const_offset L78 (1 -> 2): read_runs(limit=1) must cap at 1."""
+    for i in range(5):
+        autoresearch_runs.append_run(lane="skill", request_id=f"r{i}", tokens=i)
+    runs = autoresearch_runs.read_runs(limit=1)
+    assert len(runs) == 1

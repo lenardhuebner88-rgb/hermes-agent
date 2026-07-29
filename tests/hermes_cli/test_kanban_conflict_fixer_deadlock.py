@@ -757,6 +757,124 @@ def test_structured_integration_root_park_reaches_sweep_and_decision_queue(
     )
 
 
+def test_completed_base_prep_fixer_resumes_typed_integration_parent(kanban_home):
+    reason = "worker base preparation: stale chain branch"
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked parent", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "conflict_fixer_for",
+                {
+                    "parent_id": parent_id,
+                    "conflict_fingerprint": kb._conflict_fingerprint(reason),
+                },
+            )
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+        resume_events = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert parent is not None and parent.status == "ready"
+    assert len(resume_events) == 1
+
+
+def test_untyped_legacy_integration_park_survives_capacity_stall_row(kanban_home):
+    reason = "integration parked: merge conflict/failure (aborted): foo.py"
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="parked parent", assignee="coder")
+        assert kb.claim_task(conn, task_id) is not None
+        assert kb.block_task(conn, task_id, reason=reason, kind="capacity")
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "blocked", {"reason": reason})
+
+        before = kb.decision_queue(conn)
+        kb.no_silent_stall_sweep(conn)
+        after = kb.decision_queue(conn)
+
+    assert any(
+        item["task_id"] == task_id and item["kind"] == "integration_parked"
+        for item in before["decisions"]
+    )
+    assert any(
+        item["task_id"] == task_id and item["kind"] == "integration_parked"
+        for item in after["decisions"]
+    )
+
+
+def test_completed_fixer_does_not_resume_parent_with_active_operator_hold(kanban_home):
+    reason = "integration parked: merge conflict/failure (aborted): foo.py"
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked parent", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "conflict_fixer_for",
+                {
+                    "parent_id": parent_id,
+                    "conflict_fingerprint": kb._conflict_fingerprint(reason),
+                },
+            )
+            kb._append_event(conn, parent_id, kb.OPERATOR_ESCALATION_EVENT, {})
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+
+    assert parent is not None and parent.status == "blocked"
+
+
+def test_completed_fixer_does_not_resume_parent_after_budget_is_exhausted(kanban_home):
+    reason = "integration parked: merge conflict/failure (aborted): foo.py"
+    fingerprint = kb._conflict_fingerprint(reason)
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked parent", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "conflict_fixer_for",
+                {
+                    "parent_id": parent_id,
+                    "root_id": parent_id,
+                    "conflict_fingerprint": fingerprint,
+                },
+            )
+            for attempt in range(1, kb.CONFLICT_FIXER_MAX_ATTEMPTS + 1):
+                kb._append_event(
+                    conn,
+                    parent_id,
+                    kb.CONFLICT_FIXER_DISPATCHED_EVENT,
+                    {
+                        "root_id": parent_id,
+                        "child_id": f"t_prior_{attempt}",
+                        "conflict_fingerprint": fingerprint,
+                    },
+                )
+            conn.execute(
+                "UPDATE tasks SET block_kind = 'capacity' WHERE id = ?", (parent_id,)
+            )
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+
+    assert parent is not None and parent.status == "blocked"
+
+
 def test_pending_root_finalizer_ignores_settled_fixer_card(
     kanban_home,
     tmp_path,

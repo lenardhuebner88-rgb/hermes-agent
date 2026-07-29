@@ -126,3 +126,40 @@ def test_context_cap_preserves_required_section_order() -> None:
     assert context.index("OWNING TASK") < context.index("LAST TASK EVENTS")
     assert context.index("LAST TASK EVENTS") < context.index("PROJECT RECEIPTS")
     assert context.index("PROJECT RECEIPTS") < context.index("RUNTIME")
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_bounded_context_handles_none_task():
+    """Kill bool_op_swap L41 (or->and): mutant returns None instead of {} for task=None."""
+    # task=None: original does task or {} -> {}, mutant does task and {} -> None
+    # then task_data.get("title") crashes on None
+    result = suggest._bounded_context(
+        question_text="test?",
+        options=[],
+        task=None,
+        task_events=[],
+        receipts=[],
+        cwd=None,
+        kind=None,
+    )
+    assert "QUESTION" in result
+
+
+def test_configured_model_handles_none_config():
+    """Kill bool_op_swap L151 (or->and): mutant returns None instead of {} for config."""
+    import unittest.mock as um
+    with um.patch.object(suggest, "load_config", return_value=None):
+        # original: None or {} -> {}, mutant: None and {} -> None
+        # then config.get("agent_questions") crashes on None
+        model = suggest._configured_model()
+    assert model == suggest._DEFAULT_MODEL
+
+
+def test_parse_suggestion_strips_single_fence_line():
+    """Kill bool_op_swap L163 (and->or): mutant crashes on empty lines after fence strip."""
+    # content="```" -> lines=["```"] -> L161 strips first -> lines=[]
+    # L163 original: [] and ... -> False (skip); mutant: [] or [][-1] -> IndexError
+    with pytest.raises(json.JSONDecodeError):
+        suggest._parse_suggestion("```", {1, 2})

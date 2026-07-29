@@ -7703,6 +7703,38 @@ def _branch_has_patch_equivalent_commit(
     return any(line.startswith("- ") for line in lines)
 
 
+def _branch_reflog_has_rewritten_commit(
+    repo_root: Path,
+    branch: str,
+    commit: str,
+) -> bool:
+    """True when *commit* reached *branch* before a later completed rebase."""
+    entries = _git(
+        repo_root,
+        "reflog",
+        "show",
+        "--format=%H%x00%gs",
+        f"refs/heads/{branch}",
+        check=False,
+    ).splitlines()
+    rewrite_seen = False
+    rewrite_prefix = f"rebase (finish): refs/heads/{branch} onto "
+    for entry in entries:
+        head, separator, subject = entry.partition("\x00")
+        if not separator:
+            continue
+        if subject.startswith(rewrite_prefix):
+            rewrite_seen = True
+            continue
+        if (
+            rewrite_seen
+            and head
+            and _branch_is_ancestor(repo_root, commit, head)
+        ):
+            return True
+    return False
+
+
 def _is_merge_commit(repo_root: Path, commit: str) -> bool:
     """Return whether *commit* has more than one parent.
 
@@ -7731,10 +7763,11 @@ def _select_override_source(
     *candidates* are the newest-first distinct approved-commit metadata dicts
     from :func:`_completion_source_metadata`.  A candidate whose commit is
     already an ancestor of *default_branch*'s tip — or was replaced there by a
-    patch-equivalent rebase commit — needs no override (a parent that committed
-    to the same chain branch, or a superseded earlier commit on it). Only truly
-    off-branch commits require redirecting the merge to the approved code's own
-    worktree.
+    patch-equivalent rebase commit — needs no override. The same applies when
+    this exact branch's reflog proves that the candidate reached the branch
+    before a later completed rebase, unless another external candidate keeps
+    the result ambiguous. Only truly off-branch commits require redirecting the
+    merge to the approved code's own worktree.
 
     Fail-closed (Restfix 3): more than one DISTINCT off-branch approved commit
     is genuine ambiguity — raise :class:`WorktreeError` so the caller parks
@@ -7742,6 +7775,7 @@ def _select_override_source(
     """
     branch_present = _branch_exists(repo_root, default_branch)
     external: list[tuple[str, dict[str, Any]]] = []
+    reflog_rewritten: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
     for meta in candidates:
         requested = str(meta.get("commit") or "").strip()
@@ -7761,6 +7795,9 @@ def _select_override_source(
             # completion metadata would otherwise remain external forever once
             # a later rebase removes it from the chain branch.
             continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         if branch_present and _branch_is_ancestor(
             repo_root, resolved, default_branch
         ):
@@ -7773,10 +7810,20 @@ def _select_override_source(
             repo_root, default_branch, resolved
         ):
             continue
-        if resolved in seen:
+        # A conflict-resolving rebase changes the patch and orphans the stamped
+        # object. The branch reflog still proves, per candidate, that the commit
+        # reached this exact branch before a later successful rebase rewrote it.
+        if branch_present and _branch_reflog_has_rewritten_commit(
+            repo_root, default_branch, resolved
+        ):
+            reflog_rewritten.append((resolved, meta))
             continue
-        seen.add(resolved)
         external.append((resolved, meta))
+    if external and reflog_rewritten:
+        # The reflog proves branch provenance, not survival of the candidate's
+        # content. It may therefore clear the whole off-branch set, but must not
+        # make an unrelated candidate uniquely selectable as an override.
+        external.extend(reflog_rewritten)
     if not external:
         return None
     if len(external) > 1:

@@ -366,3 +366,44 @@ def test_gpt5_prefix_does_not_break_existing_families():
     # Unrelated providers
     assert lm.family_for_id("x-ai/grok-4.5") == "other"
     assert lm.family_for_id("meta-llama/llama-3.3-70b-instruct:free") == "other"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_parse_landscape_raises_when_header_is_last_line():
+    """Kill bool_op_swap L167: or->and would IndexError instead of
+    LandscapeParseError when the table header is the final line."""
+    body = (
+        "## Providers\n\n"
+        "| Modell-ID | Erstellt | Kontext | Prompt/Completion pro 1M |\n"
+    )
+    with pytest.raises(lm.LandscapeParseError, match="separator"):
+        lm.parse_landscape(body)
+
+
+def test_scan_guide_slugs_excludes_invalid_slug_filenames(wiki_home):
+    """Kill bool_op_swap L291: and->or would include files whose stem
+    fails _GUIDE_SLUG_RE (e.g. uppercase or spaces)."""
+    prompting = wiki_home / "llm-wiki" / "wiki" / "prompting"
+    (prompting / "Bad_Slug.md").write_text("---\nfamily: bad\n---\nbody", encoding="utf-8")
+    (prompting / "has space.md").write_text("---\nfamily: sp\n---\nbody", encoding="utf-8")
+    slugs = lm._scan_guide_slugs()
+    assert "Bad_Slug" not in slugs
+    assert "has space" not in slugs
+    # Valid guides still present
+    assert "gpt5-codex" in slugs
+
+
+def test_load_guide_family_falls_back_to_slug_only_when_missing(wiki_home):
+    """Kill bool_op_swap L309: or->and would return slug even when
+    frontmatter has an explicit family value."""
+    prompting = wiki_home / "llm-wiki" / "wiki" / "prompting"
+    (prompting / "custom-slug.md").write_text(
+        "---\nfamily: explicit-family-name\ntitle: Custom\n---\nGuide body.",
+        encoding="utf-8",
+    )
+    guide = lm._load_guide("custom-slug")
+    assert guide is not None
+    assert guide.family == "explicit-family-name"
+    assert guide.family != "custom-slug"

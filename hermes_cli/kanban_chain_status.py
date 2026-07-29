@@ -32,8 +32,17 @@ def _payload_dict(raw: object) -> dict[str, Any]:
 
 
 def blocked_event_kind(raw_payload: object, *, fallback: object = None) -> object:
-    """Read a structured block kind without making legacy payloads fatal."""
-    return _payload_dict(raw_payload).get("kind") or fallback
+    """Read the block origin from its event without making legacy payloads fatal.
+
+    ``tasks.block_kind`` can be rewritten by a later stall sweep without a new
+    ``blocked`` event.  It is not evidence of this park episode's origin and
+    therefore must not override an untyped, legacy event.
+    """
+    kind = _payload_dict(raw_payload).get("kind")
+    # ``block_task(..., kind=None)`` synthesizes ``needs_input`` or
+    # ``transient`` for legacy reason-only parks. Those are generic retry/UI
+    # states rather than typed park origins, so preserve the reason fallback.
+    return None if kind in {"needs_input", "transient"} else kind
 
 
 def is_settled_fixer_card(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -337,7 +346,11 @@ def on_fixer_card_failed(
 
 
 def is_integration_park(*, reason: object, block_kind: object) -> bool:
-    """Recognize current structured parks and legacy reason-only parks."""
-    return block_kind == "integration" or str(reason or "").startswith(
-        "integration parked:"
-    )
+    """Recognize typed integration parks and legacy reason-only parks.
+
+    A typed origin on a blocked event is authoritative. Only untyped legacy
+    events fall back to their reason prefix.
+    """
+    if isinstance(block_kind, str) and block_kind:
+        return block_kind == "integration"
+    return str(reason or "").startswith("integration parked:")

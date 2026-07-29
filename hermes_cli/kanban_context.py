@@ -133,7 +133,10 @@ def render_comment_thread(
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(c.created_at))
             safe_author = (c.author or "").replace("`", "")
             lines.append(f"operator directive `{safe_author}` at {ts}:")
-            lines.append(cap_text(c.body, comment_bytes))
+            # Directives are operational corrections, not background comment
+            # history.  They deliberately bypass both comment count and byte
+            # caps so a continuation cannot lose the instruction that fixes it.
+            lines.append(c.body or "")
             lines.append("")
 
     if regular:
@@ -213,6 +216,7 @@ class WorkerBriefInput:
     title: str
     header: str
     sections: Mapping[str, Sequence[BriefRecord]]
+    comment_id_watermark: int = 0
 
 
 @dataclass(frozen=True)
@@ -234,6 +238,7 @@ def _fingerprint(task: WorkerBriefInput, *, phase: str, audience: str, profile: 
         "title": task.title,
         "phase": phase,
         "profile": profile,
+        "comment_id_watermark": task.comment_id_watermark,
         "header": _RELATIVE_TIME_RE.sub("<relative-time>", task.header).rstrip(),
         "sections": {
             name: [{"key": record.key, "text": _canonical_record(record)} for record in task.sections.get(name, ())]
@@ -247,9 +252,11 @@ def _fingerprint(task: WorkerBriefInput, *, phase: str, audience: str, profile: 
 def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, profile: str) -> RenderedWorkerBrief:
     """Render one bounded worker payload without I/O or side effects.
 
-    Records are admitted whole, in section/record priority order. Any record
-    that exceeds a section or total budget is omitted visibly and returned in
-    overflows for the launch boundary to materialize.
+    Records are admitted whole, in section/record priority order. Any regular
+    record that exceeds a section or total budget is omitted visibly and
+    returned in overflows for the launch boundary to materialize. Explicit
+    operator directives are privileged operational instructions and remain
+    inline even when their individual record exceeds a budget.
     """
     if phase not in {"execute", "retry", "verify", "review"}:
         raise ValueError(f"unsupported worker brief phase: {phase}")
@@ -276,7 +283,11 @@ def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, pr
                 continue
             record_cost = len(text) + (2 if included else 0)
             projected_total = used + len(heading) + 4 + section_used + record_cost
-            if section_used + record_cost <= int(budgets[name]) and projected_total <= int(budgets["total"]):
+            is_operator_directive = record.key == "operator-directive"
+            if is_operator_directive or (
+                section_used + record_cost <= int(budgets[name])
+                and projected_total <= int(budgets["total"])
+            ):
                 included.append(text)
                 section_used += record_cost
             else:
@@ -305,6 +316,7 @@ def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, pr
         "profile": profile,
         "chars": len(payload),
         "token_estimate": (len(payload) + 3) // 4,
+        "comment_id_watermark": task.comment_id_watermark,
         "section_counts": section_counts,
         "omitted_records": sum(v["omitted"] for v in section_counts.values()),
         "payload_fingerprint": _fingerprint(task, phase=phase, audience=audience, profile=profile),

@@ -109,6 +109,58 @@ def test_worker_brief_fingerprint_is_canonical_but_phase_profile_and_ac_sensitiv
     assert first.manifest["payload_fingerprint"] != changed_ac.manifest["payload_fingerprint"]
 
 
+def test_operator_directives_are_never_byte_or_count_capped_in_any_profile():
+    longest_comment_cap = max(
+        int(caps["comment_bytes"])
+        for caps in context._CTX_CAP_PROFILES.values()
+    )
+    regular_count = max(
+        int(caps["comments"])
+        for caps in context._CTX_CAP_PROFILES.values()
+    ) + 1
+    directive = "DIRECTIVE-" + ("x" * (longest_comment_cap + 1))
+    comments = [
+        *[
+            type(
+                "Comment",
+                (),
+                {"body": f"regular {index}", "author": "worker", "created_at": 0, "kind": "comment"},
+            )()
+            for index in range(regular_count)
+        ],
+        type(
+            "Comment",
+            (),
+            {"body": directive, "author": "operator", "created_at": 0, "kind": "directive"},
+        )(),
+    ]
+
+    for profile, caps in context._CTX_CAP_PROFILES.items():
+        rendered = "\n".join(
+            context.render_comment_thread(
+                comments,
+                max_comments=int(caps["comments"]),
+                comment_bytes=int(caps["comment_bytes"]),
+            )
+        )
+
+        assert directive in rendered, profile
+        assert "DIRECTIVE-… [truncated" not in rendered, profile
+        assert f"regular {regular_count - 1}" in rendered, profile
+        assert "regular 0" not in rendered, profile
+
+
+def test_large_operator_directive_survives_worker_brief_section_budget(kanban_home):
+    directive = "DIRECTIVE-" + ("x" * 20_000)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="directive target", assignee="coder")
+        kb.add_comment(conn, task_id, "operator", directive, kind="directive")
+        rendered = kb.render_worker_brief_for_task(conn, task_id)
+
+    assert directive in rendered.payload
+    assert rendered.manifest["section_counts"]["comments"]["omitted"] == 0
+
+
 def test_review_diff_overflow_is_atomic_0600_artifact_and_not_logged(
     kanban_home, monkeypatch
 ):
@@ -140,6 +192,15 @@ def test_review_diff_overflow_is_atomic_0600_artifact_and_not_logged(
         )
 
     monkeypatch.setattr(kb, "_worker_brief_input", fake_input)
+    real_render = kb.render_worker_brief_for_task
+    render_calls = 0
+
+    def tracked_render(*args, **kwargs):
+        nonlocal render_calls
+        render_calls += 1
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "render_worker_brief_for_task", tracked_render)
     launched = kb._prepare_worker_brief_launch(task, board=None, audience="claude-cli")
 
     with kb.connect_closing() as conn:
@@ -164,6 +225,11 @@ def test_review_diff_overflow_is_atomic_0600_artifact_and_not_logged(
     assert metadata["brief"]["payload_fingerprint"]
     assert "requested_provider" in metadata
     assert "actual_model" in metadata
+    assert render_calls == 1
+    brief_event = next(event for event in events if event.kind == "brief_rendered")
+    assert brief_event.payload is not None
+    assert brief_event.payload["payload_fingerprint"] == metadata["brief"]["payload_fingerprint"]
+    assert brief_event.payload["comment_id_watermark"] == metadata["brief"]["comment_id_watermark"]
 
 
 def test_operator_context_is_bounded_operator_profile(kanban_home):

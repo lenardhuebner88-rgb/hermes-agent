@@ -147,6 +147,13 @@ def test_discovery_skips_archived_and_hidden_skills(env):
     assert any("demo/needy-skill" in p for p in paths)
 
 
+def test_capability_finding_key_normalizes_missing_fields_to_empty_strings(env):
+    """Findings without skill/category/evidence must dedupe under empty
+    strings — a literal "None" key would let duplicate findings through
+    the attempted-set and re-report the same weakness every night."""
+    assert env["runner"]._capability_finding_key({}) == ("", "", "")
+
+
 def test_self_test_configured_when_model_in_config(env):
     status, detail = env["runner"].self_test()
     assert status == "configured"
@@ -339,6 +346,25 @@ def test_double_run_refused_while_fresh_lock(env):
     assert "already in progress" in summary["refused"]
 
 
+def test_apply_confirm_flag_alone_satisfies_operator_gate(env):
+    """--confirm and approved_by_operator are ALTERNATIVES: the CLI flag
+    alone must open the gate even when the request carries no approval."""
+    req = _make_request(env, approved=False)
+    summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=1)
+    assert summary["ok"] is True
+    assert summary["mode"] == "apply"
+
+
+def test_finish_status_reports_stopped_by_signal_note(env):
+    """A SIGTERM-stopped run must surface 'stopped by signal' in the idle
+    status note — the dashboard reads it; without it the stop is silent."""
+    summary = {"stopped": True, "refused": None, "steps": []}
+    env["runner"]._finish_status(env["state"], "configured", summary)
+    status = json.loads((env["state"] / "current.status").read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["note"] == "stopped by signal"
+
+
 # --------------------------------------------------------------------------
 # SIGTERM stop on a paced dry-run loop (real subprocess)
 # --------------------------------------------------------------------------
@@ -435,3 +461,90 @@ def test_invalid_lane_contract_still_writes_failure_receipt(env, monkeypatch):
     assert summary["outcome"] == "invalid_output"
     assert Path(summary["receipt"]).exists()
     assert "outcome: invalid_output" in Path(summary["receipt"]).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Second pass: fallback-normalisation units
+# ---------------------------------------------------------------------------
+
+def test_resolve_aux_slot_and_model_label_fall_back_cleanly(monkeypatch):
+    """A None provider/model must normalise to '' / the configured label —
+    the literal string 'None' would leak into receipts and status lines."""
+    import types as _types
+
+    runner = _load("run_autoresearch_request", RUNNER)
+
+    monkeypatch.setattr(
+        "agent.auxiliary_client._resolve_task_provider_model",
+        lambda task: (None, "model-x", "", "", ""),
+    )
+    assert runner._resolve_autoresearch_aux_slot() == ("", "model-x")
+
+    assert runner._response_model_label(
+        _types.SimpleNamespace(model=None), "cfg-label"
+    ) == "cfg-label"
+    assert runner._response_model_label(
+        _types.SimpleNamespace(model=""), "cfg-label"
+    ) == "cfg-label"
+
+
+def test_lock_is_fresh_without_heartbeat_checks_pid_liveness(tmp_path):
+    """A lock WITHOUT a heartbeat is fresh only while its pid lives — the
+    fallback must read the pid, not crash on a missing heartbeat file."""
+    runner = _load("run_autoresearch_request", RUNNER)
+    state = tmp_path / "state"
+    state.mkdir()
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    (state / "current.lock").write_text(
+        json.dumps({"pid": proc.pid}), encoding="utf-8"
+    )
+    assert runner._lock_is_fresh(state) is False
+
+
+def test_discover_capability_candidates_normalises_sparse_report(tmp_path, monkeypatch):
+    """A sparse researcher report (None counters) must normalise to zeros
+    and still carry usage_source/budget_stop/findings — int(None) would
+    kill the nightly mid-scan."""
+    runner = _load("run_autoresearch_request", RUNNER)
+    root = tmp_path / "skills"
+    (root / "demo" / "my-skill").mkdir(parents=True)
+    (root / "demo" / "my-skill" / "SKILL.md").write_text("skill text", encoding="utf-8")
+    monkeypatch.setattr(runner, "_load_skill_usage_from_root", lambda r: {"my-skill": 9.0})
+    monkeypatch.setattr(runner, "_usage_min_use_count", lambda: 5)
+    sparse_report = {
+        "skills_seen": 1,
+        "errors": None,
+        "skills_with_findings": None,
+        "tokens": None,
+        "usage_source": "estimated",
+        "reason": "budget exhausted: weekly cap",
+        "findings": [{"skill": "my-skill"}],
+    }
+    monkeypatch.setattr(
+        runner.capability_researcher,
+        "research_skills",
+        lambda skills, usage, on_skill: sparse_report,
+    )
+
+    stats: dict = {}
+    cands = runner.discover_capability_candidates([root], set(), stats=stats)
+
+    assert stats["skills_researched"] == 1
+    assert stats["research_errors"] == 0
+    assert stats["skills_with_findings"] == 0
+    assert stats["research_tokens"] == 0
+    assert stats["usage_source"] == "estimated"
+    assert stats["budget_stop"] == "budget exhausted: weekly cap"
+    assert [c["path"].name for c in cands] == ["SKILL.md"]
+
+
+def test_write_receipt_marks_missing_backup_dir_as_dry_run(tmp_path, monkeypatch):
+    """A run without backup_dir records '(none — dry-run)' verbatim — the
+    literal 'None' would make a dry-run look like a lost path."""
+    runner = _load("run_autoresearch_request", RUNNER)
+    monkeypatch.setenv("HERMES_AUTORESEARCH_AUDIT_DIR", str(tmp_path / "audit"))
+
+    path = runner.write_receipt({"request_id": "r1"})
+
+    assert "- backup_dir: (none — dry-run)" in path.read_text(encoding="utf-8")

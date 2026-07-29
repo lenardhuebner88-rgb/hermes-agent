@@ -17,6 +17,8 @@ import pytest
 
 from loops import model_catalog
 from loops.model_catalog import (
+    _inventory_models,
+    _is_image_model,
     _slug_matches_engine,
     catalog_with_dynamic_models,
     models_for_engine,
@@ -158,3 +160,40 @@ def test_inventory_is_cached_between_calls(monkeypatch):
     model_catalog.reset_inventory_cache()
     models_for_engine("xai", [])
     assert len(calls) == 2
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_image_plus_text_model_is_not_image_only(monkeypatch):
+    """Kill bool_op_swap L91 (and -> or): mutant treats image+text as image-only."""
+    from types import SimpleNamespace
+
+    def fake_info(provider, model_id):
+        return SimpleNamespace(output_modalities=["image", "text"])
+
+    import agent.models_dev as models_dev
+
+    monkeypatch.setattr(models_dev, "get_model_info", fake_info)
+    # Original: image AND text -> NOT image-only -> False
+    # Mutant (or): image OR text -> True
+    assert _is_image_model("openai", "dall-e-plus") is False
+
+
+def test_wan_model_without_image_suffix_is_not_image(monkeypatch):
+    """Kill bool_op_swap L96 (and -> or): mutant treats any wan-* as image."""
+    import agent.models_dev as models_dev
+
+    monkeypatch.setattr(models_dev, "get_model_info", lambda p, m: None)
+    # "wan-video" starts with "wan" but has no "-image"
+    # Original: startswith AND "-image" in -> False
+    # Mutant (or): startswith OR "-image" in -> True
+    assert _is_image_model("alibaba", "wan-video") is False
+
+
+def test_inventory_models_ignores_non_string_declared(inventory):
+    """Kill bool_op_swap L170 (and -> or): mutant crashes on non-string declared."""
+    # Original: isinstance(123, str) is False -> short-circuit, skip
+    # Mutant (or): isinstance(123, str) is False -> evaluate 123.strip() -> AttributeError
+    result = _inventory_models("xai", (123, "xai-oauth"))
+    assert "grok-4.5" in result

@@ -576,3 +576,50 @@ def test_upload_mockup_render_timeout_returns_504(client, monkeypatch):
     )
     assert r.status_code == 504
     assert r.json()["detail"]["error"] == "render_timeout"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_upload_mockup_htm_extension_not_doubled(client, monkeypatch):
+    """Kill bool_op_swap L198 (or -> and): mutant appends .html to .htm files."""
+    _stub_render(monkeypatch)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("page.htm", b"<h1/>", "text/html")},
+    )
+    assert up.status_code == 200
+    card = client.get(f"/api/design-board/cards/{cid}").json()
+    html_name = card["entries"][-1]["html"].split("/")[-1]
+    # Original: endswith((".html", ".htm")) -> True -> no suffix added
+    # Mutant (and): requires BOTH -> False -> appends ".html" -> "page.htm.html"
+    assert not html_name.endswith(".htm.html")
+    assert html_name.endswith(".htm")
+
+
+def test_upload_mockup_exact_max_html_bytes_accepted(client, monkeypatch):
+    """Kill comparison_swap L191 (> -> >=): mutant rejects exactly _MAX_HTML_BYTES."""
+    _stub_render(monkeypatch)
+    monkeypatch.setattr(view, "_MAX_HTML_BYTES", 10)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("m.html", b"0123456789", "text/html")},  # exactly 10 bytes
+    )
+    # Original: len(buf) > 10 -> False -> accepted
+    # Mutant (>=): len(buf) >= 10 -> True -> 413
+    assert up.status_code == 200
+
+
+def test_upload_asset_exact_max_bytes_accepted(client, monkeypatch):
+    """Kill comparison_swap L166 (> -> >=): mutant rejects exactly _MAX_BYTES."""
+    monkeypatch.setattr(view, "_MAX_BYTES", 10)
+    cid = client.post("/api/design-board/cards", json={"kind": "mockup", "title": "x"}).json()["id"]
+    up = client.post(
+        f"/api/design-board/cards/{cid}/images",
+        files={"file": ("img.png", b"0123456789", "image/png")},  # exactly 10 bytes
+    )
+    # Original: len(buf) > 10 -> False -> accepted
+    # Mutant (>=): len(buf) >= 10 -> True -> 413
+    assert up.status_code == 200

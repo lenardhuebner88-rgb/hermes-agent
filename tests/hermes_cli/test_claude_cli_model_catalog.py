@@ -29,6 +29,9 @@ class TestLabelAbleitung:
             ("claude-fable-5", "Claude Fable 5"),
             # Wort-Suffixe bleiben eigene Wörter, statt in die Version zu rutschen.
             ("claude-opus-5-fast", "Claude Opus 5 Fast"),
+            # 2-Part-ID: genau an der Grenze — muss noch formatiert werden,
+            # nicht als Roh-ID zurückkommen (killt < → <= und 2 → 3 auf L52).
+            ("claude-opus", "Claude Opus"),
         ],
     )
     def test_leitet_anzeigename_aus_id_ab(self, model_id: str, expected: str) -> None:

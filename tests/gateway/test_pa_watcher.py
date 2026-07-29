@@ -1031,3 +1031,106 @@ def test_inbox_aging_emits_warning_once_for_old_waiting(
         store, events=again, state_updates={}, now=now + 1
     )
     assert inserted2 == 0
+
+
+# ---------------------------------------------------------------------------
+# _gate_match classification (pure)
+# ---------------------------------------------------------------------------
+
+def _gate_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "kind": "",
+        "block_kind": None,
+        "status": "",
+        "freigabe": "",
+        "live_test_depth": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_gate_match_blocked_block_kind_fallbacks() -> None:
+    """block_kind falls back to the payload kind; an empty block_kind with
+    a review_revision payload labels as 'gate'; a GATE_BLOCK_KINDS value
+    alone is enough to match."""
+    assert watcher._gate_match(
+        _gate_row(kind="blocked"), {"kind": "integration"}
+    ) == "blocked:integration"
+    assert watcher._gate_match(
+        _gate_row(kind="blocked"), {"review_revision": {"x": 1}}
+    ) == "blocked:gate"
+    assert watcher._gate_match(
+        _gate_row(kind="blocked", block_kind="review_revision"), {}
+    ) == "blocked:review_revision"
+
+
+def test_gate_match_guards_kind_and_held_preconditions() -> None:
+    """Gate markers on a NON-blocked event must not match; 'scheduled'
+    status alone is not held — it needs the operator/ui-real marker; and
+    a held task only matches on created/decomposed/status."""
+    assert watcher._gate_match(_gate_row(kind="created"), {"gate_output": "red"}) is None
+    assert watcher._gate_match(_gate_row(kind="created", status="scheduled"), {}) is None
+    assert watcher._gate_match(
+        _gate_row(kind="created", status="scheduled", freigabe="operator"), {}
+    ) == "operator_release_required"
+
+
+# ---------------------------------------------------------------------------
+# Third pass: agent-key fallbacks + exit-diff normalisation
+# ---------------------------------------------------------------------------
+
+def test_gate_match_scheduled_without_markers_does_not_crash_on_none_fields():
+    """A scheduled row with None freigabe/live_test_depth evaluates to
+    'not held' — never crashes on None.strip()."""
+    assert watcher._gate_match(
+        _gate_row(kind="created", status="scheduled", freigabe=None, live_test_depth=None),
+        {},
+    ) is None
+
+
+def test_gate_match_operator_freigabe_holds_regardless_of_live_test_depth():
+    """freigabe=operator alone makes a scheduled task held — the depth
+    check is an OR alternative, not an additional requirement."""
+    assert watcher._gate_match(
+        _gate_row(
+            kind="created", status="scheduled",
+            freigabe="operator", live_test_depth=None,
+        ),
+        {},
+    ) == "operator_release_required"
+
+
+def test_gate_match_ui_real_depth_holds_without_operator_freigabe():
+    """live_test_depth=ui-real alone makes a scheduled task held — the
+    value must survive its normalisation, not collapse to ''."""
+    assert watcher._gate_match(
+        _gate_row(
+            kind="created", status="scheduled",
+            freigabe="", live_test_depth="ui-real",
+        ),
+        {},
+    ) == "operator_release_required"
+
+
+def test_agent_key_defaults_and_fallback_ladder():
+    """The identity ladder source → session → tmux → task → label
+    normalises every missing field to '' — 'unknown' source, never
+    'None', and the right branch wins."""
+    assert watcher._agent_key({}) == "unknown:label:"
+    assert watcher._agent_key({"source": "s", "session_id": "sid"}) == "s:session:sid"
+    assert watcher._agent_key(
+        {"source": "s", "tmux_session": "ts", "tmux_window": "w"}
+    ) == "s:tmux:ts:w"
+    assert watcher._agent_key({"source": "s", "task_id": "t1"}) == "s:task:t1"
+    assert watcher._agent_key({"source": "s", "label": "lbl"}) == "s:label:lbl"
+
+
+def test_diff_agent_sessions_renders_unknown_source_for_missing_field():
+    """A disappeared agent without a source field reports source=unknown
+    in the exit detail — not the literal 'None'."""
+    prev = json.dumps({"k1": {"source": None, "task_id": "", "label": "lbl"}})
+    _snap, events = watcher.diff_agent_sessions(
+        prev, [], terminal_task_ids=set(), now=123
+    )
+    assert len(events) == 1
+    assert "source=unknown" in events[0].detail

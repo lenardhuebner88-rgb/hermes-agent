@@ -42,7 +42,7 @@ def test_context_profile_selects_reviewer_body_cap_for_initial_review():
     assert kanban_context.context_caps(profile)["body_bytes"] == 32 * 1024
 
 
-def test_render_comment_thread_keeps_directives_first_and_caps_regular_comments():
+def test_render_comment_thread_keeps_directives_first_and_caps_only_regular_comments():
     comments = [
         _CommentLike("regular 1", author="coder", created_at=60),
         _CommentLike("operator says x", author="operator", created_at=0, kind="directive"),
@@ -56,8 +56,8 @@ def test_render_comment_thread_keeps_directives_first_and_caps_regular_comments(
     )
 
     assert rendered[0].startswith("## ⚠️ OPERATOR DIRECTIVE")
-    assert "operator says x" not in rendered
-    assert "operat… [truncated" in "\n".join(rendered)
+    assert "operator says x" in rendered
+    assert "operat… [truncated" not in "\n".join(rendered)
     assert "showing most recent 1" in "\n".join(rendered)
     assert "regular 1" not in "\n".join(rendered)
     assert "regula… [truncated" in "\n".join(rendered)

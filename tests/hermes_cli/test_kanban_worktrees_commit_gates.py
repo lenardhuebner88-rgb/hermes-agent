@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+from hermes_cli import kanban as kc
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
 
@@ -151,9 +152,23 @@ def test_claude_worker_prompt_includes_parent_results(kanban_home, monkeypatch, 
         child = kb.create_task(
             conn, title="child impl", assignee="coder", parents=[parent],
         )
+        attachment_dir = kb.task_attachments_dir(parent)
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        attachment_path = attachment_dir / "parent-report.md"
+        attachment_path.write_text("parent evidence", encoding="utf-8")
+        kb.add_attachment(
+            conn,
+            parent,
+            filename=attachment_path.name,
+            stored_path=str(attachment_path.resolve()),
+            content_type="text/markdown",
+            size=attachment_path.stat().st_size,
+        )
+        attachment = kb.list_attachments(conn, parent)[0]
         kb.claim_task(conn, parent)
         kb.complete_task(conn, parent, summary="authoritative parent result")
         task = kb.get_task(conn, child)
+        hermes_context = kb.build_worker_context(conn, child)
 
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -164,6 +179,49 @@ def test_claude_worker_prompt_includes_parent_results(kanban_home, monkeypatch, 
     assert "## Parent task results" in prompt
     assert "authoritative parent result" in prompt
     assert f"### {parent}" in prompt
+    for handoff in (hermes_context, prompt):
+        assert "Parent attachments" in handoff
+        assert f"id={attachment.id}" in handoff
+        assert attachment.filename in handoff
+        assert str(attachment.size) in handoff
+        assert attachment.sha256 is None
+        assert attachment.stored_path in handoff
+        assert f"hermes kanban show {parent} --json" in handoff
+        assert f'kanban_show(task_id="{parent}", mode="full")' in handoff
+
+
+def test_show_json_payload_includes_explicit_task_attachments(kanban_home):
+    """The CLI's machine-readable show result exposes only registered rows."""
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="show attachments", assignee="coder")
+        attachment_dir = kb.task_attachments_dir(task_id)
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        attachment_path = attachment_dir / "evidence.txt"
+        attachment_path.write_text("proof", encoding="utf-8")
+        kb.add_attachment(
+            conn,
+            task_id,
+            filename=attachment_path.name,
+            stored_path=str(attachment_path.resolve()),
+            content_type="text/plain",
+            size=attachment_path.stat().st_size,
+        )
+        attachment = kb.list_attachments(conn, task_id)[0]
+        task = kb.get_task(conn, task_id)
+        payload = kc._show_build_json_payload(
+            task, [], [], [], [], [], None, kb.list_attachments(conn, task_id),
+        )
+
+    assert payload["attachments"] == [{
+        "id": attachment.id,
+        "filename": "evidence.txt",
+        "content_type": "text/plain",
+        "size": 5,
+        "sha256": None,
+        "stored_path": str(attachment_path.resolve()),
+        "uploaded_by": None,
+        "created_at": attachment.created_at,
+    }]
 
 
 def test_claude_worker_prompt_labels_scout_parent_advisory(kanban_home, monkeypatch, tmp_path):

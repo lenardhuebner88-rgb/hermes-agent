@@ -288,6 +288,72 @@ def test_show_defaults_to_env_task_id(worker_env):
     assert "runs" in d
 
 
+def test_show_includes_explicit_task_attachments(worker_env):
+    """Tool show exposes registered attachments without scraping comments."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        attachment_dir = kb.task_attachments_dir(worker_env)
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        attachment_path = attachment_dir / "tool-evidence.txt"
+        attachment_path.write_text("proof", encoding="utf-8")
+        kb.add_attachment(
+            conn,
+            worker_env,
+            filename=attachment_path.name,
+            stored_path=str(attachment_path.resolve()),
+            content_type="text/plain",
+            size=attachment_path.stat().st_size,
+        )
+        attachment = kb.list_attachments(conn, worker_env)[0]
+    finally:
+        conn.close()
+
+    shown = json.loads(kt._handle_show({"task_id": worker_env, "mode": "full"}))
+    assert shown["attachments"] == [{
+        "id": attachment.id,
+        "filename": "tool-evidence.txt",
+        "content_type": "text/plain",
+        "size": 5,
+        "sha256": None,
+        "stored_path": str(attachment_path.resolve()),
+        "uploaded_by": None,
+        "created_at": attachment.created_at,
+    }]
+
+
+
+
+def test_show_comment_delta_bypasses_worker_slim_comment_cap(worker_env):
+    """The live tool surface must not discard post-watermark comments."""
+    from tools import kanban_tools as kt
+
+    for index in range(10):
+        written = json.loads(kt._handle_comment({
+            "task_id": worker_env,
+            "body": f"tool delta {index}",
+            "author": "operator",
+        }))
+        assert written["ok"] is True
+
+    full = json.loads(kt._handle_show({"task_id": worker_env, "mode": "full"}))
+    watermark = full["comments"][0]["id"]
+    delta = json.loads(kt._handle_show({
+        "task_id": worker_env,
+        "after_comment_id": watermark,
+    }))
+
+    assert [comment["body"] for comment in delta["comments"]] == [
+        f"tool delta {index}" for index in range(1, 10)
+    ]
+    assert [comment["id"] for comment in delta["comments"]] == sorted(
+        comment["id"] for comment in delta["comments"]
+    )
+    assert len(delta["comments"]) == 9
+    assert "body" not in delta["task"]
+    assert delta["truncated"]["comments_omitted"] == 0
 
 
 def test_show_worker_default_is_slim_but_full_preserves_legacy_payload(worker_env):

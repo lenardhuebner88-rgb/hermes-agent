@@ -480,11 +480,13 @@ def _handle_show(args: dict, **kw) -> str:
             task = kb.get_task(conn, tid)
             if task is None:
                 return tool_error(f"task {tid} not found")
-            comments = kb.list_comments(conn, tid)
+            after_comment_id = args.get("after_comment_id")
+            comments = kb.list_comments(conn, tid, after_comment_id=after_comment_id)
             events = kb.list_events(conn, tid)
             runs = kb.list_runs(conn, tid)
             parents = kb.parent_ids(conn, tid)
             children = kb.child_ids(conn, tid)
+            attachments = kb.list_attachments(conn, tid)
 
             def _task_dict(t):
                 return {
@@ -516,6 +518,7 @@ def _handle_show(args: dict, **kw) -> str:
 
             def _comment_dict(c):
                 return {
+                    "id": c.id,
                     "author": c.author, "body": c.body,
                     "created_at": c.created_at,
                     "kind": getattr(c, "kind", "comment"),
@@ -527,11 +530,28 @@ def _handle_show(args: dict, **kw) -> str:
                     "created_at": e.created_at, "run_id": e.run_id,
                 }
 
+            def _attachment_dict(attachment):
+                return {
+                    "id": attachment.id,
+                    "filename": attachment.filename,
+                    "content_type": attachment.content_type,
+                    "size": attachment.size,
+                    "sha256": attachment.sha256,
+                    "uploaded_by": attachment.uploaded_by,
+                    "stored_path": attachment.stored_path,
+                    "created_at": attachment.created_at,
+                }
+
             mode = str(args.get("mode") or "worker_slim").strip()
             if mode not in {"worker_slim", "full"}:
                 return tool_error("mode must be one of: worker_slim, full")
 
-            if mode == "worker_slim" and os.environ.get("HERMES_KANBAN_TASK"):
+            if (
+                mode == "worker_slim"
+                and tid == os.environ.get("HERMES_KANBAN_TASK")
+            ):
+                comment_slice = comments if after_comment_id is not None else comments[-8:]
+                comments_omitted = 0 if after_comment_id is not None else max(0, len(comments) - 8)
                 return json.dumps({
                     "task": {
                         "id": task.id,
@@ -548,11 +568,12 @@ def _handle_show(args: dict, **kw) -> str:
                     },
                     "parents": parents,
                     "children": children,
-                    "comments": [_comment_dict(c) for c in comments[-8:]],
+                    "attachments": [_attachment_dict(a) for a in attachments],
+                    "comments": [_comment_dict(c) for c in comment_slice],
                     "events": [_event_dict(e) for e in events[-10:]],
                     "runs": [_run_dict(r) for r in runs[-3:]],
                     "truncated": {
-                        "comments_omitted": max(0, len(comments) - 8),
+                        "comments_omitted": comments_omitted,
                         "events_omitted": max(0, len(events) - 10),
                         "runs_omitted": max(0, len(runs) - 3),
                     },
@@ -567,6 +588,7 @@ def _handle_show(args: dict, **kw) -> str:
                 "task": _task_dict(task),
                 "parents": parents,
                 "children": children,
+                "attachments": [_attachment_dict(a) for a in attachments],
                 "comments": [_comment_dict(c) for c in comments],
                 "events": [_event_dict(e) for e in events[-50:]],   # cap; full log via CLI
                 "runs": [_run_dict(r) for r in runs],
@@ -1332,6 +1354,7 @@ def _handle_attachments(args: dict, **kw) -> str:
                             "filename": attachment.filename,
                             "content_type": attachment.content_type,
                             "size": attachment.size,
+                            "sha256": attachment.sha256,
                             "uploaded_by": attachment.uploaded_by,
                             "stored_path": attachment.stored_path,
                             "created_at": attachment.created_at,
@@ -1959,6 +1982,11 @@ KANBAN_SHOW_SCHEMA = {
                 "description": _DESC_TASK_ID_DEFAULT,
             },
             "board": _board_schema_prop(),
+            "after_comment_id": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Only return comments with an ID greater than this watermark.",
+            },
             "mode": {
                 "type": "string",
                 "enum": ["worker_slim", "full"],

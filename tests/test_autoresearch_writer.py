@@ -464,3 +464,124 @@ def test_judge_fix_closed_gate_on_model_exception(monkeypatch):
     assert res["resolved"] is False
     assert "judge model call failed" in res["reason"]
     assert "RuntimeError" in res["reason"]
+
+
+def test_parse_fix_reply_uses_reason_field_and_normalises_absence_to_none():
+    """The rationale falls back rationale -> reason -> None: a reply with
+    only 'reason' must carry it, and a reply with neither must yield None
+    (not an empty string the receipt would render as '')."""
+    after, _block, rationale = writer._parse_fix_reply(
+        json.dumps({"text": "New skill.\n", "reason": "because"}), "# Old\n"
+    )
+    assert after == "New skill.\n"
+    assert rationale == "because"
+
+    _after2, _block2, rationale2 = writer._parse_fix_reply(
+        json.dumps({"text": "New skill.\n"}), "# Old\n"
+    )
+    assert rationale2 is None
+
+
+def test_parse_fix_reply_replacement_not_in_skill_is_rejected():
+    """A replacement whose old_text does not occur in the skill must fail
+    closed (None) — applying it would be a no-op masquerading as a fix."""
+    after, block, rationale = writer._parse_fix_reply(
+        json.dumps({"old_text": "zzz-missing", "new_text": "yyy"}),
+        "Some skill.\n",
+    )
+    assert (after, block, rationale) == (None, None, None)
+
+
+def test_parse_fix_reply_preserves_a_missing_trailing_newline():
+    """A skill without a trailing newline must stay without one — the fix
+    may only re-add the newline the original HAD, never invent one."""
+    after, _block, _rationale = writer._parse_fix_reply(
+        json.dumps({"old_text": "aa", "new_text": "cc"}), "aa\nbb"
+    )
+    assert after == "cc\nbb"
+
+
+def test_configured_aux_model_none_model_is_empty_not_literal_none(monkeypatch):
+    """A configured slot with model: null must read as '' — the literal
+    string 'None' would leak into receipts and status lines."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"auxiliary": {"skills_hub": {"model": None}}},
+    )
+    assert writer._configured_aux_model("skills_hub") == ""
+
+
+# ---------------------------------------------------------------------------
+# Second pass: label fallback, reply/judge parsing, grounding scan
+# ---------------------------------------------------------------------------
+
+def test_model_label_falls_back_to_configured_then_default(monkeypatch):
+    """A response without a model field labels via the configured aux
+    model, then 'aux-model' — never the literal string 'None'."""
+    import types
+
+    monkeypatch.setattr(
+        writer, "_configured_aux_model", lambda task="skills_hub": "cfg-model"
+    )
+    assert writer._model_label_from_response(types.SimpleNamespace(model=None)) == "cfg-model"
+
+    monkeypatch.setattr(
+        writer, "_configured_aux_model", lambda task="skills_hub": ""
+    )
+    assert writer._model_label_from_response(types.SimpleNamespace(model=None)) == "aux-model"
+
+
+def test_parse_fix_reply_non_string_new_text_falls_back_to_plain():
+    """A replacement block whose new_text is not a string is not a
+    replacement — the reply degrades to the plain-markdown path instead
+    of crashing on int.strip()."""
+    after, _block, _rationale = writer._parse_fix_reply(
+        '{"old_text": "x", "new_text": 5}', "x\n"
+    )
+    assert after is not None
+    assert after.endswith("\n")
+
+
+def test_fix_touches_evidence_whitespace_normalised_matching():
+    """Grounding matches on whitespace-normalised text: a double-spaced
+    evidence quote still locates its single-spaced line, and an
+    all-whitespace quote grounds nothing (never every line)."""
+    assert writer._fix_touches_evidence(
+        "x small thing y\nz", "x CHANGED y\nz", "small  thing"
+    ) is True
+    assert writer._fix_touches_evidence("a\nb", "a\nc", "   ") is False
+
+
+def test_parse_judge_reply_normalises_reason_and_gate_fields():
+    """Missing reason derives from the verdict; non-boolean gate fields
+    close the gate with their own message."""
+    accepted = writer._parse_judge_reply('{"resolved": true, "no_regression": true}')
+    assert accepted == {
+        "resolved": True,
+        "no_regression": True,
+        "reason": "judge accepted",
+    }
+    rejected = writer._parse_judge_reply('{"resolved": true, "no_regression": false}')
+    assert rejected["reason"] == "judge rejected without detail"
+    nonbool = writer._parse_judge_reply('{"resolved": "yes", "no_regression": true}')
+    assert nonbool["reason"] == "judge returned non-boolean gate fields"
+
+
+def test_judge_fix_guards_inputs_without_model_call(monkeypatch):
+    """Non-string or empty texts close the gate BEFORE any model call —
+    a guard bypass would burn an aux call on garbage."""
+    called = []
+
+    def fake_call(**kwargs):
+        called.append(kwargs)
+        raise RuntimeError("must not be called")
+
+    monkeypatch.setattr(writer, "_call_llm", fake_call)
+
+    out = writer.judge_fix(None, "x", {})
+    assert out["reason"] == "before_text/after_text must be strings"
+
+    out2 = writer.judge_fix("   ", "x", {})
+    assert out2["reason"] == "empty before_text or after_text"
+
+    assert called == []

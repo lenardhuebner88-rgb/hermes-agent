@@ -324,3 +324,88 @@ def test_executable_script_passes(tmp_path: Path) -> None:
     )
     findings = [f for f in hygiene.scan_tree(tmp_path) if f.rule == "script-executable"]
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Report-helper units
+# ---------------------------------------------------------------------------
+
+def test_finding_and_path_exception_are_frozen() -> None:
+    """The report records are immutable — a later mutation would let a
+    finding quietly change its rule or message after the scan."""
+    finding = hygiene.Finding(Path("skills/x/SKILL.md"), 3, "rule", "msg")
+    exception = hygiene.PathException("some/path", "reason", "2026-10-28")
+    try:
+        finding.rule = "mutated"
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("Finding must be frozen")
+    try:
+        exception.path = "mutated"
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("PathException must be frozen")
+
+
+def test_line_of_counts_lines_from_offset_zero() -> None:
+    """Line numbers are 1-based over the WHOLE text prefix — counting from
+    offset 1 would report line 1 for matches on line 2 when the file
+    starts with a newline."""
+    assert hygiene._line_of("\nab", 2) == 2
+    assert hygiene._line_of("ab", 1) == 1
+
+
+def test_snippet_truncates_to_exactly_the_limit() -> None:
+    """A long snippet must come back at EXACTLY the limit (ellipsis
+    included) — the boundary (len == limit) stays untruncated."""
+    assert hygiene._snippet("a" * 120, 0, 120) == "a" * 120
+    long = hygiene._snippet("b" * 200, 0, 200)
+    assert len(long) == 120
+    assert long.endswith("...")
+
+
+# ---------------------------------------------------------------------------
+# Second pass: skip-reason precision + rule boundaries
+# ---------------------------------------------------------------------------
+
+def test_path_skip_reason_home_prefix_and_empty_segment() -> None:
+    """'~foo' is abs-or-home (never existence-checked) and 'a//b' carries
+    an empty segment — both must skip, precision over recall."""
+    import re
+
+    m = re.search(r"(~foo)", "x ~foo y")
+    assert m is not None
+    assert hygiene._path_skip_reason("x ~foo y", m, "~foo") == "abs-or-home"
+
+    m2 = re.search(r"(a//b)", "x a//b y")
+    assert m2 is not None
+    assert hygiene._path_skip_reason("x a//b y", m2, "a//b") == "empty-segment"
+
+
+def test_check_repo_paths_reports_missing_three_segment_extensionless_path(
+    tmp_path: Path,
+) -> None:
+    """A missing three-segment path WITHOUT a file extension is still
+    reported — the two-segment prose heuristic must not extend to three
+    segments."""
+    findings = hygiene.check_repo_paths(
+        tmp_path, Path("SKILL.md"), "Run scripts/foo/baz-missing now."
+    )
+    assert any("scripts/foo/baz-missing" in f.message for f in findings)
+
+
+def test_has_shebang_false_for_unreadable_file(tmp_path: Path) -> None:
+    """A missing/unreadable script counts as 'no shebang' (sourced
+    library) — never as executable-by-design."""
+    assert hygiene._has_shebang(tmp_path / "nope.sh") is False
+
+
+def test_script_cmd_with_ellipsis_placeholder_is_skipped(tmp_path: Path) -> None:
+    """'scripts/a...sh' is a placeholder, not a real script — it must be
+    skipped instead of reported missing."""
+    findings = hygiene.check_script_executable(
+        tmp_path, Path("SKILL.md"), "run scripts/a...sh now"
+    )
+    assert findings == []

@@ -122,3 +122,18 @@ def test_digest_endpoint_is_read_only_and_does_not_use_network(client, kanban_ho
 
     assert response.status_code == 200
     assert after == before
+
+
+def test_digest_weeks_param_default_four_and_min_one(client, monkeypatch):
+    """The weeks parameter defaults to 4 (not 5) and accepts 1 (ge=1,
+    not ge=2) — the dashboard relies on both the default window and the
+    single-week view."""
+    monkeypatch.setattr(digest.time, "time", lambda: _FIXED_NOW)
+
+    assert client.get("/api/plugins/kanban/scores/digest?weeks=1").status_code == 200
+
+    with_default = client.get("/api/plugins/kanban/scores/digest").json()
+    with_four = client.get("/api/plugins/kanban/scores/digest?weeks=4").json()
+    with_five = client.get("/api/plugins/kanban/scores/digest?weeks=5").json()
+    assert with_default == with_four
+    assert with_default != with_five

@@ -101,6 +101,7 @@ from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
 from hermes_cli import kanban_review_policy as _review_policy
 from hermes_cli.kanban_chain_status import (
+    _matching_conflict_fixer_attempts,
     blocked_event_kind,
     is_integration_park,
     is_settled_fixer_card,
@@ -6881,10 +6882,20 @@ def add_event(
         _append_event(conn, task_id, kind, payload, run_id=run_id)
 
 
-def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
+def list_comments(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    after_comment_id: Optional[int] = None,
+) -> list[Comment]:
+    where = "task_id = ?"
+    params: list[object] = [task_id]
+    if after_comment_id is not None:
+        where += " AND id > ?"
+        params.append(int(after_comment_id))
     rows = conn.execute(
-        "SELECT * FROM task_comments WHERE task_id = ? ORDER BY created_at ASC",
-        (task_id,),
+        f"SELECT * FROM task_comments WHERE {where} ORDER BY id ASC",
+        params,
     ).fetchall()
     return [
         Comment(
@@ -23448,14 +23459,32 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+def _run_brief_comment_id_watermark(
+    conn: sqlite3.Connection, task_id: str, run_id: int
+) -> Optional[int]:
+    """Return the persisted delivery baseline for one launched worker run."""
+    row = conn.execute(
+        "SELECT metadata FROM task_runs WHERE id = ? AND task_id = ?",
+        (run_id, task_id),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        metadata = json.loads(row["metadata"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    return _validated_comment_id_watermark(metadata.get("brief"))
+
+
 def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
-    """Restart locally owned live workers once for newly-added directives.
+    """Restart locally owned workers for directives beyond their delivered brief.
 
     A worker has no stdin control channel, so a directive can only be delivered
     deterministically by ending the owned worker group and returning the task
-    to the dispatcher.  The ``directive_redelivered`` event stores the highest
-    consumed comment id, making retries idempotent and batching directives that
-    arrive before the next sweep.
+    to the dispatcher.  The current run's persisted brief watermark is the
+    delivery baseline; historical redelivery events remain audit evidence only.
     """
 
     local_host = _claimer_id().split(":", 1)[0]
@@ -23480,25 +23509,12 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
         if not _pid_alive(worker_pid):
             continue
 
-        watermark = 0
-        prior_events = conn.execute(
-            """
-            SELECT payload
-              FROM task_events
-             WHERE task_id = ? AND kind = 'directive_redelivered'
-             ORDER BY id DESC
-            """,
-            (task_id,),
-        ).fetchall()
-        for event in prior_events:
-            try:
-                payload = json.loads(event["payload"] or "{}")
-            except (TypeError, ValueError):
-                continue
-            watermark = _validated_comment_id_watermark(payload) or 0
-            if watermark:
-                break
-
+        delivered_watermark = _run_brief_comment_id_watermark(conn, task_id, run_id)
+        # Runs started before brief manifests existed have no watermark.  In
+        # that legacy case restart conservatively from zero rather than
+        # silently dropping an operator directive.
+        if delivered_watermark is None:
+            delivered_watermark = 0
         directives = conn.execute(
             """
             SELECT id
@@ -23506,12 +23522,10 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
              WHERE task_id = ? AND kind = 'directive' AND id > ?
              ORDER BY id
             """,
-            (task_id, watermark),
+            (task_id, delivered_watermark),
         ).fetchall()
         if not directives:
             continue
-        directive_ids = [int(row["id"]) for row in directives]
-        next_watermark = directive_ids[-1]
 
         termination = _terminate_reclaimed_worker(worker_pid, claim_lock)
         if _worker_survived_termination(termination):
@@ -23548,6 +23562,22 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
             )
             if updated.rowcount != 1:
                 continue
+            # Re-read after termination to bundle a directive that arrived
+            # while the worker group was exiting.  The follow-up brief will
+            # record this same boundary, avoiding a second restart.
+            directives = conn.execute(
+                """
+                SELECT id
+                  FROM task_comments
+                 WHERE task_id = ? AND kind = 'directive' AND id > ?
+                 ORDER BY id
+                """,
+                (task_id, delivered_watermark),
+            ).fetchall()
+            directive_ids = [int(row["id"]) for row in directives]
+            if not directive_ids:
+                continue
+            next_watermark = directive_ids[-1]
             closed_run_id = _end_run(
                 conn,
                 task_id,
@@ -23560,6 +23590,7 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
                 metadata={
                     "reason": "operator_directive",
                     "directive_ids": directive_ids,
+                    "delivered_comment_id_watermark": delivered_watermark,
                     "comment_id_watermark": next_watermark,
                 },
             )
@@ -23570,6 +23601,7 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
                 {
                     "reason": "operator_directive",
                     "directive_ids": directive_ids,
+                    "delivered_comment_id_watermark": delivered_watermark,
                     "comment_id_watermark": next_watermark,
                     "ended_run_id": closed_run_id,
                     "worker_pid": worker_pid,
@@ -26037,10 +26069,11 @@ def _resume_parent_for_completed_conflict_fixer(
         except (TypeError, ValueError):
             return False
         parent_id = str(payload.get("parent_id") or "").strip()
+        root_id = str(payload.get("root_id") or parent_id).strip()
         expected_fingerprint = str(
             payload.get("conflict_fingerprint") or ""
         ).strip()
-        if not parent_id or not expected_fingerprint:
+        if not parent_id or not root_id or not expected_fingerprint:
             return False
 
         parent = conn.execute(
@@ -26058,7 +26091,18 @@ def _resume_parent_for_completed_conflict_fixer(
         if (
             parent is None
             or parent["status"] != "blocked"
-            or not current_reason.startswith("integration parked:")
+            or not is_integration_park(
+                reason=current_reason,
+                block_kind=blocked_event_kind(
+                    blocked["payload"] if blocked else None,
+                ),
+            )
+            or _operator_escalation_is_active(conn, parent_id)
+            or _matching_conflict_fixer_attempts(
+                conn,
+                root_id=root_id,
+                conflict_fingerprint=expected_fingerprint,
+            ) >= CONFLICT_FIXER_MAX_ATTEMPTS
             or _conflict_fingerprint(current_reason) != expected_fingerprint
         ):
             return False
@@ -26650,7 +26694,6 @@ def no_silent_stall_sweep(
             reason=reason,
             block_kind=blocked_event_kind(
                 blocked_event["payload"] if blocked_event else None,
-                fallback=row["block_kind"],
             ),
         ):
             continue
@@ -32580,6 +32623,7 @@ def _prepare_worker_brief_launch(
                 "token_estimate": brief.manifest["token_estimate"],
                 "section_counts": brief.manifest["section_counts"],
                 "payload_fingerprint": brief.manifest["payload_fingerprint"],
+                "comment_id_watermark": brief.manifest["comment_id_watermark"],
                 "artifact_count": len(artifacts),
             },
             run_id=task.current_run_id,
@@ -32609,7 +32653,7 @@ def _prepare_worker_brief_launch(
                 exc_info=True,
             )
         conn.commit()
-        return render_worker_brief_for_task(conn, task.id, audience=audience)
+        return _with_worker_brief_artifacts(brief, artifacts)
 
 
 def _default_spawn(
@@ -33495,6 +33539,30 @@ def _render_parent_results_and_role_history(
                     pass
             return body_lines
 
+        def _parent_attachment_lines(parent_id: str) -> list[str]:
+            """Render explicitly registered durable documents for one parent."""
+            attachments = list_attachments(conn, parent_id)
+            body_lines: list[str] = []
+            if attachments:
+                body_lines.append("_Parent attachments (explicit task_attachments only)_:")
+                for attachment in attachments:
+                    sha256 = (
+                        f"; sha256={attachment.sha256}"
+                        if attachment.sha256 else ""
+                    )
+                    body_lines.append(
+                        f"- id={attachment.id}; name={attachment.filename}; "
+                        f"size={attachment.size}{sha256}; "
+                        f"path={attachment.stored_path}"
+                    )
+            body_lines.append(
+                "_Lossless parent run handoff: "
+                f"`hermes kanban show {parent_id} --json` or, for Hermes "
+                f"workers, `kanban_show(task_id=\"{parent_id}\", mode=\"full\")` "
+                "returns all run summaries and metadata._"
+            )
+            return body_lines
+
         # A read-only scout parent produces recon hints, NOT an authoritative
         # result. Routing it into a separate "Advisory scout notes" section (vs
         # the equal-weight "Parent task results") stops a scout's off-scope
@@ -33529,6 +33597,7 @@ def _render_parent_results_and_role_history(
             age = _relative_age(done_ts, _now)
             lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
             lines.extend(_parent_result_lines(pt, run))
+            lines.extend(_parent_attachment_lines(pid))
             # PlanSpec reviewer children consume code-task handoffs through this
             # parent-results block. A deterministic review skip has no
             # submitted_for_review event, so include its persisted snapshot too.
@@ -33575,6 +33644,7 @@ def _render_parent_results_and_role_history(
                     f"### {pid} (scout)" + (f" (completed {age})" if age else "")
                 )
                 lines.extend(_parent_result_lines(pt, run))
+                lines.extend(_parent_attachment_lines(pid))
                 lines.append("")
 
     # Cross-task role history: what else has THIS assignee completed
@@ -33844,17 +33914,34 @@ def _brief_records_from_lines(lines: list[str]) -> list[_kanban_context.BriefRec
     """Split legacy section output into stable heading/record boundaries."""
     records: list[_kanban_context.BriefRecord] = []
     current: list[str] = []
+    current_key: Optional[str] = None
+    in_directive_block = False
+
+    def flush() -> None:
+        nonlocal current, current_key
+        text = "\n".join(current).strip()
+        if text:
+            records.append(_kanban_context.BriefRecord(text=text, key=current_key))
+        current = []
+        current_key = None
+
     for line in lines:
-        if line.startswith("### ") or (line.startswith("## ") and current):
-            text = "\n".join(current).strip()
-            if text:
-                records.append(_kanban_context.BriefRecord(text=text))
+        if line == "## ⚠️ OPERATOR DIRECTIVE — supersedes the task body above":
+            flush()
             current = [line]
+            current_key = "operator-directive"
+            in_directive_block = True
+        elif in_directive_block and line.startswith("operator directive `"):
+            flush()
+            current = [line]
+            current_key = "operator-directive"
+        elif line.startswith("### ") or (line.startswith("## ") and current):
+            flush()
+            current = [line]
+            in_directive_block = False
         else:
             current.append(line)
-    text = "\n".join(current).strip()
-    if text:
-        records.append(_kanban_context.BriefRecord(text=text))
+    flush()
     return records
 
 
@@ -33908,7 +33995,12 @@ def _worker_brief_input(
         f"Assignee: {task.assignee or '(unassigned)'}",
         f"Status:   {task.status}",
         f"Comment checkpoint: comment_id_watermark={comment_id_watermark}",
-        "Completion checkpoint: Before completing, re-read this task's comments and act on records with an id greater than comment_id_watermark.",
+        (
+            "Completion checkpoint: before completing, run "
+            f"`hermes kanban show {task.id} --after-comment-id {comment_id_watermark}` "
+            "or call `kanban_show(after_comment_id="
+            f"{comment_id_watermark})`; act on every returned record."
+        ),
     ]
     if task.tenant:
         header.append(f"Tenant:   {task.tenant}")
@@ -33962,12 +34054,31 @@ def _worker_brief_input(
     if attachments:
         assignment.append(_kanban_context.BriefRecord(text="## Attachments", key="attachments"))
     for att in attachments:
+        sha256 = f"; sha256={att.sha256}" if att.sha256 else ""
         assignment.append(
             _kanban_context.BriefRecord(
-                text=f"Attachment `{att.filename}` ({att.content_type or 'unknown type'}, {att.size} bytes): `{att.stored_path}`",
+                text=(
+                    f"Attachment id={att.id}; name=`{att.filename}`; "
+                    f"type={att.content_type or 'unknown type'}; size={att.size}"
+                    f"{sha256}; path=`{att.stored_path}`"
+                ),
                 key=f"attachment:{att.id}",
             )
         )
+    assignment.append(
+        _kanban_context.BriefRecord(
+            text=(
+                "## Lossless run handoff retrieval\n"
+                "Completion documents are limited to explicit task_attachments and "
+                "declared metadata.artifacts; task prose is not scraped for paths or URLs.\n"
+                f"For this task's complete prior-run summaries and metadata use "
+                f"`hermes kanban show {task.id} --json`; Hermes workers may instead call "
+                f"`kanban_show(task_id=\"{task.id}\", mode=\"full\")`. "
+                "Parent-specific commands are listed with each completed parent."
+            ),
+            key="lossless-run-handoff",
+        )
+    )
     if int(task.continuation_count or 0) > 0:
         assignment.insert(
             0,
@@ -34030,6 +34141,7 @@ def _worker_brief_input(
         title=task.title,
         header="\n".join(header).rstrip(),
         sections=sections,
+        comment_id_watermark=comment_id_watermark,
     )
 
 
@@ -34046,6 +34158,26 @@ def _current_brief_artifacts(conn: sqlite3.Connection, task: "Task") -> list[dic
         return []
     artifacts = metadata.get("brief_artifacts") if isinstance(metadata, dict) else None
     return artifacts if isinstance(artifacts, list) else []
+
+
+def _with_worker_brief_artifacts(
+    brief: _kanban_context.RenderedWorkerBrief,
+    artifacts: list[dict],
+) -> _kanban_context.RenderedWorkerBrief:
+    """Attach launch-materialized overflow links without re-rendering a brief."""
+    if not artifacts:
+        return brief
+    lines = [brief.payload.rstrip(), "", "## Overflow artifacts"]
+    for artifact in artifacts:
+        lines.append(
+            f"- `{artifact.get('section', 'unknown')}`: {artifact.get('omitted_records', 0)} omitted record(s); "
+            f"sha256 `{artifact.get('sha256', '')}`; full content: `{artifact.get('path', '')}`"
+        )
+    return _kanban_context.RenderedWorkerBrief(
+        payload="\n".join(lines).rstrip() + "\n",
+        manifest=brief.manifest,
+        overflows=brief.overflows,
+    )
 
 
 def render_worker_brief_for_task(
@@ -34072,19 +34204,7 @@ def render_worker_brief_for_task(
         profile=resolved_profile,
     )
     artifacts = _current_brief_artifacts(conn, task)
-    if not artifacts:
-        return brief
-    lines = [brief.payload.rstrip(), "", "## Overflow artifacts"]
-    for artifact in artifacts:
-        lines.append(
-            f"- `{artifact.get('section', 'unknown')}`: {artifact.get('omitted_records', 0)} omitted record(s); "
-            f"sha256 `{artifact.get('sha256', '')}`; full content: `{artifact.get('path', '')}`"
-        )
-    return _kanban_context.RenderedWorkerBrief(
-        payload="\n".join(lines).rstrip() + "\n",
-        manifest=brief.manifest,
-        overflows=brief.overflows,
-    )
+    return _with_worker_brief_artifacts(brief, artifacts)
 
 
 def build_worker_context(
@@ -36257,7 +36377,6 @@ def decision_queue(
                 reason=reason,
                 block_kind=blocked_event_kind(
                     lb[0] if lb else None,
-                    fallback=row["block_kind"],
                 ),
             ):
                 continue

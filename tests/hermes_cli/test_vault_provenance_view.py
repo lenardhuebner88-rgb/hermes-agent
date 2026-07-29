@@ -89,3 +89,33 @@ def test_expired_ttl_refreshes(monkeypatch):
     assert client.get("/api/vault/provenance").json()["stale_count"] == 1
     assert client.get("/api/vault/provenance").json()["stale_count"] == 2
     assert calls["n"] == 2
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_empty_helper_stale_count_is_zero():
+    """Kill const_offset L45 (0 -> 1): _empty() must report stale_count 0."""
+    result = vpv._empty("some error")
+    assert result["stale_count"] == 0
+    assert result["error"] == "some error"
+    assert result["open_sessions"] == []
+    assert result["recent_receipts"] == []
+
+
+def test_collect_sync_stale_count_counts_exactly(monkeypatch):
+    """Kill const_offset L77 (1 -> 2): exactly one stale session must
+    produce stale_count == 1, not 2."""
+    importlib.reload(vpv)
+
+    def fake_run(*args, **kwargs):
+        class P:
+            returncode = 0
+            stdout = '{"open_sessions": [{"stale": true}, {"stale": false}], "recent_receipts": []}'
+            stderr = ""
+        return P()
+
+    monkeypatch.setattr(vpv.subprocess, "run", fake_run)
+    result = vpv._collect_sync()
+    assert result["stale_count"] == 1
+    assert result["error"] is None

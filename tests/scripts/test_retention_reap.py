@@ -1278,3 +1278,67 @@ def test_backup_directories_stay_untouched_under_class_policy(tmp_path):
 
     deleted = {action.path for action in _classified(base, root)}
     assert stale_directory not in deleted
+
+
+# ---------------------------------------------------------------------------
+# Unit pinning: sizing, metadata guards, revision identity
+# ---------------------------------------------------------------------------
+
+def test_path_size_counts_regular_file_itself(tmp_path):
+    """A plain file's size is its own size — routing a file through the
+    directory walk would measure 0 and under-report every byte saved."""
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"12345")
+    assert rr._path_size(f) == 5
+
+
+def test_path_size_skips_symlinks_inside_directories(tmp_path):
+    """Symlinked children are never counted — counting the link AND the
+    target would double-report the size of one file."""
+    d = tmp_path / "d"
+    d.mkdir()
+    real = d / "real.bin"
+    real.write_bytes(b"12345")
+    os.symlink(real, d / "link.bin")
+    assert rr._path_size(d) == 5
+
+
+def test_unrelated_mcp_package_json_is_not_treated_as_playwright(tmp_path):
+    """A package dir merely named 'mcp' outside @playwright is not
+    Playwright — its invalid JSON must be skipped, not fail the scan."""
+    root = tmp_path / "proj"
+    stray = root / "node_modules" / "mcp"
+    stray.mkdir(parents=True)
+    (stray / "package.json").write_text("{invalid json")
+
+    files, error = rr._metadata_files([root])
+
+    assert files == []
+    assert error == "no installed Playwright package metadata"
+
+
+def test_empty_browsers_list_fails_closed_with_distinct_message(tmp_path):
+    """An empty browsers list is malformed metadata (fail closed with the
+    'empty browsers list' error), not a valid zero-browser installation."""
+    packages = tmp_path / "packages"
+    _package_tree(packages, [])
+
+    tokens, error = rr._revision_tokens([packages])
+
+    assert tokens == set()
+    assert "empty browsers list" in error
+
+
+def test_headless_shell_is_referenced_only_via_chromium_revision():
+    """chromium_headless_shell shares CHROMIUM's revision — referencing it
+    against any other browser's revision would leave stale shells behind
+    (or delete the live one)."""
+    assert rr._is_referenced_browser_dir(
+        "chromium_headless_shell", "1234", {("firefox", "567")}
+    ) is False
+    assert rr._is_referenced_browser_dir(
+        "chromium_headless_shell", "567", {("firefox", "567")}
+    ) is False
+    assert rr._is_referenced_browser_dir(
+        "chromium_headless_shell", "1234", {("chromium", "1234")}
+    ) is True

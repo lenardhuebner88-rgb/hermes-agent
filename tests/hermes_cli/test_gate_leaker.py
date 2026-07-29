@@ -310,3 +310,75 @@ def test_format_first_fail_detail_with_and_without_file():
         {"gate": "build", "file": None, "detail": "tsc boom"}
     )
     assert without == "tsc boom"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_parse_python_section_header_must_start_and_end_with_delimiter():
+    """Kill bool_op_swap L100: or->and would treat a line starting with ===
+    but not ending with === as a section header, capturing files that
+    follow a malformed delimiter line."""
+    log = "=== 2 files with test failures\n  tests/foo/test_alpha.py\n"
+    assert gl.parse_failed_files("python", log) == []
+
+
+def test_first_fail_keeps_first_non_isolatable_gate():
+    """Kill bool_op_swap L317: or->and would overwrite first_fail with the
+    second non-isolatable gate's result instead of keeping the first."""
+    def dummy_factory(gate):
+        return lambda f: (True, "")
+    result = gl.isolate_from_logs(
+        [("tsc", "tsc error line"), ("build", "build error line")],
+        runner_factory=dummy_factory,
+    )
+    assert result["first_fail"]["gate"] == "tsc"
+
+
+def test_isolation_command_python():
+    """Kill bool_op_swap L340: or->and would make gate resolve to '' for
+    any truthy gate name, raising ValueError instead of returning argv."""
+    assert gl.isolation_command("python", "tests/foo.py") == [
+        "scripts/run_tests.sh", "tests/foo.py",
+    ]
+
+
+def test_build_runner_vitest_uses_web_cwd(tmp_path, monkeypatch):
+    """Kill bool_op_swap L363: or->and would make gate resolve to '',
+    so cwd would be repo_root instead of repo_root/web for vitest."""
+    import subprocess as sp
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(kwargs)
+        return sp.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+    monkeypatch.setattr(sp, "run", fake_run)
+    runner = gl.build_runner("vitest", tmp_path)
+    passed, _detail = runner("src/foo.test.ts")
+    assert passed is True
+    assert calls[0]["cwd"] == str(tmp_path / "web")
+
+
+def test_build_runner_timeout_includes_partial_output(tmp_path, monkeypatch):
+    """Kill bool_op_swap L379: or->and would discard the partial output
+    from a timed-out isolation rerun, producing an empty tail."""
+    import subprocess as sp
+    def fake_run(cmd, **kwargs):
+        raise sp.TimeoutExpired(cmd, kwargs["timeout"], output="partial output line")
+    monkeypatch.setattr(sp, "run", fake_run)
+    runner = gl.build_runner("python", tmp_path)
+    passed, detail = runner("tests/foo.py")
+    assert passed is False
+    assert "partial output line" in detail
+
+
+def test_build_runner_includes_stdout_in_detail(tmp_path, monkeypatch):
+    """Kill bool_op_swap L385: or->and would discard proc.stdout when it
+    is truthy, producing an empty detail tail."""
+    import subprocess as sp
+    def fake_run(cmd, **kwargs):
+        return sp.CompletedProcess(cmd, 0, stdout="test output here", stderr="")
+    monkeypatch.setattr(sp, "run", fake_run)
+    runner = gl.build_runner("python", tmp_path)
+    passed, detail = runner("tests/foo.py")
+    assert passed is True
+    assert "test output here" in detail

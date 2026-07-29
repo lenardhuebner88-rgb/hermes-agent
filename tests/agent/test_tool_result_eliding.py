@@ -451,5 +451,106 @@ def _convo_reads(num_pairs):
     return out
 
 
+# --------------------------------------------------------------------------
+# Boundary + constant pinning
+# --------------------------------------------------------------------------
+
+def test_int_env_accepts_zero_as_a_valid_value():
+    """An explicit 0 is a legitimate knob setting (e.g. quantize off) —
+    only negatives and garbage fall back to the default."""
+    import agent.tool_result_eliding as tre
+
+    assert tre._int_env({"K": "0"}, "K", 5) == 0
+    assert tre._int_env({"K": "-1"}, "K", 5) == 5
+
+
+def test_cache_stable_boundary_negative_step_is_plain_boundary():
+    """A negative quantize step is garbage and must degrade to the plain
+    end-relative boundary, never quantise by a negative divisor (which
+    would move the boundary OUTWARDS)."""
+    assert cache_stable_boundary(20, 4, -3) == 16
+
+
+def test_tool_result_at_boundary_index_stays_protected():
+    """The elidable range is [0, boundary) — a tool result sitting exactly
+    AT the boundary index is already inside the protected tail and must
+    stay verbatim."""
+    msgs = []
+    msgs += _padding(2)                                  # idx 0..3
+    msgs.append({"role": "user", "content": "u"})        # idx 4
+    msgs.append(_tool("c1", "read_file", _BIG))          # idx 5 == boundary
+    msgs.append({"role": "user", "content": "v"})        # idx 6
+    # n=7, protect_last_n=2, quantize off → boundary 5
+    out, elided, _saved = elide_stale_tool_results(
+        msgs, protect_last_n=2, quantize_step=0
+    )
+    assert elided == 0
+    assert out[5]["content"] == _BIG
+
+
+def test_content_at_exactly_min_elide_chars_stays():
+    """The length floor is inclusive: content of EXACTLY min_elide_chars
+    is not worth the churn and stays verbatim."""
+    exact = "Y" * DEFAULT_MIN_ELIDE_CHARS
+    msgs = _pair("c1", "read_file", '{"path": "a"}', exact) + _padding(20)
+    out, elided, _saved = elide_stale_tool_results(msgs, protect_last_n=2)
+    assert elided == 0
+    assert out[1]["content"] == exact
+
+
+def test_module_defaults_are_pinned():
+    """The eliding floor (1500) and the cache-quantize step (8 ≈ 4 worker
+    turns) are cost-tuned constants — pin them against silent drift."""
+    assert DEFAULT_MIN_ELIDE_CHARS == 1500
+    assert DEFAULT_CACHE_QUANTIZE_STEP == 8
+
+
+# ---------------------------------------------------------------------------
+# Second pass: config record + quantized boundary
+# ---------------------------------------------------------------------------
+
+def test_elide_config_is_frozen_with_cache_aware_default():
+    """ElideConfig is immutable and cache-aware eliding is ON by default —
+    a silent default flip would change the cache-stability behaviour of
+    every prompt-cached lane."""
+    from agent.tool_result_eliding import ElideConfig
+
+    config = ElideConfig(
+        enabled=True,
+        protect_last_n=14,
+        min_elide_chars=1500,
+        elidable_tools=frozenset({"read_file"}),
+    )
+    assert config.cache_aware_enabled is True
+    with pytest.raises(AttributeError):
+        config.enabled = False
+
+
+def test_cache_stable_boundary_step_two_snaps_odd_raw_down():
+    """step=2 quantizes: a raw elidable span of 9 snaps DOWN to 8 — the
+    boundary only advances on full steps."""
+    from agent.tool_result_eliding import cache_stable_boundary
+
+    assert cache_stable_boundary(11, 2, 2) == 8
+
+
+def test_cache_stable_boundary_negative_raw_returns_zero():
+    """protect >= n means 'elide nothing' — the return is exactly 0, not
+    1 (a single elidable message would otherwise leak through)."""
+    from agent.tool_result_eliding import cache_stable_boundary
+
+    assert cache_stable_boundary(2, 5, 4) == 0
+
+
+def test_negative_protect_last_n_clamps_to_zero_not_one():
+    """A negative protect count clamps to 0 (protect nothing) — clamping
+    to 1 would shield the last message from eliding."""
+    messages = _pair("c1", "read_file", '{"path":"/x"}', _BIG)
+    _out, elided, _saved = elide_stale_tool_results(
+        messages, protect_last_n=-1, min_elide_chars=10
+    )
+    assert elided == 1
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

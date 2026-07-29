@@ -174,6 +174,15 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 - Wiring dead code into a live path requires an end-to-end resolution test with
   real imports and temporary `HERMES_HOME`.
 - Inspect merge diffs for silent deletion/reversion when integrating stale work.
+- **`scripts/run-affected.sh HEAD` against a CLEAN worktree runs zero tests and
+  exits 0** ("no applicable Python production paths"). The worker-gate stamp then
+  carries only `exit_codes: [0]` / `passed: True` — bit-identical to a run over a
+  thousand tests. After committing, gate with `HEAD~1` and confirm with
+  `git diff --name-only HEAD~1 HEAD` that the expected files are in the diff.
+- **`hermes kanban list --status blocked` does not show PlanSpec chains.** They
+  run under `tenant: planspec`, so the list reports "no matching tasks" while a
+  slice is blocked. Check chains with `hermes kanban show <task_id>`, never by
+  the list alone.
 - **New fork code never goes into an upstream-owned file.** Put it in a
   fork-owned module and call it from one line. `hermes_cli/kanban_db.py` is the
   cautionary tale: ~29k fork lines interleaved into upstream's ~9.8k forced the

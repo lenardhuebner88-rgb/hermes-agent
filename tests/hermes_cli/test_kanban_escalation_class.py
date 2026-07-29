@@ -80,3 +80,25 @@ def test_non_escalation_events_remain_unchanged():
         payload,
         classifier=lambda _payload: ("real-bug", {}),
     ) is payload
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_persisted_escalation_class_rejects_non_dict():
+    """Kill remove_guard L33: non-dict payload must return None, not raise."""
+    assert escalation.persisted_escalation_class("not-a-dict") is None
+    assert escalation.persisted_escalation_class(42) is None
+    assert escalation.persisted_escalation_class(None) is None
+
+
+def test_classification_without_classifier_returns_tuple():
+    """Kill return_none L59: with no classifier, must return (value, evidence)."""
+    result = escalation.persisted_escalation_classification(
+        {"escalation_class": "transient"},
+    )
+    assert result is not None
+    value, evidence = result
+    assert value == "transient"
+    assert evidence["matched"] == "transient"
+    assert evidence["signal_source"] == "persisted_escalation_class"

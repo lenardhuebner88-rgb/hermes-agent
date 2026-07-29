@@ -62,6 +62,152 @@ def repo(tmp_path):
     return r
 
 
+def _claim_and_provision(conn, task_id, repo):
+    task = kb.claim_task(conn, task_id)
+    assert task is not None
+    return kwt.provision_for_task(conn, task, str(repo))
+
+
+def _resolve_real_conflict_rebase(repo, worktree, branch, approved_commit):
+    """Rebase *branch* with a real add/add conflict and resolve it."""
+    _commit_in(
+        repo,
+        "shared.py",
+        "MAIN = True\n",
+        msg="main adds conflicting file",
+    )
+    conflict = subprocess.run(
+        ["git", "-C", str(worktree), "rebase", "main"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert conflict.returncode != 0
+    assert "CONFLICT" in conflict.stdout + conflict.stderr
+
+    (worktree / "shared.py").write_text(
+        "MAIN = True\nSLICE_A = 'resolved'\n",
+        encoding="utf-8",
+    )
+    _git(worktree, "add", "shared.py")
+    _git(worktree, "-c", "core.editor=true", "rebase", "--continue")
+    rewritten_commit = _git(worktree, "rev-parse", "HEAD")
+
+    assert rewritten_commit != approved_commit
+    assert _git(repo, "cherry", branch, approved_commit) == f"+ {approved_commit}"
+    assert not kwt._branch_is_ancestor(repo, approved_commit, branch)
+    return rewritten_commit
+
+
+def _complete_conflict_rebased_chain(repo, *, with_fixer):
+    """Run Slice A -> optional fixer -> Slice B through the real completion path."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="slice A",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        parent = root
+        fixer = None
+        if with_fixer:
+            fixer = kb.create_task(
+                conn,
+                title="conflict fixer",
+                assignee="coder",
+                parents=[root],
+                workspace_kind="dir",
+                workspace_path=str(repo),
+            )
+            parent = fixer
+        slice_b = kb.create_task(
+            conn,
+            title="slice B",
+            assignee="coder",
+            parents=[parent],
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+
+        worktree = _claim_and_provision(conn, root, repo)
+        branch = kwt.chain_branch(root)
+        _commit_in(
+            worktree,
+            "shared.py",
+            "SLICE_A = True\n",
+            msg="slice A approved commit",
+        )
+        approved_commit = _git(worktree, "rev-parse", "HEAD")
+        assert kb.complete_task(
+            conn,
+            root,
+            result="slice A done",
+            metadata={"commit": approved_commit},
+        )
+
+        kb.recompute_ready(conn)
+        next_task = fixer if fixer is not None else slice_b
+        next_worktree = _claim_and_provision(conn, next_task, repo)
+        assert next_worktree == worktree
+        rewritten_commit = _resolve_real_conflict_rebase(
+            repo, worktree, branch, approved_commit,
+        )
+
+        if fixer is not None:
+            assert kb.complete_task(
+                conn,
+                fixer,
+                result="conflict resolved",
+                metadata={"commit": rewritten_commit},
+            )
+            kb.recompute_ready(conn)
+            slice_b_worktree = _claim_and_provision(conn, slice_b, repo)
+            assert slice_b_worktree == worktree
+
+        _commit_in(
+            worktree,
+            "slice_b.py",
+            "SLICE_B = True\n",
+            msg="slice B completion",
+        )
+        final_commit = _git(worktree, "rev-parse", "HEAD")
+        assert kb.complete_task(
+            conn,
+            slice_b,
+            result="slice B done",
+            metadata={"commit": final_commit},
+        )
+        task = kb.get_task(conn, slice_b)
+        merged = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'integration_merged'",
+            (slice_b,),
+        ).fetchall()
+        blocked_row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (slice_b,),
+        ).fetchone()
+        fixer_count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title = 'conflict fixer'",
+        ).fetchone()[0]
+
+    return {
+        "approved_commit": approved_commit,
+        "rewritten_commit": rewritten_commit,
+        "task_status": task.status,
+        "merged_events": len(merged),
+        "blocked_reason": (
+            json.loads(blocked_row["payload"])["reason"]
+            if blocked_row is not None
+            else None
+        ),
+        "fixer_count": fixer_count,
+    }
+
+
 def test_changed_files_between_uses_shared_changed_path_set(repo):
     base = _git(repo, "rev-parse", "HEAD")
     (repo / "a.txt").unlink()
@@ -474,6 +620,206 @@ def test_rebased_review_stamps_resolve_to_chain_tip(repo):
         info["branch"],
         [{"commit": second_pre_rebase}, {"commit": first_pre_rebase}],
     ) is None
+
+
+def test_conflict_rebased_approved_commit_integrates_from_chain_reflog(
+    repo, kanban_home, monkeypatch,
+):
+    """A real conflict-fixer rebase preserves Slice A's branch provenance."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+
+    result = _complete_conflict_rebased_chain(repo, with_fixer=True)
+
+    assert result["task_status"] == "done", result
+    assert result["merged_events"] == 1
+    assert result["fixer_count"] == 1
+    assert (repo / "shared.py").read_text() == (
+        "MAIN = True\nSLICE_A = 'resolved'\n"
+    )
+    assert (repo / "slice_b.py").read_text() == "SLICE_B = True\n"
+
+
+def test_coder_conflict_rebase_uses_same_branch_reflog_rule(
+    repo, kanban_home, monkeypatch,
+):
+    """The coder return path needs no actor/event-specific recognition."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+
+    result = _complete_conflict_rebased_chain(repo, with_fixer=False)
+
+    assert result["task_status"] == "done", result
+    assert result["merged_events"] == 1
+    assert result["fixer_count"] == 0
+    assert (repo / "shared.py").read_text() == (
+        "MAIN = True\nSLICE_A = 'resolved'\n"
+    )
+    assert (repo / "slice_b.py").read_text() == "SLICE_B = True\n"
+
+
+def test_foreign_commit_never_in_chain_reflog_still_parks(
+    repo, kanban_home, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    foreign_worktree = tmp_path / "foreign-worktree"
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="foreign provenance",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        chain_worktree = _claim_and_provision(conn, task_id, repo)
+        chain_branch = kwt.chain_branch(task_id)
+        _commit_in(
+            chain_worktree,
+            "chain.py",
+            "CHAIN = True\n",
+            msg="chain work",
+        )
+
+        _git(
+            repo,
+            "worktree",
+            "add",
+            "-b",
+            "foreign/source",
+            str(foreign_worktree),
+            "main",
+        )
+        _commit_in(
+            foreign_worktree,
+            "foreign.py",
+            "FOREIGN = True\n",
+            msg="foreign approved commit",
+        )
+        foreign_commit = _git(foreign_worktree, "rev-parse", "HEAD")
+        assert not kwt._branch_reflog_has_rewritten_commit(
+            repo, chain_branch, foreign_commit,
+        )
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            result="foreign stamp",
+            metadata={"commit": foreign_commit},
+        )
+        task = kb.get_task(conn, task_id)
+        blocked_row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    assert task.status == "blocked"
+    blocked = json.loads(blocked_row["payload"])
+    assert blocked["source"] == "system_park"
+    assert "candidates=0" in blocked["reason"]
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+    assert not (repo / "foreign.py").exists()
+
+
+def test_one_reflog_candidate_does_not_clear_two_candidate_ambiguity(
+    repo, kanban_home, monkeypatch,
+):
+    """A reflog match must not make an unrelated candidate uniquely mergeable."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="slice A",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        child = kb.create_task(
+            conn,
+            title="slice B",
+            assignee="coder",
+            parents=[root],
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        chain_worktree = _claim_and_provision(conn, root, repo)
+        chain_branch = kwt.chain_branch(root)
+        _commit_in(
+            chain_worktree,
+            "shared.py",
+            "SLICE_A = True\n",
+            msg="slice A approved commit",
+        )
+        chain_candidate = _git(chain_worktree, "rev-parse", "HEAD")
+        assert kb.complete_task(
+            conn,
+            root,
+            result="slice A done",
+            metadata={"commit": chain_candidate},
+        )
+
+        _resolve_real_conflict_rebase(
+            repo, chain_worktree, chain_branch, chain_candidate,
+        )
+        foreign = _provisioned_chain(
+            repo,
+            "t_reflog_ambiguity_foreign",
+            relpath="foreign.py",
+            content="FOREIGN = True\n",
+        )
+        foreign_candidate = _git(foreign["path"], "rev-parse", "HEAD")
+
+        kb.recompute_ready(conn)
+        child_worktree = _claim_and_provision(conn, child, repo)
+        assert child_worktree == chain_worktree
+        assert kb.complete_task(
+            conn,
+            child,
+            result="divergent stamp",
+            metadata={"commit": foreign_candidate},
+        )
+        task = kb.get_task(conn, child)
+        blocked_row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (child,),
+        ).fetchone()
+
+    assert task.status == "blocked"
+    blocked = json.loads(blocked_row["payload"])
+    assert blocked["source"] == "system_park"
+    assert "ambiguous" in blocked["reason"].lower()
+    assert "2 divergent off-branch candidates" in blocked["reason"]
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+    assert not (repo / "foreign.py").exists()
+    assert chain_worktree.exists()
+    assert foreign["path"].exists()
+
+
+def test_chain_reflog_without_later_rewrite_is_not_recognized(repo):
+    info = _provisioned_chain(
+        repo,
+        "t_reflog_no_rewrite",
+        relpath="first.py",
+        content="FIRST = True\n",
+    )
+    candidate = _git(info["path"], "rev-parse", "HEAD")
+    _commit_in(
+        info["path"],
+        "second.py",
+        "SECOND = True\n",
+        msg="forward-only branch move",
+    )
+    reflog_heads = _git(
+        repo, "reflog", "show", "--format=%H", info["branch"],
+    ).splitlines()
+
+    assert candidate in reflog_heads
+    assert not kwt._branch_reflog_has_rewritten_commit(
+        repo, info["branch"], candidate,
+    )
 
 
 def test_approved_commit_resolution_fails_closed_for_ambiguous_branches(repo):

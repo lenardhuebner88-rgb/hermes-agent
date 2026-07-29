@@ -8,6 +8,7 @@ import pytest
 from hermes_cli.usage_facts_db import (
     LLM_CALL_COLUMNS,
     RUN_FACT_COLUMNS,
+    increment_tool_call,
     initialize_usage_facts_db,
     purge_expired_traces,
     record_llm_call,
@@ -502,3 +503,57 @@ def test_retention_deletes_only_expired_trace_rows(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM run_traces").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM run_llm_calls").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM run_usage_facts").fetchone()[0] == 1
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_call_kind_main_loop_is_sticky(tmp_path):
+    """Kill comparison_swap L396: == -> !=.
+
+    The upsert logic makes call_kind='main_loop' sticky: once a run is
+    tagged main_loop, a later upsert with a different call_kind must NOT
+    overwrite it.  With the mutant, the ``elif column == "call_kind"``
+    branch is skipped (becomes !=), so call_kind falls through to the
+    generic COALESCE path and gets overwritten.
+    """
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+    upsert_run_facts("run-1", {"call_kind": "main_loop"}, path=path)
+    upsert_run_facts("run-1", {"call_kind": "subtask"}, path=path)
+
+    row = _row(path, "SELECT call_kind FROM run_usage_facts WHERE run_id='run-1'")
+    assert row["call_kind"] == "main_loop"
+
+
+def test_record_llm_call_accepts_zero_call_index(tmp_path):
+    """Kill comparison_swap L497: < -> <=.
+
+    call_index=0 is the first valid call.  With the mutant, the guard
+    ``call_index < 0`` becomes ``call_index <= 0`` and rejects index 0.
+    """
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+    record_llm_call("run-1", 0, {"model": "test"}, path=path)
+
+    row = _row(path, "SELECT call_index FROM run_llm_calls WHERE run_id='run-1'")
+    assert row["call_index"] == 0
+
+
+def test_increment_tool_call_accepts_zero_duration(tmp_path):
+    """Kill comparison_swap L545: < -> <=.
+
+    tool_duration_ms=0 is a valid measurement (instant tool).  With the
+    mutant, the guard ``tool_duration_ms < 0`` becomes ``<= 0`` and
+    rejects a zero duration.
+    """
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+    record_llm_call("run-1", 0, {"model": "test"}, path=path)
+    increment_tool_call("run-1", 0, tool_duration_ms=0, path=path)
+
+    row = _row(
+        path,
+        "SELECT tool_duration_ms FROM run_llm_calls WHERE run_id='run-1'",
+    )
+    assert row["tool_duration_ms"] == 0

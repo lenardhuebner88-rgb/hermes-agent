@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from hermes_cli import design_board_cli as cli
 from hermes_cli import design_board_store as store
@@ -121,6 +123,38 @@ def test_add_mockup_inlines_tailwind_before_store_and_render(monkeypatch, tmp_pa
     assert "cdn.tailwindcss.com" not in stored
     assert "data-design-board-tailwind-inline" in stored
     assert rendered["html"] == stored
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_render_html_to_png_missing_output_raises(monkeypatch):
+    """Kill bool_op_swap L65: or -> and would skip the isfile check when
+    returncode is 0, silently succeeding with no PNG on disk."""
+    class _R:
+        returncode = 0
+        stderr = b""
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _R())
+    with pytest.raises(RuntimeError, match="chromium render failed"):
+        cli.render_html_to_png("/tmp/nonexistent.html", "/tmp/no_such_out.png")
+
+
+def test_main_no_subcommand_exits():
+    """Kill boolean_flip L96: required True -> False would let main([])
+    proceed without a subcommand instead of raising SystemExit."""
+    with pytest.raises(SystemExit):
+        cli.main([])
+
+
+def test_main_list_dispatches(capsys):
+    """Kill comparison_swap L110: == -> != would skip the list branch."""
+    cid = store.create_card(kind="bug", title="dispatch-check")
+    rc = cli.main(["list"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    cards = json.loads(out)
+    assert any(c["id"] == cid for c in cards)
 
 
 class _Ctx:

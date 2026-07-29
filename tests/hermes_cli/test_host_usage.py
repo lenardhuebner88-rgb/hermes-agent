@@ -177,3 +177,29 @@ def test_get_host_usage_coalesces_concurrent_cold_requests(monkeypatch) -> None:
 
     assert calls == [7]
     assert sorted(row["cached"] for row in results) == [False, True]
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_timestamp_rejects_non_string_non_numeric():
+    """Kill bool_op_swap L92: or -> and on isinstance/strip guard."""
+    assert host_usage._timestamp([]) is None
+    assert host_usage._timestamp({}) is None
+
+
+def test_provider_from_model_resolves_known_names():
+    """Kill bool_op_swap L125: or -> and on model fallback."""
+    assert host_usage._provider_from_model("qwen-max", fallback="api") == "qwen"
+    assert host_usage._provider_from_model("kimi-v1", fallback="api") == "kimi"
+    assert host_usage._provider_from_model("moonshot-v1", fallback="api") == "kimi"
+
+
+def test_provider_from_billing_resolves_known_providers():
+    """Kill bool_op_swap L143, L145, L147: or -> and on billing checks."""
+    assert host_usage._provider_from_billing("kimi", None) == "kimi"
+    assert host_usage._provider_from_billing("moonshot", None) == "kimi"
+    assert host_usage._provider_from_billing("xai", None) == "grok"
+    assert host_usage._provider_from_billing("grok", None) == "grok"
+    assert host_usage._provider_from_billing("anthropic", None) == "claude"
+    assert host_usage._provider_from_billing("claude", None) == "claude"

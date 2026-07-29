@@ -8,6 +8,7 @@ import pytest
 from hermes_cli.affected_test_budget import (
     AFFECTED_TIME_BUDGET_ENV,
     AffectedTestBudgetConfigError,
+    AffectedTestTimeEstimate,
     LOADED_HOST_DILATION,
     UNKNOWN_TEST_DURATION_SECONDS,
     check_affected_test_budget,
@@ -167,4 +168,52 @@ def test_invalid_budget_configuration_is_not_silently_ignored(tmp_path: Path) ->
             ["tests/test_selected.py"],
             durations_path=cache,
             env={AFFECTED_TIME_BUDGET_ENV: "not-a-number"},
+        )
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_exceeds_budget_false_when_equal():
+    """Kill comparison_swap L58 (> -> >=): mutant returns True when equal."""
+    est = AffectedTestTimeEstimate(
+        predicted_seconds=100.0,
+        budget_seconds=100.0,
+        serial_seconds=100.0,
+        slowest_seconds=100.0,
+        file_count=1,
+        missing_forecast_count=0,
+        workers=1,
+        top_files=(),
+    )
+    # Original: 100 > 100 -> False
+    # Mutant (>=): 100 >= 100 -> True
+    assert est.exceeds_budget is False
+
+
+def test_zero_duration_included_in_forecast(tmp_path: Path):
+    """Kill comparison_swap L122 (>= -> >): mutant excludes duration=0."""
+    cache = _write_cache(
+        tmp_path / "durations.json",
+        {"tests/test_zero.py": 0.0, "tests/test_one.py": 1.0},
+    )
+    durations, error = load_test_durations(cache)
+    assert error == ""
+    # Original: 0.0 >= 0 -> True -> included
+    # Mutant (>): 0.0 > 0 -> False -> excluded
+    assert "tests/test_zero.py" in durations
+    assert durations["tests/test_zero.py"] == 0.0
+
+
+def test_env_budget_zero_raises(tmp_path: Path):
+    """Kill comparison_swap L141 (<= -> <): mutant accepts value=0."""
+    cache = _write_cache(tmp_path / "durations.json", {"tests/test_a.py": 1.0})
+    # Original: 0 <= 0 -> True -> raises
+    # Mutant (<): 0 < 0 -> False -> does NOT raise
+    with pytest.raises(AffectedTestBudgetConfigError, match="positive finite"):
+        check_affected_test_budget(
+            tmp_path,
+            ["tests/test_a.py"],
+            durations_path=cache,
+            env={AFFECTED_TIME_BUDGET_ENV: "0"},
         )

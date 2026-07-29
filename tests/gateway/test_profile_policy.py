@@ -358,3 +358,48 @@ def test_lag_watch_ms_env_override(monkeypatch):
     finally:
         monkeypatch.delenv("HERMES_DISCORD_LAG_WATCH_MS", raising=False)
         importlib.reload(policy)
+
+
+def test_is_under_answers_true_for_a_child_path(tmp_path):
+    """The containment primitive must answer True for a real child — a
+    silent False here would let profile/worktree homes pass as the HUB."""
+    policy = _import_policy()
+    child = tmp_path / "profiles" / "x"
+    child.mkdir(parents=True)
+    assert policy._is_under(child, tmp_path / "profiles") is True
+    assert policy._is_under(tmp_path, tmp_path / "profiles") is False
+
+
+def test_hub_detection_fails_closed_on_missing_or_mismatched_paths(tmp_path, monkeypatch):
+    """Both failure nets must return False: an unresolvable home (None)
+    and a home that merely DIFFERS from the root are never the HUB."""
+    policy = _import_policy()
+    monkeypatch.setattr(policy, "_runtime_hermes_home", lambda: None)
+    assert policy.is_default_hermes_profile_home(default_root=tmp_path) is False
+
+    other = tmp_path / "other-home"
+    other.mkdir()
+    assert policy.is_default_hermes_profile_home(
+        default_root=tmp_path, hermes_home=other
+    ) is False
+
+
+def test_minimax_entry_filter_needs_a_dict_and_a_model_signal():
+    """Non-dict entries are never Minimax, and an entry with neither a
+    Minimax provider nor a model string carries no signal at all."""
+    policy = _import_policy()
+    assert policy._is_minimax_entry("minimax") is False
+    assert policy._is_minimax_entry(None) is False
+    assert policy._is_minimax_entry({"provider": "openai", "model": ""}) is False
+    assert policy._is_minimax_entry({"provider": "openai"}) is False
+
+
+def test_heartbeat_age_defaults_match_discord_beat_math(monkeypatch):
+    """The zombie-WS thresholds are one and two missed Discord beats
+    (~41s each): 60s watch / 120s critical. Drifting these silently
+    changes when a dead socket is declared dead."""
+    monkeypatch.delenv("HERMES_DISCORD_HEARTBEAT_AGE_WATCH_SECONDS", raising=False)
+    monkeypatch.delenv("HERMES_DISCORD_HEARTBEAT_AGE_CRITICAL_SECONDS", raising=False)
+    policy = _import_policy()
+    assert policy.current_discord_heartbeat_age_watch_seconds() == 60
+    assert policy.current_discord_heartbeat_age_critical_seconds() == 120

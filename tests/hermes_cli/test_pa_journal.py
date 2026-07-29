@@ -104,6 +104,83 @@ def _add_action_and_inbox(question_db: Path) -> None:
     conn.close()
 
 
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_source_error_fallback_to_class_name():
+    """Kill bool_op_swap L270: or -> and would return '' instead of class name."""
+    exc = ValueError()
+    result = journal._source_error("test_source", exc)
+    assert result == {"source": "test_source", "error": "ValueError"}
+
+
+def test_collect_actions_envelope_fallback(
+    isolated_journal_sources: dict[str, Path],
+) -> None:
+    """Kill bool_op_swap L187: or -> and would crash on NULL action_payload."""
+    question_db = isolated_journal_sources["question_db"]
+    stamp = "2033-05-06T12:00:00.000000Z"
+    evidence = {"version": 1, "category": "kanban.nudge", "status": "succeeded"}
+    conn = sqlite3.connect(question_db)
+    conn.execute(
+        "INSERT INTO question_events(ts, updated_ts, source, kind, question_text, "
+        "status, answered_by, answer_source, action_payload, action_result) "
+        "VALUES (?, ?, 'pa', 'pa_action', 'Nudge?', 'answered', 'operator', "
+        "'operator_free', NULL, ?)",
+        (stamp, stamp, json.dumps(evidence)),
+    )
+    conn.commit()
+    conn.close()
+    actions = journal._collect_actions(
+        int(datetime(2033, 5, 6, tzinfo=timezone.utc).timestamp()),
+        int(datetime(2033, 5, 7, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(actions) == 1
+    assert actions[0]["category"] == "kanban.nudge"
+
+
+def test_collect_actions_category_from_envelope(
+    isolated_journal_sources: dict[str, Path],
+) -> None:
+    """Kill bool_op_swap L192: or -> and would miss envelope category fallback."""
+    question_db = isolated_journal_sources["question_db"]
+    stamp = "2033-05-06T12:00:00.000000Z"
+    envelope = {"version": 1, "category": "envelope.cat", "payload": {}}
+    evidence = {"version": 1, "status": "succeeded"}  # no category key
+    conn = sqlite3.connect(question_db)
+    conn.execute(
+        "INSERT INTO question_events(ts, updated_ts, source, kind, question_text, "
+        "status, answered_by, answer_source, action_payload, action_result) "
+        "VALUES (?, ?, 'pa', 'pa_action', 'Nudge?', 'answered', 'operator', "
+        "'operator_free', ?, ?)",
+        (stamp, stamp, json.dumps(envelope), json.dumps(evidence)),
+    )
+    conn.commit()
+    conn.close()
+    actions = journal._collect_actions(
+        int(datetime(2033, 5, 6, tzinfo=timezone.utc).timestamp()),
+        int(datetime(2033, 5, 7, tzinfo=timezone.utc).timestamp()),
+    )
+    assert len(actions) == 1
+    assert actions[0]["category"] == "envelope.cat"
+
+
+def test_write_journal_empty_engine_body_falls_back(
+    isolated_journal_sources: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kill bool_op_swap L490: or -> and would not raise on empty body."""
+    _add_pa_turn(timestamp=int(NOW.timestamp()))
+    monkeypatch.setattr(journal, "run_engine", lambda *a, **kw: "   ")
+    result = journal.write_daily_journal(
+        journal_date=JOURNAL_DATE, now=NOW,
+        directory=isolated_journal_sources["journal_dir"],
+    )
+    assert result is not None
+    content = result.read_text(encoding="utf-8")
+    assert "Rohdaten" in content or "Fallback" in content or len(content) > 100
+
+
 def _mark_evening_brief(*, timestamp: int) -> None:
     store = PAStore()
     with store.connect() as conn:

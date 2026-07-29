@@ -545,3 +545,28 @@ def test_code_lane_records_cooldown_runs(monkeypatch, tmp_path):
         res = proposals.generate_code_weakness_proposals(max_files=1, limit=1)
         assert res["outcome"] == "clean"
     assert budget.lane_cooldown_until("code") is not None
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_load_budget_config_respects_custom_timezone():
+    """Kill bool_op_swap L114: or -> and.
+
+    With the mutant, ``str(raw.get("timezone") and defaults.timezone)``
+    evaluates to the default timezone because ``"X" and "UTC"`` returns
+    ``"UTC"``.  The correct behaviour preserves the custom value.
+    """
+    cfg = budget.load_budget_config({"autoresearch": {"budget": {"timezone": "America/New_York"}}})
+    assert cfg.timezone == "America/New_York"
+
+
+def test_load_budget_config_respects_custom_unknown_usage_policy():
+    """Kill bool_op_swap L119: or -> and.
+
+    With the mutant, ``str(raw.get("unknown_usage_policy") and defaults.unknown_usage_policy)``
+    evaluates to the default policy because ``"block_all" and "mini_only"``
+    returns ``"mini_only"``.  The correct behaviour preserves the custom value.
+    """
+    cfg = budget.load_budget_config({"autoresearch": {"budget": {"unknown_usage_policy": "block_all"}}})
+    assert cfg.unknown_usage_policy == "block_all"

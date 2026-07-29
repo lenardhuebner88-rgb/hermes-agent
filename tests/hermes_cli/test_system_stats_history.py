@@ -163,3 +163,28 @@ def test_endpoint_error_path_returns_200_with_errors(monkeypatch):
     assert "psutil" in body["errors"][0]
     assert body["samples"][0]["cpu_percent"] is None
     assert body["samples"][0]["mem_percent"] is None
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_start_sampler_disabled_env_returns_false(monkeypatch):
+    """Kill boolean_flip L114 (False -> True): env=0 must return False, not True."""
+    monkeypatch.setenv("HERMES_SYSTEM_STATS_HISTORY", "0")
+    assert mod.start_sampler() is False
+
+
+def test_start_sampler_skipped_under_pytest_without_force(monkeypatch):
+    """Kill boolean_flip L116 (False -> True): unset env under pytest returns False."""
+    monkeypatch.delenv("HERMES_SYSTEM_STATS_HISTORY", raising=False)
+    assert mod.start_sampler() is False
+
+
+def test_start_sampler_thread_is_daemon(monkeypatch):
+    """Kill boolean_flip L127 (True -> False): thread.daemon must be True."""
+    monkeypatch.setenv("HERMES_SYSTEM_STATS_HISTORY", "1")
+    started = mod.start_sampler(interval_s=0.01)
+    assert started is True
+    assert mod._sampler_thread is not None
+    assert mod._sampler_thread.daemon is True
+    mod.stop_sampler()
