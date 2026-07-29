@@ -1075,20 +1075,85 @@ def _is_int_not_bool(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_positive_int(value: Any) -> bool:
+    return _is_int_not_bool(value) and value > 0
+
+
+def _is_non_empty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and value > 0
+    )
+
+
+def _is_plausible_retry_policy(retry: Any) -> bool:
+    """Restore-shape check for a stored ``retry`` policy (loop 20 / F5).
+
+    The bar is "create_job() could have written this", and create_job stores
+    the output of _normalize_retry — NOT of validate_retry_policy: the
+    loop-15 validate_retry_policy is the strict API boundary (int-only
+    backoff, 8-entry cap), while the STORED shape keeps numeric backoff
+    entries as floats (create_job persists ``backoff_seconds: [300.0]``
+    verbatim — see the loop-18 full-record test). Reusing the API validator
+    here would discard records create_job actually wrote, so this predicate
+    deliberately mirrors the stored shape instead — derived from the same
+    central bound (MAX_RUN_RETRY_ATTEMPTS), not a third copy of the rules:
+      - max_attempts: strictly int (never bool), 1..MAX_RUN_RETRY_ATTEMPTS;
+      - backoff_seconds (optional): a list of positive numbers (int/float,
+        never bool).
+    """
+    if not isinstance(retry, dict):
+        return False
+    attempts = retry.get("max_attempts")
+    if not _is_int_not_bool(attempts) or not 1 <= attempts <= MAX_RUN_RETRY_ATTEMPTS:
+        return False
+    backoff = retry.get("backoff_seconds")
+    if backoff is None:
+        return True
+    if not isinstance(backoff, list):
+        return False
+    return all(_is_positive_number(value) for value in backoff)
+
+
+# Per-kind schedule payload schema (loop 20 / F5): the fields parse_schedule()
+# emits per kind with their stored types — the SINGLE copy both
+# _is_plausible_job_record's nested schedule validation and future restore
+# checks derive from (no open-coded per-kind clones). Each kind's payload
+# field is mandatory with its type whenever the kind is present: a record
+# claiming kind "interval" without a positive-int minutes is corrupt.
+_SCHEDULE_KIND_PAYLOAD = {
+    "interval": (("minutes", _is_positive_int),),
+    "cron": (("expr", _is_non_empty_str),),
+    "once": (("run_at", _is_non_empty_str),),
+}
+
+
 def _is_plausible_job_record(record: Any) -> bool:
     """Shape-check one job record restored from a backup (loop 15 / F3).
 
     The bar is "create_job() could have written this". Mandatory: a non-empty
     string ``id`` and ``name``, and a ``schedule`` dict whose ``kind`` is one
     parse_schedule() can emit, carrying that kind's payload with a plausible
-    type (interval → positive int minutes, cron → expr string, once → run_at
-    string). Since loop 18 (F2) every OTHER field create_job() persists is
-    type-checked too whenever it is present: enabled/no_agent bool, repeat a
-    dict with int-or-None times and int completed, state a string from the
-    known state enum, deliver/script/model/... str-or-None, skills/
-    context_from/enabled_toolsets a list of strings or None, origin/retry a
-    dict or None, and the opt-in timeouts strictly int. Fields absent from
-    the record are tolerated (back-compat with older or hand-written stores)
+    type — the nested per-kind checks derive from the central
+    _SCHEDULE_KIND_PAYLOAD table (loop 20 / F5). Since loop 18 (F2) every
+    OTHER field create_job() persists is type-checked too whenever it is
+    present: enabled/no_agent bool, repeat a dict with int-or-None times and
+    int completed, state a string from the known state enum,
+    deliver/script/model/... str-or-None, skills/context_from/
+    enabled_toolsets a list of strings or None, and the opt-in timeouts
+    strictly int. Nested validation (loop 20 / F5): a present ``retry`` dict
+    must match the stored shape _normalize_retry() emits
+    (_is_plausible_retry_policy — max_attempts int
+    1..MAX_RUN_RETRY_ATTEMPTS, backoff_seconds a list of positive numbers;
+    the strict loop-15 API validator is NOT the stored shape, see there),
+    and a present ``origin`` dict may only carry str keys with str-or-None
+    values. Fields absent from the record are tolerated (back-compat with
+    older or hand-written stores)
     and unknown extra fields are tolerated (forward-compat with newer
     writers). Deliberately not a full semantic validation — restored records
     keep flowing through _normalize_job_record() on read like any stored job.
@@ -1104,21 +1169,12 @@ def _is_plausible_job_record(record: Any) -> bool:
     schedule = record.get("schedule")
     if not isinstance(schedule, dict):
         return False
-    kind = schedule.get("kind")
-    if kind == "interval":
-        minutes = schedule.get("minutes")
-        if not _is_int_not_bool(minutes) or minutes <= 0:
-            return False
-    elif kind == "cron":
-        expr = schedule.get("expr")
-        if not (isinstance(expr, str) and expr.strip()):
-            return False
-    elif kind == "once":
-        run_at = schedule.get("run_at")
-        if not (isinstance(run_at, str) and run_at.strip()):
-            return False
-    else:
+    spec = _SCHEDULE_KIND_PAYLOAD.get(schedule.get("kind"))
+    if spec is None:
         return False
+    for field, predicate in spec:
+        if not predicate(schedule.get(field)):
+            return False
 
     # Full-schema type checks for the remaining persisted fields (loop 18 /
     # F2), present-then-strict as documented above.
@@ -1141,14 +1197,28 @@ def _is_plausible_job_record(record: Any) -> bool:
     for field in _JOB_RECORD_INT_FIELDS:
         if field in record and not _is_int_not_bool(record[field]):
             return False
-    for field in ("origin", "retry"):
-        if field in record and not (
-            record[field] is None or isinstance(record[field], dict)
-        ):
-            return False
     if "state" in record:
         state = record["state"]
         if not (isinstance(state, str) and state in _JOB_RECORD_STATES):
+            return False
+    # Nested retry validation (loop 20 / F5): a present retry policy must
+    # match the shape create_job() persists via _normalize_retry — see
+    # _is_plausible_retry_policy for why the strict loop-15 API validator
+    # (validate_retry_policy) is deliberately NOT reused here.
+    if "retry" in record and record["retry"] is not None:
+        if not _is_plausible_retry_policy(record["retry"]):
+            return False
+    # Nested origin validation (loop 20 / F5): origin is the gateway-side
+    # creation context create_job stores verbatim — a dict with string keys
+    # and str-or-None values (platform/chat_id/thread_id, ...).
+    if "origin" in record and record["origin"] is not None:
+        origin = record["origin"]
+        if not isinstance(origin, dict):
+            return False
+        if not all(
+            isinstance(key, str) and (value is None or isinstance(value, str))
+            for key, value in origin.items()
+        ):
             return False
     if "repeat" in record:
         repeat = record["repeat"]

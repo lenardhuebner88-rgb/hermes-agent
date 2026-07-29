@@ -416,21 +416,30 @@ def list_executions(
     *, job_id: Optional[str] = None, limit: int = 50,
     before_claimed_at: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Return indexed, newest-first execution history with cursor pagination."""
+    """Return indexed, newest-first execution history with cursor pagination.
+
+    Ordering AND the cursor comparison both go through SQLite julianday()
+    (loop 20 / F4 — same reasoning as the loop-18 prune): the stored
+    claimed_at is a tz-aware ISO string whose offset varies with the
+    configured/local timezone, so a raw string sort/cursor misorders mixed
+    offsets; julianday() normalizes every ISO-8601 variant onto one UTC
+    scale. The cursor contract stays "strictly older than the last row of
+    the previous page" — pass that row's claimed_at verbatim.
+    """
     clauses: List[str] = []
     params: List[Any] = []
     if job_id is not None:
         clauses.append("job_id=?")
         params.append(str(job_id))
     if before_claimed_at is not None:
-        clauses.append("claimed_at < ?")
+        clauses.append("julianday(claimed_at) < julianday(?)")
         params.append(str(before_claimed_at))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     params.append(max(1, min(int(limit), 500)))
     with _transaction() as conn:
         rows = conn.execute(
             "SELECT * FROM executions" + where
-            + " ORDER BY claimed_at DESC, id DESC LIMIT ?",
+            + " ORDER BY julianday(claimed_at) DESC, id DESC LIMIT ?",
             params,
         ).fetchall()
     return [dict(row) for row in rows]
@@ -442,7 +451,13 @@ def latest_execution(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def latest_executions(job_ids: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Load latest execution for many jobs in one indexed query."""
+    """Load latest execution for many jobs in one indexed query.
+
+    "Latest" is decided on the julianday() scale (loop 20 / F4) — identical
+    ordering to list_executions(), so the per-job top row here always
+    matches the head of the paginated list even with mixed-offset
+    claimed_at values.
+    """
     clean = [str(job_id) for job_id in dict.fromkeys(job_ids) if job_id]
     if not clean:
         return {}
@@ -453,7 +468,7 @@ def latest_executions(job_ids: List[str]) -> Dict[str, Dict[str, Any]]:
                 WHERE e.job_id IN ({placeholders})
                   AND e.id=(SELECT e2.id FROM executions e2
                             WHERE e2.job_id=e.job_id
-                            ORDER BY e2.claimed_at DESC, e2.id DESC LIMIT 1)""",
+                            ORDER BY julianday(e2.claimed_at) DESC, e2.id DESC LIMIT 1)""",
             clean,
         ).fetchall()
     return {row["job_id"]: dict(row) for row in rows}

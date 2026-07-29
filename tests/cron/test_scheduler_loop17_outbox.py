@@ -26,6 +26,7 @@ Hermetic: no network — platform sends are replaced by stub coroutines.
 
 import logging
 import os
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import cron.delivery_outbox as outbox
@@ -122,16 +123,21 @@ class TestExecutionIdWiring:
         self, tmp_path, caplog,
     ):
         """Legacy callers (no execution_id) keep the loop-6 refresh collapse
-        but are visibly marked with a warning."""
+        but are visibly marked with a warning. Since loop 20 (F3) this path
+        requires the explicit allow_legacy_no_execution=True opt-in."""
         home = tmp_path / "home"
         with use_cron_store(home):
             with caplog.at_level(logging.WARNING, logger="cron.delivery_outbox"):
-                outbox.enqueue("job", _target(), "v1", "err")
+                outbox.enqueue(
+                    "job", _target(), "v1", "err", allow_legacy_no_execution=True,
+                )
             assert any(
                 "WITHOUT execution_id" in r.message for r in caplog.records
             )
             # Loop-6 semantics preserved: a repeat refreshes the same entry.
-            outbox.enqueue("job", _target(), "v2", "err")
+            outbox.enqueue(
+                "job", _target(), "v2", "err", allow_legacy_no_execution=True,
+            )
             entries = outbox.list_entries()
             assert len(entries) == 1
             assert entries[0]["payload"] == "v2"
@@ -247,8 +253,15 @@ class TestSendLease:
             assert outbox.begin_replay(entry["id"]) is not None
 
             # Lease expired (holder crashed mid-send) ⇒ due again, replay
-            # retakes the lease and delivers.
-            monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "0")
+            # retakes the lease and delivers. Loop 20 / F6: TTL=0 is invalid
+            # input and falls back to the default — expire the lease by
+            # moving the clock past a small positive TTL instead.
+            real_now = outbox._hermes_now
+            monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "60")
+            monkeypatch.setattr(
+                outbox, "_hermes_now",
+                lambda: real_now() + timedelta(seconds=120),
+            )
             assert len(outbox.due_entries()) == 1
             with patch("gateway.config.load_gateway_config", return_value=_telegram_gateway_cfg()), \
                  patch("tools.send_message_tool._send_to_platform", new=_ok_send(sends)):
@@ -267,7 +280,12 @@ class TestSendLease:
                 assert s._replay_delivery_outbox() == 1
             entry = outbox.list_entries()[0]
             assert entry["status"] == "delivered"
-            assert entry["receipt"] == "platform-message:m-4711"
+            # Loop 20 / F1: the receipt is stored structured; a platform
+            # message_id is the external-delivery kind.
+            assert entry["receipt"] == {
+                "kind": outbox.RECEIPT_KIND_PLATFORM_MESSAGE,
+                "value": "m-4711",
+            }
             # Lease fields are cleared on the terminal transition.
             for field in ("lease_ts", "lease_pid", "send_attempt"):
                 assert field not in entry
@@ -282,7 +300,12 @@ class TestSendLease:
                 assert s._replay_delivery_outbox() == 1
             entry = outbox.list_entries()[0]
             assert entry["status"] == "delivered"
-            assert entry["receipt"].startswith("payload-sha256:")
+            # Loop 20 / F1: the payload-hash fallback is stored structured
+            # and honestly labelled as a LOCAL send witness, not a
+            # delivery receipt.
+            receipt = entry["receipt"]
+            assert receipt["kind"] == outbox.RECEIPT_KIND_LOCAL_SEND_WITNESS
+            assert "@" in receipt["value"]  # <sha256 hex>@<send timestamp>
 
     def test_crash_between_send_and_record_redelivers_after_lease_expiry(
         self, tmp_path, monkeypatch,
@@ -310,7 +333,14 @@ class TestSendLease:
 
             # After the lease expires the orphaned entry is retried and
             # delivered — the duplicate is the honest at-least-once price.
-            monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "0")
+            # Loop 20 / F6: TTL=0 is invalid input; expire the lease by
+            # moving the clock past a small positive TTL instead.
+            real_now = outbox._hermes_now
+            monkeypatch.setenv("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", "60")
+            monkeypatch.setattr(
+                outbox, "_hermes_now",
+                lambda: real_now() + timedelta(seconds=120),
+            )
             with patch("gateway.config.load_gateway_config", return_value=_telegram_gateway_cfg()), \
                  patch("tools.send_message_tool._send_to_platform", new=_ok_send(sends)):
                 assert s._replay_delivery_outbox() == 1

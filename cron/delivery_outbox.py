@@ -54,17 +54,23 @@ Design notes:
   (documented cap, not silent growth). Legacy callers without an
   execution_id keep the loop-13 refresh collapse (their key cannot
   distinguish runs).
-- Send lease + delivery receipt (audit loop 17 / F3): a replay persists
-  status ``sending`` (with ``lease_ts``, ``lease_pid`` and the
-  ``send_attempt`` number) BEFORE the send goes out, and records
-  ``delivered`` with a ``receipt`` (the platform-side message_id when the
-  send path returns one, else a payload hash + timestamp) immediately after.
-  At replay start, a ``sending`` entry whose lease is older than
+- Send lease + delivery receipt (audit loop 17 / F3, structured in loop 20 /
+  F1): a replay persists status ``sending`` (with ``lease_ts``, ``lease_pid``
+  and the ``send_attempt`` number) BEFORE the send goes out, and records
+  ``delivered`` with a structured ``receipt`` immediately after:
+  ``{"kind": "platform_message", "value": <id>}`` — the platform-side
+  message_id the send path returned; this IS an external delivery receipt —
+  or ``{"kind": "local_send_witness", "value": <hash@ts>}`` — a payload hash
+  plus the LOCAL send timestamp; this is only a local send witness (this
+  process handed the payload to the send path at that time) and explicitly
+  NOT a delivery receipt: a send that never reached the platform is
+  indistinguishable from one that did. At replay start, a ``sending`` entry
+  whose lease is older than
   ``HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS`` (default 600s) is orphaned — its
   holder died mid-send — and is retried; a fresh ``sending`` entry belongs
   to a live process and is skipped. HONEST REMAINING GAP: a crash between
   the successful send and the receipt write still redelivers once after the
-  lease expires — that is at-least-once with a visible receipt as proof,
+  lease expires — that is at-least-once with a visible receipt/witness,
   not a silent loss; exactly-once would require platform-side idempotency
   keys the send APIs do not offer.
 - Locking (audit loop 13 / F1): every read-modify-write (enqueue, replay
@@ -92,6 +98,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -149,6 +156,22 @@ MAX_DEAD_PER_TARGET = 3
 # fresher lease belongs to a live process and is skipped. Env-overridable,
 # read per call so tests and operators can tune without a restart.
 _DEFAULT_LEASE_TTL_SECONDS = 600.0
+
+# Receipt kinds (audit loop 20 / F1 — receipt honesty): a delivered entry's
+# receipt is stored structured as {"kind": ..., "value": ...} so the two
+# evidence classes can never be conflated again (the loop-17 plain-string
+# form let the payload-hash fallback read as "proof of delivery"):
+#   platform_message   — the platform-side message_id; an EXTERNAL delivery
+#                        receipt (the platform accepted the message).
+#   local_send_witness — payload hash + local send timestamp; a LOCAL send
+#                        witness only. It proves this process handed the
+#                        payload to the send path at that time, NOT external
+#                        delivery — never present it as a Zustellbeleg.
+RECEIPT_KIND_PLATFORM_MESSAGE = "platform_message"
+RECEIPT_KIND_LOCAL_SEND_WITNESS = "local_send_witness"
+_RECEIPT_KINDS = frozenset(
+    {RECEIPT_KIND_PLATFORM_MESSAGE, RECEIPT_KIND_LOCAL_SEND_WITNESS}
+)
 
 # Upper bound on waiting for the cross-process <outbox>.lock flock — same
 # reasoning as cron/jobs.py #60703: a wedged lock holder must not freeze the
@@ -385,13 +408,62 @@ def _write_entries(path: Path, entries: List[Dict[str, Any]]) -> None:
 
 
 def _lease_ttl_seconds() -> float:
-    """Effective send-lease TTL; env-tunable, invalid values fall back."""
-    try:
-        return float(os.environ.get(
-            "HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS", _DEFAULT_LEASE_TTL_SECONDS
-        ))
-    except (TypeError, ValueError):
+    """Effective send-lease TTL; env-tunable, fail-LOUD on garbage (loop 20 /
+    F6).
+
+    Only finite positive floats are accepted. NaN, ±inf, zero/negative
+    values and unparseable junk all fall back to the default with a WARNING
+    — silently accepting them would either orphan every lease instantly
+    (0/negative/NaN: the staleness comparison never comes out false) or pin
+    a crashed send forever (inf).
+    """
+    raw = os.environ.get("HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS")
+    if raw is None:
         return _DEFAULT_LEASE_TTL_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if not math.isfinite(value) or value <= 0:
+        logger.warning(
+            "HERMES_CRON_OUTBOX_LEASE_TTL_SECONDS=%r is not a finite positive "
+            "number of seconds — falling back to the default %.0fs",
+            raw, _DEFAULT_LEASE_TTL_SECONDS,
+        )
+        return _DEFAULT_LEASE_TTL_SECONDS
+    return value
+
+
+def _structure_receipt(receipt: Any) -> Optional[Dict[str, str]]:
+    """Normalize a replay receipt into its stored structured form (loop 20 /
+    F1 — receipt honesty).
+
+    Accepts the structured dict directly (validated against the known kinds)
+    or the legacy loop-17 plain strings the send path still produces:
+    ``platform-message:<id>`` maps to kind ``platform_message`` (external
+    delivery receipt), ``payload-sha256:<hash>@<ts>`` maps to kind
+    ``local_send_witness`` (LOCAL send witness — NOT a delivery receipt).
+    Any other string is preserved verbatim as a ``local_send_witness``:
+    unknown evidence is never upgraded to a platform receipt. Returns None
+    for empty/unusable input (no receipt is stored then, as before).
+    """
+    kind: Optional[str] = None
+    value: Optional[str] = None
+    if isinstance(receipt, dict):
+        raw_kind = receipt.get("kind")
+        raw_value = receipt.get("value")
+        if raw_kind in _RECEIPT_KINDS and isinstance(raw_value, str) and raw_value:
+            kind, value = raw_kind, raw_value
+    elif isinstance(receipt, str) and receipt:
+        if receipt.startswith("platform-message:"):
+            kind, value = RECEIPT_KIND_PLATFORM_MESSAGE, receipt.split(":", 1)[1]
+        elif receipt.startswith("payload-sha256:"):
+            kind, value = RECEIPT_KIND_LOCAL_SEND_WITNESS, receipt.split(":", 1)[1]
+        else:
+            kind, value = RECEIPT_KIND_LOCAL_SEND_WITNESS, receipt
+    if kind is None or not value:
+        return None
+    return {"kind": kind, "value": value}
 
 
 def _lease_is_stale(entry: Dict[str, Any], now: datetime) -> bool:
@@ -428,6 +500,7 @@ def enqueue(
     *,
     execution_id: Optional[str] = None,
     error_class: str = ERROR_CLASS_SEND,
+    allow_legacy_no_execution: bool = False,
 ) -> Dict[str, Any]:
     """Persist an undeliverable payload for later replay.
 
@@ -446,14 +519,30 @@ def enqueue(
     the key includes the execution_id, so different runs keep BOTH payloads.
     A permanently misconfigured job is still bounded: past
     ``MAX_DEAD_PER_TARGET`` entries per (job_id, target, class) the OLDEST
-    entry is replaced. Legacy callers without an execution_id keep the
-    loop-13 refresh collapse and are marked with a warning on send-class
-    enqueues (audit loop 17 / F1 — productive run paths are expected to
-    carry an execution_id since run_one_job now wires it).
+    entry is replaced.
+
+    Fail-closed on missing execution_id (audit loop 20 / F3): a ``send``
+    enqueue WITHOUT an ``execution_id`` raises ValueError — per-run
+    idempotency is load-bearing (two failed runs of the same job must never
+    collapse), and every productive run path carries
+    ``job["execution_id"]`` since loop 17, so a missing id means a caller
+    bug that must surface loudly instead of degrading silently. The
+    ``allow_legacy_no_execution=True`` opt-in keeps the loop-6 legacy key
+    (with the loop-17 warning) and exists ONLY for the loop-6/loop-17
+    legacy-caller tests and hypothetical embedders pinned to the loop-6
+    contract — DEPRECATED, do not use in new code.
     """
     if error_class not in (ERROR_CLASS_SEND, ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY):
         error_class = ERROR_CLASS_SEND
     if execution_id is None and error_class == ERROR_CLASS_SEND:
+        if not allow_legacy_no_execution:
+            raise ValueError(
+                "cron outbox: send-class enqueue REQUIRES an execution_id "
+                "(per-run idempotency key, audit loop 20 / F3); productive "
+                "run paths carry job['execution_id'] since loop 17. Legacy "
+                "callers must opt in explicitly via "
+                "allow_legacy_no_execution=True (deprecated)."
+            )
         logger.warning(
             "cron outbox: send-class enqueue for job %s WITHOUT execution_id "
             "(legacy loop-6 caller) — per-run idempotency disabled; productive "
@@ -606,18 +695,22 @@ def record_replay_result(
     *,
     success: bool,
     error: Optional[str] = None,
-    receipt: Optional[str] = None,
+    receipt: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record the outcome of one replay attempt.
 
-    Success → ``delivered``; the delivery ``receipt`` (audit loop 17 / F3 —
-    platform-side message_id when the send path returns one, else a payload
-    hash + timestamp) is stored on the entry as visible proof. Failure
-    increments ``attempts`` and either schedules the next retry (exponential
-    backoff) or, past ``MAX_ATTEMPTS``, marks the entry ``dead`` (dead-letter;
-    never retried again, never auto-pruned). Accepts entries in ``sending``
-    (the normal post-``begin_replay`` flow) and ``queued`` (loop-6/13 legacy
-    direct callers); the send-lease fields are cleared on the transition.
+    Success → ``delivered``; the delivery ``receipt`` is stored STRUCTURED
+    (audit loop 20 / F1 — receipt honesty) as ``{"kind", "value"}``:
+    ``platform_message`` is an external delivery receipt (platform-side
+    message_id); ``local_send_witness`` is only a local send witness
+    (payload hash + local send timestamp) and is explicitly NOT a
+    Zustellbeleg — see _structure_receipt() and the module docstring.
+    Failure increments ``attempts`` and either schedules the next retry
+    (exponential backoff) or, past ``MAX_ATTEMPTS``, marks the entry
+    ``dead`` (dead-letter; never retried again, never auto-pruned). Accepts
+    entries in ``sending`` (the normal post-``begin_replay`` flow) and
+    ``queued`` (loop-6/13 legacy direct callers); the send-lease fields are
+    cleared on the transition.
     Returns the updated entry, or None if the id is unknown.
     """
     with _lock:
@@ -636,8 +729,9 @@ def record_replay_result(
                 if success:
                     entry["status"] = "delivered"
                     entry["last_error"] = None
-                    if receipt:
-                        entry["receipt"] = receipt
+                    structured = _structure_receipt(receipt)
+                    if structured is not None:
+                        entry["receipt"] = structured
                 else:
                     entry["status"] = "queued"
                     entry["attempts"] = (entry.get("attempts") or 0) + 1
@@ -669,3 +763,48 @@ def outbox_counts() -> Dict[str, int]:
         status = str(entry.get("status") or "")
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def outbox_status(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Operator-facing outbox status for ``hermes cron status`` (loop 20 / F2).
+
+    The crash-critical ``sending`` state is otherwise only visible in the
+    JSONL itself, so it is surfaced explicitly here:
+
+    - ``counts``: per-status counts (queued/sending/delivered/dead);
+    - ``sending_oldest_age_seconds``: age of the OLDEST live send lease in
+      seconds (None when nothing is sending or no lease carries a parseable
+      timestamp);
+    - ``sending_expired``: how many sending leases are already older than
+      the lease TTL — orphaned leases whose holder died mid-send; they are
+      retried on the next replay trigger, but a nonzero value is an alarm
+      worth showing an operator.
+    """
+    with _lock:
+        entries = _read_entries(_current_outbox_file())
+    now = now or _hermes_now()
+    counts: Dict[str, int] = {"queued": 0, "sending": 0, "delivered": 0, "dead": 0}
+    oldest_sending_age: Optional[float] = None
+    expired = 0
+    ttl = _lease_ttl_seconds()
+    for entry in entries:
+        status = str(entry.get("status") or "")
+        counts[status] = counts.get(status, 0) + 1
+        if status != "sending":
+            continue
+        lease = _parse_ts(entry.get("lease_ts"))
+        if lease is None:
+            # sending without a lease timestamp is stale by definition
+            # (_lease_is_stale) — count it as expired.
+            expired += 1
+            continue
+        age = (now - lease).total_seconds()
+        if oldest_sending_age is None or age > oldest_sending_age:
+            oldest_sending_age = age
+        if age > ttl:
+            expired += 1
+    return {
+        "counts": counts,
+        "sending_oldest_age_seconds": oldest_sending_age,
+        "sending_expired": expired,
+    }

@@ -171,11 +171,16 @@ class TestPerExecutionIdempotency:
 
     def test_legacy_caller_without_execution_id_keeps_job_target_dedupe(self, tmp_path):
         """Backward compat: without an execution_id the loop-6 (job, target)
-        refresh semantics are unchanged."""
+        refresh semantics are unchanged — since loop 20 (F3) only behind the
+        explicit allow_legacy_no_execution=True opt-in."""
         home = tmp_path / "home"
         with use_cron_store(home):
-            first = outbox.enqueue("job", _target(), "v1", "err")
-            second = outbox.enqueue("job", _target(), "v2", "err")
+            first = outbox.enqueue(
+                "job", _target(), "v1", "err", allow_legacy_no_execution=True,
+            )
+            second = outbox.enqueue(
+                "job", _target(), "v2", "err", allow_legacy_no_execution=True,
+            )
             entries = outbox.list_entries()
             assert len(entries) == 1
             assert second["id"] == first["id"]

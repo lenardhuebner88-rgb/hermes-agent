@@ -380,26 +380,48 @@ def _print_active_jobs_summary(jobs) -> None:
 
 
 def _print_outbox_summary() -> None:
-    """Show delivery-outbox queued/dead counts when non-zero (audit A-H2).
+    """Show delivery-outbox queued/sending/dead state when non-zero (audit A-H2).
 
     Queued entries are retried automatically with backoff; dead entries are
     dead letters — reports that could not be delivered after all retries and
-    would otherwise have been lost silently. Best-effort: an unreadable
-    outbox must never break `cron status`.
+    would otherwise have been lost silently. Since loop 20 (F2) the
+    crash-critical ``sending`` state is shown too (it used to be visible
+    only in the JSONL itself): a sending count with the oldest lease age,
+    plus a ⚠ alarm line for leases already older than the TTL (orphaned —
+    the holder crashed mid-send; retried on the next replay trigger).
+    Best-effort: an unreadable outbox must never break `cron status`.
     """
     try:
-        from cron.delivery_outbox import outbox_counts
+        from cron.delivery_outbox import outbox_status
 
-        counts = outbox_counts()
+        status = outbox_status()
     except Exception:
         return
+    counts = status.get("counts") or {}
     queued = counts.get("queued", 0)
+    sending = counts.get("sending", 0)
     dead = counts.get("dead", 0)
     if queued:
         print(color(
             f"  ⏳ Delivery outbox: {queued} report(s) queued — "
             "will retry with backoff",
             Colors.YELLOW,
+        ))
+    if sending:
+        age = status.get("sending_oldest_age_seconds")
+        age_part = (
+            f", oldest lease {age:.0f}s old" if isinstance(age, (int, float)) else ""
+        )
+        print(color(
+            f"  ⇄ Delivery outbox: {sending} report(s) currently sending{age_part}",
+            Colors.YELLOW,
+        ))
+    expired = status.get("sending_expired", 0)
+    if expired:
+        print(color(
+            f"  ⚠ Delivery outbox: {expired} send lease(s) OLDER than the TTL — "
+            "holder crashed mid-send; orphaned and queued for retry",
+            Colors.RED,
         ))
     if dead:
         print(color(

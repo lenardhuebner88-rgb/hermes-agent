@@ -69,7 +69,7 @@ class TestEnqueueOnTotalDeliveryFailure:
         with use_cron_store(home):
             with patch("gateway.config.load_gateway_config", return_value=_telegram_gateway_cfg()), \
                  patch("tools.send_message_tool._send_to_platform", new=_failing_send(fail_sends)):
-                error = _deliver_result(_origin_job(), "report body")
+                error = _deliver_result(_origin_job(execution_id="exec-loop6"), "report body")
 
             # The old net still catches the failure...
             assert error is not None and "platform down" in error
@@ -88,7 +88,7 @@ class TestEnqueueOnTotalDeliveryFailure:
             # the SAME entry instead of appending a duplicate.
             with patch("gateway.config.load_gateway_config", return_value=_telegram_gateway_cfg()), \
                  patch("tools.send_message_tool._send_to_platform", new=_failing_send(fail_sends)):
-                _deliver_result(_origin_job(), "report body v2")
+                _deliver_result(_origin_job(execution_id="exec-loop6"), "report body v2")
             entries = outbox.list_entries()
             assert len(entries) == 1
             assert entries[0]["id"] == entry["id"]
@@ -141,6 +141,7 @@ class TestDeadLetterAfterMaxAttempts:
                 {"platform": "telegram", "chat_id": "9", "thread_id": None},
                 "lost report",
                 "initial failure",
+                allow_legacy_no_execution=True,
             )
 
             cfg_patch = patch(
@@ -191,6 +192,7 @@ class TestDeadLetterAfterMaxAttempts:
                 {"platform": "telegram", "chat_id": "1", "thread_id": None},
                 "p",
                 "e",
+                allow_legacy_no_execution=True,
             )
             expected = [300, 600, 1200, 2400]  # then attempt 5 → dead
             start = clock["now"]
@@ -215,6 +217,7 @@ class TestStoreScoping:
                 {"platform": "telegram", "chat_id": "1", "thread_id": None},
                 "alpha payload",
                 "err",
+                allow_legacy_no_execution=True,
             )
 
         assert (home_a / "cron" / "outbox.jsonl").exists()
@@ -235,6 +238,7 @@ class TestStoreScoping:
             {"platform": "telegram", "chat_id": "2", "thread_id": None},
             "late payload",
             "err",
+            allow_legacy_no_execution=True,
         )
 
         assert (home / "cron" / "outbox.jsonl").exists()
@@ -250,6 +254,7 @@ class TestStoreScoping:
             {"platform": "telegram", "chat_id": "3", "thread_id": None},
             "compat payload",
             "err",
+            allow_legacy_no_execution=True,
         )
 
         assert pointed.exists()
