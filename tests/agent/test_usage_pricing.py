@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
+import agent.usage_pricing as usage_pricing
 from agent.usage_pricing import (
     CanonicalUsage,
     PricingEntry,
     estimate_equivalent_cost,
+    estimate_equivalent_cost_amounts,
     estimate_usage_cost,
     get_pricing_entry,
     normalize_usage,
@@ -339,6 +341,40 @@ def test_subscription_run_has_zero_actual_and_nonzero_list_equivalent():
     assert equivalent.amount_usd is not None
     assert equivalent.amount_usd > 0
     assert equivalent.source == "litellm_feed"
+
+
+def test_bulk_equivalent_resolves_each_route_once_per_read(monkeypatch):
+    calls = []
+
+    def fake_get_pricing_entry(model_name, provider=None, base_url=None, api_key=None):
+        calls.append((model_name, provider, base_url, api_key))
+        return PricingEntry(
+            input_cost_per_million=1,
+            output_cost_per_million=2,
+            source="official_docs_snapshot",
+        )
+
+    monkeypatch.setattr(usage_pricing, "get_pricing_entry", fake_get_pricing_entry)
+
+    values = estimate_equivalent_cost_amounts(
+        [
+            {
+                "model": "model-a",
+                "provider": "anthropic",
+                "input_tokens": 1_000_000,
+                "output_tokens": 500_000,
+            },
+            {
+                "model": "model-a",
+                "provider": "anthropic",
+                "input_tokens": 2_000_000,
+                "output_tokens": 0,
+            },
+        ]
+    )
+
+    assert values == [2.0, 2.0]
+    assert len(calls) == 1
 
 
 def test_reasoning_tokens_are_billed_only_for_separate_rate(monkeypatch):

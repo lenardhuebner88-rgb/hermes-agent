@@ -1664,6 +1664,66 @@ def estimate_equivalent_cost_amount(
     return float(result.amount_usd) if result.amount_usd is not None else None
 
 
+def estimate_equivalent_cost_amounts(
+    facts: Iterable[Mapping[str, Any]],
+) -> list[Optional[float]]:
+    """Value persisted usage facts in one request-scoped pricing pass.
+
+    Pricing entries are resolved once per distinct canonical route for this
+    call, then discarded. This is deliberately not a cross-request cache:
+    replacing the vendored feed or an override affects the very next read.
+    """
+    missing = object()
+    entries: dict[
+        tuple[str, str, str],
+        PricingEntry | None,
+    ] = {}
+    amounts: list[Optional[float]] = []
+    for fact in facts:
+        model_name = fact.get("model")
+        if not model_name:
+            amounts.append(None)
+            continue
+        usage = CanonicalUsage(
+            input_tokens=int(fact.get("input_tokens") or 0),
+            output_tokens=int(fact.get("output_tokens") or 0),
+            cache_read_tokens=int(fact.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(fact.get("cache_write_tokens") or 0),
+        )
+        if not usage.total_tokens:
+            amounts.append(None)
+            continue
+        provider = fact.get("provider")
+        base_url = fact.get("base_url")
+        route = resolve_billing_route(
+            str(model_name),
+            provider=str(provider) if provider else None,
+            base_url=str(base_url) if base_url else None,
+        )
+        key = (route.provider, route.model, route.base_url)
+        entry = entries.get(key, missing)
+        if entry is missing:
+            entry = get_pricing_entry(
+                route.model,
+                provider=route.provider,
+                base_url=route.base_url,
+            )
+            entries[key] = entry
+        if entry is None:
+            amounts.append(None)
+            continue
+        result = _estimate_priced_usage(
+            route=route,
+            usage=usage,
+            entry=entry,
+            result_status="equivalent",
+        )
+        amounts.append(
+            float(result.amount_usd) if result.amount_usd is not None else None
+        )
+    return amounts
+
+
 def has_known_pricing(
     model_name: str,
     provider: Optional[str] = None,

@@ -94,7 +94,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
-from agent.usage_pricing import estimate_equivalent_cost_amount
+from agent.usage_pricing import (
+    estimate_equivalent_cost_amount,
+    estimate_equivalent_cost_amounts,
+)
 from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod, kanban_breaker_message as _breaker_message
 from hermes_cli import kanban_context as _kanban_context
@@ -8473,10 +8476,10 @@ def backfill_run_costs(
     AFTER the worker already closed its run via ``hermes kanban complete`` —
     hence post-hoc here, never at ``_end_run`` time. Tokens go into the
     columns, ``cost_usd`` is stamped ``0.0`` (the run is included in the
-    subscription — keeps the honest-$0 convention), and the API-equivalent
-    value is preserved as ``metadata.cost_usd_equivalent``. ``board`` selects
-    the worker-log directory and defaults to the current board, matching the
-    default ``connect_closing()`` the callers pair this with.
+    subscription — keeps the honest-$0 convention), and model/provider facts
+    are preserved for read-time equivalent derivation. ``board`` selects the
+    worker-log directory and defaults to the current board, matching the default
+    ``connect_closing()`` the callers pair this with.
     """
     sql = (
         "SELECT id, task_id, profile, metadata FROM task_runs "
@@ -8591,26 +8594,9 @@ def backfill_run_costs(
             if sub:
                 # K16 runs before K_sessions for metadata.worker_session_id rows.
                 # If we only stamp cost_usd=0.0, K_sessions' ``cost_usd IS NULL``
-                # gate can never add the subscription API-equivalent later.
-                # Mirror the K_sessions subscription branch here, including
-                # cache-inclusive tokens for the equivalent calculation.
+                # gate cannot add the subscription usage facts later. Mirror the
+                # K_sessions subscription branch here.
                 b_cost = 0.0
-                estimated = _coerce_float(usage.get("estimated_cost_usd"))
-                actual = _coerce_float(usage.get("actual_cost_usd"))
-                equivalent: Optional[float]
-                if estimated is not None and estimated > 0:
-                    equivalent = estimated
-                elif actual is not None and actual > 0:
-                    equivalent = actual
-                else:
-                    equivalent = estimate_equivalent_cost_amount(
-                        usage.get("model"),
-                        provider=usage.get("billing_provider"),
-                        input_tokens=b_in,
-                        output_tokens=b_out,
-                        cache_read_tokens=_coerce_int(usage.get("cache_read_tokens")),
-                        cache_write_tokens=_coerce_int(usage.get("cache_write_tokens")),
-                    )
                 stamped = dict(metadata or {})
                 stamped.setdefault("billing_mode", "subscription_included")
                 stamped.setdefault("subscription", sub)
@@ -9599,18 +9585,17 @@ def backfill_run_costs_from_sessions(
                     cread_sum = (cread_sum or 0) + sess["cache_read"]
                 if sess.get("cache_write") is not None:
                     cwrite_sum = (cwrite_sum or 0) + sess["cache_write"]
-                # Keep real metered spend (actual) apart from the API-equivalent
-                # estimate so a subscription lane can stamp cost_usd=$0 while
-                # still surfacing the estimate as cost_usd_equivalent.
+                # Keep real metered spend (actual) apart from runtime estimates;
+                # subscription lanes stamp cost_usd=$0 and retain raw usage facts
+                # for read-time equivalent derivation.
                 if sess.get("actual_cost") is not None:
                     actual_sum = (actual_sum or 0.0) + sess["actual_cost"]
                 if sess.get("est_cost") is not None:
                     est_sum = (est_sum or 0.0) + sess["est_cost"]
                 # First non-empty model/provider wins. A run's sessions are
-                # same-profile/same-model in practice; if they ever differ the
-                # summed tokens are priced at the first model's rate — an
-                # approximation that only affects the labeled equivalent estimate,
-                # never the real cost_usd, so it cannot corrupt the cost metric.
+                # same-profile/same-model in practice; if they ever differ, the
+                # first route remains the recorded provenance for the summed
+                # token facts.
                 if not model_seen and sess.get("model"):
                     model_seen = sess["model"]
                 if not provider_seen and sess.get("provider"):
@@ -9659,7 +9644,6 @@ def backfill_run_costs_from_sessions(
             stamp_out: Optional[int] = None
             stamp_cost: Optional[float] = None
             stamp_status: Optional[str] = None
-            equivalent: Optional[float] = None
             billing_mode: Optional[str] = None
             subscription: Optional[str] = None
 
@@ -9669,10 +9653,8 @@ def backfill_run_costs_from_sessions(
                 if sub:
                     # Subscription lane: the quota burn rides the subscription,
                     # so real metered cost_usd is $0 (any actual is a metered
-                    # leg) — but surface the API-equivalent estimate as
-                    # cost_usd_equivalent (generalises K17 beyond claude-cli) so
-                    # the lane stops looking free. Keeps the metric-integrity
-                    # invariant: cost_usd_total rises only by real metered $.
+                    # leg). The list-price equivalent is derived by readers from
+                    # the usage and route facts recorded below.
                     subscription = sub
                     billing_mode = "subscription_included"
                     # Subscription burn is NEVER real metered $ — cost_usd is
@@ -9683,31 +9665,11 @@ def backfill_run_costs_from_sessions(
                     # as the (clearly-labeled) equivalent.
                     stamp_cost = 0.0
                     stamp_status = "actual"
-                    if est_sum is not None and est_sum > 0:
-                        # The runtime already priced the session (claude/minimax
-                        # 'estimated' sessions) — trust its number.
-                        equivalent = est_sum
-                    elif actual_sum is not None and actual_sum > 0:
-                        # A genuine metered leg on a subscription lane: use it as
-                        # the best available equivalent (not as real cost_usd).
-                        equivalent = actual_sum
-                    else:
-                        # The runtime left it unpriced (codex 'included' sessions
-                        # stamp estimated_cost_usd=0) → compute tokens × online
-                        # price so the teure codex lanes stop looking free.
-                        _warn_model_billing_provider_mismatch(
-                            run_id=run_id,
-                            model=model_seen,
-                            billing_provider=provider_seen,
-                        )
-                        equivalent = estimate_equivalent_cost_amount(
-                            model_seen,
-                            provider=provider_seen,
-                            input_tokens=in_sum,
-                            output_tokens=out_sum,
-                            cache_read_tokens=cread_sum,
-                            cache_write_tokens=cwrite_sum,
-                        )
+                    _warn_model_billing_provider_mismatch(
+                        run_id=run_id,
+                        model=model_seen,
+                        billing_provider=provider_seen,
+                    )
                 else:
                     # Metered lane: real card cost is actual; fall back to the
                     # runtime estimate as the best proxy when no actual was
@@ -35384,12 +35346,9 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
 
 def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     """F4 (Statistik): Kosten-Sicht — heute + N-Tage-Fenster gesamt und pro
-    Profil. Liest ausschließlich gestempelte ``task_runs``-Spalten plus
-    ``metadata.cost_usd_equivalent`` (K17: Subscription-Runs tragen ehrliche
-    $0 in ``cost_usd``, das API-Äquivalent steht in der Metadata).
-    Doppelzählung verhindert das Stamping selbst (K17-Guard stempelt im
-    geteilten Worker-Log nur den jüngsten claude-cli-Run); ungestempelte
-    Runs — etwa der Review-Gate-Verifier — zählen hier schlicht 0."""
+    Profil. Liest gestempelte ``task_runs``-Fakten und leitet das
+    API-Äquivalent gegen die aktuelle kanonische Preistabelle ab. Subscription-
+    Runs tragen ehrliche $0 in ``cost_usd``; unbepreisbare Werte bleiben NULL."""
     days = max(1, min(90, int(days)))
     now = int(time.time())
     today = _dt.date.fromtimestamp(now)
@@ -35400,25 +35359,21 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     totals_window = _empty_cost_bucket()
     profiles: dict[str, dict] = {}
 
-    for row in conn.execute(
+    rows = conn.execute(
         "SELECT profile, ended_at, cost_usd, "
         "COALESCE(cost_status, json_extract(metadata, '$.cost_status')) AS cost_status, "
         "input_tokens, output_tokens, metadata "
         "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ?",
         (window_start,),
-    ).fetchall():
-        equiv = None
+    ).fetchall()
+    equivalent_values = _equivalent_cost_values_from_rows(rows)
+    for row, equiv in zip(rows, equivalent_values, strict=True):
         neuralwatt_kwh = None
         neuralwatt_cost = None
         if row["metadata"]:
             try:
                 meta = json.loads(row["metadata"])
                 if isinstance(meta, dict):
-                    equiv, _confidence = _run_cost_equivalent_from_facts(
-                        meta,
-                        input_tokens=row["input_tokens"],
-                        output_tokens=row["output_tokens"],
-                    )
                     neuralwatt_kwh = _numeric_metadata_value(
                         meta, "energy", "energy_kwh"
                     )
@@ -39656,9 +39611,20 @@ def batch_task_costs(
     rows_by_task: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         rows_by_task.setdefault(str(row["task_id"]), []).append(row)
+    equivalents_by_row = {
+        id(row): value
+        for row, value in zip(
+            rows,
+            _equivalent_cost_values_from_rows(rows),
+            strict=True,
+        )
+    }
     out: dict[str, dict] = {}
     for task_id, task_rows in rows_by_task.items():
-        equivalent = _cost_equivalent_rollup(task_rows)
+        equivalent = _cost_equivalent_rollup(
+            task_rows,
+            values=[equivalents_by_row[id(row)] for row in task_rows],
+        )
         c_usd = sum(float(row["cost_usd"] or 0.0) for row in task_rows)
         estimated_runs = sum(1 for row in task_rows if row["cost_status"] == "estimated")
         actual_runs = sum(1 for row in task_rows if row["cost_status"] == "actual")
@@ -39751,11 +39717,10 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
             ],
         }
 
-    ``cost_usd_equivalent`` is the K17 API-$ estimate stamped in
-    ``metadata.cost_usd_equivalent`` for subscription runs (which carry
-    ``cost_usd=0``).  ``cost_effective_usd`` is ``cost_usd +
-    cost_usd_equivalent`` — the real-or-estimated burn.  NULL ``cost_usd``
-    rows are treated as 0 in sums (COALESCE in SQL).
+    ``cost_usd_equivalent`` is derived at read time from subscription-run facts
+    (which carry ``cost_usd=0``) and the current canonical price table.
+    ``cost_effective_usd`` is ``cost_usd + cost_usd_equivalent`` — the
+    real-or-estimated burn. NULL ``cost_usd`` rows are treated as 0 in sums.
     NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
     ``actual_cost_usd`` is metered API cost plus NeuralWatt request billing
     from numeric ``metadata.cost.request_cost_usd``. kWh is an energy detail;
@@ -39779,13 +39744,21 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         # Pre-K5a DB without cost_usd / token columns — return empty breakdown.
         rows = []
 
+    equivalent_values = _equivalent_cost_values_from_rows(rows)
+    equivalents_by_row = {
+        id(row): value
+        for row, value in zip(rows, equivalent_values, strict=True)
+    }
     rows_by_lane: dict[Optional[str], list[sqlite3.Row]] = {}
     for row in rows:
         rows_by_lane.setdefault(row["profile"], []).append(row)
     by_lane = []
     for profile, lane_rows in rows_by_lane.items():
         cost = sum(float(row["cost_usd"] or 0.0) for row in lane_rows)
-        equivalent = _cost_equivalent_rollup(lane_rows)
+        equivalent = _cost_equivalent_rollup(
+            lane_rows,
+            values=[equivalents_by_row[id(row)] for row in lane_rows],
+        )
         equiv = equivalent["cost_usd_equivalent"]
         nw_kwh = sum(_metadata_number(_run_meta_dict(row["metadata"]), "energy", "energy_kwh") for row in lane_rows)
         nw_cost = sum(_metadata_number(_run_meta_dict(row["metadata"]), "cost", "request_cost_usd") for row in lane_rows)
@@ -39827,7 +39800,7 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         ),
         "run_count": sum(l["run_count"] for l in by_lane),
     }
-    total_equivalent = _cost_equivalent_rollup(rows)
+    total_equivalent = _cost_equivalent_rollup(rows, values=equivalent_values)
     totals["cost_usd_equivalent"] = total_equivalent["cost_usd_equivalent"]
     totals["api_equivalent_usd"] = total_equivalent["cost_usd_equivalent"]
     totals["cost_usd_equivalent_confidence"] = total_equivalent["confidence"]
@@ -39950,30 +39923,101 @@ def _metadata_number(meta: Mapping[str, Any], group: str, key: str) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
-def _cost_equivalent_rollup(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def _cost_equivalent_rollup(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    values: Optional[Sequence[Optional[float]]] = None,
+) -> dict[str, Any]:
     """Derive an all-or-unknown equivalent total from raw run facts.
 
     A partial total would silently understate cost.  Preserve that distinction by
-    returning ``None`` plus ``unknown`` whenever any run cannot be priced, while
-    still exposing the fraction of runs covered by the canonical pricing feed.
+    returning ``None`` plus ``unknown`` whenever any equivalent-cost candidate
+    cannot be priced, while still exposing the fraction covered by the canonical
+    pricing feed. Metered and synthetic completion rows are not candidates: they
+    carry real cost or lifecycle evidence, not a subscription equivalent.
     """
+    row_list = list(rows)
+    if values is None:
+        value_list = _equivalent_cost_values_from_rows(row_list)
+    else:
+        value_list = list(values)
+        if len(value_list) != len(row_list):
+            raise ValueError("equivalent values must align with rows")
     known_total = 0.0
     known_runs = 0
     total_runs = 0
-    for row in rows:
+    for row, value in zip(row_list, value_list, strict=True):
+        meta = _run_meta_dict(row["metadata"])
+        if not _is_equivalent_cost_candidate(meta):
+            continue
         total_runs += 1
-        value, _confidence = _run_cost_equivalent_from_facts(
-            _run_meta_dict(row["metadata"]),
-            input_tokens=row["input_tokens"],
-            output_tokens=row["output_tokens"],
-        )
         if value is not None:
             known_runs += 1
             known_total += value
+    if total_runs == 0:
+        return {
+            "cost_usd_equivalent": None,
+            "confidence": "unknown",
+            "coverage": 0.0,
+        }
     coverage = known_runs / total_runs if total_runs else 0.0
     if known_runs != total_runs:
         return {"cost_usd_equivalent": None, "confidence": "unknown", "coverage": coverage}
     return {"cost_usd_equivalent": round(known_total, 6), "confidence": "derived", "coverage": coverage}
+
+
+def _is_equivalent_cost_candidate(meta: Mapping[str, Any]) -> bool:
+    """Whether a run represents subscription usage needing an API equivalent."""
+    return bool(
+        meta.get("billing_mode") == "subscription_included"
+        or meta.get("subscription")
+        or meta.get("cost_equivalent_provider")
+        or meta.get("cost_equivalent_model")
+    )
+
+
+def _equivalent_cost_values_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[Optional[float]]:
+    """Derive aligned values with one transient route-resolution pass."""
+    row_list = list(rows)
+    candidate_indexes: list[int] = []
+    facts: list[dict[str, Any]] = []
+    for index, row in enumerate(row_list):
+        meta = _run_meta_dict(row["metadata"])
+        if not _is_equivalent_cost_candidate(meta):
+            continue
+        provider = (
+            meta.get("cost_equivalent_provider")
+            or meta.get("provider")
+            or meta.get("billing_provider")
+            or meta.get("api_provider")
+        )
+        model = (
+            meta.get("cost_equivalent_model")
+            or meta.get("model")
+            or meta.get("billing_model")
+            or meta.get("api_model")
+        )
+        candidate_indexes.append(index)
+        facts.append(
+            {
+                "provider": provider,
+                "model": model,
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "cache_read_tokens": meta.get("cache_read_tokens"),
+                "cache_write_tokens": meta.get("cache_write_tokens"),
+            }
+        )
+    values: list[Optional[float]] = [None] * len(row_list)
+    for index, value in zip(
+        candidate_indexes,
+        estimate_equivalent_cost_amounts(facts),
+        strict=True,
+    ):
+        values[index] = value
+    return values
 
 
 def _run_cost_equivalent_from_facts(
@@ -39989,6 +40033,8 @@ def _run_cost_equivalent_from_facts(
     ``cost_usd_equivalent`` deliberately is *not* consulted.  A missing pricing
     entry is represented as ``(None, "unknown")`` rather than a misleading $0.
     """
+    if not _is_equivalent_cost_candidate(meta):
+        return None, "unknown"
     provider = provider or (
         meta.get("cost_equivalent_provider")
         or meta.get("provider")
@@ -40027,9 +40073,9 @@ def runs_windowed_rollup(
 
     Roots are tree sinks (no task depends on them), measured by the task's
     completion timestamp (exported as ``completed_at`` and ``ended_at``). Cost
-    ranking uses the effective API burn
-    (``cost_usd + metadata.cost_usd_equivalent``); missing price evidence stays
-    ``None`` instead of being reported as a fake zero.
+    ranking uses real metered cost plus a read-time API equivalent for
+    subscription usage; missing price evidence stays ``None`` instead of being
+    reported as a fake zero.
     """
     now = int(time.time())
     since_hours = max(1, int(since_hours))

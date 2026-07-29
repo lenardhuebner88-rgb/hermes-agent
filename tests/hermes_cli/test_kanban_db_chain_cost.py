@@ -513,7 +513,11 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
 def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
     """by_lane is sorted descending by cost_effective_usd so subscription lanes
     with cost_usd=0 but positive equivalent rank above zero-cost API lanes."""
-    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 1.00)
+    monkeypatch.setattr(
+        kb,
+        "estimate_equivalent_cost_amounts",
+        lambda facts: [1.00 for _ in facts],
+    )
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sort-chain", assignee="orchestrator",
                               triage=True)
@@ -555,11 +559,11 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
         result = kb.chain_cost_breakdown(conn, root)
 
     by_lane = result["by_lane"]
-    # The measured lane ranks first; the subscription lane carries a derived
-    # equivalent independently of the stored legacy field.
-    assert by_lane[0]["profile"] == "openrouter"
-    assert by_lane[1]["cost_usd_equivalent"] == pytest.approx(1.00)
-    assert by_lane[1]["cost_usd_equivalent_confidence"] == "derived"
+    # The subscription lane carries a derived equivalent independently of the
+    # stored legacy field and therefore ranks above the smaller metered lane.
+    assert by_lane[0]["profile"] == "claude-cli"
+    assert by_lane[0]["cost_usd_equivalent"] == pytest.approx(1.00)
+    assert by_lane[0]["cost_usd_equivalent_confidence"] == "derived"
 
 
 def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanban_home):
@@ -817,4 +821,3 @@ def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
         assert meta["fallback_used"] is True
         assert meta["billing_mode"] == "subscription_included"
         assert "cost_usd_equivalent" not in meta
-

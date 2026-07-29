@@ -938,6 +938,12 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
             "review_roles": review_roles_by_task.get(node_id, []),
             "cost_usd": costs["cost_usd"],
             "cost_usd_equivalent": costs["cost_usd_equivalent"],
+            "cost_usd_equivalent_confidence": costs[
+                "cost_usd_equivalent_confidence"
+            ],
+            "cost_usd_equivalent_coverage": costs[
+                "cost_usd_equivalent_coverage"
+            ],
             "cost_effective_usd": costs["cost_effective_usd"],
             "input_tokens": costs["input_tokens"],
             "output_tokens": costs["output_tokens"],
