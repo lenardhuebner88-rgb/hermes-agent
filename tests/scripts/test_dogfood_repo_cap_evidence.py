@@ -206,3 +206,167 @@ def test_collect_git_log_default_branch_main(tmp_path):
     repo = _seed_repo(tmp_path, branch="main")
     lines = mod.collect_git_log(str(repo))
     assert any("seed commit" in line for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer — URL validation, 2xx window, login contract
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, body: str, status: int):
+        self._body = body
+        self.status = status
+
+    def read(self) -> bytes:
+        return self._body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, body: str, status: int = 200):
+        self._body = body
+        self._status = status
+
+    def open(self, request, timeout=None):
+        return _FakeResponse(self._body, self._status)
+
+
+def test_base_url_rejects_scheme_without_netloc():
+    """A scheme alone is not a dashboard URL — 'http://' must be rejected
+    or every later request would go nowhere with a confusing error."""
+    mod = _load_module()
+    try:
+        mod._base_url("http://")
+    except mod.CollectorError:
+        pass
+    else:
+        raise AssertionError("scheme-only URL must be rejected")
+    assert mod._base_url("https://h:9119/") == "https://h:9119"
+
+
+def test_json_request_enforces_2xx_status_window():
+    """Only 200..299 may pass; 199 and 300 (the window edges) must raise,
+    and the inclusive boundaries (200, 299) must succeed."""
+    mod = _load_module()
+    for status, ok in ((199, False), (200, True), (299, True), (300, False)):
+        opener = _FakeOpener('{"ok": true}', status=status)
+        if ok:
+            assert mod._json_request(opener, "GET", "https://h/x", timeout=1) == {"ok": True}
+        else:
+            try:
+                mod._json_request(opener, "GET", "https://h/x", timeout=1)
+            except mod.CollectorError:
+                pass
+            else:
+                raise AssertionError(f"status {status} must be rejected")
+
+
+def test_authenticate_requires_literal_ok_true(monkeypatch):
+    """The login response must carry ok=true literally — any other shape
+    (ok=false, missing) is a failed login and must raise."""
+    mod = _load_module()
+    kwargs = {"provider": "local", "username": "u", "password": "p", "timeout": 1}
+
+    monkeypatch.setattr(
+        mod, "_json_request",
+        lambda opener, method, url, *, payload=None, timeout: {"ok": True},
+    )
+    assert mod._authenticate("https://h", **kwargs) is not None
+
+    monkeypatch.setattr(
+        mod, "_json_request",
+        lambda opener, method, url, *, payload=None, timeout: {"ok": False},
+    )
+    try:
+        mod._authenticate("https://h", **kwargs)
+    except mod.CollectorError:
+        pass
+    else:
+        raise AssertionError("login without ok=true must be rejected")
+
+
+# ---------------------------------------------------------------------------
+# JSON-block boundaries, receipt placeholders, request payload
+# ---------------------------------------------------------------------------
+
+def test_json_request_serializes_payload_with_content_type():
+    """A payload is sent as JSON bytes WITH the Content-Type header —
+    a silent drop would POST form-less garbage to the dashboard."""
+    mod = _load_module()
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _Opener:
+        last = None
+
+        def open(self, request, timeout=None):
+            _Opener.last = request
+            return _Resp()
+
+    out = mod._json_request(_Opener(), "POST", "https://h/login", payload={"a": 1}, timeout=1)
+    assert out == {"ok": True}
+    assert _Opener.last.data == b'{"a": 1}'
+    assert _Opener.last.get_header("Content-type") == "application/json"
+
+
+def test_json_block_passthrough_boundary_is_inclusive_and_raw_utf8():
+    """Serialization at exactly max_chars passes through unchanged (the
+    boundary is inclusive) and keeps Umlauts raw."""
+    mod = _load_module()
+    exact = json.dumps("x", indent=2, ensure_ascii=False)
+    assert mod._json_block("x", max_chars=len(exact)) == exact
+    assert "ü" in mod._json_block({"t": "ü"}, max_chars=1000)
+
+
+def test_json_block_list_truncation_keeps_boundary_item_raw():
+    """A prefix serialization at exactly max_chars still KEEPS that item;
+    the truncated wrapper stays raw UTF-8 and parseable."""
+    mod = _load_module()
+    umlaut = "ü" * 10
+    items = [umlaut, "b"]
+    cap = len(json.dumps([umlaut], indent=2, ensure_ascii=False))
+
+    block = mod._json_block(items, max_chars=cap)
+
+    parsed = json.loads(block)
+    assert parsed["items"] == [umlaut]
+    assert umlaut in block  # raw, not \u-escaped
+
+
+def test_write_receipt_renders_none_placeholders(tmp_path):
+    """Empty task list and empty notes render the literal '(none)'
+    placeholders — an empty string reads like a broken template."""
+    mod = _load_module()
+    receipt = tmp_path / "receipt.md"
+    mod.write_receipt(
+        str(receipt),
+        scenario="S-test",
+        task_ids=[],
+        workers_snapshots=[],
+        peak_concurrent=0,
+        task_activities={},
+        git_log=["abc fix"],
+        repo="/repo",
+        started_at="t0",
+        finished_at="t1",
+        notes="",
+        branch="main",
+    )
+    text = receipt.read_text(encoding="utf-8")
+    assert "**Task IDs:** (none)" in text
+    assert "\n(none)\n" in text  # the Notes block placeholder

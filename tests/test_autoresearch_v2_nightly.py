@@ -142,6 +142,28 @@ def test_deep_audit_generic_whole_lane_failure_is_infra_failed():
     assert outcome.outcome == "infra_failed"
 
 
+def test_deep_audit_lane_normalizes_sparse_result_to_safe_defaults(monkeypatch):
+    """A bare ``{"ok": True}`` result (every counter absent) must map to the
+    documented zero defaults instead of crashing the nightly — a sparse
+    payload is exactly what the quiet nights produce."""
+    monkeypatch.setattr(
+        nightly.deep_audit, "write_request",
+        lambda *, subsystem, focus, max_files: {"request_path": f"/tmp/{subsystem}.json"},
+    )
+    monkeypatch.setattr(nightly.deep_audit, "run_request_file", lambda _p: {"ok": True})
+
+    summary = nightly.run_deep_audit_lane("kanban", max_files=10)
+
+    assert summary["findings"] == 0
+    assert summary["scanned"] == 0
+    assert summary["tokens"] == 0
+    assert summary["usage_source"] == "measured"
+    assert summary["llm_calls"] == 0
+    assert summary["reason"] == ""
+    assert summary["errors"] == 0
+    assert summary["ok"] is True
+
+
 # ---------------------------------------------------------------- discord contract
 
 def test_post_summary_uses_send_message_contract():
@@ -530,3 +552,74 @@ def test_v2_session_stop_blocks_next_lane_in_same_window(monkeypatch, capsys):
     monkeypatch.setattr(nightly, "run_test_foundry_lane", boom_tf)
     assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
     assert "quota" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Second pass: glue None-safety
+# ---------------------------------------------------------------------------
+
+def test_expected_skip_error_tolerates_none():
+    """A lane result without tf_error passes None — the classifier must
+    answer 'not an expected skip', not crash on None.lower()."""
+    assert nightly._expected_skip_error(None) is None
+
+
+def test_watchdog_starts_only_for_positive_budget():
+    """A zero or negative budget must not start the watchdog thread — a
+    negative deadline would fire immediately and kill a healthy sweep."""
+    import threading
+
+    def _watchdogs():
+        return {t.ident for t in threading.enumerate() if t.name == "ar-v2-watchdog"}
+
+    before = _watchdogs()
+    nightly._install_hang_forensics(0.0, 0.0)
+    nightly._install_hang_forensics(0.0, -5.0)
+    assert _watchdogs() == before
+
+
+def test_test_foundry_lane_normalizes_bare_ok_result(monkeypatch):
+    """A bare {'ok': True} foundry result maps every counter to its zero
+    default — a missing key must never crash the sweep nor be billed as
+    model calls (cooldown would lock for nothing)."""
+    monkeypatch.setattr(
+        nightly.test_foundry, "write_request",
+        lambda **kw: {"request_path": "/tmp/unused.json"},
+    )
+    monkeypatch.setattr(
+        nightly.test_foundry, "run_request_file", lambda path: {"ok": True}
+    )
+
+    (summary,) = nightly.run_test_foundry_lane(["scripts/x.py"], max_mutants=10)
+
+    assert summary["tests_kept"] == 0
+    assert summary["survivors"] == 0
+    assert summary["tokens"] == 0
+    assert summary["usage_source"] == "measured"
+    assert summary["llm_calls"] == 0
+    assert summary["reason"] == ""
+    assert summary["scanned"] == 0
+    assert summary["errors"] == 0
+
+
+def test_deep_audit_lane_normalizes_bare_ok_result(monkeypatch):
+    """A bare {'ok': True} lane result maps every counter to its zero
+    default and errors=0 — a missing key must never crash the sweep nor
+    count as an error."""
+    monkeypatch.setattr(
+        nightly.deep_audit, "write_request",
+        lambda **kw: {"request_path": "/tmp/unused.json"},
+    )
+    monkeypatch.setattr(
+        nightly.deep_audit, "run_request_file", lambda path: {"ok": True}
+    )
+
+    summary = nightly.run_deep_audit_lane("kanban", max_files=10)
+
+    assert summary["findings"] == 0
+    assert summary["scanned"] == 0
+    assert summary["tokens"] == 0
+    assert summary["usage_source"] == "measured"
+    assert summary["llm_calls"] == 0
+    assert summary["reason"] == ""
+    assert summary["errors"] == 0

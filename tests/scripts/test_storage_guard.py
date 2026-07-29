@@ -122,3 +122,55 @@ def test_main_speaks_up_when_a_bind_is_gone(tmp_path, capsys, monkeypatch):
     assert rc == 1
     assert "[SILENT]" not in out
     assert "/home/piet/.hermes/loops" in out
+
+
+# ---------------------------------------------------------------------------
+# Boundary + contract pinning
+# ---------------------------------------------------------------------------
+
+def test_usage_and_finding_are_frozen():
+    """The snapshot records are immutable — a guard that can mutate its
+    own findings could silently downgrade an alarm to a warning."""
+    import pytest as _pytest
+
+    usage = sg.Usage(Path("/"), 50.0, 1, 2)
+    finding = sg.Finding("alarm", "x")
+    with _pytest.raises(AttributeError):
+        usage.percent = 99.0
+    with _pytest.raises(AttributeError):
+        finding.level = "warn"
+
+
+def test_fstab_line_with_exactly_four_fields_is_parsed():
+    """A minimal 4-field fstab line (no dump/pass columns) still carries
+    source/target/options — dropping it would silently unwatch the bind."""
+    binds = sg.parse_fstab_binds(
+        "/mnt/data/hermes/x /home/piet/x none bind\n", data_root=DATA_ROOT
+    )
+    assert binds == [("/mnt/data/hermes/x", "/home/piet/x")]
+
+
+def test_mountinfo_line_with_exactly_five_fields_counts():
+    """A minimal 5-field mountinfo line still names a live mount target."""
+    assert sg.parse_mount_targets("1 2 3 4 /target\n") == {"/target"}
+
+
+def test_thresholds_are_inclusive_at_warn_and_alarm():
+    """Both thresholds compare '>=': a filesystem at EXACTLY 80% warns and
+    at EXACTLY 90% alarms — a strict comparison would miss the boundary
+    night and alert one cycle late."""
+    warn, _ = _evaluate(HEALTHY, {"/": 80.0, "/mnt/data": 12.0})
+    assert [f.level for f in warn] == ["warn"]
+
+    alarm, _ = _evaluate(HEALTHY, {"/": 90.0, "/mnt/data": 12.0})
+    assert [f.level for f in alarm] == ["alarm"]
+
+
+def test_render_lists_alarms_before_warnings():
+    """Alarms sort first — the first line an operator reads must be the
+    worst one, even if the warn finding was produced earlier."""
+    findings = [sg.Finding("warn", "w-message"), sg.Finding("alarm", "a-message")]
+    usages = [sg.Usage(Path("/"), 90.0, 2**30, 10 * 2**30)]
+    lines = sg._render(findings, usages).splitlines()
+    assert lines[1] == "  [ALARM] a-message"
+    assert lines[2] == "  [WARN] w-message"

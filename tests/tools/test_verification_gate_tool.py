@@ -376,3 +376,152 @@ def test_registry_dispatches_task_bound_ui_shot_to_gate_backend(repo, monkeypatc
     assert [(root, route, scenario) for root, _artifact_dir, route, scenario in calls] == [
         (repo.resolve(), "agent-terminals", "terminal_bridge"),
     ]
+
+
+def test_safe_workspace_rejects_plain_dir_with_valueerror(tmp_path):
+    """A directory without .git must fail with ValueError from the
+    worktree guard itself — not with git's CalledProcessError a step
+    later; callers rely on ValueError to refuse the workspace."""
+    from tools import verification_gate_tool as tool
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(ValueError):
+        tool._safe_workspace(plain)
+
+
+def test_safe_workspace_rejects_garbage_gitfile(tmp_path):
+    """A stray .git FILE that git itself does not recognise must be
+    rejected by the rev-parse check — accepting it would run gates in a
+    directory that is not actually a checkout."""
+    from tools import verification_gate_tool as tool
+
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / ".git").write_text("garbage\n", encoding="utf-8")
+    with pytest.raises(subprocess.CalledProcessError):
+        tool._safe_workspace(fake)
+
+
+def test_artifact_dir_requires_both_kanban_ids_to_be_safe(monkeypatch):
+    """The dispatcher fallback needs BOTH task id and run id matching the
+    safe pattern — an empty run id must raise, not build a dangling
+    'verification-t1-' artifact directory."""
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t1")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "")
+    with pytest.raises(ValueError):
+        tool._artifact_dir(None, None)
+
+
+def test_capabilities_advertise_record_only_default():
+    """The capability announcement must keep record_only_default True —
+    flipping it would silently opt every caller into execution."""
+    from tools import verification_gate_tool as tool
+
+    assert tool.capabilities()["record_only_default"] is True
+
+
+# ---------------------------------------------------------------------------
+# Second pass: command runner, UI summary, allowlists
+# ---------------------------------------------------------------------------
+
+def test_run_commands_records_exit_codes_without_raising(tmp_path):
+    """A failing command is RECORDED (exit_code, timed_out=False) — with
+    check=True semantics it would raise instead, and a successful command
+    must never be flagged as timed out."""
+    import sys
+
+    from tools import verification_gate_tool as tool
+
+    results = tool._run_commands(
+        [
+            ("ok_cmd", [sys.executable, "-c", "pass"]),
+            ("bad_cmd", [sys.executable, "-c", "raise SystemExit(3)"]),
+        ],
+        tmp_path,
+    )
+    assert results[0]["exit_code"] == 0
+    assert results[0]["timed_out"] is False
+    assert results[1]["exit_code"] == 3
+    assert results[1]["timed_out"] is False
+
+
+def _green_row(viewport: str, png_name: str) -> dict:
+    return {
+        "viewport": viewport,
+        "status": "passed",
+        "checks": {
+            "console_error_count": 0,
+            "page_error_count": 0,
+            "horizontal_overflow": False,
+            "terminal_width_usable": True,
+            "bottom_navigation_clear": True,
+            "handoff_visible": True,
+            "held_candidate_visible": True,
+        },
+        "screenshot": png_name,
+    }
+
+
+def _write_green_summary(tmp_path: Path, rows: list[dict]) -> Path:
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    for viewport in rows:
+        (src / f"{viewport['viewport']}.png").write_bytes(b"png-bytes")
+    summary = src / "summary.json"
+    summary.write_text(json.dumps({"allPassed": True, "results": rows}), encoding="utf-8")
+    return summary
+
+
+def test_parse_ui_summary_row_with_failed_status_is_not_green(tmp_path):
+    """A row with status 'failed' is not green even when every single
+    check passes — the reported pass flag is conjunctive, not an OR over
+    the checks."""
+    from tools import verification_gate_tool as tool
+
+    rows = [_green_row(vp, f"{vp}.png") for vp in tool.VIEWPORTS]
+    rows[0] = {**rows[0], "status": "failed"}
+    summary = _write_green_summary(tmp_path, rows)
+
+    out = tool._parse_ui_summary(summary, tmp_path / "art")
+
+    assert out["status"] == "failed"
+    assert out["results"][0]["exit_code"] == 1
+
+
+def test_parse_ui_summary_ignores_rows_with_unknown_viewports(tmp_path):
+    """Rows for viewports outside the pinned set are dropped — counting
+    them would flip the 'every viewport present' gate to failed."""
+    from tools import verification_gate_tool as tool
+
+    rows = [_green_row(vp, f"{vp}.png") for vp in tool.VIEWPORTS]
+    rows.append(_green_row("99x99", "junk.png"))
+    summary = _write_green_summary(tmp_path, rows)
+
+    out = tool._parse_ui_summary(summary, tmp_path / "art")
+
+    assert out["status"] == "passed"
+
+
+def test_run_ui_shot_rejects_route_outside_allowlist(tmp_path):
+    """ui_shot only allows route=agent-terminals — any other route must
+    raise before anything is launched."""
+    from tools import verification_gate_tool as tool
+
+    with pytest.raises(ValueError):
+        tool._run_ui_shot(
+            tmp_path, tmp_path / "art", route="other", scenario="terminal_bridge"
+        )
+
+
+def test_check_requirements_without_workspace_env_is_unavailable(monkeypatch):
+    """An unset HERMES_KANBAN_WORKSPACE is a clean 'unavailable', not a
+    crash on Path(None)."""
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACE", raising=False)
+    ok, msg = tool._check_requirements()
+    assert ok is False
+    assert "workspace" in msg

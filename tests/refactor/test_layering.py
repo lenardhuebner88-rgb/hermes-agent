@@ -207,3 +207,21 @@ def test_kanban_schedule_task_uses_default_but_postpones_annotation():
     )
     assert "_SCHEDULE_DUE_UNSPECIFIED" in names
     assert "_ScheduleDueUnspecified" not in names
+
+
+def test_banner_sections_banner_on_last_line_is_ignored():
+    """A divider on the very last line has no title line after it — it
+    must be ignored, not crash with an out-of-range read."""
+    assert layering.banner_sections(["x = 1", "# ---"]) == []
+
+
+def test_import_time_names_includes_annotated_assignment_value():
+    """An annotated assignment's VALUE is an import-time reference —
+    dropping it would let a cross-module 'X: int = OTHER' move without
+    flagging the order constraint."""
+    tree, _ = parse("""
+        OTHER = 1
+        TYPED: int = OTHER
+    """)
+    top = layering.top_level_symbols(tree)
+    assert layering.import_time_names(top["TYPED"], top) == {"OTHER"}

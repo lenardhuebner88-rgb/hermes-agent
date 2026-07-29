@@ -432,3 +432,82 @@ def test_aux_payload_exclusion_has_measured_volume_bound(monkeypatch, tmp_path):
             row[0] for row in conn.execute("SELECT content FROM run_traces")
         )
     assert "x" * 1000 not in retained
+
+
+# ---------------------------------------------------------------------------
+# Helper units
+# ---------------------------------------------------------------------------
+
+def test_observer_and_installation_dataclasses_are_frozen():
+    """The instrumentation records must stay immutable — a wrapper that
+    could rebind its own observer would silently stop measuring."""
+    observer = auxiliary_wrapper._Observer(
+        pre=lambda **kw: None, post=lambda **kw: None, error=lambda **kw: None
+    )
+    installation = auxiliary_wrapper.AuxiliaryWrapperInstallation(
+        call_llm=lambda *a, **k: None,
+        async_call_llm=lambda *a, **k: None,
+        rebound_references=0,
+    )
+    try:
+        observer.pre = lambda **kw: None
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("_Observer must be frozen")
+    try:
+        installation.rebound_references = 99
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("AuxiliaryWrapperInstallation must be frozen")
+
+
+def test_aux_task_label_boundary_length_stays_verbatim():
+    """A label of exactly the limit is kept verbatim — only LONGER labels
+    get the hashed suffix; hashing the boundary loses the readable name."""
+    text = "a" * auxiliary_wrapper._MAX_AUX_TASK_LABEL_CHARS
+    assert auxiliary_wrapper._aux_task_label(text) == text
+    longer = auxiliary_wrapper._aux_task_label(text + "b")
+    assert "#" in longer
+    assert len(longer) == auxiliary_wrapper._MAX_AUX_TASK_LABEL_CHARS
+
+
+def test_has_usage_field_requires_a_present_non_none_value():
+    """A field that exists but is None is NOT usable usage — counting it
+    would pick the wrong provider normalisation on half-empty payloads."""
+    assert auxiliary_wrapper._has_usage_field({"prompt_tokens": 5}, "prompt_tokens") is True
+    assert auxiliary_wrapper._has_usage_field({"prompt_tokens": None}, "prompt_tokens") is False
+    assert auxiliary_wrapper._has_usage_field({}, "prompt_tokens") is False
+    obj = SimpleNamespace(prompt_tokens=None)
+    assert auxiliary_wrapper._has_usage_field(obj, "prompt_tokens") is False
+    assert auxiliary_wrapper._has_usage_field(SimpleNamespace(prompt_tokens=5), "prompt_tokens") is True
+
+
+def test_normalized_usage_dispatches_on_which_token_fields_exist(monkeypatch):
+    """Provider detection is field-driven: bare prompt/completion tokens
+    take the default path, cache_* tokens the anthropic path — never the
+    codex fallback when a real field is present."""
+    seen = []
+
+    def fake_normalize(usage, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(
+            input_tokens=0, output_tokens=0, cache_read_tokens=0,
+            cache_write_tokens=0, reasoning_tokens=0,
+            cache_read_tokens_observed=False, cache_write_tokens_observed=False,
+            reasoning_tokens_observed=False, total_tokens=0,
+        )
+
+    monkeypatch.setattr(auxiliary_wrapper, "normalize_usage", fake_normalize)
+
+    auxiliary_wrapper._normalized_usage(SimpleNamespace(usage={"prompt_tokens": 5}))
+    assert seen[-1] == {}
+
+    auxiliary_wrapper._normalized_usage(
+        SimpleNamespace(usage={"cache_creation_input_tokens": 3})
+    )
+    assert seen[-1] == {"provider": "anthropic"}
+
+    auxiliary_wrapper._normalized_usage(SimpleNamespace(usage={"weird": 1}))
+    assert seen[-1] == {"api_mode": "codex_responses"}

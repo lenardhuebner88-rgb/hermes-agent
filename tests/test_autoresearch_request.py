@@ -210,3 +210,70 @@ def test_cli_output_includes_copy_pasteable_next_command(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "/autoresearch mode=skills area=github focus=output_contract" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Contract pinning
+# ---------------------------------------------------------------------------
+
+def test_build_request_pins_backup_and_eval_requirements(tmp_path):
+    """require_backup/require_eval are the reversibility contract — a
+    planned request without either flag must never exist."""
+    module = load_module()
+    req = module.build_request(
+        area="github",
+        focus="output_contract",
+        repo_root=ROOT,
+        hermes_home=tmp_path,
+    )
+    assert req["require_backup"] is True
+    assert req["require_eval"] is True
+
+
+def test_build_request_accepts_min_iteration_boundary(tmp_path):
+    """max_iterations=1 is the normal case — the lower bound is inclusive;
+    rejecting it would make the default single-pass run unrequestable."""
+    module = load_module()
+    req = module.build_request(
+        area="github",
+        focus="output_contract",
+        max_iterations=1,
+        repo_root=ROOT,
+        hermes_home=tmp_path,
+    )
+    assert req["max_iterations"] == 1
+    upper = module.build_request(
+        area="github",
+        focus="output_contract",
+        max_iterations=module.MAX_ITERATIONS,
+        repo_root=ROOT,
+        hermes_home=tmp_path,
+    )
+    assert upper["max_iterations"] == module.MAX_ITERATIONS
+
+
+def test_validate_allowed_paths_accepts_subpath_under_area_root(tmp_path):
+    """A path UNDER an area root is allowed (containment, not only
+    equality) — equality-only would reject every concrete skill dir."""
+    module = load_module()
+    sub = tmp_path / "skills" / "github" / "demo-skill"
+    validated = module.validate_allowed_paths(
+        "github", [str(sub)], repo_root=ROOT, hermes_home=tmp_path
+    )
+    assert validated == [str(sub.resolve())]
+
+
+def test_cli_requires_command_area_and_focus(tmp_path):
+    """The CLI fails closed on a missing subcommand, --area and --focus —
+    an argumentless invocation must be a usage error, never a run with
+    None defaults."""
+    module = load_module()
+    import pytest
+
+    parser = module.build_arg_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+    with pytest.raises(SystemExit):  # focus present, --area missing
+        parser.parse_args(["create", "--focus", "x"])
+    with pytest.raises(SystemExit):  # --area present, focus missing
+        parser.parse_args(["create", "--area", "github"])

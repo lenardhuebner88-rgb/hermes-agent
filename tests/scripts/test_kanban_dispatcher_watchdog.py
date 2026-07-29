@@ -191,3 +191,104 @@ def test_alert_send_failure_does_not_persist_bucket(paths, monkeypatch):
 
     assert result["action"] == "alert_send_failed"
     assert not paths["state"].exists()
+
+
+# ---------------------------------------------------------------------------
+# Classifier + formatter boundaries
+# ---------------------------------------------------------------------------
+
+def test_evaluate_zero_last_tick_is_invalid_not_stale():
+    """A heartbeat with last_tick_at=0 never ticked — that is INVALID, not
+    a 1970-vintage stale tick (which would mis-age the alert)."""
+    healthy, reason, detail = wd.evaluate({"last_tick_at": 0}, now=1000.0)
+    assert healthy is False
+    assert reason == "heartbeat_invalid"
+    assert detail == {"heartbeat_age_s": None}
+
+
+def test_evaluate_age_exactly_at_threshold_is_still_healthy():
+    """The staleness boundary is strict: at exactly the threshold the
+    heartbeat is still fresh (age > threshold, not >=)."""
+    heartbeat = {"last_tick_at": 900, "tick_health": "ok"}
+    healthy, reason, _detail = wd.evaluate(
+        heartbeat, now=1000.0, stale_after_seconds=100
+    )
+    assert healthy is True
+    assert reason == "ok"
+
+
+def test_format_alert_names_missing_and_invalid_reasons_distinctly():
+    """Each reason renders its own line — an 'invalid' alert that reads
+    'missing' sends the operator looking for the wrong failure."""
+    missing = wd._format_alert(
+        "heartbeat_missing", {"heartbeat_age_s": None}, stale_after_seconds=900
+    )
+    invalid = wd._format_alert(
+        "heartbeat_invalid", {"heartbeat_age_s": None}, stale_after_seconds=900
+    )
+    assert "missing" in missing
+    assert "unreadable" in invalid
+    assert "unreadable" not in missing
+    assert "missing" not in invalid
+
+    stale = wd._format_alert(
+        "stale",
+        {"heartbeat_age_s": 950.0, "tick_health": "ok", "last_tick_at": 50},
+        stale_after_seconds=900,
+    )
+    assert "stale" in stale
+    assert "threshold 15 min" in stale
+
+
+def test_read_token_preserves_equals_signs_inside_the_token(tmp_path, monkeypatch):
+    """Bot tokens can contain '=' — the parser must split on the FIRST '='
+    only and keep the rest verbatim, or the token is silently mangled."""
+    env = tmp_path / ".env"
+    env.write_text("DISCORD_BOT_TOKEN=ab=cd\n", encoding="utf-8")
+    monkeypatch.setattr(wd, "ENV_FILE", env)
+    assert wd._read_token() == "ab=cd"
+
+
+def test_post_discord_caps_body_at_exactly_2000_chars(tmp_path, monkeypatch):
+    """Discord rejects >2000 chars — the watchdog must slice to exactly
+    2000, never 2001 (which would turn every long alert into http_400)."""
+    env = tmp_path / ".env"
+    env.write_text("DISCORD_BOT_TOKEN=tok\n", encoding="utf-8")
+    monkeypatch.setattr(wd, "ENV_FILE", env)
+
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return b'{"id": "123"}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["content"] = json.loads(req.data.decode("utf-8"))["content"]
+        return _Resp()
+
+    monkeypatch.setattr(wd.urllib.request, "urlopen", fake_urlopen)
+
+    result = wd._post_discord("x" * 3000)
+
+    assert result["result"] == "sent"
+    assert len(captured["content"]) == 2000
+
+
+# ---------------------------------------------------------------------------
+# Second pass: staleness constant + state serialization
+# ---------------------------------------------------------------------------
+
+def test_save_state_keeps_non_ascii_raw(tmp_path: Path):
+    """State persists raw UTF-8 — escaped \\u sequences would make the
+    state file unreadable to humans diffing it during an incident."""
+    path = tmp_path / "state" / "watchdog.json"
+    wd._save_state(path, {"note": "prüfung läuft"})
+    raw = path.read_text(encoding="utf-8")
+    assert "prüfung läuft" in raw
+    assert json.loads(raw) == {"note": "prüfung läuft"}

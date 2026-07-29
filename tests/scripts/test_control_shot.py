@@ -173,3 +173,62 @@ def test_successful_capture_closes_context_and_browser(monkeypatch, tmp_path: Pa
 
     assert browser.context.close_calls == 1
     assert browser.close_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Env/credential/URL helper pinning
+# ---------------------------------------------------------------------------
+
+def test_load_env_file_skips_comments_and_garbage_lines(tmp_path: Path):
+    """Comments and lines without '=' are not credentials — parsing them
+    would inject junk keys into the fallback lookup."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "# a comment\nnot-an-assignment\nKEY=value\n", encoding="utf-8"
+    )
+    assert control_shot._load_env_file(env) == {"KEY": "value"}
+
+
+def test_credentials_prefers_process_env_and_fails_closed_on_partial(
+    monkeypatch, tmp_path: Path
+):
+    """With only ONE of the two variables set and an empty env file the
+    lookup must raise — returning (user, None) would log in with an empty
+    password."""
+    empty = tmp_path / "empty.env"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setattr(control_shot, "ENV_FILE", empty)
+    monkeypatch.setenv("HERMES_DASHBOARD_USERNAME", "u")
+    monkeypatch.delenv("HERMES_DASHBOARD_PASSWORD", raising=False)
+    with pytest.raises(control_shot.ShotError):
+        control_shot._credentials()
+
+
+def test_credentials_falls_back_to_env_file_per_variable(
+    monkeypatch, tmp_path: Path
+):
+    """Process env and .env mix PER variable: username from the process,
+    password from the file — an and-shortcut would discard the file half."""
+    env = tmp_path / ".env"
+    env.write_text(
+        "HERMES_DASHBOARD_USERNAME=file-user\n"
+        "HERMES_DASHBOARD_PASSWORD=file-pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(control_shot, "ENV_FILE", env)
+
+    monkeypatch.setenv("HERMES_DASHBOARD_USERNAME", "proc-user")
+    monkeypatch.delenv("HERMES_DASHBOARD_PASSWORD", raising=False)
+    assert control_shot._credentials() == ("proc-user", "file-pass")
+
+    monkeypatch.delenv("HERMES_DASHBOARD_USERNAME", raising=False)
+    monkeypatch.setenv("HERMES_DASHBOARD_PASSWORD", "proc-pass")
+    assert control_shot._credentials() == ("file-user", "proc-pass")
+
+
+def test_resolve_url_passes_absolute_routes_through():
+    """A full http:// URL must be used verbatim — prepending the base
+    would point the browser at a garbage path."""
+    assert control_shot._resolve_url("http://127.0.0.1:9119", "http://x/y") == "http://x/y"
+    assert control_shot._resolve_url("http://127.0.0.1:9119/", "https://x/y") == "https://x/y"
+    assert control_shot._resolve_url("http://127.0.0.1:9119/", "control") == "http://127.0.0.1:9119/control"

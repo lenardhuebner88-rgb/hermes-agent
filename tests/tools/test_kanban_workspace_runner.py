@@ -436,3 +436,68 @@ def test_runner_ignores_untrusted_path_pytest(worker_workspace, monkeypatch):
     assert result["ok"] is True
     assert "pytest-path-hijack" not in result["stdout"]
     assert "1 passed" in result["stdout"]
+
+
+def test_runner_rejects_workspace_path_that_is_a_file(monkeypatch, tmp_path):
+    """A regular FILE as workspace must be rejected by the existence/dir
+    guard — accepting it would resolve every script path against a file."""
+    from tools import kanban_workspace_runner as runner
+
+    ws_file = tmp_path / "ws-file"
+    ws_file.write_text("not a directory\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_runner")
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACE", str(ws_file))
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+
+    workspace, error = runner._workspace()
+
+    assert workspace is None
+    assert "does not exist" in error
+
+
+def test_validate_workspace_path_rejects_a_directory_target(worker_workspace):
+    """A directory is not a runnable script/test file — 'exists' alone
+    must not pass the target validation."""
+    from tools.kanban_workspace_runner import _validate_workspace_path
+
+    (worker_workspace / "subdir").mkdir()
+
+    rel, error = _validate_workspace_path(
+        workspace=worker_workspace, target_arg="subdir", path_label="script"
+    )
+
+    assert rel is None
+    assert "file not found in workspace" in error
+
+
+def test_runner_rejects_unknown_flag_like_target_as_flag(worker_workspace):
+    """Any '-'-prefixed target is a flag and must be rejected with the
+    flag message BEFORE path validation — routing it through path checks
+    would misreport the reason (and could pass for an existing file)."""
+    result = _run({"argv": ["python3", "--definitely-not-a-file"]})
+
+    assert "error" in result
+    # rejected by the COMMAND-level guard ('for python3'), not only by the
+    # downstream path validator ('for script')
+    assert "flag is not allowed for python3" in result["error"]
+
+
+def test_truncate_boundary_keeps_exact_limit_data():
+    """Data of exactly the limit is NOT truncated — the marker must only
+    appear when bytes were actually dropped."""
+    from tools.kanban_workspace_runner import _TRUNCATION_MARKER, _truncate
+
+    assert _truncate(b"abc", 3) == (b"abc", False)
+    out, truncated = _truncate(b"abc", 2)
+    assert truncated is True
+    assert out == b"ab" + _TRUNCATION_MARKER
+
+
+def test_runner_schema_forbids_additional_properties(worker_workspace):
+    """The tool schema must close additionalProperties — an open schema
+    would silently accept arguments the handler never validates."""
+    import tools.kanban_workspace_runner  # ensure registered
+    from tools.registry import registry
+
+    schema = registry.get_entry("kanban_run_workspace_command").schema
+    assert schema["parameters"]["additionalProperties"] is False

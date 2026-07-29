@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 
@@ -250,3 +251,42 @@ def test_worker_union_budget_failure_is_printed_to_stderr(monkeypatch, capsys):
     assert "budget 1200.0s" in captured.err
     assert "218 selected test files" in captured.err
     assert "2 files without duration forecast" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# CLI wrapper contract
+# ---------------------------------------------------------------------------
+
+def test_repo_root_resolves_inside_worktree_and_fails_outside(
+    monkeypatch, tmp_path
+):
+    """_repo_root returns the toplevel inside a worktree and raises
+    MappingError outside one — a nonzero git exit must never read as
+    success (or vice versa)."""
+    mod = _load_module()
+    monkeypatch.chdir(REPO_ROOT)
+    assert mod._repo_root() == REPO_ROOT
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(Exception, match="git worktree"):
+        mod._repo_root()
+
+
+def test_main_returns_2_on_mapping_error(monkeypatch, tmp_path):
+    """A mapping failure (no readable git worktree) exits with code 2 —
+    scripts key off that code to distinguish 'no repo' from 'no tests'."""
+    mod = _load_module()
+    monkeypatch.chdir(tmp_path)
+    assert mod.main(["affected-tests", "HEAD"]) == 2
+
+
+def test_main_json_output_is_sorted_json_when_requested(monkeypatch, capsys):
+    """--format json must print exactly the sort_keys/indent=2
+    serialization of the plan — the dashboard parses this stdout."""
+    mod = _load_module()
+    monkeypatch.chdir(REPO_ROOT)
+    rc = mod.main(["affected-tests", "HEAD", "--format", "json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)  # must be JSON at all (not a paths line)
+    assert out == json.dumps(payload, sort_keys=True, indent=2) + "\n"
