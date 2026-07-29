@@ -150,6 +150,17 @@ def test_operator_directives_are_never_byte_or_count_capped_in_any_profile():
         assert "regular 0" not in rendered, profile
 
 
+def test_large_operator_directive_survives_worker_brief_section_budget(kanban_home):
+    directive = "DIRECTIVE-" + ("x" * 20_000)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="directive target", assignee="coder")
+        kb.add_comment(conn, task_id, "operator", directive, kind="directive")
+        rendered = kb.render_worker_brief_for_task(conn, task_id)
+
+    assert directive in rendered.payload
+    assert rendered.manifest["section_counts"]["comments"]["omitted"] == 0
+
+
 def test_review_diff_overflow_is_atomic_0600_artifact_and_not_logged(
     kanban_home, monkeypatch
 ):

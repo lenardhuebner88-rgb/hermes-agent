@@ -118,6 +118,26 @@ def test_directive_restarts_live_worker_once_and_is_in_next_brief(
     ).fetchone()
 
 
+def test_directive_without_persisted_brief_restarts_live_worker(
+    running_task_with_live_worker, monkeypatch
+):
+    """Legacy in-flight workers have no brief watermark, so redelivery starts at zero."""
+    conn, task_id, old_run_id = running_task_with_live_worker
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _confirmed_termination)
+    directive_id = kb.add_comment(
+        conn, task_id, "operator", "Recover this legacy worker.", kind="directive"
+    )
+
+    result = kb.dispatch_once(conn, max_spawn=0)
+
+    assert result.directive_redelivered == [task_id]
+    event = _redelivery_events(conn, task_id)[0]
+    payload = json.loads(event["payload"])
+    assert payload["directive_ids"] == [directive_id]
+    assert payload["delivered_comment_id_watermark"] == 0
+    assert payload["ended_run_id"] == old_run_id
+
+
 def test_directives_arriving_together_share_one_restart_and_watermark(
     running_task_with_live_worker, monkeypatch
 ):
@@ -199,6 +219,7 @@ def test_plain_comment_does_not_restart_live_worker(
 ):
     conn, task_id, run_id = running_task_with_live_worker
     monkeypatch.setattr(kb, "_terminate_reclaimed_worker", _confirmed_termination)
+    _persist_current_brief(task_id)
 
     kb.add_comment(conn, task_id, "operator", "FYI: keep the current approach.")
     result = kb.dispatch_once(conn, max_spawn=0)

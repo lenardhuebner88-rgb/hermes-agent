@@ -23509,11 +23509,11 @@ def redeliver_live_worker_directives(conn: sqlite3.Connection) -> list[str]:
             continue
 
         delivered_watermark = _run_brief_comment_id_watermark(conn, task_id, run_id)
+        # Runs started before brief manifests existed have no watermark.  In
+        # that legacy case restart conservatively from zero rather than
+        # silently dropping an operator directive.
         if delivered_watermark is None:
-            # A running record without a persisted launch brief has no proof of
-            # what the worker received.  Do not infer a boundary from historical
-            # redelivery events and risk a needless restart.
-            continue
+            delivered_watermark = 0
         directives = conn.execute(
             """
             SELECT id
@@ -33902,17 +33902,34 @@ def _brief_records_from_lines(lines: list[str]) -> list[_kanban_context.BriefRec
     """Split legacy section output into stable heading/record boundaries."""
     records: list[_kanban_context.BriefRecord] = []
     current: list[str] = []
+    current_key: Optional[str] = None
+    in_directive_block = False
+
+    def flush() -> None:
+        nonlocal current, current_key
+        text = "\n".join(current).strip()
+        if text:
+            records.append(_kanban_context.BriefRecord(text=text, key=current_key))
+        current = []
+        current_key = None
+
     for line in lines:
-        if line.startswith("### ") or (line.startswith("## ") and current):
-            text = "\n".join(current).strip()
-            if text:
-                records.append(_kanban_context.BriefRecord(text=text))
+        if line == "## ⚠️ OPERATOR DIRECTIVE — supersedes the task body above":
+            flush()
             current = [line]
+            current_key = "operator-directive"
+            in_directive_block = True
+        elif in_directive_block and line.startswith("operator directive `"):
+            flush()
+            current = [line]
+            current_key = "operator-directive"
+        elif line.startswith("### ") or (line.startswith("## ") and current):
+            flush()
+            current = [line]
+            in_directive_block = False
         else:
             current.append(line)
-    text = "\n".join(current).strip()
-    if text:
-        records.append(_kanban_context.BriefRecord(text=text))
+    flush()
     return records
 
 

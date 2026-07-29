@@ -352,6 +352,8 @@ def test_show_comment_delta_bypasses_worker_slim_comment_cap(worker_env):
         comment["id"] for comment in delta["comments"]
     )
     assert len(delta["comments"]) == 9
+    assert "body" not in delta["task"]
+    assert delta["truncated"]["comments_omitted"] == 0
 
 
 def test_show_worker_default_is_slim_but_full_preserves_legacy_payload(worker_env):

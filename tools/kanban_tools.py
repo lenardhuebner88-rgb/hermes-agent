@@ -548,9 +548,10 @@ def _handle_show(args: dict, **kw) -> str:
 
             if (
                 mode == "worker_slim"
-                and after_comment_id is None
-                and os.environ.get("HERMES_KANBAN_TASK")
+                and tid == os.environ.get("HERMES_KANBAN_TASK")
             ):
+                comment_slice = comments if after_comment_id is not None else comments[-8:]
+                comments_omitted = 0 if after_comment_id is not None else max(0, len(comments) - 8)
                 return json.dumps({
                     "task": {
                         "id": task.id,
@@ -568,11 +569,11 @@ def _handle_show(args: dict, **kw) -> str:
                     "parents": parents,
                     "children": children,
                     "attachments": [_attachment_dict(a) for a in attachments],
-                    "comments": [_comment_dict(c) for c in comments[-8:]],
+                    "comments": [_comment_dict(c) for c in comment_slice],
                     "events": [_event_dict(e) for e in events[-10:]],
                     "runs": [_run_dict(r) for r in runs[-3:]],
                     "truncated": {
-                        "comments_omitted": max(0, len(comments) - 8),
+                        "comments_omitted": comments_omitted,
                         "events_omitted": max(0, len(events) - 10),
                         "runs_omitted": max(0, len(runs) - 3),
                     },

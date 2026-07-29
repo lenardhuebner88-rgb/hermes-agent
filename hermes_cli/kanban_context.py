@@ -252,9 +252,11 @@ def _fingerprint(task: WorkerBriefInput, *, phase: str, audience: str, profile: 
 def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, profile: str) -> RenderedWorkerBrief:
     """Render one bounded worker payload without I/O or side effects.
 
-    Records are admitted whole, in section/record priority order. Any record
-    that exceeds a section or total budget is omitted visibly and returned in
-    overflows for the launch boundary to materialize.
+    Records are admitted whole, in section/record priority order. Any regular
+    record that exceeds a section or total budget is omitted visibly and
+    returned in overflows for the launch boundary to materialize. Explicit
+    operator directives are privileged operational instructions and remain
+    inline even when their individual record exceeds a budget.
     """
     if phase not in {"execute", "retry", "verify", "review"}:
         raise ValueError(f"unsupported worker brief phase: {phase}")
@@ -281,7 +283,11 @@ def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, pr
                 continue
             record_cost = len(text) + (2 if included else 0)
             projected_total = used + len(heading) + 4 + section_used + record_cost
-            if section_used + record_cost <= int(budgets[name]) and projected_total <= int(budgets["total"]):
+            is_operator_directive = record.key == "operator-directive"
+            if is_operator_directive or (
+                section_used + record_cost <= int(budgets[name])
+                and projected_total <= int(budgets["total"])
+            ):
                 included.append(text)
                 section_used += record_cost
             else:
