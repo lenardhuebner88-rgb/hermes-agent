@@ -1856,6 +1856,56 @@ def _chain_member_ids(conn: sqlite3.Connection, root_id: str) -> set[str]:
     return ids
 
 
+def _finalizer_chain_member_ids(
+    conn: sqlite3.Connection,
+    root_id: str,
+) -> set[str]:
+    """Resolve archived members to proven in-chain respec replacements.
+
+    ``decomposed.child_ids`` is immutable provenance, while ``respec_task``
+    rewires the live graph. Fail closed unless an archived member's event names
+    an existing replacement whose current dependency path reaches this root.
+    """
+    resolved: set[str] = set()
+    for member_id in _chain_member_ids(conn, root_id):
+        task = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (member_id,),
+        ).fetchone()
+        if task is None or task["status"] != "archived":
+            resolved.add(member_id)
+            continue
+
+        event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'respecced' "
+            "ORDER BY id DESC LIMIT 1",
+            (member_id,),
+        ).fetchone()
+        replacement_id = ""
+        if event is not None and event["payload"]:
+            try:
+                payload = json.loads(event["payload"])
+                if isinstance(payload, dict):
+                    replacement_id = str(payload.get("new_task") or "").strip()
+            except (TypeError, ValueError):
+                pass
+
+        replacement = conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (replacement_id,),
+        ).fetchone()
+        reaches_root = replacement and conn.execute(
+            "WITH RECURSIVE downstream(task_id) AS ("
+            "  SELECT ? "
+            "  UNION "
+            "  SELECT l.child_id FROM task_links l "
+            "  JOIN downstream d ON l.parent_id = d.task_id"
+            ") SELECT 1 FROM downstream WHERE task_id = ? LIMIT 1",
+            (replacement_id, root_id),
+        ).fetchone()
+        resolved.add(replacement_id if reaches_root else member_id)
+    return resolved
+
+
 def frozen_merge_target(conn: sqlite3.Connection, root_id: str) -> Optional[str]:
     """Merge target frozen at first claim (Entscheidung 3), from the root
     task's ``worktree_provisioned`` event."""
@@ -4412,10 +4462,9 @@ def finalize_decompose_root_at_dispatch(
     * ``"would_integrate"`` / ``"would_complete_commitless"`` — dry-run
       preview, no side effects.
     """
-    # Chain members via the SAME helper the integrator uses, so membership is
-    # consistent. For a decompose root this yields {root} ∪ {build children}
-    # (links are inverted: child=parent_id, root=child_id).
-    members = _chain_member_ids(conn, root_id)
+    # Start from the integrator's immutable decompose membership, then replace
+    # only archived originals backed by a valid, currently in-chain respec.
+    members = _finalizer_chain_member_ids(conn, root_id)
     members.discard(root_id)
     if members:
         placeholders = ",".join("?" for _ in members)
