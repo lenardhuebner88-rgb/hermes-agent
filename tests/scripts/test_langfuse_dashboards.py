@@ -502,3 +502,92 @@ def test_load_golden_fixture_rejects_wrong_version_even_with_valid_source(
     path.write_text(json.dumps(fixture), encoding="utf-8")
     with pytest.raises(dashboards.ProvisionError):
         dashboards.load_golden_fixture(path)
+
+
+# ---------------------------------------------------------------------------
+# Second pass: version pin, shape guards, tRPC guards, frozen contracts
+# ---------------------------------------------------------------------------
+
+def _valid_fixture(**source_overrides: object) -> dict[str, object]:
+    source: dict[str, object] = {
+        "langfuse_version": dashboards.EXPECTED_LANGFUSE_VERSION,
+        "revision": dashboards.EXPECTED_LANGFUSE_REVISION,
+    }
+    source.update(source_overrides)
+    return {
+        "fixture_version": dashboards.FIXTURE_VERSION,
+        "source": source,
+        "definition": {},
+        "dimensions": [],
+        "metrics": [],
+        "chart_config": {},
+    }
+
+
+def _write_fixture(tmp_path, fixture: dict[str, object]) -> object:
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+    return path
+
+
+def test_golden_fixture_version_pin_requires_both_fields(tmp_path) -> None:
+    """A wrong langfuse_version with a CORRECT revision must still be
+    rejected — an AND shortcut would accept a fixture from the wrong
+    release as long as the git revision happened to match."""
+    path = _write_fixture(tmp_path, _valid_fixture(langfuse_version="0.0.0"))
+    with pytest.raises(dashboards.ProvisionError, match="not pinned"):
+        dashboards.load_golden_fixture(path)
+
+
+def test_golden_fixture_shape_checks_fire_independently(tmp_path) -> None:
+    """Each shape guard fires on its own field — a definition of the wrong
+    type must raise even when dimensions is fine, and a metrics field of
+    the wrong type even when chart_config is fine."""
+    bad_definition = _valid_fixture()
+    bad_definition["definition"] = []
+    with pytest.raises(dashboards.ProvisionError, match="definition or dimensions"):
+        dashboards.load_golden_fixture(_write_fixture(tmp_path, bad_definition))
+
+    bad_metrics = _valid_fixture()
+    bad_metrics["metrics"] = {}
+    with pytest.raises(dashboards.ProvisionError, match="metrics or chart_config"):
+        dashboards.load_golden_fixture(_write_fixture(tmp_path, bad_metrics))
+
+
+def test_sql_contract_dataclasses_are_frozen() -> None:
+    """The SQL guard contract and result records are immutable — the
+    provisioning path must not be able to rewrite pinned expectations."""
+    contract = dashboards.SqlGuardContract(
+        expected_migrations=frozenset(),
+        newest_migration="m",
+        table_fingerprints={},
+        enum_labels={},
+        expected_min_version=1,
+    )
+    result = dashboards.SqlProvisionResult(receipt={})
+    with pytest.raises(AttributeError):
+        contract.newest_migration = "tampered"
+    with pytest.raises(AttributeError):
+        result.receipt = {}
+
+
+def test_trpc_non_list_batch_response_is_rejected() -> None:
+    """A batch response that is not a one-element list fails closed with
+    the batch-shape error — indexing a dict would raise KeyError instead
+    of a clean ProvisionError."""
+    client = dashboards.TrpcClient(
+        "https://lf.test", opener=_Opener([{"unexpected": True}])
+    )
+    with pytest.raises(dashboards.ProvisionError, match="unexpected tRPC batch response"):
+        client.create_dashboard(project_id="p", name="n", description="d")
+
+
+def test_trpc_error_without_data_path_is_still_a_clean_rejection() -> None:
+    """A tRPC error envelope without data.path must raise the
+    human-readable rejection, not crash on None.get('path')."""
+    client = dashboards.TrpcClient(
+        "https://lf.test",
+        opener=_Opener([[{"error": {"json": {"message": "boom"}}}]]),
+    )
+    with pytest.raises(dashboards.ProvisionError, match=r"rejected the request: boom \(None\)"):
+        client.create_dashboard(project_id="p", name="n", description="d")
