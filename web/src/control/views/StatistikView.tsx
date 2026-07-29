@@ -130,6 +130,18 @@ function fmtWorkerTokens(value: number | null): string {
   return value == null ? "—" : fmtTokens(Math.round(value));
 }
 
+/**
+ * Latenzen kommen in Millisekunden und liegen bei TTFT praktisch immer unter
+ * einer Sekunde. `fmtDur` schneidet auf ganze Sekunden ab (`Math.floor`), also
+ * las sich ein gemessenes TTFT von 250 ms dort als "0s" — eine echte Zahl, die
+ * als Null erscheint. Unterhalb einer Sekunde bleibt die Einheit deshalb ms.
+ */
+function fmtMillis(value: number | null): string {
+  if (value == null) return "—";
+  if (value < 1000) return `${Math.round(value).toLocaleString("de-DE")} ms`;
+  return `${(value / 1000).toLocaleString("de-DE", { maximumFractionDigits: 1 })} s`;
+}
+
 function fmtWorkerRate(value: number | null): string {
   if (value == null) return "—";
   if (value >= 1000) return fmtTokens(Math.round(value));
@@ -1366,8 +1378,8 @@ function LangfuseSignals({ data }: { data: ObservabilityStatsResponse }) {
         <div key={row.name} className="grid min-h-12 grid-cols-[minmax(110px,1fr)_56px_72px_72px] items-center gap-2 border-b border-line-soft text-[10px] last:border-0">
           <span className="min-w-0 break-words font-semibold text-ink-2">{row.name}</span>
           <b className="text-right font-data">{lowerBound}{row.calls.toLocaleString("de-DE")}</b>
-          <span className="text-right text-ink-3">{row.latency_p50_ms == null ? "—" : fmtDur(row.latency_p50_ms / 1000)}</span>
-          <span className="text-right text-ink-3">{row.ttft_p50_ms == null ? "—" : fmtDur(row.ttft_p50_ms / 1000)}</span>
+          <span className="text-right text-ink-3">{fmtMillis(row.latency_p50_ms)}</span>
+          <span className="text-right text-ink-3">{fmtMillis(row.ttft_p50_ms)}</span>
         </div>
       ))}
       <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-semibold text-ink-2">
@@ -1396,6 +1408,12 @@ export function ObservabilityDeck({
     );
   }
   const summary = data.usage.summary;
+  // Faellt der Ledger-Lesepfad aus, liefert das Backend `summary: {}` und das
+  // Zod-Schema fuellt jedes fehlende Token-Feld mit 0 auf. "0 Context Tokens"
+  // liest sich dann wie "keine Worker-Aktivitaet" statt wie "nicht lesbar".
+  // Canon 2026-07-27 (Kosten-SSOT), Regel 3: Unbekanntes bleibt unbekannt und
+  // wird nie als 0 gezeigt.
+  const usageKnown = data.usage.available;
   const coverage = data.usage.coverage;
   const linkCoverage = ratio(coverage.exact_task_run_links, coverage.fact_rows);
   const dataGap = !data.langfuse.available
@@ -1429,14 +1447,16 @@ export function ObservabilityDeck({
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
           label="Usage Facts"
-          value={fmtTokens(summary.fact_rows)}
+          value={usageKnown ? fmtTokens(summary.fact_rows) : "—"}
           delta={`${data.window_days} Tage · ${data.usage.state}`}
           dot="live"
         />
         <KpiTile
           label="Context Tokens"
-          value={fmtTokens(summary.context_input_tokens)}
-          delta={`${fmtTokens(summary.cache_read_tokens)} Cache Read`}
+          value={usageKnown ? fmtTokens(summary.context_input_tokens) : "—"}
+          delta={usageKnown
+            ? `${fmtTokens(summary.cache_read_tokens)} Cache Read`
+            : `unbekannt · ${data.usage.reason ?? "Ledger nicht lesbar"}`}
         />
         <KpiTile
           label="Run Duration p50"

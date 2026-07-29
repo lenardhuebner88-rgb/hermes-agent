@@ -93,11 +93,19 @@ describe("ScorecardView", () => {
     expect(markup).toContain("Ø 1,25 Iterationen");
   });
 
-  it("markiert dünne Modellstichproben", () => {
+  it("markiert genau die dünnen Modellstichproben", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
     expect(markup).toContain("k3");
-    expect(markup).toContain("dünn");
     expect(markup).toContain("n 33");
+    expect(markup).toContain("n 139");
+    // Auf den MARKER prüfen, nicht auf das Wort: die Panel-Fußzeile rendert
+    // unbedingt "dünne Nenner bleiben sichtbar" und enthält "dünn" als
+    // Teilzeichenkette. Ein toContain("dünn") blieb deshalb auch dann grün,
+    // wenn man `thin` und den Marker komplett entfernte — der Test sicherte
+    // nichts ab. Diese Fassung liest die markierten Namen aus dem Markup:
+    // k3 hat n 33 (dünn), terra hat n 139 (nicht dünn).
+    const marked = [...markup.matchAll(/>([^<>]+)<span[^>]*>· dünn<\/span>/g)].map((m) => m[1]);
+    expect(marked).toEqual(["k3"]);
   });
 
   it("zeigt ohne Verdicts einen neutralen Nullzustand", () => {
@@ -119,5 +127,28 @@ describe("ScorecardView", () => {
     expect(markup).not.toContain("Run Duration");
     expect(markup).not.toContain("Kosten");
     expect(markup).not.toContain("Event- &amp; Usage-Scores");
+  });
+
+  it("erfindet ohne quality-Block keine Coverage und kein Zeitfenster", () => {
+    // Deploy-Versatz: neues Frontend, Dashboard-Dienst noch auf der alten
+    // Route — die Payload trägt dann kein `quality`. Der Rückfall darf daraus
+    // KEINE Vollständigkeit ableiten. Zuvor setzte er Zähler = Nenner, was
+    // exakt 100 % samt grünem Haken ergab, und beschriftete eine
+    // All-Time-Aggregation als "7 TAGE".
+    const data = baseData();
+    delete (data as { quality?: unknown }).quality;
+    mockState.data = data;
+
+    const markup = renderToStaticMarkup(<ScorecardView />);
+
+    expect(markup).toContain("GESAMTZEITRAUM");
+    expect(markup).not.toContain("7 TAGE");
+    expect(markup).not.toContain("100,0 %");
+    // Nenner sichtbar und leer statt Zähler = Nenner.
+    expect(markup).toContain("0 Verdicts / 0 Runs");
+    // Der grüne Haken der CoverageRail darf hier nicht erscheinen; die Kacheln
+    // tragen das Warndreieck. (`text-status-ok` allein taugt nicht als Probe —
+    // das trägt auch die "approved"-Zahl der Entscheidungsleiste.)
+    expect(markup).not.toContain("lucide-circle-check");
   });
 });

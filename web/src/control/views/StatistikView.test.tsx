@@ -1191,6 +1191,41 @@ describe("StatistikView (Hermes Observability)", () => {
     expect(html).toContain("≥12");
     expect(html).toContain("≥1,25");
     expect(html).toContain("$");
+    // Latenzen kommen in Millisekunden. Der frühere Renderer teilte durch 1000
+    // und gab das an `fmtDur`, das per Math.floor auf ganze Sekunden abschnitt:
+    // gemessene 250 ms TTFT lasen sich als "0s". TTFT liegt praktisch immer
+    // unter einer Sekunde, die Spalte zeigte also dauerhaft Null.
+    expect(html).toContain("250 ms");
+    expect(html).toContain("1,5 s");
+    expect(html).not.toContain(">0s<");
+  });
+
+  it("zeigt Token-Kennzahlen als unbekannt statt als 0, wenn das Usage-Ledger nicht lesbar ist", () => {
+    // Der Backend-Fehlerpfad liefert `available: false` mit leerem `summary`;
+    // das Zod-Schema füllt jedes fehlende Token-Feld per .catch(0) mit 0 auf.
+    // "0 Context Tokens in 7 Tagen" liest sich wie "keine Worker-Aktivität"
+    // statt wie "nicht lesbar" — Canon 2026-07-27 (Kosten-SSOT), Regel 3.
+    const data = observabilityData();
+    data.usage = {
+      ...data.usage,
+      available: false,
+      state: "absent",
+      reason: "read_failed:OperationalError",
+      summary: {
+        ...data.usage.summary,
+        fact_rows: 0,
+        context_input_tokens: 0,
+        cache_read_tokens: 0,
+      },
+    };
+    controlDataMock.observability = controlState(data);
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("read_failed:OperationalError");
+    expect(html).toContain("unbekannt · read_failed:OperationalError");
+    expect(html).not.toContain("0 Cache Read");
   });
 
   it("gives the MotherLedger window/sort chipset a >=44px hit-area (W3-3 touch target, 5 controls baseline-flagged <24px)", () => {

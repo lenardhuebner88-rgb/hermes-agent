@@ -24,9 +24,25 @@ const OUTCOME_LABELS: Record<string, string> = {
   crashed: "Crashed",
 };
 
+/**
+ * Rückfallform für eine Payload ohne `quality` — das passiert im Deploy-Versatz,
+ * wenn das neue Frontend schon ausgeliefert ist, der Dashboard-Dienst aber noch
+ * die alte Route im Speicher hält.
+ *
+ * Diese Form darf NICHTS behaupten, was v1 nicht liefert:
+ *  - `coverage` gab es in v1 nicht. Eine frühere Fassung setzte hier
+ *    `review_verdicts: data.overall.runs` neben `runs: data.overall.runs` —
+ *    Zähler gleich Nenner, also stets exakt 100 % samt grünem Haken. Das war
+ *    ein erfundener Vollständigkeitsbeweis über einer Zahl, die in v2 bei rund
+ *    29 % liegt. Nenner 0 lässt Aufrufer und `CoverageRail` die Quote korrekt
+ *    als unbekannt behandeln.
+ *  - `overall` aggregiert in v1 die GESAMTE Score-Tabelle ohne Zeitfilter.
+ *    Ein hartes `window_days: 7` hätte eine All-Time-Zahl als Wochenzahl
+ *    beschriftet; 0 heißt "kein Fenster" und wird im Kopf so gerendert.
+ */
 function legacyQuality(data: ScorecardResponse): QualitySnapshot {
   return {
-    window_days: 7,
+    window_days: 0,
     overall: data.overall,
     verdicts: data.verdicts,
     outcomes: {},
@@ -35,8 +51,8 @@ function legacyQuality(data: ScorecardResponse): QualitySnapshot {
     daily_verdicts: [],
     review_iterations: { average: null, count: 0, distribution: {} },
     coverage: {
-      runs: data.overall.runs,
-      review_verdicts: data.overall.runs,
+      runs: 0,
+      review_verdicts: 0,
       run_outcomes: 0,
       review_iterations: 0,
     },
@@ -70,7 +86,9 @@ export function ScorecardView() {
     <main data-scorecard className="mx-auto flex w-full max-w-[2100px] flex-col gap-4 p-4 pb-20 md:p-6">
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <p className="hc-type-label hc-dim">QUALITÄT · ENTSCHEIDUNGEN · {quality.window_days} TAGE</p>
+          <p className="hc-type-label hc-dim">
+            QUALITÄT · ENTSCHEIDUNGEN · {quality.window_days > 0 ? `${quality.window_days} TAGE` : "GESAMTZEITRAUM"}
+          </p>
           <h1 className="hc-type-display-tight mt-2">Worker Scorecard</h1>
           <p className="hc-dim mt-2 text-sm">Eine Entscheidung, dann ihre Begründung.</p>
         </div>

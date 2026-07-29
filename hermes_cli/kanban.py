@@ -29,7 +29,6 @@ import logging
 import os
 import re
 import shlex
-import sqlite3
 import subprocess
 import sys
 import time
