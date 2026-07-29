@@ -37,6 +37,8 @@ _OPERATOR_HOLD_CLASSES = frozenset(
 _BASE_PREP_PREFIX = "worker base preparation:"
 _BASE_PREP_REBASE_MARKER = "could not rebase onto"
 _ESCALATION_RESOLUTION_EVENTS = ("unblocked", "promoted_manual")
+_NO_SILENT_STALL_EVENT = "no_silent_stall_sweep"
+_INTEGRATION_PARKED_STALL_CLASS = "integration_parked"
 
 
 def persisted_escalation_class(payload: object) -> Optional[str]:
@@ -97,6 +99,119 @@ def materialize_event_payload(
     return stamped
 
 
+def _payload_dict(raw: object) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_base_prep_rebase_reason(reason: object) -> bool:
+    text = str(reason or "")
+    return text.startswith(_BASE_PREP_PREFIX) and _BASE_PREP_REBASE_MARKER in text
+
+
+def _fixer_exhaustion_escalation_exists(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? ORDER BY id DESC",
+        (task_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchall()
+    for row in rows:
+        evidence = _payload_dict(row["payload"]).get("evidence")
+        if isinstance(evidence, dict) and evidence.get("fixer_exhausted") is True:
+            return True
+    return False
+
+
+def _integration_parked_marker_exists(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> bool:
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, _NO_SILENT_STALL_EVENT),
+    ).fetchall()
+    return any(
+        _payload_dict(row["payload"]).get("stall_class")
+        == _INTEGRATION_PARKED_STALL_CLASS
+        for row in rows
+    )
+
+
+def materialize_base_prep_fixer_exhaustion(
+    conn: sqlite3.Connection,
+    *,
+    row: sqlite3.Row,
+    reason: str,
+    evidence: dict,
+) -> Optional[bool]:
+    """Add one budget-exhaustion escalation to an already reported park.
+
+    ``_park_stall_once`` correctly refuses a second escalation for a stall
+    marker. A base-prep park is the narrow exception: its first escalation is
+    the system notification emitted while fixer attempt 1 is still active, so
+    the later exhausted-budget decision needs one distinct append-only event.
+
+    Returns ``None`` when the normal park path remains responsible, ``True``
+    when this call wrote the exhaustion event, and ``False`` when another
+    caller already wrote it.
+    """
+    task_id = row["id"]
+    if not (
+        _is_base_prep_rebase_reason(reason)
+        and evidence.get("fixer_exhausted") is True
+        and _integration_parked_marker_exists(conn, task_id)
+    ):
+        return None
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        if _fixer_exhaustion_escalation_exists(conn, task_id):
+            return False
+        fresh = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if fresh is None or fresh["status"] in ("done", "archived"):
+            return False
+        esc_event_id = kb._append_event(
+            conn,
+            task_id,
+            OPERATOR_ESCALATION_EVENT,
+            kb._stall_operator_escalation_payload(
+                row=fresh,
+                stall_class=_INTEGRATION_PARKED_STALL_CLASS,
+                reason=reason,
+                evidence=evidence,
+            ),
+        )
+        h_class, h_evidence = kb._classify_failure(
+            stall_class=_INTEGRATION_PARKED_STALL_CLASS,
+            reason=reason,
+        )
+        kb._append_event(
+            conn,
+            task_id,
+            kb.HEILER_CLASSIFICATION_EVENT,
+            kb._heiler_classification_payload(
+                heiler_class=h_class,
+                evidence=h_evidence,
+                source="stall_park",
+                blocked=True,
+                escalation_event_id=esc_event_id,
+            ),
+        )
+        return True
+
+
 def base_prep_retry_allowed(
     conn: sqlite3.Connection,
     *,
@@ -114,8 +229,7 @@ def base_prep_retry_allowed(
     attempt can unlock the next sweep-routed attempt.
     """
     if not (
-        str(reason or "").startswith(_BASE_PREP_PREFIX)
-        and _BASE_PREP_REBASE_MARKER in str(reason or "")
+        _is_base_prep_rebase_reason(reason)
         and conflict_fingerprint
     ):
         return False
@@ -141,13 +255,13 @@ def base_prep_retry_allowed(
             break
     if not matching_failure:
         return False
+    if _fixer_exhaustion_escalation_exists(conn, task_id):
+        return False
 
     row = conn.execute(
         "SELECT kind, payload FROM task_events "
         "WHERE task_id = ? AND ("
-        "  (kind = ? AND COALESCE(json_extract(payload, "
-        "   '$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee')"
-        "  OR kind IN ('unblocked', 'promoted_manual')) "
+        "  kind = ? OR kind IN ('unblocked', 'promoted_manual')) "
         "ORDER BY id DESC LIMIT 1",
         (task_id, OPERATOR_ESCALATION_EVENT),
     ).fetchone()

@@ -26223,6 +26223,21 @@ def _maybe_route_conflict_park_fixer(
     task_id = row["id"]
 
     def _escalate(evidence: dict) -> None:
+        exhaustion_materialized = (
+            _escalation_class.materialize_base_prep_fixer_exhaustion(
+                conn,
+                row=row,
+                reason=reason,
+                evidence=evidence,
+            )
+        )
+        if exhaustion_materialized is not None:
+            if exhaustion_materialized:
+                summary["parked"].append({
+                    "task_id": task_id,
+                    "class": INTEGRATION_PARKED_STALL_CLASS,
+                })
+            return
         if _park_stall_once(
             conn,
             row,
@@ -26647,9 +26662,12 @@ def no_silent_stall_sweep(
         )
         # Once escalated, the operator owns it — except for a system-reported
         # base-prep park whose failed fixer still has bounded budget.
-        if (
-            _has_stall_marker(conn, task_id, INTEGRATION_PARKED_STALL_CLASS)
-            or _has_stall_marker(conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS)
+        if _has_stall_marker(
+            conn, task_id, INTEGRATION_RETRY_EXHAUSTED_CLASS
+        ):
+            continue
+        if _has_stall_marker(
+            conn, task_id, INTEGRATION_PARKED_STALL_CLASS
         ) and not base_prep_retry_allowed:
             continue
         if (

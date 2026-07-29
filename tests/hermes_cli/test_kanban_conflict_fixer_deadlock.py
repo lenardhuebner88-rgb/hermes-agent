@@ -260,7 +260,7 @@ def test_base_prep_timeout_routes_second_fixer_despite_system_escalation(
     ]
 
 
-def test_base_prep_fixer_budget_stays_capped_with_one_escalation(
+def test_base_prep_fixer_budget_exhaustion_settles_after_repeated_sweeps(
     kanban_home,
     tmp_path,
     monkeypatch,
@@ -293,10 +293,32 @@ def test_base_prep_fixer_budget_stays_capped_with_one_escalation(
             monkeypatch=monkeypatch,
         )
 
-        final_sweep = kb.no_silent_stall_sweep(
+        escalations_before_exhaustion = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+        first_exhausted_sweep = kb.no_silent_stall_sweep(
             conn,
             now=after_first + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
         )
+        events_after_exhaustion = kb.list_events(conn, parent_id)
+
+        def fail_if_routed_again(*_args, **_kwargs):
+            raise AssertionError("settled exhausted park re-entered fixer routing")
+
+        monkeypatch.setattr(
+            kb,
+            "_maybe_route_conflict_park_fixer",
+            fail_if_routed_again,
+        )
+        repeated_sweeps = [
+            kb.no_silent_stall_sweep(
+                conn,
+                now=after_first + kb.CONFLICT_FIXER_BACKOFF_SECONDS + offset,
+            )
+            for offset in (2, 3, 4)
+        ]
         dispatched = [
             event
             for event in kb.list_events(conn, parent_id)
@@ -307,10 +329,65 @@ def test_base_prep_fixer_budget_stays_capped_with_one_escalation(
             for event in kb.list_events(conn, parent_id)
             if event.kind == kb.OPERATOR_ESCALATION_EVENT
         ]
+        exhaustion_escalations = [
+            event
+            for event in escalations
+            if event.payload["evidence"].get("fixer_exhausted") is True
+        ]
+        events_after_repeated_sweeps = kb.list_events(conn, parent_id)
 
     assert len(dispatched) == kb.CONFLICT_FIXER_MAX_ATTEMPTS
-    assert final_sweep["conflict_fixer_dispatched"] == []
-    assert len(escalations) == 1
+    assert first_exhausted_sweep["conflict_fixer_dispatched"] == []
+    assert len(escalations) - len(escalations_before_exhaustion) == 1
+    assert len(exhaustion_escalations) == 1
+    assert exhaustion_escalations[0].payload["evidence"]["attempts"] == (
+        kb.CONFLICT_FIXER_MAX_ATTEMPTS
+    )
+    assert all(sweep["conflict_fixer_dispatched"] == [] for sweep in repeated_sweeps)
+    assert events_after_repeated_sweeps == events_after_exhaustion
+
+
+def test_base_prep_retry_never_bypasses_integration_retry_exhaustion(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    with kb.connect_closing() as conn:
+        parent_id, first_child = _base_prep_route_with_system_escalation(
+            conn,
+            tmp_path,
+            now=now,
+        )
+        _timeout_fixer_at_limit(
+            conn,
+            first_child,
+            now=now,
+            monkeypatch=monkeypatch,
+        )
+        with kb.write_txn(conn):
+            kb._append_stall_marker(
+                conn,
+                parent_id,
+                stall_class=kb.INTEGRATION_RETRY_EXHAUSTED_CLASS,
+                action="parked",
+                reason="transient integration retry budget exhausted",
+                now=now,
+            )
+
+        sweep = kb.no_silent_stall_sweep(
+            conn,
+            now=now + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1,
+        )
+        dispatched = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    assert len(dispatched) == 1
+    assert sweep["conflict_fixer_dispatched"] == []
 
 
 def test_base_prep_operator_hold_still_blocks_second_fixer(
