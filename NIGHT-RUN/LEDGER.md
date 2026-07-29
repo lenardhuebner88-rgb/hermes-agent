@@ -177,3 +177,6 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 12/20 = 60%
 - gate: narrow pytest 32 passed | ruff clean
 - commit: 1d9376389
+
+## 25. hermes_cli/symbol_test_narrowing.py — 2026-07-29T00:44:47Z
+- REJECTED: probe timeout — per-mutant runtime 11-40s × 20 mutants exceeds 300s budget; baseline GREEN but incomplete score (11/20 evaluated before timeout)
