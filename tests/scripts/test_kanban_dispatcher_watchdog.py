@@ -278,3 +278,23 @@ def test_post_discord_caps_body_at_exactly_2000_chars(tmp_path, monkeypatch):
 
     assert result["result"] == "sent"
     assert len(captured["content"]) == 2000
+
+
+# ---------------------------------------------------------------------------
+# Second pass: staleness constant + state serialization
+# ---------------------------------------------------------------------------
+
+def test_stale_after_seconds_is_exactly_fifteen_minutes():
+    """The staleness window is pinned at 15*60 — off-by-one factors
+    would shift the alert boundary by a full minute."""
+    assert wd.STALE_AFTER_SECONDS == 15 * 60
+
+
+def test_save_state_keeps_non_ascii_raw(tmp_path: Path):
+    """State persists raw UTF-8 — escaped \\u sequences would make the
+    state file unreadable to humans diffing it during an incident."""
+    path = tmp_path / "state" / "watchdog.json"
+    wd._save_state(path, {"note": "prüfung läuft"})
+    raw = path.read_text(encoding="utf-8")
+    assert "prüfung läuft" in raw
+    assert json.loads(raw) == {"note": "prüfung läuft"}
