@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from hermes_cli.plan_compiler import CompileBlocked, TaskgraphHints
-from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan
+from hermes_cli.plan_prose import ProseSlice, _slice_id, compile_prose_plan, parse_prose_plan
 
 
 def test_parse_two_slices():
@@ -137,3 +137,32 @@ def test_deps_from_order():
     assert result.children[0]["parents"] == []
     assert result.children[1]["parents"] == [0]
     assert result.children[2]["parents"] == [1]
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_ambiguous_false_when_done_when_set_body_empty():
+    """Kill both L36 mutants (and->or, or->and): done_when present, body empty."""
+    s = ProseSlice(title="t", done_when="ships green", body="")
+    # Original: not "ships green".strip() and not "".strip() = False and True = False
+    # Mutant (and->or): False or True = True
+    # Mutant (or->and on done_when): not ("ships green" and "").strip() = not "" = True; True and True = True
+    assert s.ambiguous is False
+
+
+def test_slice_id_starts_at_s1():
+    """Kill const_offset L69 (1 -> 2): _slice_id(0) must be 'S1', not 'S2'."""
+    assert _slice_id(0) == "S1"
+    assert _slice_id(1) == "S2"
+
+
+def test_compile_valid_dep_does_not_raise():
+    """Kill identity_swap L181 (is -> is not): valid dep must not raise CompileBlocked."""
+    plan = parse_prose_plan(
+        "# Plan\n**Goal:** G\n\n## Slice: Alpha\n- done-when: A done.\n\n## Slice: Beta\n- done-when: B done.\n- deps: Alpha\n"
+    )
+    result = compile_prose_plan(plan)
+    # Original: dep_id is None = False -> no raise -> compiles fine
+    # Mutant (is not): dep_id is not None = True -> raises CompileBlocked
+    assert len(result.children) == 2
