@@ -384,3 +384,28 @@ def test_unknown_store_version_fails_soft(corrections_home):
             ITEM_ID, {"autor": "Claude"}, "Nicht überschreiben",
             confirm=True, derived_provenance=_provenance(),
         )
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_snapshot_missing_status_defaults_to_unknown():
+    """Kill bool_op_swap L263: or -> and would yield None instead of 'unknown'."""
+    result = lc._snapshot({"producer": "p", "path": "/x"})
+    assert result["status"] == "unknown"
+
+
+def test_apply_empty_provenance_chain_and_refs_fallback():
+    """Kill bool_op_swap L310/L311: or -> and would crash on dict(None)/list(None)."""
+    record = {"fields": {"path": "/new"}, "item_id": "x"}
+    result, block = lc.apply({}, record)
+    assert result["refs"] == []
+    assert isinstance(result["chain"], dict)
+    assert block is not None
+
+
+def test_apply_missing_refs_defaults_to_empty_list():
+    """Kill bool_op_swap L311: or -> and would crash on list(None)."""
+    record = {"fields": {"path": "/y"}, "item_id": "z"}
+    result, _ = lc.apply({"producer": "p", "path": "/x", "status": "ok"}, record)
+    assert result["refs"] == []

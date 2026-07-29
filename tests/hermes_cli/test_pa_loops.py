@@ -422,3 +422,57 @@ def test_loop_card_text_is_category_specific_and_enqueue_uses_it(
         )
     )
     assert fallback == "PA-Aktion ausführen: tmux.interrupt? — halt"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_state_root_uses_override(isolated_loops, monkeypatch):
+    """Kill bool_op_swap L50: or->and would ignore STATE_ROOT_OVERRIDE."""
+    custom = isolated_loops["hermes_home"] / "custom-loops"
+    monkeypatch.setattr(pa_loops, "STATE_ROOT_OVERRIDE", custom)
+    assert pa_loops._state_root() == custom
+
+
+def test_pack_names_in_excludes_invalid_names(isolated_loops):
+    """Kill bool_op_swap L64: and->or would include dirs with invalid names."""
+    repo = isolated_loops["repo_packs"]
+    # Valid pack
+    valid = repo / "good-pack"
+    valid.mkdir()
+    (valid / "pack.yaml").write_text("name: good-pack\n")
+    # Invalid: uppercase violates _PACK_NAME_RE
+    invalid = repo / "BadPack"
+    invalid.mkdir()
+    (invalid / "pack.yaml").write_text("name: BadPack\n")
+    names = pa_loops._pack_names_in(repo)
+    assert "good-pack" in names
+    assert "BadPack" not in names
+
+
+def test_model_catalog_skips_non_list_models(isolated_loops):
+    """Kill bool_op_swap L118: or->and would not skip when only models is wrong."""
+    models_file = isolated_loops["models"]
+    models_file.write_text(
+        yaml.safe_dump({"engines": {"claude": {"models": "not-a-list"}}}),
+        encoding="utf-8",
+    )
+    catalog = pa_loops._model_catalog()
+    assert "claude" not in catalog
+
+
+def test_model_catalog_excludes_non_str_models(isolated_loops):
+    """Kill bool_op_swap L120: and->or would include non-str model entries."""
+    models_file = isolated_loops["models"]
+    models_file.write_text(
+        yaml.safe_dump({"engines": {"claude": {"models": ["valid", 123, None]}}}),
+        encoding="utf-8",
+    )
+    catalog = pa_loops._model_catalog()
+    assert catalog["claude"] == {"valid"}
+
+
+def test_age_seconds_returns_none_for_empty_string():
+    """Kill bool_op_swap L378: or->and would not return None for empty string."""
+    now = datetime.now(timezone.utc)
+    assert pa_loops._age_seconds("", now) is None

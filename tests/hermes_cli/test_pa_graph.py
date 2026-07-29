@@ -487,3 +487,43 @@ print(json.dumps({'registered': path in paths, 'public': path in _PUBLIC_API_PAT
         "registered": True,
         "public": False,
     }
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_normalize_vault_path_drops_dot_and_empty_segments():
+    """Kill bool_op_swap L197: and -> or.
+
+    With the mutant, a segment that is empty OR '.' would pass the filter
+    (because `normalized or normalized != "."` is True when normalized is
+    falsy).  The correct behaviour drops both empty and '.' segments.
+    """
+    result = graph._normalize_vault_path("vault://a/./b//c")
+    assert result == "a/b/c", f"expected 'a/b/c', got {result!r}"
+
+
+def test_project_node_label_falls_back_to_slug():
+    """Kill bool_op_swap L466: or -> and.
+
+    With the mutant, `row["name"] and row["slug"]` evaluates to the empty
+    string when name is falsy, so the label becomes '' instead of the slug.
+    """
+    row = {"id": "42", "name": "", "slug": "my-project"}
+    node = graph._project_node(row)
+    assert node["label"] == "my-project", f"expected 'my-project', got {node['label']!r}"
+
+
+def test_link_targets_preserves_angle_bracket_link_with_space():
+    """Kill bool_op_swap L272: and -> or.
+
+    With the mutant, a raw target starting with '<' that also contains a
+    space would be split on the space (because `" " in raw or not
+    raw.startswith("<")` is True).  The correct behaviour keeps the full
+    angle-bracket target intact (only stripping the <> delimiters).
+    """
+    text = "[Demo](<a b>)"
+    links = list(graph._link_targets(text))
+    assert ("markdown-link", "a b") in links, (
+        f"angle-bracket link with space was split: {links}"
+    )

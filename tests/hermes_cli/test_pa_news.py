@@ -304,3 +304,71 @@ def test_cache_ttl_second_call_does_not_reread(monkeypatch):
     mod._cache_at = time.monotonic() - mod.CACHE_TTL_S - 1  # expire
     client.get("/api/pa/news")
     assert calls["n"] == 2
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_clip_exact_limit_not_truncated():
+    """Kill comparison_swap L152: <= -> < would truncate at-limit text."""
+    text = "a" * 120
+    assert mod._clip(text, 120) == text
+
+
+def test_is_metadata_line_len_exactly_100():
+    """Kill comparison_swap L182: < -> <= would accept len==100."""
+    # 2 middle dots + padding to exactly 100 chars
+    text = "A·B·" + "x" * 96
+    assert len(text) == 100
+    assert mod._is_metadata_line(text) is False
+
+
+def test_is_metadata_line_and_not_or():
+    """Kill bool_op_swap L182: and -> or would accept long metadata."""
+    # >= 2 middle dots but len >= 100 → False with and, True with or
+    text = "A·B·" + "x" * 200
+    assert mod._is_metadata_line(text) is False
+
+
+def test_derive_summary_breaks_at_exactly_summary_max():
+    """Kill comparison_swap L207: >= -> > would collect past SUMMARY_MAX."""
+    line = "x" * mod.SUMMARY_MAX
+    response = f"# Title\n{line}\nmore text here"
+    result = mod._derive_summary(response, "Title")
+    # With >=, breaks after first line → result is exactly 200 x's.
+    # With >, collects second line then _clip truncates → different string.
+    assert result == "x" * mod.SUMMARY_MAX
+
+
+def test_cap_markdown_exact_limit_unchanged():
+    """Kill comparison_swap L215: <= -> < would truncate at-limit text."""
+    text = "a" * mod.MAX_MARKDOWN_BYTES
+    assert mod._cap_markdown(text) == text
+
+
+def test_extract_response_fence_tracking_starts_false():
+    """Kill boolean_flip L121: False -> True would skip ## break."""
+    # A ## heading right after ## Response must terminate the section.
+    text = "## Response\nanswer line\n## Next Section\nshould not appear"
+    result = mod._extract_response(text)
+    assert result == "answer line"
+    assert "should not appear" not in (result or "")
+
+
+def test_collect_items_newest_first(tmp_path, monkeypatch):
+    """Kill boolean_flip L286: True -> False would sort oldest-first."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cron_root = tmp_path / "profiles" / "research" / "cron" / "output"
+    for job_id in mod.JOBS:
+        job_dir = cron_root / job_id
+        job_dir.mkdir(parents=True)
+        older = job_dir / "2026-01-01-0800.md"
+        newer = job_dir / "2026-01-02-0800.md"
+        older.write_text("## Response\nOld item\n", encoding="utf-8")
+        newer.write_text("## Response\nNew item\n", encoding="utf-8")
+
+    items, errors = mod._collect_items()
+    assert not errors
+    assert len(items) >= 2
+    # Newest file should come first (reverse=True)
+    assert items[0]["title"] == "New item"

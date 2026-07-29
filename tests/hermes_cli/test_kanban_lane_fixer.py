@@ -349,3 +349,52 @@ def test_allowlisted_paths_for_parent_only_includes_done_fixer(lane_parent):
         violating_paths=paths,
         expected_lane="coder-frontend",
     ) == set(paths)
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_event_payloads_parses_real_payload(lane_parent):
+    """Kill bool_op_swap L54: or "{}" -> and "{}" in _event_payloads."""
+    conn, parent, info = lane_parent
+    parent_id = parent["id"]
+    fp = "test-fingerprint-abc"
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            lane_fixer.LANE_FIXER_DISPATCHED_EVENT,
+            {"fingerprint": fp, "extra": "data"},
+        )
+    result = lane_fixer._event_payloads(conn, parent_id, fp)
+    assert len(result) == 1
+    assert result[0][1]["fingerprint"] == fp
+    assert result[0][1]["extra"] == "data"
+
+
+def test_lane_fingerprint_from_scope_payload_returns_fingerprint():
+    """Kill bool_op_swap L93: or "" -> and "" on expected_lane."""
+    payload = {
+        "violating_paths": ["a.py", "b.py"],
+        "expected_lane": "coder",
+    }
+    fp = lane_fixer._lane_fingerprint_from_scope_payload(payload)
+    assert fp != ""
+    assert isinstance(fp, str)
+
+
+def test_resume_tip_for_fingerprint_returns_tip(lane_parent):
+    """Kill bool_op_swap L147 and L149: or "" -> and "" on fingerprint/tip."""
+    conn, parent, info = lane_parent
+    parent_id = parent["id"]
+    fp = "resume-fp-xyz"
+    tip_sha = "abc123def456"
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT,
+            {"fingerprint": fp, "resume_branch_tip": tip_sha},
+        )
+    result = lane_fixer._resume_tip_for_fingerprint(conn, parent_id, fp)
+    assert result == tip_sha

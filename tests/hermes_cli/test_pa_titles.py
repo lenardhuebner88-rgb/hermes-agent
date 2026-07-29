@@ -90,3 +90,27 @@ def test_distill_decision_why_without_planspec_is_honest_fallback() -> None:
         INBOX_WHY_FALLBACK,
         INBOX_DECLINE_FALLBACK,
     )
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_bounded_text_truncates_at_exact_limit() -> None:
+    """Kill const_offset L45 and comparison_swap L45: exact-boundary oracle.
+    80-char text must pass through unchanged; 81-char must truncate to 80."""
+    from hermes_cli.pa_titles import _bounded_text
+
+    exact = "a" * 80
+    assert _bounded_text(exact, 80) == exact  # <= must keep 80
+    over = "a" * 81
+    result = _bounded_text(over, 80)
+    assert len(result) == 80  # 79 chars + "…"
+    assert result.endswith("…")
+
+
+def test_distill_decision_why_labelled_section() -> None:
+    """Kill const_offset L141 (group(1)->group(2)) and L143 (group(2)->group(3)):
+    labelled inline sections must use the label for kind and text for content."""
+    body = "Ziel: Das Ziel ist klar und eindeutig.\n"
+    why, _ = distill_decision_why(body)
+    assert "Das Ziel ist klar" in why

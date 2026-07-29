@@ -145,3 +145,33 @@ def test_apply_lane_model_writes_only_requested_aux_slots(tmp_path: Path):
         "timeout": 120,
     }
     assert saved["auxiliary"]["vision"] == {"model": "keep"}
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_apply_lane_model_captures_before_state(tmp_path: Path):
+    """Kill bool_op_swap L85: or->and would make `before` always {}."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump({"auxiliary": {"code_audit": {"model": "old-model", "provider": "custom"}}}),
+        encoding="utf-8",
+    )
+
+    result = lanes.apply_lane_model_config(cfg_path, lane="code_audit", model_key="glm-5.2")
+
+    assert result["ok"] is True
+    assert result["before"] == {"model": "old-model", "provider": "custom"}
+
+
+def test_first_tool_call_name_handles_namespace_without_message():
+    """Kill bool_op_swap L158: and->or would enter dict-fallback on a namespace."""
+    resp = SimpleNamespace(choices=[SimpleNamespace()])
+    assert lanes._first_tool_call_name(resp) is None
+
+
+def test_first_tool_call_name_handles_namespace_without_function():
+    """Kill bool_op_swap L166: and->or would enter dict-fallback on a namespace."""
+    msg = SimpleNamespace(tool_calls=[SimpleNamespace()])
+    resp = SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+    assert lanes._first_tool_call_name(resp) is None

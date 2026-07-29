@@ -591,3 +591,46 @@ def test_auto_triage_open_questions_stay_open(disposition, severity):
 def test_auto_triage_status_is_valid_ledger_status():
     status = d.auto_triage_terminal_status(_item(disposition="drop"))
     assert status in d.VALID_LEDGER_STATUS
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_validate_disposition_block_not_dict():
+    """Kill L263: block must be a dict, not a list/string."""
+    ok, missing = d.validate_disposition({"disposition": ["not", "a", "dict"]})
+    assert not ok
+    assert d.DISPOSITION_KEY in missing
+
+
+def test_validate_disposition_item_not_dict():
+    """Kill L287: each item must be a dict."""
+    metadata = {"disposition": {"items": ["just-a-string"]}}
+    ok, missing = d.validate_disposition(metadata)
+    assert not ok
+    assert any("item must be a dict" in m for m in missing)
+
+
+def test_is_intish_rejects_bool():
+    """Kill L336: bool is NOT intish even though isinstance(True, int) is True."""
+    assert d._is_intish(True) is False
+    assert d._is_intish(False) is False
+
+
+def test_is_intish_rejects_non_numeric_string():
+    """Kill L344: non-numeric strings return False via ValueError path."""
+    assert d._is_intish("abc") is False
+    assert d._is_intish("12.5") is False
+    assert d._is_intish("") is False
+
+
+def test_validate_completion_bundle_gates_exit_code_not_intish():
+    """Kill L397: gates.exit_code must be intish; non-intish triggers missing."""
+    metadata = {
+        "schema_version": 1,
+        "gates": {"exit_code": "not-a-number"},
+        "AC": [{"id": "AC-1", "status": "met"}],
+        "residual_risk": "none identified",
+    }
+    missing = d.validate_completion_bundle(metadata)
+    assert any("gates.exit_code" in m for m in missing)

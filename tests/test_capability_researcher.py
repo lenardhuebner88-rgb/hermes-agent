@@ -277,3 +277,83 @@ def test_research_skills_sweep_aggregates_and_ranks():
     assert report["skills_with_findings"] == 2
     assert len(report["findings"]) == 2
     assert all("rank_score" in f for f in report["findings"])
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_coerce_skill_severity_explicit_value_wins():
+    """Kill bool_op_swap L88: or->and would turn 'high' into ''."""
+    assert cr._coerce_skill_severity("high", "contradiction") == "high"
+
+
+def test_coerce_skill_severity_none_falls_back_to_category():
+    """L88 complement: None must hit the category default, not crash."""
+    result = cr._coerce_skill_severity(None, "contradiction")
+    assert result in cr._SEVERITY_SCALE
+
+
+def test_extract_content_none_content_returns_empty():
+    """Kill bool_op_swap L115: or->and would make None.strip() crash."""
+
+    class _Msg:
+        content = None
+
+    class _Choice:
+        message = _Msg()
+
+    class _Resp:
+        choices = [_Choice()]
+
+    assert cr._extract_content(_Resp()) == ""
+
+
+def test_extract_tokens_prefers_attr_over_dict():
+    """Kill bool_op_swap L123: and->or would let dict override attr."""
+
+    class _Usage(dict):
+        total_tokens = 42
+
+        def get(self, key, default=None):
+            return 999 if key == "total_tokens" else default
+
+    class _Resp:
+        usage = _Usage()
+
+    # total_tokens attr is 42; dict.get would return 999.
+    # Original: total=42 (not None) → skips dict branch → returns 42.
+    # Mutant (or): total=42, isinstance True → enters branch → 999.
+    assert cr._extract_tokens(_Resp()) == 42
+
+
+def test_extract_tokens_nonzero_total():
+    """Kill bool_op_swap L125: or->and would turn 5 into 0."""
+
+    class _Usage:
+        total_tokens = 5
+
+    class _Resp:
+        usage = _Usage()
+
+    assert cr._extract_tokens(_Resp()) == 5
+
+
+def test_parse_findings_drops_empty_problem():
+    """Kill bool_op_swap L264: or->and would keep empty-problem findings."""
+    content = json.dumps({"findings": [{
+        "category": "contradiction",
+        "problem": "",
+        "evidence": "Some evidence here.",
+        "fix_hint": "fix it",
+    }]})
+    skills = [("deploy", _SKILL)]
+    report = cr.research_skills(skills, call_llm=_stub(content))
+    assert report["ok"] is True
+    assert len(report["findings"]) == 0
+
+
+def test_rank_reason_zero_usage_no_genutzt_clause():
+    """Kill bool_op_swap L333: and->or would emit 'genutzt (0×)'."""
+    finding = {"category": "contradiction", "rank_score": 1.0}
+    reason = cr._rank_reason(finding, use_count=0)
+    assert "genutzt" not in reason

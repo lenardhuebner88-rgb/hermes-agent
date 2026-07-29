@@ -145,3 +145,20 @@ def test_mtime_change_reflects_without_force(config_file):
 
     second = load_stats_config()  # still no force — relies on mtime invalidation
     assert second["providers"][0]["label"] == "Second"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_normalize_provider_explicit_usage_role_and_label():
+    """Kill bool_op_swap L84 (or->and) and L89 (or->and):
+    explicit usage_role and label must not be replaced by fallbacks."""
+    result = stats_config._normalize_provider({
+        "id": "test-prov",
+        "label": "Custom Label",
+        "lane": "test-lane",
+        "usage_role": "spend",
+    })
+    assert result is not None
+    assert result["usage_role"] == "spend"
+    assert result["label"] == "Custom Label"

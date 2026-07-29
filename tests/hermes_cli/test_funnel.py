@@ -632,3 +632,40 @@ def test_short_cost_comment_unblocks_approve_and_keeps_spec(conn):
     child = kb.get_task(conn, new_id)
     assert "# Benchmark-Spec" in (child.body or "")
     assert note not in (child.body or "")
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_draft_dict_operator_edited_false_for_plain_draft(conn):
+    """Kill bool_op_swap L254: and->or would flag any non-empty text as edited."""
+    tid = _make_done_draft(conn, draft="# Normaler Draft\n" + "p" * 150)
+    task = kb.get_task(conn, tid)
+    d = funnel.draft_dict(conn, task)
+    assert d["operator_edited"] is False
+
+
+def test_revision_title_no_double_prefix(conn):
+    """Kill bool_op_swap L278: `title or ""` -> `title and ""` would double-prefix
+    already-prefixed titles."""
+    tid = _make_done_draft(conn, title="Überarbeiten: alter Titel")
+    new_id = funnel.request_revision(
+        conn, tid, draft_text="# Rev\n" + "r" * 150,
+    )
+    revised = kb.get_task(conn, new_id)
+    assert revised.title == "Überarbeiten: alter Titel"
+    assert not revised.title.startswith("Überarbeiten: Überarbeiten:")
+
+
+def test_request_revision_uses_assignee_fallback(conn):
+    """Kill bool_op_swap L425: or->and would drop fallback when assignee is None."""
+    tid = _make_done_draft(conn)
+    # _make_done_draft creates via create_wish which sets no assignee
+    task = kb.get_task(conn, tid)
+    assert not task.assignee  # precondition: no assignee on the draft
+    new_id = funnel.request_revision(
+        conn, tid, draft_text="# Rev\n" + "r" * 150,
+        assignee_fallback="premium",
+    )
+    revised = kb.get_task(conn, new_id)
+    assert revised.assignee == "premium"

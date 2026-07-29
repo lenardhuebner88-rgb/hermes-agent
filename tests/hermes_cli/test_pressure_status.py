@@ -277,3 +277,46 @@ def test_snapshot_uses_short_top_level_cache(monkeypatch):
 
     assert first == second
     assert calls["host"] == 1
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_scrub_redacts_paths():
+    """Kill bool_op_swap L52: or -> and would leak one of the path forms."""
+    assert ps._scrub("/home/piet/secret") == "redacted"
+    assert ps._scrub("C:\\Users\\bob\\data") == "redacted"
+    assert ps._scrub("repo/.worktrees/branch/file") == "redacted"
+    assert ps._scrub("plain text") == "plain text"
+
+
+def test_scope_kind_classification():
+    """Kill bool_op_swap L149: and -> or breaks session scope detection."""
+    assert ps._scope_kind("/sys/fs/user.slice/session-2.scope") == (
+        "session",
+        "session scope",
+    )
+    assert ps._scope_kind("/sys/fs/system.slice/foo.service") == ("service", "service")
+    assert ps._scope_kind("/sys/fs/other.scope") == ("scope", "systemd scope")
+    assert ps._scope_kind("/sys/fs/cgroup/leaf") == ("cgroup", "cgroup")
+    assert ps._scope_kind(None) == ("unknown", "unknown")
+
+
+def test_classify_process_categories():
+    """Kill bool_op_swap L226/L228/L230/L232: or -> and breaks classification."""
+    assert ps._classify_process("python", ["python", "-m", "pytest", "tests/"]) == (
+        "test",
+        "pytest",
+    )
+    assert ps._classify_process("tox", ["tox", "-e", "py"]) == ("test", "tox")
+    assert ps._classify_process("nox", ["nox", "-s", "lint"]) == ("test", "nox")
+    assert ps._classify_process(
+        "chromium", ["chromium", "--headless"]
+    ) == ("browser_test", "browser test")
+    assert ps._classify_process("node", ["node", "playwright", "test"]) == (
+        "browser_test",
+        "browser test",
+    )
+    # noise processes are filtered out
+    assert ps._classify_process("rg", ["rg", "pattern"]) is None
+    assert ps._classify_process("grep", ["grep", "x"]) is None

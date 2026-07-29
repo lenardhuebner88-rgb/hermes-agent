@@ -549,3 +549,103 @@ def test_ad_hoc_guards_minor_ui_impact_still_auto_executes(kanban_home, monkeypa
 
 
 import json  # noqa: E402
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_contract_depth_defaults_path_to_api_status():
+    """Kill bool_op_swap L87: or->and would make path empty when no 'path' key."""
+    calls = []
+
+    def fake_fetch(path, timeout=8.0):
+        calls.append(path)
+        return {"version": "1.0"}
+
+    res = auto_release.run_live_test(
+        "contract", fetch=fake_fetch, contract={"expect": {"version": "1.0"}}
+    )
+    assert res.passed
+    assert calls == ["/api/status"]
+
+
+def test_contract_depth_degrades_to_smoke_when_expect_not_dict():
+    """Kill bool_op_swap L89: or->and would not degrade when expect is a list."""
+    calls = []
+
+    def fake_fetch(path, timeout=8.0):
+        calls.append(path)
+        return {"version": "1.0"}
+
+    res = auto_release.run_live_test(
+        "contract", fetch=fake_fetch, contract={"path": "/api/x", "expect": ["not-a-dict"]}
+    )
+    # Degrades to smoke: just checks payload has 'version'
+    assert res.passed
+    assert calls == ["/api/x"]
+
+
+def test_release_config_handles_empty_yaml(kanban_home, monkeypatch, tmp_path):
+    """Kill bool_op_swap L136: or->and would crash on None from safe_load."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("")  # empty file -> yaml.safe_load returns None
+    monkeypatch.setattr(
+        "hermes_constants.get_default_hermes_root", lambda: tmp_path
+    )
+    cfg_result = auto_release._release_config()
+    assert cfg_result["autonomous"] is False
+    assert cfg_result["max_tier_autonomous"] == "review"
+
+
+def test_release_config_handles_missing_release_key(kanban_home, monkeypatch, tmp_path):
+    """Kill bool_op_swap L137: or->and would crash when 'release' key is absent."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agent:\n  max_turns: 80\n")
+    monkeypatch.setattr(
+        "hermes_constants.get_default_hermes_root", lambda: tmp_path
+    )
+    cfg_result = auto_release._release_config()
+    assert cfg_result["autonomous"] is False
+
+
+def test_release_config_defaults_max_tier(kanban_home, monkeypatch, tmp_path):
+    """Kill bool_op_swap L145: or->and would make max_tier empty string."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("release:\n  autonomous: true\n")
+    monkeypatch.setattr(
+        "hermes_constants.get_default_hermes_root", lambda: tmp_path
+    )
+    cfg_result = auto_release._release_config()
+    assert cfg_result["max_tier_autonomous"] == "review"
+
+
+def test_release_chain_empty_depth_runs_smoke_post_deploy():
+    """Kill bool_op_swap L270: or->and would pass empty depth to post-deploy test."""
+    calls = []
+
+    def fake_fetch(path, timeout=8.0):
+        calls.append(path)
+        return {"version": "1.0", "gateway_running": True}
+
+    result = auto_release.release_chain(
+        depth="",
+        config={},
+        deploy=lambda: (True, "deployed ok"),
+        rollback=lambda: (True, "rolled back"),
+        notify=lambda msg: None,
+        fetch=fake_fetch,
+    )
+    assert result["outcome"] == "deployed"
+    # Post-deploy test must have hit /api/status (smoke), not empty path
+    assert "/api/status" in calls
+
+
+def test_evaluate_guards_holds_critical_tier(kanban_home, monkeypatch):
+    """Kill bool_op_swap L339: or->and would not hold when max_tier is critical."""
+    monkeypatch.setattr(auto_release, "_release_config", _green_config)
+    with kb.connect() as conn:
+        root, kids = _mk_chain(conn, tier="critical")
+        decision = auto_release.evaluate_ad_hoc_release_guards(
+            conn, root_id=root, chain_ids=_chain_ids(root, kids),
+        )
+    assert decision["outcome"] == "held_critical"

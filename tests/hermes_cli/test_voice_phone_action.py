@@ -179,3 +179,33 @@ def test_confirmation_card_accessibility_and_short_viewport_scroll_contract():
     assert ".phone-action-buttons button { min-height: 48px; }" in html
     assert "overflow-y: auto;" in html
     assert 'body[data-phone-action-open="true"] .state-card { display: none; }' in html
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_phone_action_rejects_empty_text():
+    """Kill bool_op_swap L41 (or -> and): mutant lets empty string through."""
+    action, error = validate_phone_action({"action": "copy_text", "text": ""})
+    # Original: not isinstance(str)=False OR not "".strip()=True -> True -> error
+    # Mutant (and): False AND True -> False -> no error, returns action
+    assert action is None
+    assert "darf nicht leer sein" in (error or "")
+
+
+def test_phone_action_rejects_control_char_without_null():
+    """Kill bool_op_swap L43 (or -> and): mutant lets a lone control char through."""
+    action, error = validate_phone_action({"action": "copy_text", "text": "a\x01b"})
+    # Original: "\x00" in val=False OR any(control)=True -> True -> error
+    # Mutant (and): False AND True -> False -> no error
+    assert action is None
+    assert "Steuerzeichen" in (error or "")
+
+
+def test_phone_action_share_text_under_8192_accepted():
+    """Kill bool_op_swap L47 (and -> or): mutant rejects share_text at copy limit."""
+    action, error = validate_phone_action({"action": "share_text", "text": "x" * 5000})
+    # Original: action=="copy_text"=False AND len>4096=True -> False -> allowed
+    # Mutant (or): False OR True -> True -> wrongly rejects with 4096 message
+    assert action is not None
+    assert error is None

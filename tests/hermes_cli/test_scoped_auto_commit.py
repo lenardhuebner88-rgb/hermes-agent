@@ -6,6 +6,9 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.scoped_auto_commit import (
+    _all_checks_green,
+    _normalize_scoped_paths,
+    _truthy,
     create_scoped_local_commit,
     evaluate_scoped_auto_commit_gate,
 )
@@ -159,3 +162,40 @@ def test_create_scoped_local_commit_rejects_staged_paths_outside_scope(tmp_path)
             anti_scope=ANTI_SCOPE_GREEN,
             expected_workflow_id=WORKFLOW_ID,
         )
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_truthy_numeric_zero_is_false():
+    """Kill comparison_swap L44 (!= -> ==): mutant treats 0 as truthy."""
+    assert _truthy(0) is False
+    assert _truthy(0.0) is False
+    assert _truthy(1) is True
+    assert _truthy(-1) is True
+
+
+def test_all_checks_green_rejects_empty():
+    """Kill boolean_flip L65 (False -> True): mutant accepts empty checks."""
+    ok, failures = _all_checks_green(None)
+    assert ok is False
+    assert failures == ["acceptance checks are required"]
+
+    ok2, failures2 = _all_checks_green({})
+    assert ok2 is False
+    assert failures2 == ["acceptance checks are required"]
+
+
+def test_normalize_scoped_paths_rejects_absolute_and_traversal():
+    """Kill bool_op_swap L200 (or -> and): mutant allows /abs or ../ paths."""
+    with pytest.raises(ValueError, match="non-traversing"):
+        _normalize_scoped_paths(["/absolute/path"])
+
+    with pytest.raises(ValueError, match="non-traversing"):
+        _normalize_scoped_paths(["../traverse"])
+
+    # valid relative paths still work
+    assert _normalize_scoped_paths(["src/main.py", "tests/test_x.py"]) == [
+        "src/main.py",
+        "tests/test_x.py",
+    ]

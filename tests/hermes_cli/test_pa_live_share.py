@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 import hermes_cli.pa_chat as pa
 from hermes_cli.pa_live_share import (
+    LiveShareError,
     LiveShareNoFrame,
     LiveShareNotFound,
     LiveShareRegistry,
@@ -188,3 +189,36 @@ def test_live_share_stop_unknown_is_ok_false(isolated_pa_home: Path) -> None:
         stopped = client.post("/api/pa/live-share/live_missing/stop")
         assert stopped.status_code == 200
         assert stopped.json() == {"ok": False}
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_sweep_boundary_exact_cutoff_survives() -> None:
+    """Kill comparison_swap L82: < -> <= would sweep a session updated
+    exactly at the cutoff boundary."""
+    clock = _Clock()
+    reg = LiveShareRegistry(ttl_seconds=100.0, clock=clock)
+    sid = reg.start(now=1000.0)
+    # updated_at = 1000.0; cutoff at now=1100.0 is 1000.0
+    # 1000.0 < 1000.0 is False → survives. Mutant <= would sweep it.
+    reg.put_frame(sid, b"x", ".jpg", now=1000.0)
+    clock.t = 1100.0
+    assert reg.active_count() == 1
+    # One tick past → swept
+    clock.t = 1100.1
+    assert reg.active_count() == 0
+
+
+def test_put_frame_exact_cap_accepted() -> None:
+    """Kill comparison_swap L117: > -> >= would reject a frame at exactly
+    max_frame_bytes."""
+    clock = _Clock()
+    reg = LiveShareRegistry(max_frame_bytes=100, clock=clock)
+    sid = reg.start()
+    reg.put_frame(sid, b"A" * 100, ".jpg")
+    data, suffix = reg.latest_frame(sid)
+    assert len(data) == 100
+    # One byte over → rejected
+    with pytest.raises(LiveShareError):
+        reg.put_frame(sid, b"A" * 101, ".jpg")

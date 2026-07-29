@@ -356,3 +356,86 @@ def test_jarvis_blueprints_and_documented_cron_commands_validate() -> None:
         assert args.prompt == prompt
         assert args.deliver == "local"
         assert args.workdir == "/home/piet/.hermes/hermes-agent"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_brief_store_roundtrip_preserves_nonempty_hashes(
+    isolated_brief_home: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill bool_op_swap L158-160: or "" -> and "" on hash fields.
+
+    The mutant turns every non-empty hash into "" on read-back.
+    """
+    now = 2_000_000_000
+    monkeypatch.setattr(brief.time, "time", lambda: now)
+    store = brief.BriefStore()
+    candidate = brief.BriefCandidate(
+        kind="morning",
+        since_ts=0,
+        captured_at=now,
+        kanban={"events": [{"id": 1}]},
+        receipts={"items": []},
+        inbox={"items": []},
+        errors=(),
+        payload_hash="abc123",
+        inbox_hash="def456",
+    )
+    built = brief.BuiltBrief(candidate=candidate, text="Test brief text")
+    assert store.append_if_new(built) is True
+
+    state = store.get_state("morning")
+    assert state.last_payload_hash == "abc123"
+    assert state.last_content_hash != ""
+    assert state.last_inbox_hash == "def456"
+
+
+def test_kanban_event_preserves_real_status(
+    isolated_brief_home: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill bool_op_swap L325: or "unbekannt" -> and "unbekannt".
+
+    The mutant replaces every non-empty status with "unbekannt".
+    """
+    now = 2_000_000_000
+    _insert_event(
+        isolated_brief_home["db"],
+        task_id="t_status",
+        title="Statuskarte",
+        status="running",
+        kind="completed",
+        ts=now - 10,
+    )
+    delta = brief._collect_kanban_delta(0, now)
+    events = delta.get("events") or []
+    assert len(events) == 1
+    assert events[0]["current_status"] == "running"
+
+
+def test_fallback_brief_counts_inbox_items(
+    isolated_brief_home: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kill bool_op_swap L542: or [] -> and [] on inbox items.
+
+    The mutant drops all inbox items so the count reads 0.
+    """
+    now = 2_000_000_000
+    candidate = brief.BriefCandidate(
+        kind="evening",
+        since_ts=0,
+        captured_at=now,
+        kanban={"events": []},
+        receipts={"items": []},
+        inbox={
+            "items": [
+                {"type": "question", "id": "q1", "title": "Freigabe?"},
+                {"type": "question", "id": "q2", "title": "Deploy?"},
+            ]
+        },
+        errors=(),
+        payload_hash="x",
+        inbox_hash="y",
+    )
+    text = brief._fallback_brief(candidate)
+    assert "Entscheidungen: 2 warten" in text

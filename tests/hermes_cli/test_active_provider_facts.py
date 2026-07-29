@@ -468,3 +468,40 @@ def _create_usage_facts(path: Path, fact: dict[str, Any]) -> None:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_state_session_reader_rejects_profile_with_slash(tmp_path: Path) -> None:
+    """Kill bool_op_swap L89: or -> and.
+
+    With the mutant, ``not profile and "/" in profile`` is False for a
+    profile containing "/", so the guard is bypassed and a path is
+    returned.  The correct behaviour rejects any profile with a slash.
+    """
+    reader = provider_facts._StateSessionReader(tmp_path, immutable=True)
+    assert reader.profile_path("foo/bar") is None
+
+
+def test_configured_provider_returns_single_match() -> None:
+    """Kill comparison_swap L469: == -> !=.
+
+    With the mutant, ``len(providers) != 1`` is True when there is
+    exactly one provider, so the function falls through and returns
+    None instead of the single provider.
+    """
+    routes = {("default", "gpt-4"): frozenset({"openai"})}
+    result = provider_facts._configured_provider(routes, "default", "gpt-4")
+    assert result == "openai"
+
+
+def test_metadata_provider_prefers_primary_field() -> None:
+    """Kill bool_op_swap L475: or -> and.
+
+    With the mutant, ``_text(provider) and _text(cost_equivalent)`` is
+    falsy when cost_equivalent_provider is absent, so the function
+    returns None even though the primary provider field is set.
+    """
+    result = provider_facts._metadata_provider({"provider": "anthropic"})
+    assert result == "anthropic"

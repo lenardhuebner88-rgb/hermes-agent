@@ -130,3 +130,52 @@ def test_nightly_only_fails_nonzero_when_every_selected_lane_failed():
 
     assert nightly_exit_code([fatal, fatal]) == 2
     assert nightly_exit_code([fatal, clean]) == 0
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_classify_preserves_yielded_count():
+    """Kill bool_op_swap L287 (or->and): mutant zeroes out yielded."""
+    result = classify_lane_outcome(
+        "skill", scanned=5, errors=0, yielded=3, ok=True, reason="found stuff"
+    )
+    assert result.yielded == 3
+    assert result.outcome == "yielded"
+
+
+def test_classify_preserves_reason_text():
+    """Kill bool_op_swap L288 (or->and): mutant empties reason text."""
+    result = classify_lane_outcome(
+        "skill", scanned=5, errors=0, yielded=0, ok=True, reason="all good"
+    )
+    assert result.reason == "all good"
+
+
+def test_skill_lane_fails_on_all_errors():
+    """Kill boolean_flip L96 (True->False): mutant disables fail_on_all_errors."""
+    specs = load_lane_specs(config={})
+    assert specs["skill"].fail_on_all_errors is True
+    # Behavioral: all errors -> infra_failed, not degraded
+    result = classify_lane_outcome(
+        "skill", scanned=3, errors=3, yielded=0, ok=False,
+        reason="all proposals failed"
+    )
+    assert result.outcome == "infra_failed"
+
+
+def test_skill_lane_allow_empty_success():
+    """Kill boolean_flip L97 (True->False): mutant rejects empty success."""
+    # ok=False, scanned=0: original -> clean (allow_empty_success), mutant -> invalid_output
+    result = classify_lane_outcome(
+        "skill", scanned=0, errors=0, yielded=0, ok=False, reason="nothing to scan"
+    )
+    assert result.outcome == "clean"
+
+
+def test_code_lane_allow_empty_success():
+    """Kill boolean_flip L118 (True->False): mutant rejects empty success."""
+    result = classify_lane_outcome(
+        "code", scanned=0, errors=0, yielded=0, ok=False, reason="nothing to scan"
+    )
+    assert result.outcome == "clean"

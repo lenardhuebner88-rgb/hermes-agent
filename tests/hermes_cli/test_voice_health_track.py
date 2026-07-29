@@ -71,3 +71,46 @@ async def test_voice_tool_surface_routes_to_fail_closed_preview_contract():
         },
     )
     assert result["status"] == "confirm_required"
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_weight_boundary_20kg_is_valid():
+    """Kill const_offset L36 (20 -> 21): weight exactly 20 kg must be accepted."""
+    result = health_track_capture({
+        "kind": "weight",
+        "date": "2026-07-12",
+        "target_account": "piet",
+        "weight_kg": 20,
+        "confirm": False,
+    })
+    assert result["status"] == "confirm_required"
+    assert result["preview"]["weight_kg"] == 20.0
+
+
+def test_meal_description_exactly_500_chars_is_valid():
+    """Kill comparison_swap L52 (> -> >=): description of exactly 500 chars
+    must be accepted (limit is > 500, not >= 500)."""
+    result = health_track_capture({
+        "kind": "meal",
+        "date": "2026-07-12",
+        "target_account": "piet",
+        "description": "x" * 500,
+        "confirm": False,
+    })
+    assert result["status"] == "confirm_required"
+
+
+def test_weight_rounded_to_exactly_2_decimals():
+    """Kill const_offset L41 (2 -> 3): round(float(value), 2) must produce
+    exactly 2 decimal places, not 3."""
+    result = health_track_capture({
+        "kind": "weight",
+        "date": "2026-07-12",
+        "target_account": "piet",
+        "weight_kg": 82.456,
+        "confirm": False,
+    })
+    assert result["status"] == "confirm_required"
+    assert result["preview"]["weight_kg"] == 82.46  # round(82.456, 2), not 82.456

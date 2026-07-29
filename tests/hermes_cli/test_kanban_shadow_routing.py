@@ -242,3 +242,30 @@ def test_completed_run_keeps_wave2_brief_manifest(conn):
     )
     assert metadata["result"] == "ok"
     assert metadata["brief"] == _manifest()
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_normalize_window_rejects_non_int_non_bool():
+    """Kill bool_op_swap L32 (or->and): mutant lets non-int through to range check."""
+    # "hello" is not bool and not int: original returns DEFAULT_WINDOW via the
+    # or-branch; mutant (and) falls through to the range check and raises TypeError.
+    assert shadow.normalize_routing_shadow_window("hello") == shadow.DEFAULT_WINDOW
+    assert shadow.normalize_routing_shadow_window(3.14) == shadow.DEFAULT_WINDOW
+
+
+def test_normalize_window_accepts_min_boundary():
+    """Kill comparison_swap L34 (<=-><): mutant rejects MIN_COMPARABLE_COMPLETIONS."""
+    # value=30 is exactly MIN_COMPARABLE_COMPLETIONS: original accepts it,
+    # mutant (30 < 30) rejects it and returns DEFAULT_WINDOW.
+    assert shadow.normalize_routing_shadow_window(shadow.MIN_COMPARABLE_COMPLETIONS) == shadow.MIN_COMPARABLE_COMPLETIONS
+
+
+def test_manifest_rejects_non_string_audience():
+    """Kill bool_op_swap L50 (and->or): mutant accepts non-string truthy values."""
+    brief = _manifest()
+    brief["audience"] = 123  # truthy but not a string
+    # original: isinstance(123, str)=False -> and short-circuits -> None
+    # mutant: False or bool(123)=True -> passes validation
+    assert shadow._manifest({"brief": brief}) is None

@@ -488,3 +488,62 @@ def test_legacy_coordinator_gate_allows_only_mechanical_normalization():
             },
         },
     )
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+from hermes_cli.control_plane_gate import (
+    _normalize_role,
+    _role_mechanical_diff,
+    _truthy,
+)
+
+
+def test_truthy_falsy_strings():
+    """Kill bool_op_swap L142: and -> or would make 'false' truthy."""
+    assert _truthy("false") is False
+    assert _truthy("no") is False
+    assert _truthy("0") is False
+    assert _truthy("none") is False
+    assert _truthy("null") is False
+    assert _truthy("") is False
+    assert _truthy("yes") is True
+    assert _truthy("true") is True
+
+
+def test_normalize_role_non_alias_and_blank():
+    """Kill bool_op_swap L172: or -> and would return None for real roles."""
+    assert _normalize_role("coder") == "coder"
+    assert _normalize_role("Reviewer") == "reviewer"
+    assert _normalize_role("my-agent") == "my_agent"
+    # blank string -> None (not empty string)
+    assert _normalize_role("   ") is None
+
+
+def test_role_mechanical_diff_no_diff_when_already_normalized():
+    """Kill bool_op_swap L448: and -> or would report phantom diff."""
+    # role already equals normalized form -> no diff
+    assert _role_mechanical_diff({"source_role": "orchestrator"}) == {}
+    assert _role_mechanical_diff({"source_role": "coder"}) == {}
+    # role differs from normalized -> diff reported
+    assert _role_mechanical_diff({"source_role": "default"}) == {
+        "source_role": {"from": "default", "to": "orchestrator"}
+    }
+    # missing role -> no diff
+    assert _role_mechanical_diff({}) == {}
+
+
+def test_reviewer_gate_docs_only_low_risk_exempt():
+    """Kill bool_op_swap L329/L330: or -> and breaks risk/action defaults."""
+    docs_plan = {
+        "risk_class": "LOW-docs-only",
+        "scope": "update docs wording",
+        "scope_contract": {
+            "forbidden_actions": ["deploy", "migrate"],
+        },
+    }
+    # low risk + docs text + no action_class -> exempt (False)
+    assert reviewer_gate_required(docs_plan) is False
+    # same but with action_class -> not exempt
+    action_plan = dict(docs_plan, action_class="deploy")
+    assert reviewer_gate_required(action_plan) is True

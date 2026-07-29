@@ -200,3 +200,56 @@ def test_cli_report_discord_json_is_discoverable_and_read_only(kanban_home, caps
         after_runs = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
     assert after_events == before_events
     assert after_runs == before_runs
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_dependency_summary_empty_and_nonempty():
+    """Kill bool_op_swap on L131: or -> and on empty check."""
+    assert kdr._dependency_summary([]) == "none"
+    assert kdr._dependency_summary(["abc", "def"]) == "`abc`, `def`"
+
+
+def test_next_step_returns_status_specific_text():
+    """Kill bool_op_swap on L145-147: or -> and on status checks."""
+    assert kdr._next_step("running") == "worker is running"
+    assert kdr._next_step("ready") == "waiting for dispatcher claim"
+    assert kdr._next_step("todo") == "waiting on parent dependencies"
+    assert kdr._next_step("triage") == "needs specification"
+    assert kdr._next_step("scheduled") == "waiting for scheduled time"
+    assert kdr._next_step("unknown_status") == "not provided"
+
+
+def test_blocked_reason_prefers_run_summary_then_event():
+    """Kill bool_op_swap on L120, L123: or -> and on outcome/kind checks."""
+    run_blocked = kb.Run(
+        id=1, task_id="t1", profile="coder", step_key=None,
+        status="closed", claim_lock=None, claim_expires=None,
+        worker_pid=None, max_runtime_seconds=None, last_heartbeat_at=None,
+        started_at=100, ended_at=200, outcome="blocked",
+        summary="run blocker reason", metadata=None, error=None,
+    )
+    run_ok = kb.Run(
+        id=2, task_id="t1", profile="coder", step_key=None,
+        status="closed", claim_lock=None, claim_expires=None,
+        worker_pid=None, max_runtime_seconds=None, last_heartbeat_at=None,
+        started_at=300, ended_at=400, outcome="completed",
+        summary="done", metadata=None, error=None,
+    )
+    event_blocked = kb.Event(
+        id=1, task_id="t1", kind="blocked",
+        payload={"reason": "event blocker reason"}, created_at=500,
+    )
+    # Run with blocked outcome takes priority
+    assert kdr._blocked_reason([run_ok, run_blocked], [event_blocked]) == "run blocker reason"
+    # No blocked run -> falls back to event
+    assert kdr._blocked_reason([run_ok], [event_blocked]) == "event blocker reason"
+    # Nothing blocked -> empty
+    assert kdr._blocked_reason([run_ok], []) == ""
+    # Non-blocked event with dict payload must NOT leak reason (kills L123 and->or)
+    event_created = kb.Event(
+        id=2, task_id="t1", kind="created",
+        payload={"reason": "should not appear"}, created_at=600,
+    )
+    assert kdr._blocked_reason([run_ok], [event_created]) == ""

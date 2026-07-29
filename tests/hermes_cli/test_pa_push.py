@@ -144,3 +144,45 @@ def test_push_test_endpoint(isolated_pa_home: Path, monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"enabled": True, "sent": 2, "removed": 0, "failed": 0}
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_truncate_exact_limit_not_truncated() -> None:
+    """Kill comparison_swap L43: <= -> < would truncate a string at exactly
+    the limit (220 chars), appending an ellipsis."""
+    text = "a" * 220
+    assert pp._truncate(text) == text  # no ellipsis at the boundary
+    # one over → truncated with ellipsis, total length == limit
+    over = pp._truncate("a" * 221)
+    assert over.endswith("…") and len(over) == 220
+
+
+def test_build_payload_title_truncated_at_80() -> None:
+    """Kill const_offset L52: 80 -> 81 would keep an 81-char title intact."""
+    payload = pp.build_pa_payload(title="t" * 81, body="b", tag="x")
+    assert len(payload["title"]) == 80
+    assert payload["title"].endswith("…")
+    # exactly 80 stays intact
+    payload80 = pp.build_pa_payload(title="t" * 80, body="b", tag="x")
+    assert payload80["title"] == "t" * 80
+
+
+def test_send_payload_preserves_non_ascii(
+    isolated_pa_home: Path, monkeypatch
+) -> None:
+    """Kill boolean_flip L93: ensure_ascii False -> True would escape
+    non-ASCII chars as \\uXXXX in the raw payload."""
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("VAPID_CLAIMS_SUB", "mailto:test@example.com")
+    calls: list[dict] = []
+    _fake_pywebpush(monkeypatch, calls)
+    _insert_subscription()
+
+    pp.send_pa_push(title="Entscheidung nötig", body="überfällig", tag="t1")
+
+    raw = calls[0]["data"]
+    assert "nötig" in raw  # literal non-ASCII, not \u00f6 escapes
+    assert "\\u00f6" not in raw

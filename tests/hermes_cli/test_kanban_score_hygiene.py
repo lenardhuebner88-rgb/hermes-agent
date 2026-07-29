@@ -12,6 +12,7 @@ from hermes_cli.kanban_score_hygiene import (
     SYNTHETIC_RETRY_HEAVY_TASK_IDS,
     backfill_run_metric_scores_with_classification,
     classify_metric_run,
+    is_metric_test_fixture,
     metric_run_class_counts,
     metric_run_classification_relation,
     metric_scores_relation,
@@ -292,3 +293,41 @@ def test_metric_scores_relation_keeps_all_rows_and_exposes_class_counts(
         RUN_CLASS_FIXTURE: 1,
     }
     assert sum(by_class.values()) == persisted == 2
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_classify_never_ran_when_started_at_none_but_ended_at_present():
+    """Kill comparison_swap L60: is->is not would skip the None check and
+    hit TypeError on float(None), caught as False -> PRODUCTIVE."""
+    result = classify_metric_run(
+        "task-x",
+        active_model=None,
+        input_tokens=None,
+        output_tokens=None,
+        cost_usd=None,
+        started_at=None,
+        ended_at=100.0,
+    )
+    assert result == RUN_CLASS_NEVER_RAN
+
+
+def test_classify_productive_when_timestamps_not_floatable():
+    """Kill boolean_flip L65: False->True would make non-floatable timestamps
+    count as zero_or_missing_duration -> NEVER_RAN instead of PRODUCTIVE."""
+    result = classify_metric_run(
+        "task-y",
+        active_model=None,
+        input_tokens=None,
+        output_tokens=None,
+        cost_usd=None,
+        started_at="not-a-number",
+        ended_at="also-not",
+    )
+    assert result == RUN_CLASS_PRODUCTIVE
+
+
+def test_is_metric_test_fixture_false_for_normal_task():
+    """Kill comparison_swap L79: ==->!= would invert the fixture check."""
+    assert is_metric_test_fixture("normal-task-123") is False

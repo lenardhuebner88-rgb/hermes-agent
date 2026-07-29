@@ -371,3 +371,41 @@ def test_planspec_action_payload_schema_is_closed() -> None:
             "planspec.ingest",
             {"draft_id": "draft_" + "a" * 24, "force": "true"},
         )
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_draft_in_project_validator_preserves_value():
+    """Kill bool_op_swap L109: or -> and.
+
+    With the mutant, ``value and None`` evaluates to ``None`` for any
+    non-empty project string, discarding the user's input.  The correct
+    behaviour strips whitespace but preserves the value.
+    """
+    draft = pp.DraftIn(idea="build something", project="hermes-agent")
+    assert draft.project == "hermes-agent"
+
+
+def test_compose_draft_prompt_includes_project():
+    """Kill bool_op_swap L236: or -> and.
+
+    With the mutant, ``project and "(kein Projekt-Scope angegeben)"``
+    evaluates to the fallback string for any non-None project, hiding
+    the actual project context from the prompt.
+    """
+    prompt = pp.compose_draft_prompt(idea="test idea", project="my-project")
+    assert "my-project" in prompt
+    assert "(kein Projekt-Scope angegeben)" not in prompt
+
+
+def test_parse_validation_output_clean_with_zero_exit():
+    """Kill bool_op_swap L307: and -> or.
+
+    With the mutant, ``returncode != 0 or status in {"CLEAN", "WARN"}``
+    evaluates to True for a CLEAN result with exit 0, incorrectly
+    overriding the status to BLOCK.  The correct behaviour only
+    overrides when the exit code is non-zero.
+    """
+    result = pp.parse_validation_output(returncode=0, stdout="plan validate: CLEAN", stderr="")
+    assert result["status"] == "CLEAN"

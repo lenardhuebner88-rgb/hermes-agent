@@ -584,3 +584,50 @@ def test_health_status_requires_authenticated_dashboard_session(
         web_server.app.state.bound_host = prev_host
         web_server.app.state.bound_port = prev_port
         web_server.app.state.auth_required = prev_required
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_run_probe_args_only_uses_partial():
+    """Kill bool_op_swap L34 (or->and): mutant skips partial when kwargs empty."""
+    def add(a, b):
+        return a + b
+
+    result = asyncio.run(hs._run_probe(add, 3, 4))
+    assert result == 7
+
+
+def test_autoresearch_probe_exception_includes_heartbeat_age_key():
+    """Kill boolean_flip L117 (True->False): mutant omits heartbeat_age_s key."""
+    import unittest.mock as um
+    with um.patch.object(hs, "_run_probe", side_effect=RuntimeError("disk gone")):
+        result = asyncio.run(hs._probe_autoresearch_status())
+
+    assert result["status"] == "offline"
+    assert "heartbeat_age_s" in result
+    assert result["heartbeat_age_s"] is None
+
+
+def test_autoresearch_probe_no_heartbeat_includes_key():
+    """Kill boolean_flip L138 (True->False): mutant omits heartbeat_age_s when None."""
+    async def fake_run_probe(fn, /, *args, **kwargs):
+        return {"state": "idle", "heartbeat_fresh": True}
+        # no heartbeat_age_s key -> None
+
+    import unittest.mock as um
+    with um.patch.object(hs, "_run_probe", side_effect=fake_run_probe):
+        result = asyncio.run(hs._probe_autoresearch_status())
+
+    assert result["status"] == "healthy"
+    assert "heartbeat_age_s" in result
+    assert result["heartbeat_age_s"] is None
+
+
+def test_probe_error_autoresearch_includes_heartbeat_age_key():
+    """Kill boolean_flip L256 (True->False): mutant omits heartbeat_age_s key."""
+    exc = RuntimeError("kaboom")
+    result = hs._offline_from_exception("autoresearch", exc)
+    assert result["status"] == "offline"
+    assert "heartbeat_age_s" in result
+    assert result["heartbeat_age_s"] is None
