@@ -287,3 +287,40 @@ observability 9.1 · code_quality 9.0 · test_coverage 9.5 · documentation_trut
 
 **Tests final:** hermes **1065/1065** (57 Dateien) + tool-nah **228/228** · scripts **64/64**.
 **Loops:** 23 (12 geplant + 11 Schärf-Loops auf Codex-Findings). **Commits:** 20 (hermes: 12 Code + 8 Doku/Eval) + 15 (scripts) — Stand nach Loop 23, `git rev-list --count` eb942ca905..HEAD bzw. aae76ed..HEAD.
+
+---
+
+## L. K3-Schlussreview (kimi-code/k3) + Fix-Abarbeitung
+
+**Review-Verdict: GELB (grüne Tendenz)** — kein critical/high; Kernsubstanz als real,
+rückwärtskompatibel (gegen Live-Daten belegt: alle 47 Live-Job-Records über 10 Profile
+passieren die Full-Schema-Validierung, 0 Rejects) und ehrlich getestet bestätigt;
+alle drei Gates unabhängig reproduziert. Volltext: `eval/k3-review.md` (Kopie).
+
+**7 Medium-Findings — alle behoben:**
+
+| K3-Finding | Fix | Commit |
+|---|---|---|
+| M1 RuntimeError-Fallback umgeht Delivery-Timeout (Duplikat-Garantie) | wait_for + threadsafe Cancel im Fallback | `05b4988c9f` |
+| M2 Replay ignoriert per-Job delivery_timeout | Timeout auf Eintrag persistiert, Replay liest es | `05b4988c9f` |
+| M3 Prune-Warnung spamt + print() in Bibliothek | logger-only, 1h-Dedup, Doku präzisiert | `05b4988c9f` |
+| M4 julianday ORDER BY schlägt Indizes | 2 Expression-Indizes (IF NOT EXISTS, EXPLAIN-belegt) | `05b4988c9f` |
+| M5 classify: disabled+rezent ⇒ falsche OBSOLETE-Evidenz | DISABLED-Klasse mit ehrlicher Evidenz | `759bf32` (scripts) |
+| M6 korruptes jobs.json = stiller grüner Tick | SENSOR-ERROR-Klasse, actionable, 🚨 | `759bf32` (scripts) |
+| M7 C9-Proposal überzogen („Job-Definitionen bereit") | als Design-Skizze + Merge-Vorbedingung markiert | `ab76a26` (scripts) |
+
+**14 Low-Findings — alle behoben:** Stale-Retake attempts++ (unendliche Resends),
+Lease-Liveness-Check + TTL-Clamp, Tick-Guard um Replay-Send, load_jobs
+FileNotFoundError-Re-Check, `_normalize_retry` isfinite, Quarantäne-Retention 7d,
+`int(consec_errors)`-Guard, `has_wiki_doc` Leer-Match, DELIVERY-FAILING-Klasse
+(last_delivery_error), toter Import, rcc Profil-Stores (profile-first Script-Auflösung),
+notify MAYBE-SENT-Doku + Pre-Start-Budget-Guard + Attachment-TOCTOU,
+channel-health-Kommentar, benign stdout-Variante, TricklingFp.close().
+
+**Doku-Findings — behoben:** Commit-Zählung (20+15, rev-list-verifiziert),
+Kappen-Wording (Alarm statt Bound), C3-Zahlen (56 OPENCLAW-OFF, loop_monitor ohne
+flock/timeout), **Go-Kriterien Merge-Falle**: Worktree-kanban-followup ist alter
+MUTIERENDER Code (INSERT INTO) — Reihenfolge „erst Live-Fremd-Arbeit committen
+(inkl. untracked `_kanban_db_guard.py`), dann mergen, dann Jobs" ins Proposal.
+
+**Teststand nach K3-Abarbeitung:** hermes **1100/1100** (61 Dateien) · scripts **81/81**.
