@@ -219,8 +219,7 @@ def test_codex_gpt55_equivalent_golden_reproduces_7_92776():
 
 
 def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
-    """A claude-cli run with cost_usd=0 + metadata.cost_usd_equivalent=0.42 →
-    by_lane cost_usd_equivalent==0.42, cost_effective_usd==0.42, cost_usd==0.0."""
+    """Legacy materialized equivalents are ignored when raw facts are absent."""
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sub-chain", assignee="orchestrator",
                               triage=True)
@@ -247,13 +246,16 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
 
     lane = next(l for l in result["by_lane"] if l["profile"] == "claude-cli")
     assert lane["cost_usd"] == pytest.approx(0.0)
-    assert lane["cost_usd_equivalent"] == pytest.approx(0.42)
-    assert lane["cost_effective_usd"] == pytest.approx(0.42)
+    assert lane["cost_usd_equivalent"] is None
+    assert lane["cost_usd_equivalent_confidence"] == "unknown"
+    assert lane["cost_usd_equivalent_coverage"] == 0.0
+    assert lane["cost_effective_usd"] is None
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.0)
-    assert totals["cost_usd_equivalent"] == pytest.approx(0.42)
-    assert totals["cost_effective_usd"] == pytest.approx(0.42)
+    assert totals["cost_usd_equivalent"] is None
+    assert totals["cost_usd_equivalent_confidence"] == "unknown"
+    assert totals["cost_effective_usd"] is None
 
 
 def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkeypatch):
@@ -471,12 +473,12 @@ def test_chain_cost_breakdown_emits_actual_and_neuralwatt(kanban_home):
     assert neuralwatt["billing_neuralwatt_kwh"] == pytest.approx(0.03)
     assert neuralwatt["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
     assert neuralwatt["actual_cost_usd"] == pytest.approx(0.12)
-    assert neuralwatt["api_equivalent_usd"] == pytest.approx(0.90)
+    assert neuralwatt["api_equivalent_usd"] is None
 
     totals = result["totals"]
     assert totals["actual_cost_usd"] == pytest.approx(0.52)
     assert totals["billing_neuralwatt_cost_usd"] == pytest.approx(0.12)
-    assert totals["api_equivalent_usd"] == pytest.approx(0.90)
+    assert totals["api_equivalent_usd"] is None
 
 
 def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
@@ -498,13 +500,14 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
 
     lane = result["by_lane"][0]
     assert lane["cost_usd"] == pytest.approx(0.03)
-    assert lane["cost_usd_equivalent"] == pytest.approx(0.0)
-    assert lane["cost_effective_usd"] == pytest.approx(0.03)
+    assert lane["cost_usd_equivalent"] is None
+    assert lane["cost_usd_equivalent_confidence"] == "unknown"
+    assert lane["cost_effective_usd"] is None
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.03)
-    assert totals["cost_usd_equivalent"] == pytest.approx(0.0)
-    assert totals["cost_effective_usd"] == pytest.approx(0.03)
+    assert totals["cost_usd_equivalent"] is None
+    assert totals["cost_effective_usd"] is None
 
 
 def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):

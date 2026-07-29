@@ -8717,7 +8717,7 @@ def repair_cost_equivalent_for_frozen_runs(
         "SELECT id, task_id, profile, input_tokens, output_tokens, metadata "
         "FROM task_runs "
         "WHERE cost_usd = 0.0 "
-        "AND json_extract(metadata, '$.cost_usd_equivalent') IS NULL "
+        "AND json_extract(metadata, '$.cost_equivalent_model') IS NULL "
         "AND (COALESCE(input_tokens, 0) > 0 OR COALESCE(output_tokens, 0) > 0) "
         "AND ended_at IS NOT NULL"
     )
@@ -9111,7 +9111,7 @@ def audit_claude_cost_equivalent_backfill(
         "input_tokens, output_tokens, cost_usd, metadata "
         "FROM task_runs "
         "WHERE ended_at IS NOT NULL "
-        "AND json_extract(metadata, '$.cost_usd_equivalent') IS NULL "
+        "AND json_extract(metadata, '$.cost_equivalent_model') IS NULL "
         "AND (cost_usd IS NULL OR cost_usd = 0.0)"
     )
     params: list[Any] = []
@@ -39684,43 +39684,33 @@ def batch_task_costs(
     try:
         rows = conn.execute(
             f"""
-            SELECT
-                task_id,
-                CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
-                CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
-                COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
-                COALESCE(SUM(COALESCE(
-                    json_extract(metadata, '$.cost_usd_equivalent'), 0.0
-                )), 0.0)                                          AS cost_usd_equivalent,
-                SUM(CASE WHEN COALESCE(cost_status, json_extract(metadata, '$.cost_status')) = 'estimated' THEN 1 ELSE 0 END)
-                                                                    AS estimated_cost_runs,
-                SUM(CASE WHEN COALESCE(cost_status, json_extract(metadata, '$.cost_status')) = 'actual' THEN 1 ELSE 0 END)
-                                                                    AS actual_cost_runs
+            SELECT task_id, input_tokens, output_tokens, cost_usd, cost_status, metadata
             FROM task_runs
             WHERE task_id IN ({placeholders})
-            GROUP BY task_id
             """,
             ids,
         ).fetchall()
     except sqlite3.OperationalError:
         return {}  # pre-K5a: cost/token columns absent — no cost footer
-    out: dict[str, dict] = {}
+    rows_by_task: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
-        c_usd = float(row["cost_usd"])
-        c_equiv = float(row["cost_usd_equivalent"])
-        estimated_runs = int(row["estimated_cost_runs"] or 0)
-        actual_runs = int(row["actual_cost_runs"] or 0)
-        out[row["task_id"]] = {
-            "input_tokens": int(row["input_tokens"]),
-            "output_tokens": int(row["output_tokens"]),
+        rows_by_task.setdefault(str(row["task_id"]), []).append(row)
+    out: dict[str, dict] = {}
+    for task_id, task_rows in rows_by_task.items():
+        equivalent = _cost_equivalent_rollup(task_rows)
+        c_usd = sum(float(row["cost_usd"] or 0.0) for row in task_rows)
+        estimated_runs = sum(1 for row in task_rows if row["cost_status"] == "estimated")
+        actual_runs = sum(1 for row in task_rows if row["cost_status"] == "actual")
+        c_equiv = equivalent["cost_usd_equivalent"]
+        out[task_id] = {
+            "input_tokens": sum(int(row["input_tokens"] or 0) for row in task_rows),
+            "output_tokens": sum(int(row["output_tokens"] or 0) for row in task_rows),
             "cost_usd": c_usd,
             "cost_usd_equivalent": c_equiv,
-            "cost_effective_usd": c_usd + c_equiv,
-            "cost_status": "estimated"
-            if estimated_runs
-            else "actual"
-            if actual_runs
-            else None,
+            "cost_usd_equivalent_confidence": equivalent["confidence"],
+            "cost_usd_equivalent_coverage": equivalent["coverage"],
+            "cost_effective_usd": None if c_equiv is None else c_usd + c_equiv,
+            "cost_status": "estimated" if estimated_runs else "actual" if actual_runs else None,
             "estimated_cost_runs": estimated_runs,
             "actual_cost_runs": actual_runs,
         }
@@ -39818,28 +39808,9 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
     try:
         rows = conn.execute(
             f"""
-            SELECT
-                profile,
-                CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER)  AS input_tokens,
-                CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
-                COALESCE(SUM(cost_usd), 0.0)                     AS cost_usd,
-                COALESCE(SUM(COALESCE(
-                    json_extract(metadata, '$.cost_usd_equivalent'), 0.0
-                )), 0.0)                                          AS cost_usd_equivalent,
-                COALESCE(SUM(
-                    CASE WHEN json_type(metadata, '$.energy.energy_kwh') IN ('integer', 'real')
-                         THEN CAST(json_extract(metadata, '$.energy.energy_kwh') AS REAL)
-                         ELSE 0.0 END
-                ), 0.0)                                            AS billing_neuralwatt_kwh,
-                COALESCE(SUM(
-                    CASE WHEN json_type(metadata, '$.cost.request_cost_usd') IN ('integer', 'real')
-                         THEN CAST(json_extract(metadata, '$.cost.request_cost_usd') AS REAL)
-                         ELSE 0.0 END
-                ), 0.0)                                            AS billing_neuralwatt_cost_usd,
-                COUNT(*)                                          AS run_count
+            SELECT profile, input_tokens, output_tokens, cost_usd, metadata
             FROM task_runs
             WHERE task_id IN ({placeholders})
-            GROUP BY profile
             """,
             member_ids,
         ).fetchall()
@@ -39847,38 +39818,46 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         # Pre-K5a DB without cost_usd / token columns — return empty breakdown.
         rows = []
 
-    by_lane = []
+    rows_by_lane: dict[Optional[str], list[sqlite3.Row]] = {}
     for row in rows:
-        cost = float(row["cost_usd"])
-        equiv = float(row["cost_usd_equivalent"])
-        nw_kwh = float(row["billing_neuralwatt_kwh"])
-        nw_cost = float(row["billing_neuralwatt_cost_usd"])
+        rows_by_lane.setdefault(row["profile"], []).append(row)
+    by_lane = []
+    for profile, lane_rows in rows_by_lane.items():
+        cost = sum(float(row["cost_usd"] or 0.0) for row in lane_rows)
+        equivalent = _cost_equivalent_rollup(lane_rows)
+        equiv = equivalent["cost_usd_equivalent"]
+        nw_kwh = sum(_metadata_number(_run_meta_dict(row["metadata"]), "energy", "energy_kwh") for row in lane_rows)
+        nw_cost = sum(_metadata_number(_run_meta_dict(row["metadata"]), "cost", "request_cost_usd") for row in lane_rows)
         by_lane.append({
-            "profile": row["profile"],
-            "input_tokens": int(row["input_tokens"]),
-            "output_tokens": int(row["output_tokens"]),
+            "profile": profile,
+            "input_tokens": sum(int(row["input_tokens"] or 0) for row in lane_rows),
+            "output_tokens": sum(int(row["output_tokens"] or 0) for row in lane_rows),
             "cost_usd": cost,
             "cost_usd_equivalent": equiv,
-            "cost_effective_usd": cost + equiv,
+            "cost_usd_equivalent_confidence": equivalent["confidence"],
+            "cost_usd_equivalent_coverage": equivalent["coverage"],
+            "cost_effective_usd": None if equiv is None else cost + equiv,
             "actual_cost_usd": round(cost + nw_cost, 6),
             "api_equivalent_usd": equiv,
             "billing_neuralwatt_kwh": round(nw_kwh, 6),
             "billing_neuralwatt_cost_usd": round(nw_cost, 6),
-            "run_count": int(row["run_count"]),
+            "run_count": len(lane_rows),
         })
 
     # Sort descending by cost_effective_usd so subscription lanes (cost_usd=0
     # but positive equivalent) rank ahead of zero-cost API runs.
-    by_lane.sort(key=lambda l: -l["cost_effective_usd"])
+    by_lane.sort(key=lambda lane: -(lane["cost_effective_usd"] or lane["cost_usd"]))
 
     totals: dict[str, Any] = {
         "input_tokens": sum(l["input_tokens"] for l in by_lane),
         "output_tokens": sum(l["output_tokens"] for l in by_lane),
         "cost_usd": sum(l["cost_usd"] for l in by_lane),
-        "cost_usd_equivalent": sum(l["cost_usd_equivalent"] for l in by_lane),
-        "cost_effective_usd": sum(l["cost_effective_usd"] for l in by_lane),
+        "cost_usd_equivalent": None,
+        "cost_usd_equivalent_confidence": "unknown",
+        "cost_usd_equivalent_coverage": 0.0,
+        "cost_effective_usd": None,
         "actual_cost_usd": round(sum(l["actual_cost_usd"] for l in by_lane), 6),
-        "api_equivalent_usd": round(sum(l["api_equivalent_usd"] for l in by_lane), 6),
+        "api_equivalent_usd": None,
         "billing_neuralwatt_kwh": round(
             sum(l["billing_neuralwatt_kwh"] for l in by_lane), 6
         ),
@@ -39887,6 +39866,13 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         ),
         "run_count": sum(l["run_count"] for l in by_lane),
     }
+    total_equivalent = _cost_equivalent_rollup(rows)
+    totals["cost_usd_equivalent"] = total_equivalent["cost_usd_equivalent"]
+    totals["api_equivalent_usd"] = total_equivalent["cost_usd_equivalent"]
+    totals["cost_usd_equivalent_confidence"] = total_equivalent["confidence"]
+    totals["cost_usd_equivalent_coverage"] = total_equivalent["coverage"]
+    if total_equivalent["cost_usd_equivalent"] is not None:
+        totals["cost_effective_usd"] = totals["cost_usd"] + total_equivalent["cost_usd_equivalent"]
 
     return {
         "schema": "kanban-chain-costs-v1",
@@ -39993,6 +39979,40 @@ def _run_cost_equivalent_from_meta(meta: dict[str, Any]) -> Optional[float]:
     """
     value, _confidence = _run_cost_equivalent_from_facts(meta)
     return value
+
+
+def _metadata_number(meta: Mapping[str, Any], group: str, key: str) -> float:
+    value = meta.get(group)
+    if not isinstance(value, Mapping):
+        return 0.0
+    value = value.get(key)
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _cost_equivalent_rollup(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Derive an all-or-unknown equivalent total from raw run facts.
+
+    A partial total would silently understate cost.  Preserve that distinction by
+    returning ``None`` plus ``unknown`` whenever any run cannot be priced, while
+    still exposing the fraction of runs covered by the canonical pricing feed.
+    """
+    known_total = 0.0
+    known_runs = 0
+    total_runs = 0
+    for row in rows:
+        total_runs += 1
+        value, _confidence = _run_cost_equivalent_from_facts(
+            _run_meta_dict(row["metadata"]),
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+        )
+        if value is not None:
+            known_runs += 1
+            known_total += value
+    coverage = known_runs / total_runs if total_runs else 0.0
+    if known_runs != total_runs:
+        return {"cost_usd_equivalent": None, "confidence": "unknown", "coverage": coverage}
+    return {"cost_usd_equivalent": round(known_total, 6), "confidence": "derived", "coverage": coverage}
 
 
 def _run_cost_equivalent_from_facts(

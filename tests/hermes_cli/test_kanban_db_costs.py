@@ -215,7 +215,7 @@ def test_k16_backfill_subscription_stamps_cache_inclusive_equivalent(
         meta2 = conn.execute(
             "SELECT metadata FROM task_runs WHERE id = ?", (run_id,),
         ).fetchone()["metadata"]
-        assert json.loads(meta2)["cost_usd_equivalent"] == pytest.approx(0.01095)
+        assert "cost_usd_equivalent" not in json.loads(meta2)
 
 
 def test_k16_kimi_coding_price_is_available_from_canonical_feed():
@@ -539,13 +539,15 @@ def test_batch_task_costs_sums_runs_and_omits_runless_tasks(kanban_home):
     assert costs[ran]["input_tokens"] == 1500
     assert costs[ran]["output_tokens"] == 300
     assert costs[ran]["cost_usd"] == pytest.approx(0.15)
-    assert costs[ran]["cost_usd_equivalent"] == pytest.approx(0.0)
-    assert costs[ran]["cost_effective_usd"] == pytest.approx(0.15)
+    assert costs[ran]["cost_usd_equivalent"] is None
+    assert costs[ran]["cost_usd_equivalent_confidence"] == "unknown"
+    assert costs[ran]["cost_effective_usd"] is None
     assert costs[ran]["cost_status"] == "actual"
     # Subscription task: metered $0 but the estimated equivalent is the effective $.
     assert costs[sub]["cost_usd"] == pytest.approx(0.0)
-    assert costs[sub]["cost_usd_equivalent"] == pytest.approx(0.42)
-    assert costs[sub]["cost_effective_usd"] == pytest.approx(0.42)
+    assert costs[sub]["cost_usd_equivalent"] is None
+    assert costs[sub]["cost_usd_equivalent_confidence"] == "unknown"
+    assert costs[sub]["cost_effective_usd"] is None
     assert costs[sub]["cost_status"] == "actual"
     assert costs[sub]["input_tokens"] == 3000
     # A task with no runs is omitted entirely → its card renders no cost footer.
