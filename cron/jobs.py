@@ -1335,7 +1335,14 @@ def load_jobs() -> List[Dict[str, Any]]:
     jobs_file = _current_cron_store().jobs_file
     ensure_dirs()
     if not jobs_file.exists():
-        return []
+        # Race guard (loop 19): a sibling process may hold the store inside its
+        # quarantine→restore window (file temporarily renamed away). Concluding
+        # "no jobs" here would silently present a wiped store to the caller.
+        # Re-check under _jobs_lock() — a recovery in progress finishes first,
+        # and only then is "missing" authoritative.
+        with _jobs_lock():
+            if not jobs_file.exists():
+                return []
 
     _strict_retry = False  # track whether we used the strict=False fallback
 
