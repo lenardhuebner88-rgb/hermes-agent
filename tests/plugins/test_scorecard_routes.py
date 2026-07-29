@@ -216,3 +216,55 @@ def test_scorecard_request_does_not_modify_sqlite_database(client, kanban_home):
 
     assert response.status_code == 200
     assert after == before
+
+
+def test_scorecard_labels_every_legacy_numeric_outcome_code(client):
+    """Every legacy numeric outcome code (2..12) must render its own
+    label — an off-by-one in the table would misname the outcome (a
+    'gave_up' run reported as 'crashed' misleads the triage)."""
+    expected = {
+        2.0: "blocked",
+        3.0: "iteration_budget_exhausted",
+        4.0: "spawn_failed",
+        5.0: "gave_up",
+        6.0: "crashed",
+        7.0: "reclaimed",
+        8.0: "scheduled",
+        9.0: "spawn_retry",
+        10.0: "stale",
+        11.0: "timed_out",
+        12.0: "operator_review_required",
+    }
+    with kb.connect_closing() as conn:
+        for code in expected:
+            task_id, run_id = _make_run(conn)
+            _insert_score(
+                conn, task_id=task_id, run_id=run_id,
+                name="run_outcome_kind", value=code,
+            )
+
+    response = client.get("/api/plugins/kanban/scorecard")
+
+    assert response.status_code == 200
+    freq = response.json()["materialized_scores"]["run_outcome_kind"]["value"]
+    for label in expected.values():
+        assert freq.get(label) == 1, label
+    assert not any(str(key).startswith("unknown_outcome_code") for key in freq)
+
+
+def test_scorecard_approval_rate_is_asymmetric_not_mirror(client):
+    """Two approvals + one rejection must read 2/3 approved — an
+    inverted comparator would report 1/3 and flip the health signal."""
+    with kb.connect_closing() as conn:
+        pairs = [_make_run(conn) for _ in range(3)]
+        for (task_id, run_id), value in zip(pairs, (1.0, 1.0, 0.0)):
+            _insert_score(
+                conn, task_id=task_id, run_id=run_id,
+                name="review_verdict", value=value, value_type="binary",
+            )
+
+    response = client.get("/api/plugins/kanban/scorecard")
+
+    payload = response.json()
+    assert payload["overall"] == {"runs": 3, "approved": 2, "approval_rate": 2 / 3}
+    assert payload["verdicts"] == {"approved": 2, "rejected": 1}
