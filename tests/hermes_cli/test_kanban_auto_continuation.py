@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_runtime_facts import SPAWN_IDENTITY_METADATA_FIELDS
 from tools import kanban_tools as kt
 
 
@@ -72,7 +73,9 @@ def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
         assert run.status == "iteration_budget_exhausted"
         assert run.outcome == "iteration_budget_exhausted"
         assert run.summary == "Inspected 7 files; continue from API routing section."
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        assert run.metadata["worker_runtime"] == "hermes"
+        ignored = SPAWN_IDENTITY_METADATA_FIELDS | {"cost"}
+        md = {k: v for k, v in run.metadata.items() if k not in ignored}
         assert md == {"phase": "routing"}
 
         events = kb.list_events(conn, tid)
