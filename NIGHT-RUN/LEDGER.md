@@ -285,3 +285,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 18/20 = 90%
 - equivalent survivors: L34 (frozen=True→False on dataclass), L55 (frozen=True→False on dataclass)
 - commit: 37b06b9cc
+
+## 41. hermes_cli/health_status.py — 2026-07-29T03:14:33Z
+- probe before: 13/20 = 65%
+- killed survivors: [K] bool_op_swap L34, [K] boolean_flip L117, [K] boolean_flip L138, [K] boolean_flip L256
+- equivalent survivors: L220, L228, L235 (heartbeat_age_s always float, include_heartbeat_age irrelevant)
+- probe after: 17/20 = 85%
+- commit: d79d6c467
