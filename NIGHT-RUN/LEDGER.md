@@ -257,3 +257,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 19/20 = 95%
 - equivalent survivors: L94 (>→>= equivalent: sample_count=0 → error_rate=0.0 < threshold)
 - commit: 8e1ecebb6
+
+## 37. hermes_cli/pa_news.py — 2026-07-29T02:27:40Z
+- probe before: 13/20 = 65%
+- killed survivors: [K] boolean_flip L121, [K] comparison_swap L152, [K] comparison_swap L182, [K] bool_op_swap L182, [K] comparison_swap L207, [K] comparison_swap L215, [K] boolean_flip L286
+- probe after: 20/20 = 100%
+- equivalent survivors: (none)
+- commit: f14e32f2b
