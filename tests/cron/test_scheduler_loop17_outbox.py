@@ -124,19 +124,19 @@ class TestExecutionIdWiring:
     ):
         """Legacy callers (no execution_id) keep the loop-6 refresh collapse
         but are visibly marked with a warning. Since loop 20 (F3) this path
-        requires the explicit allow_legacy_no_execution=True opt-in."""
+        requires the explicit _allow_legacy_no_execution=True opt-in."""
         home = tmp_path / "home"
         with use_cron_store(home):
             with caplog.at_level(logging.WARNING, logger="cron.delivery_outbox"):
                 outbox.enqueue(
-                    "job", _target(), "v1", "err", allow_legacy_no_execution=True,
+                    "job", _target(), "v1", "err", _allow_legacy_no_execution=True,
                 )
             assert any(
                 "WITHOUT execution_id" in r.message for r in caplog.records
             )
             # Loop-6 semantics preserved: a repeat refreshes the same entry.
             outbox.enqueue(
-                "job", _target(), "v2", "err", allow_legacy_no_execution=True,
+                "job", _target(), "v2", "err", _allow_legacy_no_execution=True,
             )
             entries = outbox.list_entries()
             assert len(entries) == 1

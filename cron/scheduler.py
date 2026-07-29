@@ -2358,10 +2358,15 @@ def _send_outbox_entry(entry: dict) -> tuple:
     """Send one outbox entry over the standalone path.
 
     Returns ``(error, receipt)``: ``error`` is None on success, else a string.
-    ``receipt`` (audit loop 17 / F3) is the delivery proof persisted on the
-    entry — the platform-side message_id when the send path returns one
-    (Telegram/plugin standalone senders do), else a payload hash + timestamp
-    so a delivered entry always carries *some* verifiable evidence.
+    ``receipt`` (audit loop 17 / F3, wording loop 23b / F2) is the evidence
+    persisted on the entry — a ``platform-message:<id>`` EXTERNAL delivery
+    receipt when the send path returns a platform-side message_id
+    (Telegram/plugin standalone senders do), else a payload hash + local send
+    timestamp, which is only a LOCAL send witness: it proves THIS process
+    attempted the send, not that the platform accepted it. The honest
+    ``platform_message`` vs. ``local_send_witness`` distinction lives in
+    ``cron/delivery_outbox.py`` — a delivered entry always carries *some*
+    evidence, but only ``platform_message`` is a delivery receipt.
 
     Uses the same bounded standalone transport as ``_deliver_result``
     (``asyncio.wait_for`` with the delivery timeout, audit A-H1) so a wedged
@@ -2417,9 +2422,11 @@ def _send_outbox_entry(entry: dict) -> tuple:
         return f"replay delivery failed: {e}", None
     if result and result.get("error"):
         return f"delivery error: {result['error']}", None
-    # Delivery proof: prefer the platform-side message_id (Telegram and
-    # plugin standalone senders return one); fall back to a payload hash +
-    # timestamp so the receipt is never empty.
+    # Evidence (loop 23b / F2): prefer the platform-side message_id — an
+    # EXTERNAL delivery receipt (kind ``platform_message``). Fall back to a
+    # payload hash + local send timestamp so the receipt is never empty —
+    # but that fallback is only a LOCAL send witness (kind
+    # ``local_send_witness``), NOT proof the platform accepted the message.
     message_id = result.get("message_id") if isinstance(result, dict) else None
     if message_id:
         receipt = f"platform-message:{message_id}"

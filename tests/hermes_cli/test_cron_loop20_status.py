@@ -4,7 +4,9 @@ state of the delivery outbox.
 The most crash-critical outbox state — ``sending`` — used to be visible
 only in the JSONL itself. _print_outbox_summary() now shows the sending
 count with the oldest live lease age, plus a ⚠ alarm line for leases
-already older than the TTL (orphaned: the holder crashed mid-send).
+already older than the TTL. Since audit loop 23b / F3 that alarm is
+worded as stale/ambiguous (retry-due), not categorically "holder crashed"
+— a slow, still-living sender produces the same signal.
 """
 
 from __future__ import annotations
@@ -59,7 +61,11 @@ def test_status_alarms_on_expired_send_lease(tmp_path, monkeypatch, capsys):
         out = capsys.readouterr().out
         assert "currently sending" in out
         assert "1 send lease(s) OLDER than the TTL" in out
-        assert "crashed mid-send" in out
+        assert "stale/ambiguous" in out
+        assert "retry-due" in out
+        # An expired lease must NOT be asserted as a crash — a slow living
+        # sender is possible (loop 23b / F3).
+        assert "crashed mid-send;" not in out
 
 
 def test_status_keeps_queued_and_dead_lines(tmp_path, monkeypatch, capsys):

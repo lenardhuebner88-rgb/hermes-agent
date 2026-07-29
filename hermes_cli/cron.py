@@ -387,8 +387,11 @@ def _print_outbox_summary() -> None:
     would otherwise have been lost silently. Since loop 20 (F2) the
     crash-critical ``sending`` state is shown too (it used to be visible
     only in the JSONL itself): a sending count with the oldest lease age,
-    plus a ⚠ alarm line for leases already older than the TTL (orphaned —
-    the holder crashed mid-send; retried on the next replay trigger).
+    plus a ⚠ alarm line for leases already older than the TTL. That alarm
+    is deliberately worded as STALE/AMBIGUOUS (loop 23b / F3), not
+    "crashed": an expired lease means the holder is presumed gone and the
+    entry is retry-due, but a merely slow, still-living sender produces the
+    same signal — a crash is only certain with additional evidence.
     Best-effort: an unreadable outbox must never break `cron status`.
     """
     try:
@@ -420,7 +423,8 @@ def _print_outbox_summary() -> None:
     if expired:
         print(color(
             f"  ⚠ Delivery outbox: {expired} send lease(s) OLDER than the TTL — "
-            "holder crashed mid-send; orphaned and queued for retry",
+            "stale/ambiguous: holder presumed gone (crashed mid-send OR just "
+            "slow); retry-due on the next replay trigger",
             Colors.RED,
         ))
     if dead:

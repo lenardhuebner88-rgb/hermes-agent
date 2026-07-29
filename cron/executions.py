@@ -415,6 +415,7 @@ def recover_interrupted_executions() -> int:
 def list_executions(
     *, job_id: Optional[str] = None, limit: int = 50,
     before_claimed_at: Optional[str] = None,
+    before_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return indexed, newest-first execution history with cursor pagination.
 
@@ -425,6 +426,19 @@ def list_executions(
     offsets; julianday() normalizes every ISO-8601 variant onto one UTC
     scale. The cursor contract stays "strictly older than the last row of
     the previous page" — pass that row's claimed_at verbatim.
+
+    Composite cursor (audit loop 23b / F1): the ORDER BY already has an
+    ``id DESC`` tiebreak (``id`` is a TEXT uuid — the tiebreak order is
+    lexicographic, not insertion order, but still a total order), yet a
+    ``before_claimed_at``-only cursor drops rows whose
+    julianday(claimed_at) is IDENTICAL to the cursor row's — page 2 skipped
+    those ties. Pass the last row's ``id`` verbatim as ``before_id``
+    alongside its claimed_at and the comparison becomes
+    ``(jd(claimed_at), id) < (jd(cursor_claimed_at), cursor_id)`` — ties
+    continue onto the next page in id order, with no gap and no duplicate.
+    ``before_id`` without ``before_claimed_at`` is ignored (there is no
+    time component to compare against), and callers that keep passing only
+    ``before_claimed_at`` get the old strictly-older behavior unchanged.
     """
     clauses: List[str] = []
     params: List[Any] = []
@@ -432,8 +446,16 @@ def list_executions(
         clauses.append("job_id=?")
         params.append(str(job_id))
     if before_claimed_at is not None:
-        clauses.append("julianday(claimed_at) < julianday(?)")
-        params.append(str(before_claimed_at))
+        if before_id is not None:
+            clauses.append(
+                "(julianday(claimed_at) < julianday(?)"
+                " OR (julianday(claimed_at) = julianday(?) AND id < ?))"
+            )
+            params.extend([str(before_claimed_at), str(before_claimed_at),
+                           str(before_id)])
+        else:
+            clauses.append("julianday(claimed_at) < julianday(?)")
+            params.append(str(before_claimed_at))
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
     params.append(max(1, min(int(limit), 500)))
     with _transaction() as conn:

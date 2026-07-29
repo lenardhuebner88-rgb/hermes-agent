@@ -500,7 +500,7 @@ def enqueue(
     *,
     execution_id: Optional[str] = None,
     error_class: str = ERROR_CLASS_SEND,
-    allow_legacy_no_execution: bool = False,
+    _allow_legacy_no_execution: bool = False,
 ) -> Dict[str, Any]:
     """Persist an undeliverable payload for later replay.
 
@@ -527,21 +527,23 @@ def enqueue(
     collapse), and every productive run path carries
     ``job["execution_id"]`` since loop 17, so a missing id means a caller
     bug that must surface loudly instead of degrading silently. The
-    ``allow_legacy_no_execution=True`` opt-in keeps the loop-6 legacy key
-    (with the loop-17 warning) and exists ONLY for the loop-6/loop-17
-    legacy-caller tests and hypothetical embedders pinned to the loop-6
-    contract — DEPRECATED, do not use in new code.
+    ``_allow_legacy_no_execution=True`` opt-in keeps the loop-6 legacy key
+    (with the loop-17 warning) and exists ONLY for the loop-6/loop-13/
+    loop-17 legacy-caller tests — DEPRECATED, do not use in new code. It
+    was made PRIVATE (audit loop 23b / F4) precisely because a public
+    ``allow_legacy_no_execution`` flag was an easy bypass of the fail-closed
+    contract: productive callers must pass ``execution_id``.
     """
     if error_class not in (ERROR_CLASS_SEND, ERROR_CLASS_CONFIG, ERROR_CLASS_RELAY):
         error_class = ERROR_CLASS_SEND
     if execution_id is None and error_class == ERROR_CLASS_SEND:
-        if not allow_legacy_no_execution:
+        if not _allow_legacy_no_execution:
             raise ValueError(
                 "cron outbox: send-class enqueue REQUIRES an execution_id "
                 "(per-run idempotency key, audit loop 20 / F3); productive "
                 "run paths carry job['execution_id'] since loop 17. Legacy "
                 "callers must opt in explicitly via "
-                "allow_legacy_no_execution=True (deprecated)."
+                "_allow_legacy_no_execution=True (deprecated, test-only)."
             )
         logger.warning(
             "cron outbox: send-class enqueue for job %s WITHOUT execution_id "

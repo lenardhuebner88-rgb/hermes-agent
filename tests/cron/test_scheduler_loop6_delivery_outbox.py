@@ -141,7 +141,7 @@ class TestDeadLetterAfterMaxAttempts:
                 {"platform": "telegram", "chat_id": "9", "thread_id": None},
                 "lost report",
                 "initial failure",
-                allow_legacy_no_execution=True,
+                _allow_legacy_no_execution=True,
             )
 
             cfg_patch = patch(
@@ -192,7 +192,7 @@ class TestDeadLetterAfterMaxAttempts:
                 {"platform": "telegram", "chat_id": "1", "thread_id": None},
                 "p",
                 "e",
-                allow_legacy_no_execution=True,
+                _allow_legacy_no_execution=True,
             )
             expected = [300, 600, 1200, 2400]  # then attempt 5 → dead
             start = clock["now"]
@@ -217,7 +217,7 @@ class TestStoreScoping:
                 {"platform": "telegram", "chat_id": "1", "thread_id": None},
                 "alpha payload",
                 "err",
-                allow_legacy_no_execution=True,
+                _allow_legacy_no_execution=True,
             )
 
         assert (home_a / "cron" / "outbox.jsonl").exists()
@@ -238,7 +238,7 @@ class TestStoreScoping:
             {"platform": "telegram", "chat_id": "2", "thread_id": None},
             "late payload",
             "err",
-            allow_legacy_no_execution=True,
+            _allow_legacy_no_execution=True,
         )
 
         assert (home / "cron" / "outbox.jsonl").exists()
@@ -254,7 +254,7 @@ class TestStoreScoping:
             {"platform": "telegram", "chat_id": "3", "thread_id": None},
             "compat payload",
             "err",
-            allow_legacy_no_execution=True,
+            _allow_legacy_no_execution=True,
         )
 
         assert pointed.exists()

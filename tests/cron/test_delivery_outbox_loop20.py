@@ -11,7 +11,7 @@ enqueue, and lease-TTL env validation (Codex review #4 — F1/F2/F3/F6).
   lease age, and the number of leases already past the TTL (orphaned).
 - F3 (fail-closed enqueue): a send-class enqueue without an execution_id
   silently degraded per-run idempotency. It now raises ValueError; only the
-  explicit (deprecated) ``allow_legacy_no_execution=True`` opt-in keeps the
+  explicit (deprecated) ``_allow_legacy_no_execution=True`` opt-in keeps the
   loop-6 legacy key.
 - F6 (lease-TTL env validation): only finite positive floats are accepted;
   NaN/inf/zero/negative/garbage fall back to the default WITH a warning.
@@ -231,7 +231,7 @@ class TestFailClosedEnqueue:
         with use_cron_store(home):
             with caplog.at_level(logging.WARNING, logger="cron.delivery_outbox"):
                 entry = outbox.enqueue(
-                    "job", _target(), "p", "err", allow_legacy_no_execution=True,
+                    "job", _target(), "p", "err", _allow_legacy_no_execution=True,
                 )
             assert entry["status"] == "queued"
             assert entry["execution_id"] is None
