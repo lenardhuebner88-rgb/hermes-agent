@@ -477,3 +477,78 @@ def test_is_noise_flags_imports_but_not_from_prose():
     assert flc.is_noise(flc.normalise("import os")) is True
     assert flc.is_noise(flc.normalise("from hermes_cli import kanban_db")) is True
     assert flc.is_noise(flc.normalise("from the merge base onward we track")) is False
+
+
+# ---------------------------------------------------------------------------
+# Second pass: classification gates + CLI arg contract
+# ---------------------------------------------------------------------------
+
+def test_symbol_spans_include_module_level_assignments():
+    """Module-level assignments are symbols — walking the body 'inside a
+    function' from the start would silently drop every constant."""
+    spans = flc.symbol_spans("X = 1\n")
+    assert [name for _start, _end, name in spans] == ["X"]
+
+
+def test_classify_non_python_path_is_line_only_even_with_python_fork_src():
+    """Symbol classification is reserved for .py paths — a markdown file
+    stays LINE_ONLY even when the fork source happens to parse as
+    Python."""
+    findings = flc._classify(
+        "docs/x.md",
+        [(1, "gone line")],
+        "def f():\n    return 1\n",
+        "def f():\n    return 1\n",
+    )
+    assert findings[0]["kind"] == flc.KIND_LINE_ONLY
+    assert findings[0]["symbol"] is None
+
+
+def test_print_report_renders_symbolless_finding_with_dash(capsys):
+    """A finding without a symbol renders '[-]' — never the literal
+    string 'None' in the operator summary."""
+    report = {
+        "refs": {"old_base": "ob", "fork_tip": "ft", "current": "cur", "upstream_tip": "up"},
+        "risk_surface": {
+            "fork_changed": 1,
+            "upstream_changed": 1,
+            "intersection": 1,
+            "scanned": 1,
+            "fork_deleted": 0,
+            "fork_only": 0,
+        },
+        "stage1": {"candidates": 1, "present": 0, "moved_or_reflowed": 0, "missing": 1},
+        "counts": {kind: 0 for kind in flc.SEVERITY},
+        "findings": [
+            {
+                "path": "x.md",
+                "kind": flc.KIND_LINE_ONLY,
+                "scope": "risk_surface",
+                "symbol": None,
+                "missing_lines": 1,
+                "lines": [{"lineno": 3, "text": "gone line"}],
+            }
+        ],
+        "files_with_findings": 1,
+    }
+    flc.print_report(report)
+    out = capsys.readouterr().out
+    assert "[-]" in out
+    assert "[None]" not in out
+
+
+def test_main_requires_all_four_ref_arguments(capsys):
+    """Each of the four ref arguments is required on its own — omitting
+    exactly one must fail in ARGPARSE (usage error), never as a later
+    git failure with a None ref."""
+    cases = [
+        ["--fork-tip", "b", "--current", "c", "--upstream-tip", "d"],   # no old-base
+        ["--old-base", "a", "--current", "c", "--upstream-tip", "d"],   # no fork-tip
+        ["--old-base", "a", "--fork-tip", "b", "--upstream-tip", "d"],  # no current
+        ["--old-base", "a", "--fork-tip", "b", "--current", "c"],       # no upstream-tip
+    ]
+    for argv in cases:
+        with pytest.raises(SystemExit):
+            flc.main(argv)
+        err = capsys.readouterr().err
+        assert "the following arguments are required" in err
