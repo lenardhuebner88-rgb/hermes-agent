@@ -153,3 +153,29 @@ per-job), maschineller Docstring↔Live-Job-Konsistenzcheck (→ Loop 12, script
 **Bewusst nicht geändert (Erhaltung):** uncommittete Fremd-Arbeit im Live-Checkout
 (10 Dateien, u.a. Morning-Digest-Rewrite, green-gate-Isolation); Live `jobs.json`,
 systemd-Units, Crontab (nur Proposals). Kein Deploy, kein Merge, kein Push.
+
+---
+
+## G. Reproduzierbare Gates (Loop 16)
+
+Alle Kommandos aus dem jeweiligen Worktree-Root; Interpreter-Auflösung via Wrapper
+(AGENTS.md: niemals bare pytest/python im hermes-Worktree).
+
+```bash
+# hermes-agent Worktree (Branch kimi/reporting-audit)
+cd /home/piet/.hermes/worktrees/kimi-reporting-audit
+scripts/run_tests.sh tests/cron tests/hermes_cli/test_cron.py -q -p no:cacheprovider
+# Stand Loop 1-6+10:  45 Dateien, 931 Tests passed, 0 failed (22.6s, 8 Workers)
+#   (nur tests/cron allein: 44 Dateien, 915 Tests — die Differenz 16 = test_cron.py)
+
+# scripts Worktree (Branch kimi/reporting-audit)
+cd /home/piet/.hermes/worktrees/kimi-reporting-scripts
+python3 -m pytest tests/ -q     # Stand Loop 7-12: 39 passed (hermetisch, kein Netz)
+
+# Live-Verifikation des Konsistenz-Sensors (read-only gegen Live-Store)
+python3 reporting-consistency-check.py
+```
+
+Codex-Bewertungen: Baseline `eval/2026-07-29-codex-baseline.json` (5.6/10),
+Zweitbewertung `eval/2026-07-29-codex-final.json` (7.1/10) — beide via
+`codex exec --sandbox read-only --output-schema` mit identischem Rubric-Prompt.
