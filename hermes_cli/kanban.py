@@ -4787,7 +4787,7 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             f"{token_report['rows_affected'] + n + n_sessions} run(s)."
         )
         if n_repair:
-            print(f"Repaired cost_usd_equivalent for {n_repair} frozen closed run(s).")
+            print(f"Repaired cost-equivalent raw facts for {n_repair} frozen closed run(s).")
     return 0
 
 

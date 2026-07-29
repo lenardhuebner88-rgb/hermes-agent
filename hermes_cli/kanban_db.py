@@ -40125,7 +40125,13 @@ def runs_windowed_rollup(
                     run_cost = _coerce_float(meta.get("actual_cost_usd"))
                 if run_cost is not None:
                     cost = (cost or 0.0) + run_cost
-                run_equiv = _run_cost_equivalent_from_meta(meta)
+                run_equiv, run_equiv_confidence = _run_cost_equivalent_from_facts(
+                    meta,
+                    input_tokens=run["input_tokens"],
+                    output_tokens=run["output_tokens"],
+                    provider=provider,
+                    model=model,
+                )
                 if run_equiv is not None:
                     equiv = (equiv or 0.0) + run_equiv
                 worker_stats = worker_costs.setdefault(
@@ -40176,6 +40182,8 @@ def runs_windowed_rollup(
                     "output_tokens": run["output_tokens"],
                     "cost_usd": run_cost,
                     "cost_usd_equivalent": run_equiv,
+                    "cost_usd_equivalent_confidence": run_equiv_confidence,
+                    "cost_usd_equivalent_coverage": 1.0 if run_equiv is not None else 0.0,
                     "cost_effective_usd": (
                         (run_cost or 0.0) + (run_equiv or 0.0)
                         if run_cost is not None or run_equiv is not None
@@ -40190,6 +40198,8 @@ def runs_windowed_rollup(
                 })
 
         breakdown = chain_cost_breakdown(conn, row["id"])
+        totals = breakdown.get("totals") or {}
+        equiv = totals.get("cost_usd_equivalent")
         workers: list[dict[str, Any]] = []
         for lane in breakdown.get("by_lane", []):
             worker = dict(lane)
@@ -40206,16 +40216,6 @@ def runs_windowed_rollup(
             stats = worker_costs.get(worker.get("profile"))
             if stats is not None:
                 worker["unknown_run_count"] = stats["unknown_run_count"]
-                if stats["evidence_count"]:
-                    worker["cost_usd"] = stats["cost_usd"]
-                    worker["cost_usd_equivalent"] = stats["cost_usd_equivalent"]
-                    worker["cost_effective_usd"] = (stats["cost_usd"] or 0.0) + (
-                        stats["cost_usd_equivalent"] or 0.0
-                    )
-                else:
-                    worker["cost_usd"] = None
-                    worker["cost_usd_equivalent"] = None
-                    worker["cost_effective_usd"] = None
             else:
                 worker["unknown_run_count"] = 0
             worker["neuralwatt"] = _neuralwatt_detail(
@@ -40229,7 +40229,6 @@ def runs_windowed_rollup(
         cost_effective: Optional[float] = None
         if cost is not None or equiv is not None:
             cost_effective = (cost or 0.0) + (equiv or 0.0)
-        totals = breakdown.get("totals") or {}
         root_neuralwatt = _neuralwatt_detail(
             kwh=totals.get("billing_neuralwatt_kwh"),
             cost=totals.get("billing_neuralwatt_cost_usd"),
@@ -40246,6 +40245,12 @@ def runs_windowed_rollup(
             "providers": sorted(providers),
             "cost_usd": cost,
             "cost_usd_equivalent": equiv,
+            "cost_usd_equivalent_confidence": totals.get(
+                "cost_usd_equivalent_confidence", "unknown"
+            ),
+            "cost_usd_equivalent_coverage": totals.get(
+                "cost_usd_equivalent_coverage", 0.0
+            ),
             "cost_effective_usd": cost_effective,
             "unknown_run_count": unknown_run_count,
             "billing_mode": (

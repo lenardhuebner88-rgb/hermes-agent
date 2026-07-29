@@ -1015,6 +1015,35 @@ def test_archive_board_is_cursor_paginated_searchable_and_separate_from_active_p
     assert invalid.json()["detail"] == "invalid archive cursor"
 
 
+def test_archive_exposes_unknown_equivalent_confidence_and_coverage(client):
+    """Archive cards preserve the derived-cost unknown contract for clients."""
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="archive cost contract", assignee="coder")
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, input_tokens, output_tokens, metadata) "
+            "VALUES (?, 'coder', 'done', 1, 12, 34, ?)",
+            (
+                task_id,
+                json.dumps(
+                    {
+                        "billing_mode": "subscription_included",
+                        "provider": "unpriceable",
+                        "model": "unpriceable",
+                    }
+                ),
+            ),
+        )
+        assert kb.archive_task(conn, task_id) is True
+
+    response = client.get("/api/plugins/kanban/board/archive", params={"limit": 50})
+    assert response.status_code == 200, response.text
+    card = next(item for item in response.json()["tasks"] if item["id"] == task_id)
+    assert card["cost_usd_equivalent"] is None
+    assert card["cost_usd_equivalent_confidence"] == "unknown"
+    assert card["cost_usd_equivalent_coverage"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # POST /tasks then GET /board sees it
 # ---------------------------------------------------------------------------
