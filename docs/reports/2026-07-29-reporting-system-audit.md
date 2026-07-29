@@ -240,3 +240,27 @@ scripts/run_tests.sh tests/tools/test_cronjob_tools.py tests/tools/test_cronjob_
 cd /home/piet/.hermes/worktrees/kimi-reporting-scripts
 python3 -m pytest tests/ -q     # final: 58 passed
 ```
+
+---
+
+## J. Feinschliff-Loops 20–22 (auf Codex #4 = 8.8/10)
+
+| Codex-#4-Befund | Fix | Commit |
+|---|---|---|
+| Hash-„Receipt" als Proof überzeichnet | strukturiert `receipt.kind`: `platform_message` (echter Provider-Beleg) vs. `local_send_witness` (ausdrücklich NUR lokaler Send-Nachweis, kein Zustellbeleg) | `cc051cb0cf` |
+| `sending`/Lease/Receipt nicht in `hermes cron status` | `outbox_status()` + Statusanzeige: sending-Count, ältestes Lease-Alter, ⚠ bei TTL-überschrittenen Leases | `cc051cb0cf` |
+| enqueue akzeptiert fehlende execution_id mit WARNING | fail-closed ValueError für send-class; deprecated Opt-in nur für Legacy-Tests; Zwei-Prozesse-Konkurrenz-Test | `cc051cb0cf` |
+| list/latest_executions rohe ISO-Sortierung | julianday für ORDER BY + Cursor + Subquery (jetzt wirklich ALLE Ledger-Zeitvergleiche, nicht nur Prune) | `cc051cb0cf` |
+| Restore-Validierung nested grob | zentrale `_SCHEDULE_KIND_PAYLOAD`-Tabelle; nested origin/retry (gespeicherte Form, `_is_plausible_retry_policy`) | `cc051cb0cf` |
+| Lease-TTL Env akzeptiert NaN/inf/negativ | nur endliche positive Floats, sonst laut Default 600 | `cc051cb0cf` |
+| urllib Socket-Timeout ≠ harte Wall-Clock | Thread-Klammer: join(exakt Restbudget), `_HardDeadlineExceeded`, rc=1 ohne auf Thread zu warten; Slow-Server-Test mit echter Zeitmessung | `0bbacd0` (scripts) |
+
+**Bekannte Restgrenzen (bewusste, dokumentierte Trade-offs — keine Behauptung
+von Lückenlosigkeit):** at-least-once-Restspalt zwischen Send und Receipt-Write
+(ohne plattformseitige Idempotenz-Keys nicht schließbar; die `sending`-Lease
+macht den Zustand sichtbar, ein Duplikat nach Lease-Ablauf bleibt möglich);
+`local_send_witness` ist kein externer Zustellbeleg; verwaister Daemon-Thread
+bei hard-deadline lebt bis Prozessende; Live-Proposals nicht appliziert
+(Auftragsgrenze).
+
+**Teststand final:** hermes **1058/1058** (56 Dateien) + tool-nah 228/228 · scripts **60/60**.
