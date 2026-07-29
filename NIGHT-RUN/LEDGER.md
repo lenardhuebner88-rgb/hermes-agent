@@ -243,3 +243,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - equivalent survivors: bool_op_swap L338 (and→or unreachable for non-receipt), const_offset L280 (default param), const_offset L300 (slice offset)
 - probe after: 17/20 = 85%
 - commit: 80af88a9f
+
+## 35. hermes_cli/library_results.py — 2026-07-29T02:10:44Z
+- probe before: 10/20 = 50%
+- killed survivors: [K] bool_op_swap L76, [K] bool_op_swap L87, [K] bool_op_swap L205, [K] bool_op_swap L277, [K] bool_op_swap L279
+- probe after: 15/20 = 75%
+- equivalent survivors: L77 (<= boundary after strip()), L81 (> 0 unreachable after strip()), L239 (default param), L252 (None guard), L278 (None guard)
+- commit: 86edc1a53
