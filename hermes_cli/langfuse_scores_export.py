@@ -392,7 +392,15 @@ def _trace_events(row: sqlite3.Row, *, board: str, chain_root: str) -> list[dict
     outcome = str(_row_value(row, "outcome") or row["status"] or "unknown")
     timestamp = _utc_timestamp(row["started_at"])
     trace_id = trace_id_for_run(run_id)
-    trace_metadata = dict(metadata)
+    trace_metadata = {
+        key: value
+        for key, value in metadata.items()
+        if key not in {
+            "cost_usd_equivalent",
+            "cost_usd_equivalent_confidence",
+            "cost_usd_equivalent_coverage",
+        }
+    }
     trace_metadata.update({"kanban_run_id": run_id, "kanban_task_id": row["task_id"]})
     tags = ["kanban-worker", f"board:{board}", f"profile:{profile}", f"model:{model}", f"outcome:{outcome}"]
     trace_body = {
