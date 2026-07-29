@@ -22,6 +22,12 @@ DEFAULT_TRACE_RETENTION_DAYS = 180
 
 RUN_FACT_COLUMNS = (
     "origin",
+    "task_run_id",
+    "task_id",
+    "chain_id",
+    "board",
+    "session_id",
+    "correlation_source",
     "provider",
     "model",
     "requested_provider",
@@ -103,6 +109,12 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_usage_facts (
     run_id TEXT PRIMARY KEY,
     origin TEXT NOT NULL DEFAULT 'hermes_agent',
+    task_run_id TEXT,
+    task_id TEXT,
+    chain_id TEXT,
+    board TEXT,
+    session_id TEXT,
+    correlation_source TEXT,
     provider TEXT,
     model TEXT,
     requested_provider TEXT,
@@ -202,6 +214,26 @@ _FACT_INDEXES = (
         ON run_usage_facts(captured_at)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_task_run
+        ON run_usage_facts(task_run_id)
+        WHERE task_run_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_task
+        ON run_usage_facts(task_id)
+        WHERE task_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_chain
+        ON run_usage_facts(chain_id)
+        WHERE chain_id IS NOT NULL
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_session
+        ON run_usage_facts(session_id)
+        WHERE session_id IS NOT NULL
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_run_llm_calls_origin_model
         ON run_llm_calls(origin, model)
     """,
@@ -268,6 +300,12 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                             "TEXT NOT NULL DEFAULT 'hermes_agent'",
                         ),
                         ("profile", "TEXT"),
+                        ("task_run_id", "TEXT"),
+                        ("task_id", "TEXT"),
+                        ("chain_id", "TEXT"),
+                        ("board", "TEXT"),
+                        ("session_id", "TEXT"),
+                        ("correlation_source", "TEXT"),
                         ("wall_ms", "INTEGER"),
                         ("call_kind", "TEXT"),
                         (

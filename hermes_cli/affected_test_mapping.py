@@ -124,6 +124,9 @@ EXPLICIT_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
         "tests/hermes_cli/test_kanban_db_dispatcher.py",
     ),
     "hermes_cli/migrate.py": ("tests/hermes_cli/test_migrate_xai.py",),
+    "hermes_cli/observability_context.py": (
+        "tests/agent/test_observability_context_forwarding.py",
+    ),
     "hermes_cli/pairing.py": (
         "tests/gateway/test_pairing.py",
         "tests/gateway/test_pairing_allowlist_bypass.py",
@@ -136,6 +139,9 @@ EXPLICIT_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
     "hermes_cli/route_identity.py": (
         "tests/run_agent/test_credential_rotation_route_settings.py",
         "tests/run_agent/test_switch_model_context.py",
+    ),
+    "hermes_cli/usage_fact_correlation.py": (
+        "tests/hermes_cli/test_claude_code_harvester.py",
     ),
     "hermes_cli/web_git.py": ("tests/hermes_cli/test_web_server_git.py",),
     "hermes_cli/windows_ssh_runtime.py": (

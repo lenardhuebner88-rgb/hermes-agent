@@ -11,19 +11,60 @@ vi.mock("../hooks/scorecard", () => ({
 import { ScorecardView } from "./ScorecardView";
 
 const baseData = (): ScorecardResponse => ({
+  contract_version: "hermes-scorecard.v2",
   overall: { runs: 12, approved: 9, approval_rate: .75 },
   verdicts: { approved: 9, rejected: 3 },
   profiles: [{ name: "coder", runs: 10, approved: 8, approval_rate: .8 }],
   models: [{ name: "gpt-test", runs: 10, approved: 8, approval_rate: .8 }],
   weeks: [{ year: 2026, week: 30, runs: 10, approved: 8, approval_rate: .8 }],
   materialized_scores: {},
-  checked_at: 1,
+  quality: {
+    window_days: 7,
+    overall: { runs: 282, approved: 192, approval_rate: 192 / 282 },
+    verdicts: { approved: 192, rejected: 90 },
+    outcomes: {
+      completed: 397,
+      blocked: 171,
+      iteration_budget_exhausted: 24,
+      spawn_failed: 18,
+    },
+    profiles: [{ name: "coder", runs: 139, approved: 103, approval_rate: 103 / 139 }],
+    models: [
+      { name: "terra", runs: 139, approved: 103, approval_rate: 103 / 139 },
+      { name: "k3", runs: 33, approved: 30, approval_rate: 30 / 33 },
+    ],
+    daily_verdicts: [
+      { date: "2026-07-27", approved: 15, rejected: 4 },
+      { date: "2026-07-28", approved: 56, rejected: 8 },
+    ],
+    review_iterations: {
+      average: 1.25,
+      count: 75,
+      distribution: { "0": 38, "1": 22, "2": 15 },
+    },
+    coverage: {
+      runs: 987,
+      review_verdicts: 282,
+      run_outcomes: 755,
+      review_iterations: 75,
+    },
+    source: "kanban.metric_scores",
+    captured_at: 1_785_300_000,
+  },
+  observability: {
+    available: false,
+    state: "absent",
+    reason: "credentials_missing",
+    captured_at: null,
+    cache: { ttl_seconds: 45, age_seconds: null },
+  },
+  checked_at: 1_785_300_000,
 });
 
 describe("ScorecardView", () => {
   beforeEach(() => { mockState.data = baseData(); });
 
-  it("preserves nullable numeric distribution statistics from the scorecard response", () => {
+  it("preserves materialized distributions in the response contract", () => {
     const scores = ScorecardResponseSchema.parse({
       ...baseData(),
       materialized_scores: {
@@ -36,104 +77,78 @@ describe("ScorecardView", () => {
     expect(scores.run_outcome_kind).toMatchObject({ value: { completed: 2 }, count: 2 });
   });
 
-  it("renders the scorecard endpoint aggregation shape", () => {
+  it("zeigt Qualitätsentscheidungen mit sichtbaren Nennern", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("75.0 %");
-    expect(markup).toContain("coder");
-    expect(markup).toContain("2026 · W30");
+    expect(markup).toContain("Worker Scorecard");
+    expect(markup).toContain("68,1 %");
+    expect(markup).toContain("192 / 282 entschiedene Reviews");
+    expect(markup).toContain("282 Verdicts / 987 Runs");
+    expect(markup).toContain("Verdicts je Tag");
   });
 
-  it("zeigt numerische Serien einheitengerecht statt als Prozentwert (SC-S5)", () => {
-    mockState.data = {
-      ...baseData(),
-      materialized_scores: {
-        run_duration_seconds: { value: 167.45, min: 0, max: 85699, sum: 1374284, count: 8207 },
-        run_cost_usd: { value: 0.0027357, min: 0, max: 6.22306474, sum: 11.7472338, count: 4294 },
-      },
-    };
+  it("zeigt vollständige Outcomes und Review-Iterationen", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    // AC-1: Dauer traegt eine Zeiteinheit und erscheint NICHT als Prozentwert.
-    expect(markup).toContain("2,8 min");
-    expect(markup).not.toContain("16745");
-    // AC-2: Kosten erscheinen als Geldbetrag.
-    expect(markup).toContain("$");
-    expect(markup).toContain("0,0027");
-    // AC-5: Maximum und Anzahl je numerischer Serie sichtbar.
-    expect(markup).toContain("max 23,8 h");
-    expect(markup).toContain("n = 8.207");
-    expect(markup).toContain("n = 4.294");
+    expect(markup).toContain("Iteration budget exhausted");
+    expect(markup).toContain("Spawn failed");
+    expect(markup).toContain("Ø 1,25 Iterationen");
   });
 
-  it("zeigt unbekannte Score-Namen als schlichte Zahl neben den Review-Verdicts (SC-S5)", () => {
-    mockState.data = {
-      ...baseData(),
-      materialized_scores: {
-        planner_brief_shape: { value: .8, count: 12 },
-        worker_completion: { value: .6, count: 20 },
-      },
-    };
+  it("markiert genau die dünnen Modellstichproben", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    // AC-7: Unbekannte Namen verschwinden nicht und werden nicht als Prozent verkauft.
-    expect(markup).toContain("Event- &amp; Usage-Scores");
-    expect(markup).toContain("planner_brief_shape");
-    expect(markup).toContain("0,8");
-    expect(markup).not.toContain("80.0 % · n = 12");
-    expect(markup).toContain("n = 12");
-    expect(markup).toContain("worker_completion");
-    expect(markup).toContain("n = 20");
-    // AC-8: Die bestehende review_verdict-Darstellung bleibt unverändert.
-    expect(markup).toContain("75.0 %");
-    expect(markup).toContain("coder");
+    expect(markup).toContain("k3");
+    expect(markup).toContain("n 33");
+    expect(markup).toContain("n 139");
+    // Auf den MARKER prüfen, nicht auf das Wort: die Panel-Fußzeile rendert
+    // unbedingt "dünne Nenner bleiben sichtbar" und enthält "dünn" als
+    // Teilzeichenkette. Ein toContain("dünn") blieb deshalb auch dann grün,
+    // wenn man `thin` und den Marker komplett entfernte — der Test sicherte
+    // nichts ab. Diese Fassung liest die markierten Namen aus dem Markup:
+    // k3 hat n 33 (dünn), terra hat n 139 (nicht dünn).
+    const marked = [...markup.matchAll(/>([^<>]+)<span[^>]*>· dünn<\/span>/g)].map((m) => m[1]);
+    expect(marked).toEqual(["k3"]);
   });
 
-  it("schlüsselt die kategoriale Serie als Häufigkeitskarte auf (SC-S5)", () => {
-    mockState.data = {
-      ...baseData(),
-      materialized_scores: {
-        run_outcome_kind: {
-          value: { blocked: 109, completed: 171, "unknown_outcome_code:0.0": 12 },
-          count: 292,
-        },
-      },
-    };
+  it("zeigt ohne Verdicts einen neutralen Nullzustand", () => {
+    const data = baseData();
+    data.quality!.verdicts = { approved: 0, rejected: 0 };
+    data.quality!.overall = { runs: 0, approved: 0, approval_rate: null };
+    mockState.data = data;
+
     const markup = renderToStaticMarkup(<ScorecardView />);
-    // AC-3: Labels mit Anzahlen, absteigend sortiert; kein Platzhalterwort.
-    expect(markup).toContain("completed (171)");
-    expect(markup).toContain("blocked (109)");
-    expect(markup.indexOf("completed (171)")).toBeLessThan(markup.indexOf("blocked (109)"));
-    expect(markup).toContain("n = 292");
-    expect(markup).not.toContain("kategorial");
-    // AC-4: unknown_outcome_code-Eintraege bleiben sichtbar.
-    expect(markup).toContain("unknown_outcome_code:0.0 (12)");
+
+    expect(markup).toContain('aria-label="Keine Verdict-Daten"');
+    expect(markup).toContain("Keine Verdict-Daten");
+    expect(markup).not.toContain('aria-label="0.0 Prozent approved"');
   });
 
-  it("kennzeichnet dünne und leere Nenner ausdrücklich statt als Zielwert (SC-S5)", () => {
-    mockState.data = {
-      ...baseData(),
-      materialized_scores: {
-        planner_brief_shape: { value: .9, count: 3 },
-        empty_score: { value: null, count: 0 },
-      },
-    };
+  it("mischt keine Kosten-, Token- oder Laufzeitmetriken in die Scorecard", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("0,9");
-    expect(markup).toContain("n = 3");
-    expect(markup).toContain("dünne Datenlage");
-    expect(markup).toContain("nicht bestätigt");
-    // AC-6: Leere Serie bleibt ausdruecklich leer, ohne erfundenen Nullwert.
-    expect(markup).toContain("keine Rows · dünne Datenlage");
-    expect(markup).not.toContain("Zielwert erreicht");
-    // Genau ein Mittelwert im Markup: der der belegten Serie, keiner fuer die leere.
-    expect(markup.match(/Ø/g)).toHaveLength(1);
+    expect(markup).not.toContain("Context Tokens");
+    expect(markup).not.toContain("Run Duration");
+    expect(markup).not.toContain("Kosten");
+    expect(markup).not.toContain("Event- &amp; Usage-Scores");
   });
 
-  it("zeigt bei leerem Datensatz eine ruhige deutsche Erklärung ohne falsches Zeitfenster (SC-S5)", () => {
+  it("erfindet ohne quality-Block keine Coverage und kein Zeitfenster", () => {
+    // Deploy-Versatz: neues Frontend, Dashboard-Dienst noch auf der alten
+    // Route — die Payload trägt dann kein `quality`. Der Rückfall darf daraus
+    // KEINE Vollständigkeit ableiten. Zuvor setzte er Zähler = Nenner, was
+    // exakt 100 % samt grünem Haken ergab, und beschriftete eine
+    // All-Time-Aggregation als "7 TAGE".
+    const data = baseData();
+    delete (data as { quality?: unknown }).quality;
+    mockState.data = data;
+
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("Keine materialisierten Event- und Usage-Scores.");
-    expect(markup).toContain("Situation:");
-    expect(markup).toContain("Bewertung:");
-    expect(markup).toContain("Nächste Aktion:");
-    expect(markup).not.toContain("28 Tage");
-    expect(markup).not.toContain("Zielwert erreicht");
+
+    expect(markup).toContain("GESAMTZEITRAUM");
+    expect(markup).not.toContain("7 TAGE");
+    expect(markup).not.toContain("100,0 %");
+    // Nenner sichtbar und leer statt Zähler = Nenner.
+    expect(markup).toContain("0 Verdicts / 0 Runs");
+    // Der grüne Haken der CoverageRail darf hier nicht erscheinen; die Kacheln
+    // tragen das Warndreieck. (`text-status-ok` allein taugt nicht als Probe —
+    // das trägt auch die "approved"-Zahl der Entscheidungsleiste.)
+    expect(markup).not.toContain("lucide-circle-check");
   });
 });

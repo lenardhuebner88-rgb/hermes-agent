@@ -17,6 +17,53 @@ endpoint never runs schema initialization or materialization.
 The executable example for S7 is
 `tests/fixtures/usage_facts_readmodel/s7_payload_example.json`.
 
+## Exact worker-correlation fields
+
+The persisted run table has six nullable, additive correlation fields:
+
+```text
+task_run_id, task_id, chain_id, board, session_id, correlation_source
+```
+
+Native Hermes hooks populate task/run/chain/board context only after a cached,
+read-only board lookup proves that `HERMES_KANBAN_TASK` names a real task.
+Loop-worker pseudo IDs and missing tasks stay uncorrelated; the lookup never
+initializes or migrates a board database. The Claude Code harvester persists
+the transcript session UUID and may enrich it only through an exact
+`task_runs.metadata.claude_session_id` match.
+
+Correlation rules are intentionally conservative:
+
+- one session matching one task and one run:
+  `correlation_source = claude_session_id_run`;
+- one session reused by multiple runs of the same task: keep the exact task,
+  clear `task_run_id`, and use `claude_session_id_task`;
+- one session matching multiple tasks or boards: leave every worker field
+  unset;
+- name, time-window, model, profile, prompt text and path similarity are never
+  joins.
+
+The additive migration preserves existing rows. Pre-migration/read-only
+databases are valid audit inputs and report the absent fields instead of
+failing or treating them as zero coverage.
+
+Exact-correlated worker facts are read into `/control`; they are deliberately
+NOT pushed back into Langfuse. The binding operator decision
+`vault/00-Canon/decisions/2026-07-27-kosten-ssot-im-lesepfad.md` (rule 4) states:
+"Langfuse ist nicht das Auswertungsziel. Kein Export, kein zweites Dashboard.
+Kennzahlen gehören ins `/control`." An export adapter written against this
+contract was removed before landing for exactly that reason — do not
+reintroduce one without a new operator decision.
+
+`scripts/langfuse_worker_audit.py` reports the correlation coverage read-only
+and mutates neither Hermes nor Langfuse; it is the supported way to inspect
+how many worker runs are exactly correlated.
+
+`scripts/langfuse_worker_audit.py` is the source of truth for rollout coverage.
+It reports explicit per-origin denominators, structural unknowns and matched
+versus unmatched board runs. A dashboard coverage ratio must not be introduced
+until the corresponding exact score is exported natively.
+
 ## Group contract
 
 `groups[]` is already aggregated. S7 must not sum native database rows.

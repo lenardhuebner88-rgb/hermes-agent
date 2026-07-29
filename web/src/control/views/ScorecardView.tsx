@@ -1,142 +1,294 @@
-import { CheckCircle2, MinusCircle } from "lucide-react";
-import { DigestCard } from "../components/leitstand/DigestCard";
-import { KpiTile, ListRow, SectionHeader, StatusChip } from "../components/leitstand";
+import { AlertTriangle, CheckCircle2, Database, Radio } from "lucide-react";
+import { useMemo } from "react";
+import { KpiTile, SectionHeader } from "../components/leitstand";
 import { useScorecard } from "../hooks/scorecard";
-import type { MaterializedScore } from "../lib/schemas";
+import type { QualitySnapshot, ScorecardResponse } from "../lib/schemas";
+import { cn } from "@/lib/utils";
 
-const percent = (value: number | null) => value == null ? "–" : `${(value * 100).toFixed(1)} %`;
+const percent = (value: number | null) =>
+  value == null ? "—" : `${(value * 100).toLocaleString("de-DE", { maximumFractionDigits: 1 })} %`;
 
-/** Schlichte Zahl nach Hauskonvention de-DE (vgl. autoresearch.ts). */
-const plainNumber = (value: number) =>
-  value.toLocaleString("de-DE", { maximumFractionDigits: 2 });
+const number = (value: number) => value.toLocaleString("de-DE");
 
-/** Dauer lesbar skaliert: Sekunden, darueber Minuten, ab einer Stunde Stunden. */
-const formatDuration = (seconds: number) => {
-  if (seconds < 120) return `${Math.round(seconds).toLocaleString("de-DE")} s`;
-  if (seconds < 3600) return `${(seconds / 60).toLocaleString("de-DE", { maximumFractionDigits: 1 })} min`;
-  return `${(seconds / 3600).toLocaleString("de-DE", { maximumFractionDigits: 1 })} h`;
+const OUTCOME_LABELS: Record<string, string> = {
+  completed: "Completed",
+  blocked: "Blocked",
+  scheduled: "Scheduled",
+  unknown: "Unknown",
+  "unknown_outcome_code:0.0": "Unknown",
+  iteration_budget_exhausted: "Iteration budget exhausted",
+  spawn_failed: "Spawn failed",
+  gave_up: "Gave up",
+  timed_out: "Timed out",
+  reclaimed: "Reclaimed",
+  crashed: "Crashed",
 };
 
 /**
- * Einheitengerechte Formatierung je bekannter Serie (SC-S5). Ein Score-Name,
- * der hier nicht vorkommt, faellt auf die schlichte Zahl zurueck — er
- * verschwindet nie und wird nie faelschlich als Prozentwert gezeigt.
+ * Rückfallform für eine Payload ohne `quality` — das passiert im Deploy-Versatz,
+ * wenn das neue Frontend schon ausgeliefert ist, der Dashboard-Dienst aber noch
+ * die alte Route im Speicher hält.
+ *
+ * Diese Form darf NICHTS behaupten, was v1 nicht liefert:
+ *  - `coverage` gab es in v1 nicht. Eine frühere Fassung setzte hier
+ *    `review_verdicts: data.overall.runs` neben `runs: data.overall.runs` —
+ *    Zähler gleich Nenner, also stets exakt 100 % samt grünem Haken. Das war
+ *    ein erfundener Vollständigkeitsbeweis über einer Zahl, die in v2 bei rund
+ *    29 % liegt. Nenner 0 lässt Aufrufer und `CoverageRail` die Quote korrekt
+ *    als unbekannt behandeln.
+ *  - `overall` aggregiert in v1 die GESAMTE Score-Tabelle ohne Zeitfilter.
+ *    Ein hartes `window_days: 7` hätte eine All-Time-Zahl als Wochenzahl
+ *    beschriftet; 0 heißt "kein Fenster" und wird im Kopf so gerendert.
  */
-const SERIES_FORMATTERS: Record<string, (value: number) => string> = {
-  run_cost_usd: (value) =>
-    value.toLocaleString("de-DE", { style: "currency", currency: "USD", maximumSignificantDigits: 4 }),
-  run_duration_seconds: formatDuration,
-  run_tokens_total: (value) => Math.round(value).toLocaleString("de-DE"),
-  run_attempt_index: plainNumber,
-  review_iterations_to_approval: plainNumber,
-};
-
-const formatSeriesValue = (name: string, value: number) =>
-  (SERIES_FORMATTERS[name] ?? plainNumber)(value);
-
-/**
- * Kategoriale Haeufigkeitskarte, absteigend nach Anzahl. Labels werden
- * unveraendert uebernommen — auch `unknown_outcome_code:*`-Eintraege, die
- * bewusst vom Backend erhalten bleiben.
- */
-const formatFrequencyMap = (map: Record<string, number>) =>
-  Object.entries(map)
-    .sort(([, a], [, b]) => b - a)
-    .map(([label, count]) => `${label} (${Math.round(count).toLocaleString("de-DE")})`)
-    .join(" · ");
-
-/**
- * Datenserien-Palette (DESIGN.md: mehrere Serien = Datenfarben, kein
- * Statusvokabular). Volle Literal-Klassen, damit Tailwind sie generiert.
- */
-const SERIES_DOT_CLASSES = [
-  "bg-[var(--color-data-1)]",
-  "bg-[var(--color-data-2)]",
-  "bg-[var(--color-data-3)]",
-  "bg-[var(--color-data-4)]",
-  "bg-[var(--color-data-5)]",
-  "bg-[var(--color-data-7)]",
-];
-/** Neutraler Serien-Token fuer dünne Datenlage — bewusst kein Status-Gruen/-Rot. */
-const THIN_DOT_CLASS = "bg-[var(--color-data-6)]";
-/** Unterhalb dieser Row-Anzahl gilt ein Score-Mittelwert als nicht belastbar. */
-const MIN_EVIDENCE_ROWS = 5;
+function legacyQuality(data: ScorecardResponse): QualitySnapshot {
+  return {
+    window_days: 0,
+    overall: data.overall,
+    verdicts: data.verdicts,
+    outcomes: {},
+    profiles: data.profiles,
+    models: data.models,
+    daily_verdicts: [],
+    review_iterations: { average: null, count: 0, distribution: {} },
+    coverage: {
+      runs: 0,
+      review_verdicts: 0,
+      run_outcomes: 0,
+      review_iterations: 0,
+    },
+    source: "kanban.metric_scores",
+    captured_at: data.checked_at,
+  };
+}
 
 export function ScorecardView() {
   const { data, loading, error } = useScorecard();
-  if (loading && !data) return <div className="hc-dim p-6">Scorecard wird geladen …</div>;
-  if (error || !data) return <div className="hc-dim p-6">Scorecard ist derzeit nicht verfügbar.</div>;
-  return <main className="mx-auto flex max-w-6xl flex-col gap-8 p-4 md:p-6">
-    <header><p className="hc-type-label hc-dim">KANBAN · QUALITÄT</p><h1 className="hc-type-display">Lane Scorecard</h1><p className="hc-dim">Review-Entscheidungen, nach Lane und Modell aufgeschlüsselt.</p></header>
-    <section className="grid gap-3 sm:grid-cols-3">
-      <KpiTile label="Approval rate" value={percent(data.overall.approval_rate)} delta={`${data.overall.approved} freigegeben`} />
-      <KpiTile label="Review runs" value={String(data.overall.runs)} delta="bewertete Läufe" />
-      <KpiTile label="Verteilung" value={`${data.verdicts.approved} / ${data.verdicts.rejected}`} delta="approved / rejected" />
-    </section>
-    <DigestCard />
-    <ScoreSeriesSection scores={data.materialized_scores} />
-    <section className="flex flex-col gap-3"><SectionHeader label="Lanes" meta={`${data.profiles.length} Profile`} />
-      {data.profiles.map((row) => <ListRow key={row.name} leading={<span className="size-2 rounded-full bg-[var(--color-data-1)]" aria-hidden />} title={row.name} meta={`${percent(row.approval_rate)} · ${row.runs} Runs`} trailing={<StatusChip icon={CheckCircle2} label="Approval" value={percent(row.approval_rate)} hint={row.approval_rate != null && row.approval_rate >= .8 ? "stabil" : "prüfen"} tone={row.approval_rate != null && row.approval_rate >= .8 ? "emerald" : "amber"} />} />)}
-    </section>
-    <section className="flex flex-col gap-3"><SectionHeader label="Modelle" meta={`${data.models.length} aktiv`} />
-      {data.models.map((row) => <ListRow key={row.name} title={row.name} meta={`${percent(row.approval_rate)} · ${row.runs} Runs`} />)}
-    </section>
-    <section className="flex flex-col gap-3"><SectionHeader label="Wochentrend" meta="ISO-Wochen" />
-      {data.weeks.map((row) => <ListRow key={`${row.year}-${row.week}`} title={`${row.year} · W${String(row.week).padStart(2, "0")}`} meta={`${percent(row.approval_rate)} · ${row.approved}/${row.runs} approved`} />)}
-    </section>
-  </main>;
+  if (loading && !data) {
+    return <div className="hc-dim p-6">Scorecard wird geladen …</div>;
+  }
+  if (error || !data) {
+    return <div className="hc-dim p-6">Scorecard ist derzeit nicht verfügbar.</div>;
+  }
+
+  const quality = data.quality ?? legacyQuality(data);
+  const completed = quality.outcomes.completed ?? 0;
+  const coverage = quality.coverage.runs
+    ? quality.coverage.review_verdicts / quality.coverage.runs
+    : null;
+  const sourceState = data.observability?.state ?? "absent";
+  const sourceLabel = sourceState === "fresh"
+    ? "Langfuse fresh"
+    : sourceState === "stale"
+      ? `Langfuse stale · ${data.observability?.cache.age_seconds ?? "?"} s`
+      : "Langfuse absent · lokale Scores";
+
+  return (
+    <main data-scorecard className="mx-auto flex w-full max-w-[2100px] flex-col gap-4 p-4 pb-20 md:p-6">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <p className="hc-type-label hc-dim">
+            QUALITÄT · ENTSCHEIDUNGEN · {quality.window_days > 0 ? `${quality.window_days} TAGE` : "GESAMTZEITRAUM"}
+          </p>
+          <h1 className="hc-type-display-tight mt-2">Worker Scorecard</h1>
+          <p className="hc-dim mt-2 text-sm">Eine Entscheidung, dann ihre Begründung.</p>
+        </div>
+        <div className={cn(
+          "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-[11px] font-semibold",
+          sourceState === "fresh"
+            ? "border-status-ok/40 text-status-ok"
+            : "border-status-warn/40 text-status-warn",
+        )}>
+          <span className="size-2 rounded-full bg-current" aria-hidden />
+          {sourceLabel}
+        </div>
+      </header>
+
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Qualitäts-Kernzahlen">
+        <KpiTile
+          label="Approval"
+          value={percent(quality.overall.approval_rate)}
+          delta={`${number(quality.overall.approved)} / ${number(quality.overall.runs)} entschiedene Reviews`}
+          dot="live"
+        />
+        <KpiTile
+          label="Completed"
+          value={number(completed)}
+          delta={`${number(quality.coverage.run_outcomes)} Outcome-Rows`}
+        />
+        <KpiTile
+          label="Review-Coverage"
+          value={percent(coverage)}
+          delta={`${number(quality.coverage.review_verdicts)} Verdicts / ${number(quality.coverage.runs)} Runs`}
+          deltaTone={coverage != null && coverage < 0.5 ? "down" : "neutral"}
+        />
+        <KpiTile
+          label="Rejected"
+          value={number(quality.verdicts.rejected)}
+          delta={`${number(quality.verdicts.approved)} approved`}
+          deltaTone={quality.verdicts.rejected > quality.verdicts.approved ? "down" : "neutral"}
+        />
+      </section>
+
+      <section className="grid gap-4 2xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,.55fr)]">
+        <DecisionPanel quality={quality} />
+        <IterationPanel quality={quality} />
+      </section>
+
+      <ModelQualityPanel quality={quality} />
+      <CoverageRail quality={quality} state={sourceState} />
+
+      <footer className="flex justify-between gap-4 text-[10px] font-semibold text-ink-3">
+        <span>Quelle: {quality.source} · Stand {new Date(quality.captured_at * 1000).toLocaleString("de-DE")}</span>
+        <span>/control/scorecard</span>
+      </footer>
+    </main>
+  );
 }
 
-/**
- * Event- & Usage-Scores (SC-S1): materialisierte Serien einheitengerecht (SC-S5).
- * Numerische Serien zeigen Mittelwert, Maximum und Row-Anzahl; kategoriale
- * Serien zeigen ihre Haeufigkeitskarte. Dünne Nenner werden ausdruecklich als
- * solche beschriftet und nicht als Zielwert verkauft.
- */
-function ScoreSeriesSection({ scores }: { scores: Record<string, MaterializedScore> }) {
-  const entries = Object.entries(scores).sort(([a], [b]) => a.localeCompare(b));
+function DecisionPanel({ quality }: { quality: QualitySnapshot }) {
+  const totalVerdicts = quality.verdicts.approved + quality.verdicts.rejected;
+  const approvedShare = totalVerdicts
+    ? (quality.verdicts.approved / totalVerdicts) * 100
+    : 0;
+  const outcomes = Object.entries(quality.outcomes)
+    .sort(([, left], [, right]) => right - left);
+  const topOutcome = Math.max(1, ...outcomes.map(([, count]) => count));
   return (
-    <section className="flex flex-col gap-3" data-testid="score-series">
-      <SectionHeader label="Event- & Usage-Scores" meta={`${entries.length} Scores`} />
-      {entries.length === 0 ? (
-        <div className="hc-surface-card flex flex-col gap-1 p-4 text-sm" data-testid="score-series-empty">
-          <p className="font-semibold">Keine materialisierten Event- und Usage-Scores.</p>
-          <p className="hc-dim">Situation: Für keinen Score liegen Rows vor — der Endpunkt aggregiert ohne Zeitfenster über alle vorhandenen Rows.</p>
-          <p className="hc-dim">Bewertung: Ohne Rows ist kein Zielwert bestätigt — das ist eine Datenlücke, kein Erfolg.</p>
-          <p className="hc-dim">Nächste Aktion: Score-Materialisierung im Backend prüfen.</p>
+    <article className="hc-surface-card p-4 md:p-5">
+      <SectionHeader label="Entscheidungen" meta={`Review verdict · n ${number(totalVerdicts)}`} />
+      {totalVerdicts ? (
+        <div className="mt-4 flex h-4 overflow-hidden rounded-full bg-surface-3" aria-label={`${approvedShare.toFixed(1)} Prozent approved`}>
+          <i className="bg-status-ok" style={{ width: `${approvedShare}%` }} />
+          <i className="flex-1 bg-status-alert" />
         </div>
       ) : (
-        entries.map(([name, score], index) => {
-          const thin = score.count < MIN_EVIDENCE_ROWS;
-          return (
-            <ListRow
-              key={name}
-              leading={<span className={`size-2 rounded-full ${thin ? THIN_DOT_CLASS : SERIES_DOT_CLASSES[index % SERIES_DOT_CLASSES.length]}`} aria-hidden />}
-              title={name}
-              meta={seriesMeta(name, score, thin)}
-              trailing={thin
-                ? <StatusChip icon={MinusCircle} label="Zielwert" value="nicht bestätigt" hint={score.count === 0 ? "keine Rows" : `n < ${MIN_EVIDENCE_ROWS}`} tone="zinc" />
-                : undefined}
-            />
-          );
-        })
+        <div className="mt-4 h-4 rounded-full bg-surface-3" aria-label="Keine Verdict-Daten" />
       )}
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] font-semibold text-ink-2">
+        <span><b className="text-status-ok">{number(quality.verdicts.approved)}</b> approved</span>
+        <span><b className="text-status-alert">{number(quality.verdicts.rejected)}</b> rejected</span>
+        <span>{totalVerdicts ? "Nenner sichtbar" : "Keine Verdict-Daten"}</span>
+      </div>
+      <DailyVerdictChart rows={quality.daily_verdicts} />
+      <div className="mt-6 flex flex-col gap-3">
+        {outcomes.map(([name, count]) => (
+          <div key={name} className="grid grid-cols-[minmax(108px,1fr)_minmax(100px,2.6fr)_48px] items-center gap-2 text-[11px] font-semibold">
+            <span className="min-w-0 whitespace-normal text-ink-2">{OUTCOME_LABELS[name] ?? name}</span>
+            <span className="h-2 overflow-hidden rounded-full bg-surface-3">
+              <i className="block h-full rounded-full bg-gradient-to-r from-data-1 to-live" style={{ width: `${Math.max(2, (count / topOutcome) * 100)}%` }} />
+            </span>
+            <b className="text-right font-data">{number(count)}</b>
+          </div>
+        ))}
+        {outcomes.length === 0 ? <p className="hc-dim text-sm">Noch keine Outcome-Scores im gewählten Fenster.</p> : null}
+      </div>
+    </article>
+  );
+}
+
+function DailyVerdictChart({ rows }: { rows: QualitySnapshot["daily_verdicts"] }) {
+  const peak = Math.max(1, ...rows.flatMap((row) => [row.approved, row.rejected]));
+  if (!rows.length) return null;
+  return (
+    <div className="mt-5">
+      <div className="flex h-28 items-end gap-2 border-b border-line px-1" aria-label="Verdicts je Tag">
+        {rows.map((row) => (
+          <div key={row.date} className="relative flex h-full flex-1 items-end gap-0.5 pt-5">
+            <i className="min-h-0.5 flex-1 rounded-t bg-status-ok" style={{ height: `${Math.max(2, (row.approved / peak) * 100)}%` }} title={`${row.approved} approved`} />
+            <i className="min-h-0.5 flex-1 rounded-t bg-status-alert" style={{ height: `${Math.max(2, (row.rejected / peak) * 100)}%` }} title={`${row.rejected} rejected`} />
+            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[8px] font-semibold text-ink-3">{row.date.slice(8)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 flex justify-between text-[9px] font-semibold text-ink-3">
+        <span>Verdicts je Tag</span><span>approved / rejected</span>
+      </div>
+    </div>
+  );
+}
+
+function IterationPanel({ quality }: { quality: QualitySnapshot }) {
+  const distribution = Object.entries(quality.review_iterations.distribution)
+    .sort(([left], [right]) => Number(left) - Number(right));
+  const peak = Math.max(1, ...distribution.map(([, count]) => count));
+  return (
+    <article className="hc-surface-card p-4 md:p-5">
+      <SectionHeader label="Review-Iterationen" meta={`bis Freigabe · n ${number(quality.review_iterations.count)}`} />
+      <div className="mt-4 flex h-40 items-end gap-3 border-b border-line px-1">
+        {distribution.map(([label, count]) => (
+          <div key={label} className="relative flex h-full flex-1 items-end pt-6">
+            <i className="block w-full rounded-t bg-gradient-to-b from-live to-live/25" style={{ height: `${Math.max(2, (count / peak) * 100)}%` }} />
+            <b className="absolute left-1/2 top-1 -translate-x-1/2 text-[10px] font-data text-ink-2">{number(count)}</b>
+            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-ink-3">{label}</span>
+          </div>
+        ))}
+      </div>
+      <div className="mt-7 rounded-xl border border-status-warn/30 bg-status-warn/5 p-3 text-[11px] font-semibold text-ink-2">
+        Ø {quality.review_iterations.average?.toLocaleString("de-DE", { maximumFractionDigits: 2 }) ?? "—"} Iterationen · dünne Nenner bleiben sichtbar.
+      </div>
+    </article>
+  );
+}
+
+function ModelQualityPanel({ quality }: { quality: QualitySnapshot }) {
+  const models = useMemo(
+    () => [...quality.models].sort((left, right) => (right.approval_rate ?? -1) - (left.approval_rate ?? -1)),
+    [quality.models],
+  );
+  return (
+    <section className="hc-surface-card p-4 md:p-5">
+      <SectionHeader label="Modellqualität" meta="Approval · nur entschiedene Reviews" />
+      <div className="mt-3">
+        {models.map((row) => {
+          const thin = row.runs < 50;
+          return (
+            <div key={row.name} className="grid min-h-12 grid-cols-[minmax(110px,1fr)_minmax(100px,2.5fr)_68px_44px] items-center gap-2 border-b border-line-soft text-[11px] font-semibold last:border-0">
+              <span className="min-w-0 break-words">
+                {row.name}
+                {thin ? <span className="ml-1 text-status-warn">· dünn</span> : null}
+              </span>
+              <span className="h-1.5 overflow-hidden rounded-full bg-surface-3">
+                <i className={cn("block h-full", thin ? "bg-status-warn" : "bg-data-4")} style={{ width: `${Math.max(0, (row.approval_rate ?? 0) * 100)}%` }} />
+              </span>
+              <b className={cn("text-right font-data", thin && "text-status-warn")}>{percent(row.approval_rate)}</b>
+              <small className="text-right text-ink-3">n {number(row.runs)}</small>
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
 
-/** Meta-Zeile je Serie: leere Serie, numerische Serie oder Haeufigkeitskarte. */
-function seriesMeta(name: string, score: MaterializedScore, thin: boolean) {
-  if (score.count === 0) return "keine Rows · dünne Datenlage";
-  const suffix = thin ? " · dünne Datenlage" : "";
-  if (typeof score.value === "number") {
-    const parts = [`Ø ${formatSeriesValue(name, score.value)}`];
-    if (score.max != null) parts.push(`max ${formatSeriesValue(name, score.max)}`);
-    parts.push(`n = ${score.count.toLocaleString("de-DE")}`);
-    return parts.join(" · ") + suffix;
-  }
-  if (score.value != null) {
-    return `${formatFrequencyMap(score.value)} · n = ${score.count.toLocaleString("de-DE")}${suffix}`;
-  }
-  return `n = ${score.count.toLocaleString("de-DE")}${suffix}`;
+function CoverageRail({ quality, state }: { quality: QualitySnapshot; state: string }) {
+  const entries = [
+    ["Review", quality.coverage.review_verdicts, quality.coverage.runs],
+    ["Outcomes", quality.coverage.run_outcomes, quality.coverage.runs],
+    ["Iterationen", quality.coverage.review_iterations, quality.coverage.review_verdicts],
+  ] as const;
+  return (
+    <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="Datenabdeckung">
+      {entries.map(([label, observed, denominator]) => {
+        const ratio = denominator ? observed / denominator : null;
+        return (
+          <div key={label} className="rounded-xl border border-line bg-surface-1 p-3">
+            <span className="hc-type-label hc-dim">{label}-Coverage</span>
+            <div className="mt-2 flex items-center gap-2">
+              {ratio != null && ratio >= 0.8
+                ? <CheckCircle2 className="size-4 text-status-ok" />
+                : <AlertTriangle className="size-4 text-status-warn" />}
+              <b className="font-data text-sm">{number(observed)} / {number(denominator)}</b>
+            </div>
+          </div>
+        );
+      })}
+      <div className="rounded-xl border border-line bg-surface-1 p-3">
+        <span className="hc-type-label hc-dim">Data Plane</span>
+        <div className="mt-2 flex items-center gap-2">
+          {state === "fresh" ? <Radio className="size-4 text-status-ok" /> : <Database className="size-4 text-status-alert" />}
+          <b className={cn("font-data text-sm", state === "fresh" ? "text-status-ok" : "text-status-alert")}>Langfuse {state}</b>
+        </div>
+      </div>
+    </section>
+  );
 }

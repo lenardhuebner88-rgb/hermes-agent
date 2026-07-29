@@ -40,6 +40,12 @@ _PURGE_ATTEMPTED = False
 @dataclass
 class _RunContext:
     run_id: str
+    task_run_id: Optional[str] = None
+    task_id: Optional[str] = None
+    chain_id: Optional[str] = None
+    board: Optional[str] = None
+    session_id: Optional[str] = None
+    correlation_source: Optional[str] = None
     requested_provider: Optional[str] = None
     requested_model: Optional[str] = None
     lane: Optional[str] = None
@@ -119,6 +125,16 @@ def _request_body(kwargs: Mapping[str, Any]) -> dict[str, Any]:
 
 def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
+
+
+def _worker_dimensions() -> dict[str, str]:
+    """Resolve stable Kanban dimensions without making hooks write board state."""
+    try:
+        from hermes_cli.observability_context import resolve_observability_context
+
+        return resolve_observability_context()
+    except Exception:
+        return {}
 
 
 def _usage_bucket(usage: Mapping[str, Any], name: str) -> Optional[int]:
@@ -261,8 +277,10 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
         _text(kwargs.get("model")),
     )
     environment_profile = _text(os.environ.get("HERMES_PROFILE"))
+    worker_dimensions = _worker_dimensions()
     lane = _first(
         _text(kwargs.get("lane")),
+        _text(worker_dimensions.get("lane")),
         existing.lane if reuse_existing else None,
         environment_profile,
     )
@@ -278,6 +296,54 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
         else _RunContext(run_id=run_id, origin=event_origin)
     )
     ctx.run_id = run_id
+    verified_task_id = _first(
+        _text(kwargs.get("kanban_task_id")),
+        _text(worker_dimensions.get("kanban_task_id")),
+    )
+    has_worker_evidence = verified_task_id is not None or (
+        reuse_existing and ctx.correlation_source == "kanban_runtime"
+    )
+    ctx.task_run_id = (
+        _first(
+            _text(os.environ.get("HERMES_KANBAN_RUN_ID")),
+            _text(worker_dimensions.get("task_run_id")),
+            _text(kwargs.get("task_run_id")),
+            ctx.task_run_id if reuse_existing else None,
+        )
+        if has_worker_evidence
+        else None
+    )
+    ctx.task_id = (
+        _first(
+            verified_task_id,
+            ctx.task_id if reuse_existing else None,
+        )
+        if has_worker_evidence
+        else None
+    )
+    ctx.chain_id = (
+        _first(
+            _text(kwargs.get("chain_id")),
+            _text(worker_dimensions.get("chain_id")),
+            ctx.chain_id if reuse_existing else None,
+        )
+        if has_worker_evidence
+        else None
+    )
+    ctx.board = (
+        _first(
+            _text(os.environ.get("HERMES_KANBAN_BOARD")),
+            _text(kwargs.get("board")),
+            ctx.board if reuse_existing else None,
+        )
+        if has_worker_evidence
+        else None
+    )
+    ctx.session_id = _first(
+        _text(kwargs.get("session_id")),
+        ctx.session_id if reuse_existing else None,
+    )
+    ctx.correlation_source = "kanban_runtime" if has_worker_evidence else "hermes_runtime"
     ctx.requested_provider = requested_provider
     ctx.requested_model = requested_model
     ctx.lane = lane
@@ -360,6 +426,12 @@ def _run_context_fields(
 ) -> dict[str, Any]:
     return {
         "origin": ctx.origin,
+        "task_run_id": ctx.task_run_id,
+        "task_id": ctx.task_id,
+        "chain_id": ctx.chain_id,
+        "board": ctx.board,
+        "session_id": ctx.session_id,
+        "correlation_source": ctx.correlation_source,
         "lane": ctx.lane,
         "profile": ctx.profile,
         "wall_ms": _integer(kwargs.get("wall_ms")),

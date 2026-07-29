@@ -22,7 +22,12 @@ class _PluginContext:
 
 def _reload(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_USAGE_FACTS_DB", str(tmp_path / "facts.db"))
-    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    for name in (
+        "HERMES_KANBAN_RUN_ID",
+        "HERMES_KANBAN_TASK",
+        "HERMES_KANBAN_BOARD",
+    ):
+        monkeypatch.delenv(name, raising=False)
     return importlib.reload(board_facts)
 
 
@@ -89,9 +94,22 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     secret = "langfuse-secret-in-a-trace"
     monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", secret)
     monkeypatch.setenv("HERMES_PROFILE", "implementation-profile")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-42")
+    monkeypatch.setattr(
+        plugin,
+        "_worker_dimensions",
+        lambda: {
+            "kanban_task_id": "task-42",
+            "task_run_id": "run-42",
+            "chain_id": "chain-42",
+            "lane": "implementation",
+        },
+    )
     common = {
         "task_run_id": "run-42",
         "task_id": "task-42",
+        "chain_id": "chain-42",
+        "board": "default",
         "turn_id": "turn-42",
         "api_request_id": "request-42",
         "session_id": "session-42",
@@ -167,6 +185,12 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
         ).fetchall()
 
     assert fact["provider"] == "xai-oauth"
+    assert fact["task_run_id"] == "run-42"
+    assert fact["task_id"] == "task-42"
+    assert fact["chain_id"] == "chain-42"
+    assert fact["board"] == "default"
+    assert fact["session_id"] == "session-42"
+    assert fact["correlation_source"] == "kanban_runtime"
     assert fact["model"] == "grok-4.20"
     assert fact["requested_provider"] == "xai-oauth"
     assert fact["requested_model"] == "requested-grok"
@@ -193,6 +217,74 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
         row["role"] for row in traces
     }
     assert secret not in "\n".join(row["content"] for row in traces)
+
+
+def test_worker_environment_beats_ephemeral_turn_task_id(monkeypatch, tmp_path):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-stable")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "run-stable")
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", "default")
+    monkeypatch.setattr(
+        plugin,
+        "_worker_dimensions",
+        lambda: {
+            "kanban_task_id": "task-stable",
+            "task_run_id": "run-stable",
+            "chain_id": "chain-stable",
+            "lane": "coder",
+        },
+    )
+
+    plugin.on_pre_llm_request(
+        task_id="ephemeral-turn-uuid",
+        turn_id="turn-stable",
+        api_request_id="request-stable",
+        session_id="session-stable",
+        provider="test",
+        model="test-model",
+        request_messages=[],
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT task_run_id, task_id, chain_id, board, correlation_source "
+            "FROM run_usage_facts WHERE run_id='run-stable'"
+        ).fetchone()
+
+    assert tuple(fact) == (
+        "run-stable",
+        "task-stable",
+        "chain-stable",
+        "default",
+        "kanban_runtime",
+    )
+
+
+def test_pseudo_worker_environment_is_not_exact_correlation(monkeypatch, tmp_path):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "loop-pack-phase")
+    monkeypatch.setattr(plugin, "_worker_dimensions", lambda: {})
+
+    plugin.on_pre_llm_request(
+        task_id="ephemeral-turn-uuid",
+        turn_id="turn-loop",
+        api_request_id="request-loop",
+        session_id="session-loop",
+        provider="test",
+        model="test-model",
+        request_messages=[],
+    )
+
+    with sqlite3.connect(path) as conn:
+        fact = conn.execute(
+            "SELECT task_run_id, task_id, chain_id, board, correlation_source "
+            "FROM run_usage_facts WHERE run_id='turn-loop'"
+        ).fetchone()
+
+    assert fact == (None, None, None, None, "hermes_runtime")
 
 
 def test_main_and_aux_calls_use_disjoint_indices_for_the_same_run(

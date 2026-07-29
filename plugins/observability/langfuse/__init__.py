@@ -47,6 +47,7 @@ class TraceState:
     trace_id: str
     root_ctx: Any
     root_span: Any
+    worker_metadata: Dict[str, Any] = field(default_factory=dict)
     generations: Dict[str, Any] = field(default_factory=dict)
     tools: Dict[str, Any] = field(default_factory=dict)
     pending_tools_by_name: Dict[str, list] = field(default_factory=dict)
@@ -669,30 +670,54 @@ def _correlation_metadata(*, task_run_id: str = "", task_id: str = "", chain_id:
     return result
 
 
-def _kanban_worker_metadata() -> dict[str, str]:
-    """Return dispatcher identity for worker traces without affecting other runs."""
-    try:
-        task_id = _env("HERMES_KANBAN_TASK")
-        if not task_id:
-            return {}
-        return {
-            key: value
-            for key, value in {
-                "kanban_task_id": task_id,
-                "kanban_run_id": _env("HERMES_KANBAN_RUN_ID"),
-                "kanban_board": _env("HERMES_KANBAN_BOARD"),
-                "kanban_profile": _env("HERMES_PROFILE"),
-            }.items()
-            if value
-        }
-    except Exception:  # pragma: no cover - defensive fail-open for trace hooks
+def _kanban_worker_metadata(
+    *,
+    kanban_task_id: str = "",
+    task_run_id: str = "",
+    chain_id: str = "",
+    board: str = "",
+    session_id: str = "",
+    origin: str = "",
+    profile: str = "",
+    lane: str = "",
+) -> dict[str, str]:
+    """Return only caller-validated worker identity for traces/generations.
+
+    The conversation loop resolves these fields through
+    ``resolve_observability_context``. Reading ``HERMES_KANBAN_TASK`` here
+    would create a second, unvalidated identity source and could tag pseudo
+    task IDs as real workers.
+    """
+    if not kanban_task_id:
         return {}
+    normalized_profile = profile or lane
+    return {
+        key: value
+        for key, value in {
+            # Backwards-compatible names used by the score exporter.
+            "kanban_task_id": kanban_task_id,
+            "kanban_run_id": task_run_id,
+            "kanban_board": board,
+            "kanban_profile": normalized_profile,
+            # Canonical dimensions shared with Usage Facts.
+            "task_run_id": task_run_id,
+            "chain_id": chain_id,
+            "board": board,
+            "session_id": session_id,
+            "origin": origin or "hermes_agent",
+            "profile": normalized_profile,
+            "lane": lane or normalized_profile,
+        }.items()
+        if value
+    }
 
 
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "", task_run_id: str = "",
-                      chain_id: str = "", lane: str = "", billing_snapshot: Any = None) -> TraceState:
+                      chain_id: str = "", lane: str = "", kanban_task_id: str = "",
+                      board: str = "", profile: str = "", origin: str = "",
+                      billing_snapshot: Any = None) -> TraceState:
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
     trace_input = _extract_last_user_message(messages)
     metadata = {
@@ -710,12 +735,16 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         provider=provider, model=model, billing_snapshot=billing_snapshot,
     )
     metadata.update(correlation_metadata)
-    worker_dimensions = {
-        key: correlation_metadata[key]
-        for key in ("task_run_id", "chain_id", "lane")
-        if key in correlation_metadata
-    }
-    kanban_metadata = _kanban_worker_metadata()
+    kanban_metadata = _kanban_worker_metadata(
+        kanban_task_id=kanban_task_id,
+        task_run_id=task_run_id,
+        chain_id=chain_id,
+        board=board,
+        session_id=session_id,
+        origin=origin,
+        profile=profile,
+        lane=lane,
+    )
     metadata.update(kanban_metadata)
 
     # session_id must be passed in trace_context for Langfuse session grouping.
@@ -737,14 +766,13 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                 "session_id": trace_session_id or task_key,
                 "trace_name": "Hermes turn",
                 "tags": ["hermes", "langfuse"]
-                + (["kanban-worker"] if worker_dimensions or kanban_metadata else [])
+                + (["kanban-worker"] if kanban_metadata else [])
                 + ([f"lane:{lane}"] if lane else []),
             }
             if lane:
                 pa_kwargs["user_id"] = lane
-            propagated_metadata = {**worker_dimensions, **kanban_metadata}
-            if propagated_metadata:
-                pa_kwargs["metadata"] = propagated_metadata
+            if kanban_metadata:
+                pa_kwargs["metadata"] = kanban_metadata
             with propagate_attributes(**pa_kwargs):
                 root_span = client.start_observation(**root_kwargs)
         except Exception:
@@ -758,7 +786,12 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         pass
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span)
+    return TraceState(
+        trace_id=trace_id,
+        root_ctx=None,
+        root_span=root_span,
+        worker_metadata=kanban_metadata,
+    )
 
 
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
@@ -883,7 +916,9 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
                     api_call_count: int = 0, messages: Any = None, turn_type: str = "user",
                     conversation_history: Any = None, user_message: Any = None,
                     turn_id: str = "", api_request_id: str = "", task_run_id: str = "",
-                    chain_id: str = "", lane: str = "", billing_snapshot: Any = None, **_: Any) -> None:
+                    chain_id: str = "", lane: str = "", kanban_task_id: str = "",
+                    board: str = "", profile: str = "", origin: str = "",
+                    billing_snapshot: Any = None, **_: Any) -> None:
     # Older Hermes branches used pre_llm_call for request-scoped tracing and
     # passed the actual API messages. Current Hermes also has a turn-scoped
     # pre_llm_call used for context injection; tracing that hook creates an
@@ -926,6 +961,10 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
                     task_run_id=task_run_id,
                     chain_id=chain_id,
                     lane=lane,
+                    kanban_task_id=kanban_task_id,
+                    board=board,
+                    profile=profile,
+                    origin=origin,
                     billing_snapshot=billing_snapshot,
                 )
             except Exception as exc:  # Observability must never break the run.
@@ -962,6 +1001,10 @@ def on_pre_llm_request(
     task_run_id: str = "",
     chain_id: str = "",
     lane: str = "",
+    kanban_task_id: str = "",
+    board: str = "",
+    profile: str = "",
+    origin: str = "",
     billing_snapshot: Any = None,
     **_: Any,
 ) -> None:
@@ -1003,6 +1046,10 @@ def on_pre_llm_request(
                     task_run_id=task_run_id,
                     chain_id=chain_id,
                     lane=lane,
+                    kanban_task_id=kanban_task_id,
+                    board=board,
+                    profile=profile,
+                    origin=origin,
                     billing_snapshot=billing_snapshot,
                 )
             except Exception as exc:  # Observability must never break the run.
@@ -1022,9 +1069,11 @@ def on_pre_llm_request(
             input_value=_serialize_messages(input_messages),
             metadata={
                 "provider": provider,
+                "model": model,
                 "platform": platform,
                 "api_mode": api_mode,
                 "base_url": base_url,
+                **state.worker_metadata,
             },
             model=model,
             model_parameters={"api_mode": api_mode, "provider": provider},

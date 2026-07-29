@@ -7,6 +7,46 @@ const ScoreRateSchema = z.object({
   approval_rate: z.coerce.number().nullable().catch(null),
 });
 const ScoreGroupSchema = ScoreRateSchema.extend({ name: z.string().catch("unknown") });
+const QualityCoverageSchema = z.object({
+  runs: z.coerce.number().catch(0),
+  review_verdicts: z.coerce.number().catch(0),
+  run_outcomes: z.coerce.number().catch(0),
+  review_iterations: z.coerce.number().catch(0),
+});
+const QualitySnapshotSchema = z.object({
+  window_days: z.coerce.number().catch(7),
+  overall: ScoreRateSchema,
+  verdicts: z.object({
+    approved: z.coerce.number().catch(0),
+    rejected: z.coerce.number().catch(0),
+  }),
+  outcomes: z.record(z.string(), z.coerce.number()).catch({}),
+  profiles: z.array(ScoreGroupSchema).catch([]),
+  models: z.array(ScoreGroupSchema).catch([]),
+  daily_verdicts: z.array(z.object({
+    date: z.string().catch(""),
+    approved: z.coerce.number().catch(0),
+    rejected: z.coerce.number().catch(0),
+  })).catch([]),
+  review_iterations: z.object({
+    average: z.coerce.number().nullable().catch(null),
+    count: z.coerce.number().catch(0),
+    distribution: z.record(z.string(), z.coerce.number()).catch({}),
+  }),
+  coverage: QualityCoverageSchema,
+  source: z.string().catch("kanban.metric_scores"),
+  captured_at: epochSeconds,
+});
+const ObservabilityHealthSchema = z.object({
+  available: z.boolean().catch(false),
+  state: z.enum(["fresh", "stale", "absent", "partial", "unknown"]).catch("absent"),
+  reason: z.string().nullable().catch(null),
+  captured_at: z.string().nullable().catch(null),
+  cache: z.object({
+    ttl_seconds: z.coerce.number().catch(45),
+    age_seconds: z.coerce.number().nullable().catch(null),
+  }).catch({ ttl_seconds: 45, age_seconds: null }),
+});
 /** Materialisierte numerische Serien oder kategoriale Häufigkeits-Maps aus SC-S1. */
 const MaterializedScoreSchema = z.object({
   value: z.union([z.coerce.number(), z.record(z.string(), z.coerce.number())]).nullable().catch(null),
@@ -16,14 +56,18 @@ const MaterializedScoreSchema = z.object({
   count: z.coerce.number().catch(0),
 });
 export const ScorecardResponseSchema = z.object({
+  contract_version: z.string().catch("hermes-scorecard.v1"),
   overall: ScoreRateSchema,
   verdicts: z.object({ approved: z.coerce.number().catch(0), rejected: z.coerce.number().catch(0) }),
   profiles: z.array(ScoreGroupSchema).catch([]),
   models: z.array(ScoreGroupSchema).catch([]),
   weeks: z.array(ScoreRateSchema.extend({ year: z.coerce.number(), week: z.coerce.number() })).catch([]),
   materialized_scores: z.record(z.string(), MaterializedScoreSchema).catch({}),
+  quality: QualitySnapshotSchema.optional(),
+  observability: ObservabilityHealthSchema.optional(),
   checked_at: epochSeconds,
 });
+export type QualitySnapshot = z.infer<typeof QualitySnapshotSchema>;
 export type MaterializedScore = z.infer<typeof MaterializedScoreSchema>;
 export type ScorecardResponse = z.infer<typeof ScorecardResponseSchema>;
 
