@@ -6,7 +6,10 @@ import urllib.error
 from email.message import Message
 from pathlib import Path
 
-from scripts.langfuse_worker_audit import build_live_smoke_contract
+from scripts.langfuse_worker_audit import (
+    build_control_surface_live_smoke,
+    build_live_smoke_contract,
+)
 
 
 def _seed_databases(
@@ -283,3 +286,104 @@ def test_live_smoke_contract_marks_claude_cli_run_ineligible_not_lifecycle_defec
     assert report["runtime_eligible"] is False
     assert report["lifecycle"]["assessment"] == "not_applicable"
     assert report["lifecycle"]["missing_events"] == []
+
+
+def test_control_surface_smoke_proves_full_partial_and_warm_budget() -> None:
+    observations = [
+        {
+            "id": f"generation-{index}",
+            "type": "GENERATION",
+            "metadata": {"kanban_run_id": str(index)},
+            "startTime": "2026-07-29T20:00:00Z",
+            "endTime": "2026-07-29T20:00:01Z",
+            "usageDetails": {"total": 10},
+        }
+        for index in range(3)
+    ]
+
+    def langfuse_request(url: str, _authorization: str, *, timeout: float) -> dict:
+        assert timeout > 0
+        query = url.split("?", 1)[1]
+        params = dict(part.split("=", 1) for part in query.split("&"))
+        page = int(params["page"])
+        limit = int(params["limit"])
+        start = (page - 1) * limit
+        return {
+            "data": observations[start : start + limit],
+            "meta": {"totalPages": (len(observations) + limit - 1) // limit},
+        }
+
+    dashboard_calls: list[tuple[str, str]] = []
+
+    def dashboard_request(url: str, token: str) -> dict:
+        dashboard_calls.append((url, token))
+        return {
+            "langfuse": {"state": "fresh"},
+            "usage": {"state": "fresh", "summary": {"fact_rows": 94_682}},
+        }
+
+    report = build_control_surface_live_smoke(
+        dashboard_base_url="http://127.0.0.1:8642",
+        dashboard_token="dashboard-secret",
+        days=7,
+        warm_calls=5,
+        page_size=2,
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "http://127.0.0.1:3000",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "pk-secret",
+            "HERMES_LANGFUSE_SECRET_KEY": "sk-secret",
+        },
+        langfuse_request=langfuse_request,
+        dashboard_request=dashboard_request,
+    )
+
+    assert report["status"] == "pass", report
+    assert report["langfuse"]["public_api_page"] == {
+        "authenticated": True,
+        "rows": 2,
+    }
+    assert report["langfuse"]["full_scan"]["state"] == "fresh"
+    assert report["langfuse"]["full_scan"]["coverage"]["scan_truncated"] is False
+    assert report["langfuse"]["limited_scan"]["state"] == "partial"
+    assert report["langfuse"]["limited_scan"]["summary"]["count"]["lower_bound"] is True
+    assert report["langfuse"]["limited_scan"]["coverage"]["window_coverage"] is None
+    assert report["dashboard"]["authenticated"] is True
+    assert report["dashboard"]["warm_calls"] == 5
+    assert report["dashboard"]["fact_rows"] == 94_682
+    assert report["dashboard"]["budget"]["passed"] is True
+    assert len(dashboard_calls) == 6
+    encoded = json.dumps(report)
+    assert "dashboard-secret" not in encoded
+    assert "pk-secret" not in encoded
+    assert "sk-secret" not in encoded
+
+
+def test_control_surface_smoke_keeps_usage_available_when_langfuse_is_unreachable() -> None:
+    def fail_langfuse(_url: str, _authorization: str, *, timeout: float) -> dict:
+        raise RuntimeError("connection refused at http://secret-host")
+
+    report = build_control_surface_live_smoke(
+        dashboard_base_url="http://127.0.0.1:8642",
+        dashboard_token="dashboard-secret",
+        env={
+            "HERMES_LANGFUSE_BASE_URL": "http://127.0.0.1:3000",
+            "HERMES_LANGFUSE_PUBLIC_KEY": "pk-secret",
+            "HERMES_LANGFUSE_SECRET_KEY": "sk-secret",
+        },
+        langfuse_request=fail_langfuse,
+        dashboard_request=lambda _url, _token: {
+            "langfuse": {"state": "absent", "reason": "read_failed:RuntimeError"},
+            "usage": {"state": "fresh", "summary": {"fact_rows": 12}},
+        },
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"] == {
+        "state": "absent",
+        "reason": "unreachable",
+        "error_type": "RuntimeError",
+        "configured_host_checked": True,
+    }
+    assert report["dashboard"]["usage_state"] == "fresh"
+    assert report["dashboard"]["langfuse_state"] == "absent"
+    assert "secret-host" not in json.dumps(report)

@@ -7,14 +7,17 @@ import argparse
 import json
 import os
 import sqlite3
+import statistics
 import sys
+import time
 import urllib.error
 from collections import defaultdict
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
-from urllib.parse import quote
+from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import quote, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -456,6 +459,274 @@ def _langfuse_failure_receipt(exc: Exception) -> dict[str, Any]:
     return receipt
 
 
+def _control_surface_dashboard_request(url: str, token: str) -> dict[str, Any]:
+    request = Request(
+        url,
+        headers={"Accept": "application/json", "Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    with urlopen(request, timeout=30.0) as response:  # noqa: S310 - validated below
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("dashboard_payload_invalid")
+    return payload
+
+
+def _validated_dashboard_url(base_url: str, *, days: int) -> str:
+    parsed = urlparse(base_url.strip())
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("dashboard_url_invalid")
+    return (
+        f"{base_url.rstrip('/')}/api/plugins/kanban/stats/observability"
+        f"?{urlencode({'days': days})}"
+    )
+
+
+def _langfuse_page(
+    host: str,
+    authorization: str,
+    *,
+    page: int,
+    limit: int,
+    from_start_time: str,
+    request_json: Callable[..., dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int | None]:
+    url = (
+        f"{host}/api/public/observations?"
+        f"{urlencode({'page': page, 'limit': limit, 'fromStartTime': from_start_time})}"
+    )
+    payload = request_json(url, authorization, timeout=30.0)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        raise RuntimeError("langfuse_payload_invalid")
+    meta = payload.get("meta")
+    total_pages = meta.get("totalPages") if isinstance(meta, dict) else None
+    if not isinstance(total_pages, int) or total_pages < 0:
+        total_pages = None
+    return [row for row in rows if isinstance(row, dict)], total_pages
+
+
+def _scan_langfuse_pages(
+    host: str,
+    authorization: str,
+    *,
+    page_size: int,
+    max_pages: int,
+    from_start_time: str,
+    request_json: Callable[..., dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int, bool]:
+    rows: list[dict[str, Any]] = []
+    for page in range(1, max_pages + 1):
+        current, total_pages = _langfuse_page(
+            host,
+            authorization,
+            page=page,
+            limit=page_size,
+            from_start_time=from_start_time,
+            request_json=request_json,
+        )
+        rows.extend(current)
+        if total_pages is not None and page >= total_pages:
+            return rows, page, True
+        if total_pages is None and len(current) < page_size:
+            return rows, page, True
+    return rows, max_pages, False
+
+
+def _scan_receipt(
+    rows: list[dict[str, Any]],
+    *,
+    days: int,
+    pages: int,
+    complete: bool,
+    reason: str | None,
+) -> dict[str, Any]:
+    from plugins.kanban.dashboard.langfuse_read_model import _aggregate
+
+    aggregate = _aggregate(
+        rows,
+        days=days,
+        generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        truncation_reason=reason,
+    )
+    count = aggregate["metrics"]["generation_calls"]
+    coverage = aggregate["coverage"]
+    return {
+        "state": "fresh" if complete else "partial",
+        "reason": reason,
+        "summary": {
+            "count": {
+                "value": count["value"],
+                "lower_bound": count["value_semantics"] == "lower_bound",
+            }
+        },
+        "coverage": {
+            "scan_pages": pages,
+            "scan_truncated": not complete,
+            "scanned_generations": len(rows),
+            "window_coverage": (
+                1.0 if complete else None
+            ),
+            "counts_semantics": coverage["counts_semantics"],
+        },
+    }
+
+
+def build_control_surface_live_smoke(
+    *,
+    dashboard_base_url: str,
+    dashboard_token: str,
+    days: int = 7,
+    warm_calls: int = 5,
+    page_size: int = 100,
+    env: Mapping[str, str] | None = None,
+    langfuse_request: Callable[..., dict[str, Any]] | None = None,
+    dashboard_request: Callable[[str, str], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run the separately approved, secret-safe Langfuse/dashboard live smoke."""
+    from plugins.kanban.dashboard import langfuse_read_model
+
+    if warm_calls < 5 or not dashboard_token:
+        raise ValueError("dashboard authentication and at least five warm calls are required")
+    if days < 1 or page_size < 1:
+        raise ValueError("days and page_size must be positive")
+    dashboard_url = _validated_dashboard_url(dashboard_base_url, days=days)
+    request_json = langfuse_request or langfuse_read_model._request_json
+    dashboard_probe = dashboard_request or _control_surface_dashboard_request
+    source_env = os.environ if env is None else env
+    resolution = langfuse_read_model._resolve_config(source_env)
+
+    report: dict[str, Any] = {
+        "contract_version": 1,
+        "status": "fail",
+        "secrets_redacted": True,
+    }
+    if resolution.config is None:
+        report["langfuse"] = {
+            "state": "absent",
+            "reason": resolution.error or "configuration_missing",
+            "configured_host_checked": False,
+        }
+    else:
+        host, authorization = langfuse_read_model._credentials(resolution.config)
+        from_start_time = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat().replace("+00:00", "Z")
+        try:
+            first_page, _ = _langfuse_page(
+                host,
+                authorization,
+                page=1,
+                limit=page_size,
+                from_start_time=from_start_time,
+                request_json=request_json,
+            )
+            full_rows, full_pages, full_complete = _scan_langfuse_pages(
+                host,
+                authorization,
+                page_size=page_size,
+                max_pages=1_000,
+                from_start_time=from_start_time,
+                request_json=request_json,
+            )
+            limited_rows, limited_pages, _ = _scan_langfuse_pages(
+                host,
+                authorization,
+                page_size=1,
+                max_pages=1,
+                from_start_time=from_start_time,
+                request_json=request_json,
+            )
+            report["langfuse"] = {
+                "state": "fresh" if full_complete else "partial",
+                "configured_host_checked": True,
+                "public_api_page": {
+                    "authenticated": True,
+                    "rows": len(first_page),
+                },
+                "full_scan": _scan_receipt(
+                    full_rows,
+                    days=days,
+                    pages=full_pages,
+                    complete=full_complete,
+                    reason=None if full_complete else "smoke_page_limit",
+                ),
+                "limited_scan": _scan_receipt(
+                    limited_rows,
+                    days=days,
+                    pages=limited_pages,
+                    complete=False,
+                    reason="intentional_smoke_limit",
+                ),
+            }
+        except Exception as exc:
+            report["langfuse"] = {
+                "state": "absent",
+                "reason": "unreachable",
+                "error_type": type(exc).__name__,
+                "configured_host_checked": True,
+            }
+
+    try:
+        dashboard_probe(dashboard_url, dashboard_token)
+        wall_samples: list[float] = []
+        cpu_samples: list[float] = []
+        payload: dict[str, Any] = {}
+        for _ in range(warm_calls):
+            wall_started = time.perf_counter()
+            cpu_started = time.process_time()
+            payload = dashboard_probe(dashboard_url, dashboard_token)
+            cpu_samples.append((time.process_time() - cpu_started) * 1_000)
+            wall_samples.append((time.perf_counter() - wall_started) * 1_000)
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        langfuse = (
+            payload.get("langfuse") if isinstance(payload.get("langfuse"), dict) else {}
+        )
+        summary = usage.get("summary") if isinstance(usage.get("summary"), dict) else {}
+        mean_wall = statistics.fmean(wall_samples)
+        mean_cpu = statistics.fmean(cpu_samples)
+        report["dashboard"] = {
+            "authenticated": True,
+            "warm_calls": warm_calls,
+            "wall_ms": {
+                "median": statistics.median(wall_samples),
+                "maximum": max(wall_samples),
+                "mean": mean_wall,
+            },
+            "cpu_ms": {
+                "median": statistics.median(cpu_samples),
+                "maximum": max(cpu_samples),
+                "mean": mean_cpu,
+            },
+            "fact_rows": summary.get("fact_rows"),
+            "usage_state": usage.get("state"),
+            "langfuse_state": langfuse.get("state"),
+            "budget": {
+                "cpu_mean_limit_ms": 200,
+                "wall_mean_limit_ms": 300,
+                "passed": mean_cpu < 200 and mean_wall < 300,
+            },
+        }
+    except Exception:
+        report["dashboard"] = {
+            "authenticated": False,
+            "state": "unreachable",
+        }
+
+    langfuse_ok = report["langfuse"].get("state") == "fresh"
+    dashboard_ok = bool(report["dashboard"].get("budget", {}).get("passed"))
+    if langfuse_ok and dashboard_ok:
+        report["status"] = "pass"
+    return report
+
+
 def _trace_metadata(trace: dict[str, Any]) -> dict[str, Any]:
     metadata = trace.get("metadata")
     if isinstance(metadata, dict):
@@ -610,12 +881,27 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         help="emit a fail-closed receipt for one operator-approved real worker run",
     )
+    parser.add_argument(
+        "--control-surface-smoke-url",
+        help=(
+            "run the separately approved Langfuse/dashboard smoke against this "
+            "dashboard base URL; reads HERMES_DASHBOARD_TOKEN from the environment"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(list(argv) if argv is not None else sys.argv[1:])
     try:
+        if args.control_surface_smoke_url is not None:
+            report = build_control_surface_live_smoke(
+                dashboard_base_url=args.control_surface_smoke_url,
+                dashboard_token=os.environ.get("HERMES_DASHBOARD_TOKEN", ""),
+                days=args.days,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0 if report["status"] == "pass" else 3
         if args.live_smoke_run_id is not None:
             report = build_live_smoke_contract(
                 task_run_id=args.live_smoke_run_id,

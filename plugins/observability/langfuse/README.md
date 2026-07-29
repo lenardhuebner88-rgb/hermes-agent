@@ -131,6 +131,29 @@ the receipt.
    .venv/bin/python scripts/langfuse_worker_audit.py --live-smoke-run-id "$TASK_RUN_ID" > live-smoke.json
    ```
 
+4. After the separate operational approval and after the configured Langfuse
+   listener has been repaired, run the control-surface smoke. Supply the
+   dashboard credential only through the environment; never put it in an
+   argument or redirect an HTTP trace containing headers:
+
+   ```bash
+   HERMES_DASHBOARD_TOKEN="$DASHBOARD_TOKEN" \
+     .venv/bin/python scripts/langfuse_worker_audit.py \
+       --control-surface-smoke-url http://127.0.0.1:8642 \
+       --days 7 > control-surface-smoke.json
+   ```
+
+   This performs a configured-host check, an authenticated Langfuse Public API
+   page, a complete pagination scan, an intentionally one-page-limited scan,
+   one dashboard warm-up, and five measured authenticated dashboard reads. A
+   complete scan can report `fresh` only after an explicit total-page boundary
+   or a short final page. The limited scan always reports `partial`, count
+   lower bounds, and unknown total-window coverage. The receipt records wall
+   and process-CPU median, maximum, and mean, the Usage fact count, and the
+   LRM-4 mean budgets (CPU < 200 ms, wall < 300 ms). A refused Langfuse
+   connection remains red while the dashboard receipt may still show Usage as
+   available. The command does not start or restart Langfuse or the dashboard.
+
 The command exits `0` only when the authenticated public trace API is readable,
 an explicit trace metadata field and a usage fact carry that exact run ID, the
 usage fact agrees on task ID, all required lifecycle observations exist, and the
@@ -146,6 +169,7 @@ worker-runtime-facts and exact-usage-correlation contracts rather than SQLite's
 internal DDL counter.
 
 Archive `audit-before.json`, `backfill-preview.json`, `backfill-applied.json`,
-`audit-after.json`, and `live-smoke.json` together with the exact commands and
-their exit codes. A green contract test is only evidence that this acceptance
-logic works; it is never a substitute for a green operator live-smoke receipt.
+`audit-after.json`, `live-smoke.json`, and `control-surface-smoke.json` together
+with the exact commands and their exit codes. A green contract test is only
+evidence that this acceptance logic works; it is never a substitute for a green
+operator live-smoke receipt.
