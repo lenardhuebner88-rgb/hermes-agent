@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,6 +155,7 @@ def observability_app(tmp_path, monkeypatch):
         },
     )
     app = FastAPI()
+    app.state.observability_module = module
     app.include_router(module.router, prefix="/api/plugins/kanban")
     return TestClient(app), home / "kanban.db", usage_path
 
@@ -168,6 +170,9 @@ def test_observability_route_separates_stats_from_quality(observability_app):
     assert payload["contract_version"] == "langfuse-hermes-read.v1"
     assert payload["window_days"] == 7
     assert payload["usage"]["summary"]["fact_rows"] == 2
+    assert payload["usage"]["state"] == "fresh"
+    assert payload["usage"]["cache"]["ttl_seconds"] == 120
+    assert payload["usage"]["cache"]["age_seconds"] >= 0
     assert payload["usage"]["coverage"]["exact_task_run_links"] == 1
     assert payload["usage"]["coverage"]["model_known"] == 2
     assert payload["usage"]["coverage"]["duration_known"] == 1
@@ -207,6 +212,173 @@ def test_observability_route_separates_stats_from_quality(observability_app):
     }
     assert "approval_rate" not in payload
     assert "review_verdict" not in repr(payload)
+
+
+def test_warm_observability_poll_meets_live_size_budget(observability_app):
+    client, _kanban_path, usage_path = observability_app
+    module = client.app.state.observability_module
+    target_rows = 94_682
+    with sqlite3.connect(usage_path) as connection:
+        columns = [
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(run_usage_facts)")
+        ]
+        quoted = ", ".join(f'"{column}"' for column in columns)
+        projection = ", ".join(
+            "?" if column == "run_id" else f'"{column}"' for column in columns
+        )
+        connection.executemany(
+            f"INSERT INTO run_usage_facts ({quoted}) "
+            f"SELECT {projection} FROM run_usage_facts WHERE run_id='worker-exact'",
+            ((f"synthetic-{index}",) for index in range(target_rows - 2)),
+        )
+
+    warm = client.get("/api/plugins/kanban/stats/observability?days=7")
+    assert warm.status_code == 200
+    assert warm.json()["usage"]["summary"]["fact_rows"] == target_rows
+
+    component_cpu_ms: dict[str, float] = {}
+    for name, project in (
+        ("langfuse", lambda: module.get_langfuse_snapshot(days=7)),
+        (
+            "usage",
+            lambda: module._cached_usage_projection(
+                board="default", days=7, generated_at="benchmark"
+            ),
+        ),
+        (
+            "run_duration",
+            lambda: module._run_duration_projection(board="default", days=7),
+        ),
+    ):
+        component_started = time.process_time()
+        project()
+        component_cpu_ms[name] = (time.process_time() - component_started) * 1000
+
+    cpu_started = time.process_time()
+    wall_started = time.perf_counter()
+    responses = [
+        client.get("/api/plugins/kanban/stats/observability?days=7")
+        for _ in range(5)
+    ]
+    wall_ms = (time.perf_counter() - wall_started) * 1000 / len(responses)
+    cpu_ms = (time.process_time() - cpu_started) * 1000 / len(responses)
+
+    assert all(response.status_code == 200 for response in responses)
+    assert all(response.json()["usage"]["state"] == "fresh" for response in responses)
+    print(
+        f"live-size observability benchmark: rows={target_rows:,}; "
+        f"mean_cpu={cpu_ms:.1f}ms; mean_wall={wall_ms:.1f}ms; "
+        f"components_cpu_ms={component_cpu_ms}"
+    )
+    assert cpu_ms < 200, f"{target_rows=:,}; mean warm CPU={cpu_ms:.1f} ms"
+    assert wall_ms < 300, f"{target_rows=:,}; mean warm wall={wall_ms:.1f} ms"
+
+
+def test_usage_projection_cache_is_identity_scoped_and_single_flight(monkeypatch):
+    module = _load_plugin_module()
+    module.clear_usage_projection_cache()
+    calls: list[tuple[str, int, str]] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    monkeypatch.setattr(
+        module,
+        "_usage_cache_identity",
+        lambda *, board, days: (board, days, "data-v1"),
+    )
+
+    def build(*, board, days, generated_at):
+        calls.append((board, days, generated_at))
+        started.set()
+        assert release.wait(timeout=2)
+        return {
+            "available": True,
+            "state": "fresh",
+            "reason": None,
+            "captured_at": generated_at,
+            "summary": {"fact_rows": 94_682},
+        }
+
+    monkeypatch.setattr(module, "_usage_projection", build)
+    results: list[dict] = []
+    leader = threading.Thread(
+        target=lambda: results.append(
+            module._cached_usage_projection(
+                board="default", days=7, generated_at="first"
+            )
+        )
+    )
+    waiter = threading.Thread(
+        target=lambda: results.append(
+            module._cached_usage_projection(
+                board="default", days=7, generated_at="second"
+            )
+        )
+    )
+    leader.start()
+    assert started.wait(timeout=1)
+    waiter.start()
+    time.sleep(0.05)
+    assert len(calls) == 1
+    release.set()
+    leader.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert len(calls) == 1
+    assert len(results) == 2
+    assert all(result["state"] == "fresh" for result in results)
+    assert all(result["cache"]["age_seconds"] == 0 for result in results)
+
+    # A different board cannot reuse the default board's projection.
+    release.set()
+    other = module._cached_usage_projection(
+        board="other", days=7, generated_at="third"
+    )
+    assert other["summary"]["fact_rows"] == 94_682
+    assert len(calls) == 2
+
+
+def test_usage_projection_refresh_failure_returns_explicit_stale(monkeypatch):
+    module = _load_plugin_module()
+    module.clear_usage_projection_cache()
+    identity = ["data-v1"]
+    monkeypatch.setattr(
+        module,
+        "_usage_cache_identity",
+        lambda *, board, days: (board, days, identity[0]),
+    )
+    monkeypatch.setattr(
+        module,
+        "_usage_projection",
+        lambda **kwargs: {
+            "available": True,
+            "state": "fresh",
+            "reason": None,
+            "captured_at": kwargs["generated_at"],
+            "summary": {"fact_rows": 94_682},
+        },
+    )
+    fresh = module._cached_usage_projection(
+        board="default", days=7, generated_at="first"
+    )
+    assert fresh["state"] == "fresh"
+
+    identity[0] = "data-v2"
+
+    def fail(**_kwargs):
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(module, "_usage_projection", fail)
+    stale = module._cached_usage_projection(
+        board="default", days=7, generated_at="second"
+    )
+
+    assert stale["available"] is True
+    assert stale["state"] == "stale"
+    assert stale["reason"] == "refresh_failed:RuntimeError"
+    assert stale["summary"]["fact_rows"] == 94_682
+    assert stale["cache"]["age_seconds"] >= 0
 
 
 def test_group_tokens_does_not_coerce_missing_value_to_zero():

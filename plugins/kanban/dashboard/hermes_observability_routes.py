@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import sqlite3
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -37,6 +39,94 @@ _TOKEN_COLUMNS = (
     "cache_write_tokens",
     "reasoning_tokens",
 )
+
+# Longer than the dashboard's normal 60 second poll interval: an unchanged
+# seven-day projection is reused for at least one poll, while file identities
+# below invalidate it immediately when an input changes.
+_USAGE_CACHE_TTL_SECONDS = 120
+_usage_cache_condition = threading.Condition(threading.RLock())
+_usage_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_usage_cache_latest: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_usage_cache_inflight: set[tuple[Any, ...]] = set()
+
+
+def _path_identity(path: Path) -> tuple[Any, ...]:
+    resolved = path.expanduser().resolve()
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return (str(resolved), None)
+    return (
+        str(resolved),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+
+
+def _sqlite_identity(path: Path) -> tuple[Any, ...]:
+    """Identify a SQLite snapshot without opening or mutating the database."""
+    return tuple(
+        _path_identity(Path(f"{path}{suffix}")) for suffix in ("", "-wal", "-shm")
+    )
+
+
+def _profiles_identity(root: Path) -> tuple[Any, ...]:
+    """Identify profile state/config inputs used for provider reconstruction."""
+    if not root.is_dir():
+        return (_path_identity(root),)
+    candidates: list[Path] = []
+    for profile_dir in sorted(root.iterdir(), key=lambda item: item.name):
+        if not profile_dir.is_dir():
+            continue
+        candidates.extend(
+            profile_dir / name
+            for name in ("config.yaml", "state.db", "state.db-wal", "state.db-shm")
+        )
+    return tuple(_path_identity(path) for path in candidates)
+
+
+def _usage_cache_identity(*, board: str, days: int) -> tuple[Any, ...]:
+    usage_path = usage_facts_db_path()
+    board_path = kanban_db.kanban_db_path(board=board)
+    profiles_root = get_hermes_home() / "profiles"
+    return (
+        board,
+        days,
+        _sqlite_identity(usage_path),
+        _sqlite_identity(board_path),
+        _profiles_identity(profiles_root),
+    )
+
+
+def _usage_cache_scope(identity: tuple[Any, ...]) -> tuple[Any, ...]:
+    # Board and time window are the semantic scope. The remaining identity
+    # components are input revisions; an older revision is eligible only as an
+    # explicitly stale fallback when a refresh fails.
+    return identity[:2]
+
+
+def _with_usage_cache_metadata(
+    payload: Mapping[str, Any], *, created_at: float, state: str | None = None
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(payload))
+    if state is not None:
+        result["state"] = state
+    result["cache"] = {
+        "ttl_seconds": _USAGE_CACHE_TTL_SECONDS,
+        "age_seconds": max(0, int(time.monotonic() - created_at)),
+    }
+    return result
+
+
+def clear_usage_projection_cache() -> None:
+    """Clear process-local projection state (primarily for isolated tests)."""
+    with _usage_cache_condition:
+        _usage_cache.clear()
+        _usage_cache_latest.clear()
+        _usage_cache_inflight.clear()
+        _usage_cache_condition.notify_all()
 
 
 def _token_filter(columns: set[str]) -> str:
@@ -422,6 +512,78 @@ def _usage_projection(
     }
 
 
+def _cached_usage_projection(
+    *,
+    board: str,
+    days: int,
+    generated_at: str,
+) -> dict[str, Any]:
+    """Return an identity-bound projection with TTL and per-key single-flight."""
+    identity = _usage_cache_identity(board=board, days=days)
+    scope = _usage_cache_scope(identity)
+    while True:
+        with _usage_cache_condition:
+            cached = _usage_cache.get(identity)
+            now = time.monotonic()
+            if cached is not None and now - cached[0] <= _USAGE_CACHE_TTL_SECONDS:
+                return _with_usage_cache_metadata(cached[1], created_at=cached[0])
+            if identity not in _usage_cache_inflight:
+                _usage_cache_inflight.add(identity)
+                break
+            _usage_cache_condition.wait()
+
+    payload: dict[str, Any] | None = None
+    failure_reason: str | None = None
+    try:
+        payload = _usage_projection(
+            board=board,
+            days=days,
+            generated_at=generated_at,
+        )
+        if not payload.get("available"):
+            failure_reason = str(payload.get("reason") or "refresh_unavailable")
+    except Exception as exc:
+        failure_reason = f"refresh_failed:{type(exc).__name__}"
+
+    with _usage_cache_condition:
+        try:
+            if payload is not None and failure_reason is None:
+                created_at = time.monotonic()
+                entry = (created_at, copy.deepcopy(payload))
+                for cached_identity in list(_usage_cache):
+                    if _usage_cache_scope(cached_identity) == scope:
+                        _usage_cache.pop(cached_identity, None)
+                _usage_cache[identity] = entry
+                _usage_cache_latest[scope] = entry
+                return _with_usage_cache_metadata(payload, created_at=created_at)
+
+            stale = _usage_cache_latest.get(scope)
+            if stale is not None:
+                result = _with_usage_cache_metadata(
+                    stale[1], created_at=stale[0], state="stale"
+                )
+                result["reason"] = failure_reason
+                return result
+
+            unavailable = payload or {
+                "available": False,
+                "state": "absent",
+                "reason": failure_reason,
+                "captured_at": None,
+                "summary": {},
+                "origins": [],
+                "models": [],
+                "coverage": {},
+            }
+            return _with_usage_cache_metadata(
+                unavailable,
+                created_at=time.monotonic(),
+            )
+        finally:
+            _usage_cache_inflight.discard(identity)
+            _usage_cache_condition.notify_all()
+
+
 def _percentile(values: list[float], fraction: float) -> float | None:
     if not values:
         return None
@@ -485,7 +647,7 @@ def get_observability_stats(
         "window_days": days,
         "generated_at": generated_at,
         "langfuse": get_langfuse_snapshot(days=days),
-        "usage": _usage_projection(
+        "usage": _cached_usage_projection(
             board=resolved_board,
             days=days,
             generated_at=generated_at,
@@ -498,4 +660,4 @@ def get_observability_stats(
     }
 
 
-__all__ = ("get_observability_stats",)
+__all__ = ("clear_usage_projection_cache", "get_observability_stats")
