@@ -7,6 +7,7 @@ are omitted rather than inferred from adjacent events.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -23,6 +24,19 @@ EVENT_KINDS = frozenset(
         "first_llm_request",
         "first_token",
         "ended",
+    }
+)
+SPAWN_IDENTITY_METADATA_FIELDS = frozenset(
+    {
+        "worker_runtime",
+        "route_provider",
+        "model_source",
+        "provider",
+        "model",
+        "fallback_providers",
+        "subscription",
+        "billing_mode",
+        "cost_source",
     }
 )
 
@@ -98,6 +112,31 @@ RETRY_CLASSES = frozenset({"auto", "integration", "transient", "operator"})
 def init_schema(conn: sqlite3.Connection) -> None:
     """Install the fork-owned runtime-facts tables for an existing board."""
     conn.executescript(_SCHEMA_SQL)
+
+
+def preserve_spawn_identity_metadata(
+    conn: sqlite3.Connection,
+    *,
+    task_run_id: int,
+    terminal_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge immutable claim-time identity into terminal run metadata."""
+    merged = dict(terminal_metadata or {})
+    row = conn.execute(
+        "SELECT metadata FROM task_runs WHERE id = ?", (int(task_run_id),)
+    ).fetchone()
+    if not row or not row[0]:
+        return merged
+    try:
+        spawn_metadata = json.loads(row[0])
+    except (TypeError, ValueError):
+        return merged
+    if not isinstance(spawn_metadata, dict):
+        return merged
+    for field in SPAWN_IDENTITY_METADATA_FIELDS:
+        if field in spawn_metadata:
+            merged[field] = spawn_metadata[field]
+    return merged
 
 
 def _runtime_dimensions(conn: sqlite3.Connection, task_run_id: int, board: str | None) -> dict[str, Any]:

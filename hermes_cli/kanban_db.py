@@ -9856,6 +9856,9 @@ def _end_run(
             metadata_for_store.setdefault(
                 "brief_artifacts", prior_metadata["brief_artifacts"]
             )
+    metadata_for_store = _runtime_facts.preserve_spawn_identity_metadata(
+        conn, task_run_id=run_id, terminal_metadata=metadata_for_store
+    )
     if cost is None and isinstance(metadata_for_store, dict):
         provider, model = _run_metadata_provider_model(metadata_for_store, profile=None)
         equivalent = estimate_equivalent_cost_amount(

@@ -58,6 +58,9 @@ SIGNAL_FIELDS = (
     "context_window_used",
     "billing_mode",
 )
+LIVE_SMOKE_CONTRACT_VERSION = 1
+WORKER_RUNTIME_FACTS_SCHEMA_VERSION = 1
+USAGE_CORRELATION_SCHEMA_VERSION = 1
 
 
 def _read_only(path: Path) -> sqlite3.Connection:
@@ -445,6 +448,9 @@ def _langfuse_failure_receipt(exc: Exception) -> dict[str, Any]:
         receipt["credentials_configured"] = True
         receipt["tcp_http_reachable"] = True
         receipt["http_status"] = cause.code
+    elif isinstance(cause, json.JSONDecodeError):
+        receipt["credentials_configured"] = True
+        receipt["tcp_http_reachable"] = True
     elif isinstance(cause, urllib.error.URLError):
         receipt["credentials_configured"] = True
     return receipt
@@ -501,7 +507,7 @@ def build_live_smoke_contract(
             "SELECT task_id FROM run_usage_facts WHERE task_run_id = ?", (run_id,)
         ).fetchall()
         usage_task_ids = {str(row["task_id"]) for row in usage_rows if row["task_id"]}
-        usage_schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+
 
     with closing(_read_only(kanban_path)) as connection:
         run = connection.execute(
@@ -522,7 +528,7 @@ def build_live_smoke_contract(
             "task_outcome, end_reason FROM worker_run_terminal_facts WHERE task_run_id = ?",
             (int(task_run_id),),
         ).fetchone()
-        board_schema_version = int(connection.execute("PRAGMA schema_version").fetchone()[0])
+
 
     try:
         run_metadata = json.loads(run["metadata"] or "{}")
@@ -564,14 +570,14 @@ def build_live_smoke_contract(
         terminal_report["task_outcome"] == "completed",
     ))
     return {
-        "contract_version": 1,
+        "contract_version": LIVE_SMOKE_CONTRACT_VERSION,
         "status": "pass" if passed else "fail",
         "task_run_id": int(task_run_id),
         "worker_runtime": worker_runtime,
         "runtime_eligible": runtime_eligible,
         "schema": {
-            "usage_schema_version": usage_schema_version,
-            "board_schema_version": board_schema_version,
+            "worker_runtime_facts_version": WORKER_RUNTIME_FACTS_SCHEMA_VERSION,
+            "usage_correlation_version": USAGE_CORRELATION_SCHEMA_VERSION,
         },
         "langfuse": langfuse,
         "usage_fact": {

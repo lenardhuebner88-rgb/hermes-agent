@@ -263,3 +263,44 @@ def test_worker_session_reuse_does_not_create_or_replace_retry_link(kanban_home)
         )
 
         assert facts.get_retry_link(conn, task_run_id=run_id) is None
+
+
+def test_claim_to_end_preserves_exact_worker_runtime_metadata(
+    kanban_home, monkeypatch
+) -> None:
+    with kb.connect_closing() as conn:
+        for runtime in ("hermes", "claude-cli"):
+            task_id = kb.create_task(
+                conn, title=f"runtime-{runtime}", assignee="coder"
+            )
+            monkeypatch.setattr(
+                kb,
+                "_spawn_identity_metadata",
+                lambda *args, _runtime=runtime, **kwargs: {
+                    "worker_runtime": _runtime,
+                    "route_provider": "test-provider",
+                    "model_source": "profile",
+                },
+            )
+            claimed = kb.claim_task(conn, task_id)
+            assert claimed is not None
+            run_id = conn.execute(
+                "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()["current_run_id"]
+
+            kb._end_run(
+                conn,
+                task_id,
+                outcome="completed",
+                metadata={"completion_fact": runtime},
+            )
+
+            stored = json.loads(
+                conn.execute(
+                    "SELECT metadata FROM task_runs WHERE id = ?", (run_id,)
+                ).fetchone()[0]
+            )
+            assert stored["worker_runtime"] == runtime
+            assert stored["route_provider"] == "test-provider"
+            assert stored["model_source"] == "profile"
+            assert stored["completion_fact"] == runtime

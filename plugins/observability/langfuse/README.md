@@ -120,11 +120,12 @@ the receipt.
    ```
 
 3. After an approved real Kanban worker run has completed, confirm that its
-   `task_runs.metadata.worker_runtime` is exactly `hermes`. The contract is not
-   applicable to `claude-cli` workers: those runs do not pass through the Hermes
-   conversation loop and therefore emit neither the plugin trace nor its LLM
-   lifecycle observations. Then run the acceptance gate with the numeric
-   `task_run_id` of the eligible Hermes-runtime run:
+   preserved `task_runs.metadata.worker_runtime` is exactly `hermes`. Claim-time
+   spawn identity is retained when terminal completion metadata is stored. The
+   contract is not applicable to `claude-cli` workers: those runs do not pass
+   through the Hermes conversation loop and therefore emit neither the plugin
+   trace nor its LLM lifecycle observations. Then run the acceptance gate with
+   the numeric `task_run_id` of the eligible Hermes-runtime run:
 
    ```bash
    .venv/bin/python scripts/langfuse_worker_audit.py --live-smoke-run-id "$TASK_RUN_ID" > live-smoke.json
@@ -138,8 +139,11 @@ request was observed, `first_token` is required; a run that failed before its
 first model request reports the absent observations but does not invent or
 require a first token. The receipt includes `worker_runtime` and marks an
 ineligible runtime's lifecycle assessment as `not_applicable`. Endpoint errors
-separate missing credentials, HTTP responses, and network failures without
-copying exception text; trace IDs are truncated in the JSON receipt.
+separate missing credentials, HTTP responses (including invalid JSON), and
+network failures without copying exception text or response bodies; trace IDs
+are truncated in the JSON receipt. `schema` reports the versioned
+worker-runtime-facts and exact-usage-correlation contracts rather than SQLite's
+internal DDL counter.
 
 Archive `audit-before.json`, `backfill-preview.json`, `backfill-applied.json`,
 `audit-after.json`, and `live-smoke.json` together with the exact commands and

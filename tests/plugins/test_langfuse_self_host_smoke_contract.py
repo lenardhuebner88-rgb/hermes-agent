@@ -86,6 +86,11 @@ def test_live_smoke_contract_passes_only_with_exact_trace_usage_and_lifecycle(tm
     )
 
     assert report["status"] == "pass"
+    assert report["contract_version"] == 1
+    assert report["schema"] == {
+        "worker_runtime_facts_version": 1,
+        "usage_correlation_version": 1,
+    }
     assert report["worker_runtime"] == "hermes"
     assert report["langfuse"] == {
         "credentials_configured": True,
@@ -172,6 +177,29 @@ def test_live_smoke_contract_distinguishes_url_failure(tmp_path: Path) -> None:
     assert report["langfuse"]["authenticated_public_api_readable"] is False
     assert report["langfuse"]["error_type"] == "URLError"
     assert "secret-network-reason" not in json.dumps(report)
+
+
+def test_live_smoke_contract_classifies_invalid_json_as_reachable(tmp_path: Path) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+
+    def invalid_json() -> list[dict[str, object]]:
+        raise RuntimeError("response contents must never be copied") from json.JSONDecodeError(
+            "secret response", "secret body", 0
+        )
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=invalid_json,
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["credentials_configured"] is True
+    assert report["langfuse"]["tcp_http_reachable"] is True
+    assert report["langfuse"]["authenticated_public_api_readable"] is False
+    assert report["langfuse"]["error_type"] == "JSONDecodeError"
+    assert "secret body" not in json.dumps(report)
 
 
 def test_live_smoke_contract_reports_missing_credentials(tmp_path: Path, monkeypatch) -> None:
