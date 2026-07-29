@@ -183,6 +183,22 @@ def test_observability_route_separates_stats_from_quality(observability_app):
         "claude_code",
         "hermes_agent",
     ]
+    claude_origin, hermes_origin = payload["usage"]["origins"]
+    assert claude_origin["coverage"]["output_tokens"] == {
+        "observed_rows": 1,
+        "denominator_rows": 1,
+        "status": "complete",
+    }
+    assert claude_origin["cost"]["status"] == "unknown"
+    assert hermes_origin["cost"] == {
+        "known_amount_usd": None,
+        "observed_facts": 0,
+        "denominator_facts": 0,
+        "lower_bound_facts": 0,
+        "status": "unknown",
+    }
+    assert payload["usage"]["summary"]["cost"]["status"] == "unknown"
+    assert payload["usage"]["models"][0]["coverage"]
     assert payload["run_duration"] == {
         "p50_seconds": 120.0,
         "p95_seconds": 120.0,
@@ -191,6 +207,52 @@ def test_observability_route_separates_stats_from_quality(observability_app):
     }
     assert "approval_rate" not in payload
     assert "review_verdict" not in repr(payload)
+
+
+def test_group_tokens_does_not_coerce_missing_value_to_zero():
+    module = _load_plugin_module()
+
+    assert module._group_tokens({"tokens": {"context_input": {"tokens": 0}}}, "context_input") == 0
+    assert module._group_tokens({"tokens": {"context_input": {"tokens": None}}}, "context_input") is None
+    assert module._group_tokens({}, "context_input") is None
+
+
+def test_cost_coverage_can_be_reaggregated_without_losing_unknown_facts():
+    module = _load_plugin_module()
+    groups = [
+        {
+            "billing": {
+                "metered": {
+                    "metered_usd": {
+                        "known_amount_usd": "0.000000",
+                        "priced_breakdowns": 1,
+                        "unpriced_breakdowns": 0,
+                        "lower_bound_breakdowns": 0,
+                    }
+                }
+            }
+        },
+        {
+            "billing": {
+                "metered": {
+                    "metered_usd": {
+                        "known_amount_usd": None,
+                        "priced_breakdowns": 0,
+                        "unpriced_breakdowns": 1,
+                        "lower_bound_breakdowns": 0,
+                    }
+                }
+            }
+        },
+    ]
+
+    assert module._group_cost_coverage(groups) == {
+        "known_amount_usd": "0.000000",
+        "observed_facts": 1,
+        "denominator_facts": 2,
+        "lower_bound_facts": 0,
+        "status": "partial",
+    }
 
 
 def test_observability_route_is_read_only(observability_app):

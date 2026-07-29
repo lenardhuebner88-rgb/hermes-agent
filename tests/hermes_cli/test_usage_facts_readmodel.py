@@ -224,6 +224,55 @@ def test_payload_separates_metered_quota_unattributed_and_kanban(
     assert calls
 
 
+def test_aggregate_normalized_tokens_preserves_unknown_and_observed_zero():
+    complete_zero = {
+        "observed_rows": {
+            "token_rows": 1,
+            "input": 1,
+            "output": 1,
+            "cache_read": 1,
+            "cache_write": 1,
+        },
+        "raw_input_tokens": 0,
+        "context_input": {"tokens": 0, "status": readmodel.STATUS_EXACT},
+        "new_input": {"tokens": 0, "status": readmodel.STATUS_EXACT},
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": None,
+        "semantics": readmodel.INPUT_CACHE_INCLUSIVE,
+    }
+    missing = {
+        "observed_rows": {
+            "token_rows": 1,
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+        },
+        "raw_input_tokens": None,
+        "context_input": {"tokens": None, "status": readmodel.STATUS_UNAVAILABLE},
+        "new_input": {"tokens": None, "status": readmodel.STATUS_UNAVAILABLE},
+        "cache_read_tokens": None,
+        "cache_write_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "semantics": readmodel.INPUT_NOT_DERIVABLE,
+    }
+
+    aggregate = readmodel.aggregate_normalized_tokens([complete_zero, missing])
+
+    assert aggregate["output_tokens"] == 0
+    assert aggregate["coverage"]["output_tokens"] == {
+        "observed_rows": 1,
+        "denominator_rows": 2,
+        "status": "partial",
+    }
+    unknown = readmodel.aggregate_normalized_tokens([missing])
+    assert unknown["output_tokens"] is None
+    assert unknown["coverage"]["output_tokens"]["status"] == "unknown"
+
+
 def test_payload_calibrates_route_changes_from_board_events(
     tmp_path: Path,
 ) -> None:
@@ -410,14 +459,17 @@ def test_workload_split_uses_discovered_subagent_profiles_and_keeps_unknown(
     assert workload["main"] == {
         "fact_rows": 1,
         "context_input_tokens": 100,
+        "coverage": {"observed_rows": 1, "denominator_rows": 1, "status": "complete"},
     }
     assert workload["subagent"] == {
         "fact_rows": 4,
         "context_input_tokens": 1_400,
+        "coverage": {"observed_rows": 4, "denominator_rows": 4, "status": "complete"},
     }
     assert workload["unknown"] == {
         "fact_rows": 2,
         "context_input_tokens": 1_300,
+        "coverage": {"observed_rows": 2, "denominator_rows": 2, "status": "complete"},
     }
     assert workload["subagent_share"] == {
         "context_input_tokens": 1_400,

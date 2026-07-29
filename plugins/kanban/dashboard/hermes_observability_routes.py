@@ -6,6 +6,7 @@ import sqlite3
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import quote
@@ -16,7 +17,10 @@ from hermes_cli.kanban_score_hygiene import (
     metric_scores_relation,
 )
 from hermes_cli.usage_facts_db import usage_facts_db_path
-from hermes_cli.usage_facts_readmodel import build_usage_facts_payload
+from hermes_cli.usage_facts_readmodel import (
+    aggregate_normalized_tokens,
+    build_usage_facts_payload,
+)
 from hermes_constants import get_hermes_home
 from plugins.kanban.dashboard.langfuse_read_model import (
     CONTRACT_VERSION,
@@ -51,6 +55,11 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _optional_int(value: Any) -> int | None:
+    number = _number(value)
+    return int(number) if number is not None else None
+
+
 def _nested(value: Any, *keys: str) -> Any:
     current = value
     for key in keys:
@@ -60,31 +69,65 @@ def _nested(value: Any, *keys: str) -> Any:
     return current
 
 
-def _group_tokens(group: Mapping[str, Any], field: str) -> int:
+def _group_tokens(group: Mapping[str, Any], field: str) -> int | None:
     value = _nested(group, "tokens", field, "tokens")
-    return int(_number(value) or 0)
+    number = _number(value)
+    return int(number) if number is not None else None
+
+
+def _group_cost_coverage(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    amount = Decimal("0")
+    has_amount = False
+    observed = denominator = lower_bounds = 0
+    for group in groups:
+        cost = _nested(group, "billing", "metered", "metered_usd")
+        if not isinstance(cost, Mapping):
+            continue
+        priced = int(_number(cost.get("priced_breakdowns")) or 0)
+        unpriced = int(_number(cost.get("unpriced_breakdowns")) or 0)
+        observed += priced
+        denominator += priced + unpriced
+        lower_bounds += int(_number(cost.get("lower_bound_breakdowns")) or 0)
+        raw_amount = cost.get("known_amount_usd")
+        if raw_amount is not None:
+            try:
+                amount += Decimal(str(raw_amount))
+                has_amount = True
+            except InvalidOperation:
+                pass
+    status = (
+        "complete"
+        if denominator > 0 and observed == denominator and lower_bounds == 0
+        else "partial"
+        if observed > 0
+        else "unknown"
+    )
+    return {
+        "known_amount_usd": f"{amount:.6f}" if has_amount else None,
+        "observed_facts": observed,
+        "denominator_facts": denominator,
+        "lower_bound_facts": lower_bounds,
+        "status": status,
+    }
+
+
+def _dimension_row(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    tokens = aggregate_normalized_tokens(group["tokens"] for group in groups)
+    return {
+        "fact_rows": sum(int(_number(group.get("fact_rows")) or 0) for group in groups),
+        **tokens,
+        "cost": _group_cost_coverage(groups),
+    }
 
 
 def _usage_dimensions(
     groups: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     origins: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {
-            "fact_rows": 0,
-            "context_input_tokens": 0,
-            "output_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "models": set(),
-        }
+        lambda: {"groups": [], "models": set()}
     )
     models: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {
-            "fact_rows": 0,
-            "context_input_tokens": 0,
-            "output_tokens": 0,
-            "origins": set(),
-        }
+        lambda: {"groups": [], "origins": set()}
     )
     for group in groups:
         key = group.get("key")
@@ -92,26 +135,15 @@ def _usage_dimensions(
             continue
         origin = str(key.get("origin") or "unknown")
         model = str(key.get("model") or "nicht_zuordenbar")
-        rows = int(_number(group.get("fact_rows")) or 0)
-        context_tokens = _group_tokens(group, "context_input")
-        output_tokens = int(_number(_nested(group, "tokens", "output_tokens")) or 0)
-        cache_read = int(_number(_nested(group, "tokens", "cache_read_tokens")) or 0)
-        cache_write = int(_number(_nested(group, "tokens", "cache_write_tokens")) or 0)
-        origins[origin]["fact_rows"] += rows
-        origins[origin]["context_input_tokens"] += context_tokens
-        origins[origin]["output_tokens"] += output_tokens
-        origins[origin]["cache_read_tokens"] += cache_read
-        origins[origin]["cache_write_tokens"] += cache_write
+        origins[origin]["groups"].append(group)
         origins[origin]["models"].add(model)
-        models[model]["fact_rows"] += rows
-        models[model]["context_input_tokens"] += context_tokens
-        models[model]["output_tokens"] += output_tokens
+        models[model]["groups"].append(group)
         models[model]["origins"].add(origin)
 
     origin_rows = [
         {
             "name": name,
-            **{key: value for key, value in values.items() if key != "models"},
+            **_dimension_row(values["groups"]),
             "model_count": len(values["models"]),
         }
         for name, values in origins.items()
@@ -119,7 +151,7 @@ def _usage_dimensions(
     model_rows = [
         {
             "name": name,
-            **{key: value for key, value in values.items() if key != "origins"},
+            **_dimension_row(values["groups"]),
             "origin_count": len(values["origins"]),
         }
         for name, values in models.items()
@@ -334,19 +366,13 @@ def _usage_projection(
         "captured_at": payload.get("generated_at") or generated_at,
         "summary": {
             "fact_rows": int(_number(summary.get("fact_rows")) or 0),
-            "context_input_tokens": int(
-                _number(tokens.get("context_input_tokens")) or 0
-            ),
-            "new_input_tokens": int(
-                _number(tokens.get("new_input_tokens")) or 0
-            ),
-            "output_tokens": int(_number(tokens.get("output_tokens")) or 0),
-            "cache_read_tokens": int(
-                _number(tokens.get("cache_read_tokens")) or 0
-            ),
-            "cache_write_tokens": int(
-                _number(tokens.get("cache_write_tokens")) or 0
-            ),
+            "context_input_tokens": _optional_int(tokens.get("context_input_tokens")),
+            "new_input_tokens": _optional_int(tokens.get("new_input_tokens")),
+            "output_tokens": _optional_int(tokens.get("output_tokens")),
+            "cache_read_tokens": _optional_int(tokens.get("cache_read_tokens")),
+            "cache_write_tokens": _optional_int(tokens.get("cache_write_tokens")),
+            "coverage": dict(tokens.get("coverage") or {}),
+            "cost": _group_cost_coverage(groups),
             "known_metered_usd": (
                 metered_price.get("known_amount_usd")
                 if isinstance(metered_price, Mapping)
