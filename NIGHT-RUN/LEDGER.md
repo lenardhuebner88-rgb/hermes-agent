@@ -364,3 +364,9 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - killed survivors: [K] boolean_flip L32-L36, [K] boolean_flip L48, [K] bool_op_swap L84, [K] bool_op_swap L89
 - probe after: 20/20 = 100%
 - commit: 9e49c692c
+
+## 54. hermes_cli/pa_titles.py — 2026-07-29T04:36:16Z
+- probe before: 10/20 = 50%
+- killed survivors: [K] const_offset L33, L35, L36, L40, [K] const_offset L45, [K] const_offset L141, [K] const_offset L143 (+2 collateral)
+- probe after: 16/20 = 80%
+- commit: 4834f7993
