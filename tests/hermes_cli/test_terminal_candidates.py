@@ -152,3 +152,60 @@ def test_candidate_root_and_pending_marker_commit_atomically(tmp_path, monkeypat
     ).fetchone()["n"] == 1
     observer.close()
     conn.close()
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_candidate_import_error_defaults_recovery_required_false():
+    """Kill L40: default recovery_required=False mutated to True."""
+    exc = candidates.CandidateImportError("boom")
+    assert exc.recovery_required is False
+
+
+def test_read_manifest_rejects_dict_with_wrong_run_id(tmp_path):
+    """Kill bool_op_swap L94: or->and would skip the run_id mismatch
+    check when the manifest is already a dict."""
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "tr_alpha"
+    run_dir.mkdir(parents=True)
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "schema_version": 2, "run_id": "tr_beta",
+        "correlation_id": "c", "start_mode": "isolated_write",
+        "repo_root": "/tmp", "worktree_path": "/tmp/wt",
+        "branch": "b", "base_sha": "a" * 40,
+    }))
+    with pytest.raises(candidates.CandidatePreflightError, match="identity mismatch"):
+        candidates._read_manifest(runs_root, "tr_alpha")
+
+
+def test_preflight_rejects_empty_manifest_correlation(isolated_candidate):
+    """Kill bool_op_swap L122: or->and would let an empty manifest
+    correlation pass when the caller also passes no correlation_id."""
+    repo, source, runs_root, base_sha, candidate_sha = isolated_candidate
+    manifest_path = runs_root / "tr_candidate" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["correlation_id"] = ""
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(candidates.CandidatePreflightError, match="correlation"):
+        candidates.preflight_terminal_candidate(
+            terminal_run_id="tr_candidate", correlation_id="",
+            candidate_sha=candidate_sha,
+            terminal_runs_dir=runs_root, repo_allowlist=[repo],
+        )
+
+
+def test_event_payload_returns_empty_dict_for_blank_payload(tmp_path):
+    """Kill bool_op_swap L198: or->and would make json.loads('') raise,
+    returning None instead of {} for a blank payload column."""
+    import sqlite3
+    db = tmp_path / "test.db"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT, kind TEXT, payload TEXT)")
+    conn.execute("INSERT INTO task_events (task_id, kind, payload) VALUES (?, ?, ?)",
+                 ("root1", "terminal_candidate_imported", ""))
+    conn.commit()
+    result = candidates._event_payload(conn, "root1", "terminal_candidate_imported")
+    conn.close()
+    assert result == {}
