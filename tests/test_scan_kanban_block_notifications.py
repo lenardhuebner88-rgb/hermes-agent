@@ -586,3 +586,56 @@ def test_main_creates_nested_output_dir_and_tolerates_existing_one(
 
     # second run: the parent directory now EXISTS — exist_ok must hold
     assert scanner.main() == 0
+
+
+# ---------------------------------------------------------------------------
+# Second pass: block classification + timeline fallbacks
+# ---------------------------------------------------------------------------
+
+def test_class_for_block_needs_input_is_always_human_action():
+    """kind=needs_input classifies as human_action regardless of reason —
+    an AND with the reason keywords would drop it to unclassified."""
+    assert scanner.class_for_block({"kind": "needs_input"}, []) == "human_action"
+    assert scanner.class_for_block(
+        {"kind": "needs_input", "reason": "unrelated"}, []
+    ) == "human_action"
+
+
+def test_run_report_timeline_falls_back_for_missing_payload_fields():
+    """A blocked event without payload kind timelines as 'unclassified';
+    a submitted_for_review without resume_stage keeps its review_stage."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (1, "t", None, "blocked", json.dumps({}), 100),
+            (2, "t", None, "submitted_for_review", json.dumps({"review_stage": 2}), 101),
+        ],
+    )
+
+    report = scanner.run_report(conn, days=1, focus_task="t")
+
+    timeline = {row["event"]: row for row in report["focus_task"]["timeline"]}
+    assert timeline["blocked"]["block_kind"] == "unclassified"
+    assert timeline["submitted_for_review"]["review_stage"] == 2
