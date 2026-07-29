@@ -9,7 +9,7 @@ directly so the tests don't depend on live host state.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -153,3 +153,34 @@ def test_nightgate_red_alert_surfaces_gate_name(tmp_path, monkeypatch):
 
     body = client.get("/api/operator/digest").json()
     assert any(a["severity"] == "red" and "vitest" in a["detail"] for a in body["alerts"])
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_age_days_naive_datetime_gets_utc():
+    """Kill comparison_swap L38: is -> is not would skip tzinfo attachment,
+    causing TypeError on aware-minus-naive subtraction."""
+    now = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    age = odv._age_days("2026-01-01T00:00:00", now=now)
+    assert age == 2
+
+
+def test_age_days_future_date_clamps_to_zero():
+    """Kill const_offset L40: 0 -> 1 would make max(1, negative) = 1."""
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    age = odv._age_days("2026-01-05T00:00:00+00:00", now=now)
+    assert age == 0
+
+
+def test_nightgate_no_autoheal_log(tmp_path, monkeypatch):
+    """Kill bool_op_swap L126: and -> or would stat a missing file and crash."""
+    recent = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir = tmp_path / "green-gate" / recent
+    run_dir.mkdir(parents=True)
+    # deliberately NO autoheal.log
+    monkeypatch.setattr(odv, "_GREEN_GATE_ROOT", tmp_path / "green-gate")
+
+    alerts, degraded = odv._nightgate_alert()
+    assert alerts == []
+    assert degraded == []
