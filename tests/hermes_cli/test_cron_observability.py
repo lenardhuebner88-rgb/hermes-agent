@@ -245,3 +245,42 @@ def test_output_endpoint_unknown_job(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(backend, monkeypatch)
     res = client.get("/api/cron/observability/output/does-not-exist")
     assert res.status_code == 404
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_output_endpoint_502_on_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill const_offset L153: 502 -> 503 would change the status code."""
+    backend = _FakeBackend({"default": [{"id": "j1"}]}, pids=[1])
+    original = backend.call_cron_for_profile
+
+    def broken(profile, func_name, *args):
+        if func_name == "read_output_file":
+            raise RuntimeError("boom")
+        return original(profile, func_name, *args)
+
+    backend.call_cron_for_profile = broken
+    client = _client(backend, monkeypatch)
+    res = client.get("/api/cron/observability/output/j1?profile=default")
+    assert res.status_code == 502
+
+
+def test_output_endpoint_empty_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kill remove_guard L154 (mutant crashes on None.get -> 500) and
+    boolean_flip L159 (truncated False -> True)."""
+    backend = _FakeBackend({"default": [{"id": "j1"}]}, pids=[1])
+    original = backend.call_cron_for_profile
+
+    def empty_result(profile, func_name, *args):
+        if func_name == "read_output_file":
+            return None
+        return original(profile, func_name, *args)
+
+    backend.call_cron_for_profile = empty_result
+    client = _client(backend, monkeypatch)
+    res = client.get("/api/cron/observability/output/j1?profile=default")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["text"] is None
+    assert body["truncated"] is False
