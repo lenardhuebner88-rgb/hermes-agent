@@ -278,3 +278,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 20/20 = 100%
 - equivalent survivors: (none)
 - commit: 3bec4a3da
+
+## 40. hermes_cli/autoresearch_lane_contracts.py — 2026-07-29T03:03:17Z
+- probe before: 13/20 = 65%
+- killed survivors: [K] boolean_flip L96, [K] boolean_flip L97, [K] boolean_flip L118, [K] bool_op_swap L287, [K] bool_op_swap L288
+- probe after: 18/20 = 90%
+- equivalent survivors: L34 (frozen=True→False on dataclass), L55 (frozen=True→False on dataclass)
+- commit: 37b06b9cc
