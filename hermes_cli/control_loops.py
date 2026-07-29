@@ -193,6 +193,41 @@ def _load_models_catalog() -> dict[str, Any]:
     return catalog_with_dynamic_models(engines)
 
 
+def _resolve_touched_phase_engine(
+    pack: loop_runner.Pack,
+    cleaned: dict[str, str],
+    phase_names: dict[str, str],
+    touched: set[str],
+) -> list[tuple[str, str, str]]:
+    """Je beruehrter Phase die EFFEKTIVE Engine aufloesen und registrieren pruefen.
+
+    Bewusst von Start- UND Night-Overrides geteilt. Bis 2026-07-29 pruefte nur
+    der Night-Pfad ueberhaupt eine Engine: ein Dashboard-*Start* mit unbekanntem
+    Engine-Namen kam durch die HTTP-Schicht und starb erst in der systemd-Unit —
+    der Operator sah "Loop-Unit sofort gescheitert" statt der Ursache. Zwei
+    Kopien derselben Regel waren genau der Grund, warum eine zurueckblieb.
+
+    Aufgeloest wird effektiv: fehlt der Teil-Override, gilt die pack.yaml.
+    Gibt (phase_up, phase_name, engine) zurueck, damit Aufrufer darauf
+    aufbauen koennen — Night prueft zusaetzlich den Modell-Katalog, Start
+    erlaubt bewusst einen Engine-Wechsel ohne mitgeschicktes Modell.
+    """
+    from loops import engines as loop_engines
+
+    resolved: list[tuple[str, str, str]] = []
+    for phase_up in sorted(touched):
+        phase_name = phase_names[phase_up]
+        base = pack.phases[phase_name]
+        engine = cleaned.get(f"PHASE_{phase_up}_ENGINE", base.engine)
+        if engine not in loop_engines.ENGINES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine {engine!r} für Phase {phase_name!r} unbekannt",
+            )
+        resolved.append((phase_up, phase_name, engine))
+    return resolved
+
+
 def _validate_night_overrides(
     pack: loop_runner.Pack,
     raw: dict[str, Any],
@@ -234,19 +269,19 @@ def _validate_night_overrides(
     catalog = _load_models_catalog()
     from loops import engines as loop_engines
 
-    for phase_up in sorted(touched):
-        phase_name = phase_names[phase_up]
-        base = pack.phases[phase_name]
-        eng_key = f"PHASE_{phase_up}_ENGINE"
-        mod_key = f"PHASE_{phase_up}_MODEL"
-        engine = cleaned.get(eng_key, base.engine)
-        model = cleaned.get(mod_key, base.model)
+    for phase_up, phase_name, engine in _resolve_touched_phase_engine(
+        pack, cleaned, phase_names, touched
+    ):
+        # Night schreibt eine PERSISTENTE Konfiguration — hier zusätzlich das
+        # Modell gegen den Katalog pinnen, damit nicht jede Nacht auf einer
+        # unmöglichen Engine/Modell-Kombination läuft.
         engine_entry = catalog.get(engine)
-        if engine not in loop_engines.ENGINES or not isinstance(engine_entry, dict):
+        if not isinstance(engine_entry, dict):
             raise HTTPException(
                 status_code=400,
                 detail=f"Engine {engine!r} für Phase {phase_name!r} unbekannt",
             )
+        model = cleaned.get(f"PHASE_{phase_up}_MODEL", pack.phases[phase_name].model)
         models = engine_entry.get("models") or []
         if model not in models:
             raise HTTPException(
@@ -319,6 +354,28 @@ def _validate_start_overrides(
             )
 
     phase_names = {name.upper(): name for name in pack.phases}
+
+    # Engine/Modell derselben Katalogpruefung unterwerfen wie die Night-Overrides.
+    # Auch ein Teil-Override zaehlt: PHASE_BUILD_ENGINE allein (genau die
+    # Nacht-Konfiguration vom 2026-07-29) muss gegen das Pack-Modell geprueft
+    # werden, sonst startet der Loop mit einer unmoeglichen Kombination.
+    touched: set[str] = set()
+    for key in cleaned:
+        if not key.startswith("PHASE_"):
+            continue
+        body = key[len("PHASE_") :]
+        if "_" not in body:
+            continue
+        phase_up, kind = body.rsplit("_", 1)
+        if kind not in ("ENGINE", "MODEL"):
+            continue
+        if phase_up not in phase_names:
+            raise HTTPException(
+                status_code=400, detail=f"Unbekannte Phase in Override: {key}"
+            )
+        touched.add(phase_up)
+    _resolve_touched_phase_engine(pack, cleaned, phase_names, touched)
+
     for key, val in cleaned.items():
         if not key.endswith("_EFFORT") or not key.startswith("PHASE_"):
             continue

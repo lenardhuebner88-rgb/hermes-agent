@@ -443,6 +443,60 @@ def test_start_rejects_bad_override_keys_and_values(api):
     assert not any(c[0] == "start" for c in calls), "bei 400 darf kein Unit-Start passieren"
 
 
+def test_start_rejects_unknown_engine_like_night_overrides_do(api):
+    """Start muss dieselbe Katalogpruefung fahren wie die Night-Overrides.
+
+    Bis 2026-07-29 pruefte `_validate_start_overrides` nur Autoland-Keys und
+    Effort — eine unbekannte Engine passierte die HTTP-Schicht und starb erst in
+    der systemd-Unit. Der Operator sah "Loop-Unit sofort gescheitert" statt zu
+    erfahren, dass die Engine gar nicht existiert. `_validate_night_overrides`
+    macht es fuer denselben Fehler seit jeher richtig (400 "unbekannt").
+    """
+    client, calls, _tmp = api
+    resp = client.post(
+        "/api/loops/nacht/start",
+        json={"overrides": {"PHASE_ROUND_ENGINE": "warpantrieb"}},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "unbekannt" in resp.json()["detail"]
+    assert not any(c[0] == "start" for c in calls), "bei 400 darf kein Unit-Start passieren"
+
+
+def test_start_rejects_unknown_engine_on_a_partial_override(api):
+    """Auch ein Teil-Override muss die Engine pruefen.
+
+    Genau diese Form war die Nacht-Konfiguration vom 2026-07-29: nur
+    PHASE_BUILD_ENGINE gesetzt, das Modell kam aus der pack.yaml. Ein Tippfehler
+    im Engine-Namen darf nicht durchrutschen, nur weil kein MODEL-Key dabei war.
+    """
+    client, calls, _tmp = api
+    resp = client.post(
+        "/api/loops/nacht/start",
+        json={"overrides": {"PHASE_ROUND_ENGINE": "codex-typo"}},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "unbekannt" in resp.json()["detail"]
+    assert not any(c[0] == "start" for c in calls)
+
+
+def test_start_still_allows_engine_swap_without_matching_model(api):
+    """Bewusste Asymmetrie zu den Night-Overrides — nicht versehentlich verschaerfen.
+
+    Night schreibt eine PERSISTENTE Konfiguration und pinnt deshalb zusaetzlich
+    das Modell gegen den Katalog. Der Start ist einmalig und erlaubt weiterhin,
+    nur die Engine zu tauschen (das Modell kommt dann aus der pack.yaml) — sonst
+    braeche jeder bestehende Teil-Override-Aufruf.
+    """
+    client, _calls, tmp = api
+    resp = client.post(
+        "/api/loops/nacht/start",
+        json={"overrides": {"PHASE_ROUND_ENGINE": "kimi"}},
+    )
+    assert resp.status_code == 200, resp.text
+    env = (tmp / "state" / "nacht" / "overrides.env").read_text(encoding="utf-8")
+    assert "PHASE_ROUND_ENGINE=kimi" in env
+
+
 def test_summary_flags_a_pack_whose_repo_is_gone(api, tmp_path):
     """Ein Pack mit totem repo-Pfad sah bis 28.07. im Dashboard normal aus.
 
