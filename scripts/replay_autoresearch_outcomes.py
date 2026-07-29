@@ -757,6 +757,11 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
             metadata = json.loads(row["metadata"] or "{}")
         except (TypeError, ValueError):
             metadata = {}
+        equivalent, equivalent_confidence = kb._run_cost_equivalent_from_facts(
+            metadata,
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+        )
         run_evidence.append(
             {
                 "id": int(row["id"]),
@@ -773,12 +778,8 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                     )
                     or ("actual" if row["cost_usd"] is not None else "unknown")
                 ),
-                "cost_usd_equivalent": (
-                    float(metadata["cost_usd_equivalent"])
-                    if isinstance(metadata.get("cost_usd_equivalent"), (int, float))
-                    and not isinstance(metadata.get("cost_usd_equivalent"), bool)
-                    else None
-                ),
+                "cost_usd_equivalent": equivalent,
+                "cost_usd_equivalent_confidence": equivalent_confidence,
                 "billing_mode": metadata.get("billing_mode"),
                 "requested_provider": row["requested_provider"],
                 "requested_model": row["requested_model"],

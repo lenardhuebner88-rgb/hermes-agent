@@ -1293,6 +1293,12 @@ def get_board(
                 d["input_tokens"] = cost["input_tokens"]
                 d["output_tokens"] = cost["output_tokens"]
                 d["cost_usd_equivalent"] = cost["cost_usd_equivalent"]
+                d["cost_usd_equivalent_confidence"] = cost[
+                    "cost_usd_equivalent_confidence"
+                ]
+                d["cost_usd_equivalent_coverage"] = cost[
+                    "cost_usd_equivalent_coverage"
+                ]
                 d["cost_effective_usd"] = cost["cost_effective_usd"]
             # Slice b: live review-stage pill — only while the task is in review, so
             # a done/blocked task never shows a stale stage. Absent key → schema null.

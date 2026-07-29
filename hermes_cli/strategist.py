@@ -114,10 +114,10 @@ GATE_STREAK_TARGET = 7  # green_gate_streak
 # COST-AWARENESS-S1: a lane whose effective burn (real $ + API-equivalent of the
 # subscription token burn, ``kanban_db.runs_costs``) over the window exceeds this
 # threshold opens a cost-efficiency lever. Effective cost only became a real
-# signal once the cost-visibility backfill stamped cost_usd_equivalent for the
-# subscription lanes (Codex/claude) — before that every lane read $0 and the
-# strategist was cost-blind. The signal is capped so one very hot lane cannot
-# crowd every other lever out of the cap.
+# signal once the cost-visibility backfill stamped raw pricing facts for the
+# subscription lanes (Codex/claude) — the reader then derives their current
+# equivalent instead of treating missing evidence as $0. The signal is capped
+# so one very hot lane cannot crowd every other lever out of the cap.
 COST_WINDOW_DAYS = 7
 COST_LANE_THRESHOLD_USD = 25.0
 COST_SIGNAL_CAP = 3.0

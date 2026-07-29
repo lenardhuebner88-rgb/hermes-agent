@@ -1180,23 +1180,23 @@ def test_s1d_non_claude_equivalent_restamps_csi_and_missing_models(
 
         dry = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50)
         assert dry["updated"] == 0
-        assert dry["classes"]["restamp_price_correction"] == 2
+        assert dry["classes"]["restamp_price_correction"] == 0
         assert dry["classes"]["new_stamp_csi"] == 1
         assert dry["classes"]["stampable_with_model_and_price"] == 1
 
         applied = kb.audit_non_claude_cost_equivalent_backfill(conn, limit=50, apply=True)
-        assert applied["updated"] == 4
+        assert applied["updated"] == 2
 
         rows = conn.execute(
             "SELECT id, metadata FROM task_runs WHERE id IN (?, ?, ?, ?, ?)",
             (restamp_run, mini_run, csi_run, missing_run, s1b_run),
         ).fetchall()
         by_id = {row["id"]: json.loads(row["metadata"]) for row in rows}
+        # Legacy materialized equivalents are not read or altered by raw-fact repair.
         assert by_id[restamp_run]["cost_usd_equivalent"] == pytest.approx(6.011145)
-        assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[restamp_run]
-        assert by_id[restamp_run]["provider_model_source"] == "unknown"
+        assert "provider_model_source" not in by_id[restamp_run]
         assert by_id[mini_run]["cost_usd_equivalent"] == pytest.approx(0.008)
-        assert "cost_usd_equivalent_s1c_pre_s1d" not in by_id[mini_run]
+        assert "provider_model_source" not in by_id[mini_run]
         assert "cost_usd_equivalent" not in by_id[csi_run]
         assert by_id[csi_run]["provider_model_source"] == "session_log"
         assert "cost_usd_equivalent" not in by_id[missing_run]
@@ -1377,7 +1377,7 @@ def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
                 (prestamped, json.dumps({"cost_usd_equivalent": 123.0})),
             )
 
-        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 0
+        assert kb.repair_cost_equivalent_for_frozen_runs(conn, limit=50) == 1
         rows = conn.execute(
             "SELECT task_id, cost_usd, metadata FROM task_runs "
             "ORDER BY task_id"
@@ -1387,7 +1387,9 @@ def test_repair_frozen_equivalent_skips_metered_claude_and_prestamped(
         assert by_task[metered]["metadata"] is None
         assert by_task[claude]["cost_usd"] == pytest.approx(0.0)
         assert by_task[claude]["metadata"] is None
-        assert json.loads(by_task[prestamped]["metadata"])["cost_usd_equivalent"] == 123.0
+        prestamped_meta = json.loads(by_task[prestamped]["metadata"])
+        assert prestamped_meta["cost_usd_equivalent"] == 123.0
+        assert prestamped_meta["cost_equivalent_model"] == "gpt-5.5"
 
 
 def test_s1_codex_included_no_price_leaves_equivalent_unset(kanban_home, tmp_path, monkeypatch):

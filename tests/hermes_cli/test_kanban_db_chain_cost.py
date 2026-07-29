@@ -510,9 +510,10 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
     assert totals["cost_effective_usd"] is None
 
 
-def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
+def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
     """by_lane is sorted descending by cost_effective_usd so subscription lanes
     with cost_usd=0 but positive equivalent rank above zero-cost API lanes."""
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", lambda *args, **kwargs: 1.00)
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="sort-chain", assignee="orchestrator",
                               triage=True)
@@ -528,14 +529,17 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
         )
         sub_task, api_task = child_ids
         with kb.write_txn(conn):
-            # subscription run: cost_usd=0, equivalent=1.00 → effective=1.00
+            # subscription raw facts derive to 1.00 → effective=1.00
             _insert_run_cost_with_meta(
                 conn, sub_task,
                 profile="claude-cli",
                 input_tokens=2000,
                 output_tokens=400,
                 cost_usd=0.0,
-                metadata={"cost_usd_equivalent": 1.00},
+                metadata={
+                    "cost_equivalent_model": "claude-fable-5",
+                    "cost_equivalent_provider": "anthropic",
+                },
             )
             # API run: cost_usd=0.005, no equivalent → effective=0.005
             _insert_run_cost_with_meta(
@@ -551,9 +555,11 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home):
         result = kb.chain_cost_breakdown(conn, root)
 
     by_lane = result["by_lane"]
-    # claude-cli (effective=1.00) must rank above openrouter (effective=0.005)
-    assert by_lane[0]["profile"] == "claude-cli"
-    assert by_lane[1]["profile"] == "openrouter"
+    # The measured lane ranks first; the subscription lane carries a derived
+    # equivalent independently of the stored legacy field.
+    assert by_lane[0]["profile"] == "openrouter"
+    assert by_lane[1]["cost_usd_equivalent"] == pytest.approx(1.00)
+    assert by_lane[1]["cost_usd_equivalent_confidence"] == "derived"
 
 
 def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanban_home):
@@ -626,7 +632,12 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
     assert row["input_tokens"] == 1_000_000
     assert row["output_tokens"] == 100_000
     meta = json.loads(row["metadata"])
-    assert meta["cost_usd_equivalent"] == pytest.approx(9.125)
+    assert "cost_usd_equivalent" not in meta
+    equivalent, confidence = kb._run_cost_equivalent_from_facts(
+        meta, input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
+    )
+    assert equivalent == pytest.approx(9.125)
+    assert confidence == "derived"
     assert meta["model"] == "claude-opus-4-8"
     assert meta["billing_mode"] == "subscription_included"
     assert meta["subscription"] == "claude"
@@ -716,7 +727,7 @@ def test_k17_backfill_claude_cli_uses_spawn_identity_after_lane_switch(
         assert meta["worker_runtime"] == "claude-cli"
         assert meta["model"] == "claude-fable-5"
         assert meta["provider"] is None
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lane_switch(
@@ -765,7 +776,7 @@ def test_k17_backfill_claude_cli_spawn_identity_prefers_model_override_after_lan
         assert meta["worker_runtime"] == "claude-cli"
         assert meta["model"] == "claude-opus-4-1"
         assert meta["provider"] is None
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.55)
+        assert "cost_usd_equivalent" not in meta
 
 
 def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
@@ -805,5 +816,5 @@ def test_k17_backfill_claude_cli_lane_metadata_preserves_existing_keys(
         assert meta["provider"] is None
         assert meta["fallback_used"] is True
         assert meta["billing_mode"] == "subscription_included"
-        assert meta["cost_usd_equivalent"] == pytest.approx(0.42)
+        assert "cost_usd_equivalent" not in meta
 

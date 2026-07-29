@@ -1891,16 +1891,23 @@ def _measurement_accounting(
                     metadata = {}
                 if not isinstance(metadata, Mapping):
                     metadata = {}
-                from hermes_cli import kanban_db
-                equivalent, equivalent_confidence = kanban_db._run_cost_equivalent_from_facts(
-                    metadata,
-                    input_tokens=row["input_tokens"],
-                    output_tokens=row["output_tokens"],
-                )
                 value = (
                     max(0.0, float(row["cost_usd"]))
                     if row["cost_usd"] is not None else None
                 )
+                subscription_lane = (
+                    value == 0.0
+                    and metadata.get("billing_mode") == "subscription_included"
+                )
+                if subscription_lane:
+                    from hermes_cli import kanban_db
+                    equivalent, equivalent_confidence = kanban_db._run_cost_equivalent_from_facts(
+                        metadata,
+                        input_tokens=row["input_tokens"],
+                        output_tokens=row["output_tokens"],
+                    )
+                else:
+                    equivalent, equivalent_confidence = None, "measured"
                 component = (
                     "review_usd"
                     if "review" in str(row["profile"] or "").lower()
@@ -1913,7 +1920,9 @@ def _measurement_accounting(
                 if equivalent is not None:
                     breakdown[equivalent_component] += equivalent
                     equivalent_task_run_usd += equivalent
-                subscription_needs_equivalent = equivalent_confidence == "unknown"
+                subscription_needs_equivalent = (
+                    subscription_lane and equivalent_confidence == "unknown"
+                )
                 if value is None or subscription_needs_equivalent:
                     unknown_task_run_refs.append(run_ref)
                 else:

@@ -8704,14 +8704,13 @@ def repair_cost_equivalent_for_frozen_runs(
     since_seconds: Optional[int] = None,
     board: Optional[str] = None,
 ) -> int:
-    """Opt-in repair for subscription runs frozen at ``cost_usd=0.0``.
+    """Repair raw pricing facts for subscription runs frozen at ``cost_usd=0.0``.
 
     This is deliberately separate from the steady-state ``backfill_run_costs``:
-    it never changes ``cost_usd`` and only setdefault-stamps
-    ``metadata.cost_usd_equivalent`` for bounded, closed, non-claude-cli runs
-    that already have token columns but no session/model evidence. Cache-token
-    columns do not exist on ``task_runs``; the equivalent is therefore a
-    documented underestimate based on input + output tokens only.
+    it never changes ``cost_usd`` and stamps only the model/provider provenance
+    needed by the read-time equivalent calculation.  Cache-token columns do not
+    exist on ``task_runs``; the derived value therefore uses input + output
+    tokens only and remains explicitly derived rather than materialized.
     """
     sql = (
         "SELECT id, task_id, profile, input_tokens, output_tokens, metadata "
@@ -9097,10 +9096,11 @@ def audit_claude_cost_equivalent_backfill(
     board: Optional[str] = None,
     apply: bool = False,
 ) -> dict[str, Any]:
-    """Dry-run/apply S1b audited Claude ``cost_usd_equivalent`` stamping.
+    """Dry-run/apply S1b repair of Claude raw pricing facts.
 
     The scan is bounded and only uses run metadata or persisted session logs as
     provider/model evidence; current lane fallback is deliberately excluded.
+    It records facts for read-time calculation and never stores an equivalent.
     """
 
     scan_limit = max(0, int(limit))
@@ -9233,12 +9233,11 @@ def audit_non_claude_cost_equivalent_backfill(
     apply: bool = False,
     board: Optional[str] = None,
 ) -> dict[str, Any]:
-    """S1c/S1d audited API-equivalent cost backfill for non-Claude worker runs.
+    """S1c/S1d audited raw-pricing-fact repair for non-Claude worker runs.
 
-    S1d extends the original S1c dry-run/apply path with corrected GPT-5.4
-    pricing, CSI-only session lookup, missing model overrides, and provenance
-    backfill for existing S1c stamps. Metered rows and S1b-attributed rows are
-    deliberately left untouched.
+    CSI-only session lookup and missing model overrides remain supported.
+    Metered rows and S1b-attributed rows are deliberately left untouched.
+    Equivalent cost is calculated only by readers from the repaired facts.
     """
 
     scan_limit = max(0, int(limit))
@@ -9252,8 +9251,7 @@ def audit_non_claude_cost_equivalent_backfill(
         "AND (profile IS NULL OR profile NOT IN ('coder-claude', 'premium')) "
         "AND ("
         "json_extract(metadata, '$.worker_session_id') IS NOT NULL "
-        "OR json_extract(metadata, '$.cost_session_ids') IS NOT NULL "
-        "OR json_extract(metadata, '$.cost_usd_equivalent') IS NOT NULL"
+        "OR json_extract(metadata, '$.cost_session_ids') IS NOT NULL"
         ") "
         "ORDER BY id ASC LIMIT ?"
     )
@@ -9336,12 +9334,7 @@ def audit_non_claude_cost_equivalent_backfill(
         ).startswith("s1b"):
             continue
 
-        existing_equiv = _coerce_float(metadata.get("cost_usd_equivalent"))
         usage, source = _s1b_usage_for_run(row, metadata, sessions_by_id)
-        if existing_equiv is not None and existing_equiv > 0:
-            stamped, stamped_source = stamped_usage(row, metadata)
-            if usage is None:
-                usage, source = stamped, stamped_source
         if (
             not usage
             or not usage.get("model")
@@ -9358,35 +9351,14 @@ def audit_non_claude_cost_equivalent_backfill(
 
         provider = usage.get("provider")
         model = str(usage.get("model"))
-        restamp_price = bool(
-            existing_equiv
-            and existing_equiv > 0
-            and model in _S1D_PRICE_CORRECTION_MODELS
+        equivalent = estimate_equivalent_cost_amount(
+            model,
+            provider=provider,
+            input_tokens=_coerce_int(usage.get("input_tokens")),
+            output_tokens=_coerce_int(usage.get("output_tokens")),
+            cache_read_tokens=_coerce_int(usage.get("cache_read")),
+            cache_write_tokens=_coerce_int(usage.get("cache_write")),
         )
-        pms_backfill = bool(
-            existing_equiv
-            and existing_equiv > 0
-            and not metadata.get("provider_model_source")
-        )
-        if (
-            existing_equiv is not None
-            and existing_equiv > 0
-            and not restamp_price
-            and not pms_backfill
-        ):
-            continue
-
-        if pms_backfill and not restamp_price:
-            equivalent = existing_equiv
-        else:
-            equivalent = estimate_equivalent_cost_amount(
-                model,
-                provider=provider,
-                input_tokens=_coerce_int(usage.get("input_tokens")),
-                output_tokens=_coerce_int(usage.get("output_tokens")),
-                cache_read_tokens=_coerce_int(usage.get("cache_read")),
-                cache_write_tokens=_coerce_int(usage.get("cache_write")),
-            )
         if equivalent is None:
             classes["null_cost_no_cost_evidence"] += 1
             add_example(
@@ -9396,11 +9368,7 @@ def audit_non_claude_cost_equivalent_backfill(
             )
             continue
 
-        if restamp_price:
-            cls = "restamp_price_correction"
-        elif pms_backfill:
-            cls = "provider_model_source_backfill"
-        elif source == "session_log" and metadata.get("cost_session_ids"):
+        if source == "session_log" and metadata.get("cost_session_ids"):
             cls = "new_stamp_csi"
         elif model in _S1D_MISSING_MODEL_OVERRIDES:
             cls = "new_stamp_missing_model"
@@ -9414,22 +9382,15 @@ def audit_non_claude_cost_equivalent_backfill(
                 "model": model,
                 "provider": provider,
                 "source": source,
-                "cost_usd_equivalent": round(equivalent, 6),
-                "previous_cost_usd_equivalent": existing_equiv,
+                "pricing_available": True,
             },
         )
         stamped = dict(metadata)
-        if restamp_price and existing_equiv is not None:
-            stamped["cost_usd_equivalent_s1c_pre_s1d"] = float(existing_equiv)
         stamped["cost_equivalent_model"] = model
         if provider:
             stamped["cost_equivalent_provider"] = provider
         stamped["provider_model_source"] = source
-        stamped["cost_equivalent_source"] = (
-            "s1d_audited_session_usage"
-            if (restamp_price or pms_backfill)
-            else "s1c_audited_session_usage"
-        )
+        stamped["cost_equivalent_source"] = "s1c_audited_session_usage"
         stamped.setdefault("billing_mode", "subscription_included")
         stamped["cost_equivalent_input_tokens"] = (
             _coerce_int(usage.get("input_tokens")) or 0
