@@ -210,33 +210,35 @@ def test_launch_snapshot_excludes_comments_arriving_after_its_watermark(
 
 
 def test_as_dict_returns_dict_not_none():
-    """Kill return_none L20: as_dict() must return a real dict."""
+    """Kill return_none L21: as_dict() must return a real dict."""
     d = kanban_comment_delivery.CommentDelivery(
-        comment_id=1, reaches_current_worker=True,
+        comment_id=1, kind="comment", reaches_current_worker=True,
         effective_from="now", worker_is_live=True, message="ok",
     )
     result = d.as_dict()
     assert result is not None
     assert isinstance(result, dict)
     assert result["comment_id"] == 1
+    assert result["kind"] == "comment"
     assert result["reaches_current_worker"] is True
 
 
 def test_build_delivery_unknown_task_raises(kanban_home):
-    """Kill remove_guard L41: unknown task must raise ValueError."""
+    """Kill remove_guard L44: unknown task must raise ValueError."""
     conn = kb.connect()
     try:
         import pytest
         with pytest.raises(ValueError, match="unknown task"):
             kanban_comment_delivery.build_comment_delivery(
-                conn, "nonexistent-task-id", 1, int(time.time()), lambda _p: True,
+                conn, "nonexistent-task-id", 1, "comment", int(time.time()),
+                lambda _p: True,
             )
     finally:
         conn.close()
 
 
 def test_claim_expires_equal_now_is_not_valid(kanban_home, monkeypatch):
-    """Kill comparison_swap L47 (> -> >=): claim_expires == now must NOT
+    """Kill comparison_swap L50 (> -> >=): claim_expires == now must NOT
     count as a valid claim (strict > required)."""
     monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
     conn = kb.connect()
@@ -249,7 +251,7 @@ def test_claim_expires_equal_now_is_not_valid(kanban_home, monkeypatch):
                 (now, 424244, task_id),
             )
         result = kanban_comment_delivery.build_comment_delivery(
-            conn, task_id, 1, now, lambda _p: True,
+            conn, task_id, 1, "comment", now, lambda _p: True,
         )
         # claim_expires == now -> NOT valid -> worker_is_live must be False
         assert result.worker_is_live is False
