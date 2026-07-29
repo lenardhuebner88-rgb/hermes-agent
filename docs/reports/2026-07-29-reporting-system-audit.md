@@ -179,3 +179,25 @@ python3 reporting-consistency-check.py
 Codex-Bewertungen: Baseline `eval/2026-07-29-codex-baseline.json` (5.6/10),
 Zweitbewertung `eval/2026-07-29-codex-final.json` (7.1/10) — beide via
 `codex exec --sandbox read-only --output-schema` mit identischem Rubric-Prompt.
+
+---
+
+## H. Nachschärf-Loops 13–16 (auf Codex #2 = 7.1/10)
+
+Jeder `top_issue`-Punkt aus Codex #2 und sein Status:
+
+| Codex-Befund | Loop | Fix | Commit |
+|---|---|---|---|
+| cron-of-crons false-green (error ohne consecutiveErrors, nie gelaufen ⇒ HEALTHY) | 14 | `last_status∈{error,failed,crashed,timeout}` ⇒ ERRORING; NEVER_RAN-Klasse; Baseline-Test exakt auf voice-spar-smoke + Negativprobe | `e458ae2` (scripts) |
+| Outbox kollabiert Runs (nur job_id+target-Key) | 13 | per-execution_id append-only, nie zusammenfalten; flock-Locking (RMW + replay_lock, ProcessPool-Test) | `da082a6428` |
+| Replay nur Built-in-Tick | 13 | gemeinsamer Pfad gefunden: `run_one_job` (Chronos fire_due → run_one_job); Replay dort + Built-in, dedupliziert via replay_lock + next_retry_at-Gate | `da082a6428` |
+| Relay/Config-Fehler nicht enqueued | 13 | error_class send/config/relay; config+relay dead-on-arrival (kein Endlos-Queue, dedupe pro job+target+class) | `da082a6428` |
+| retry/timeout-Felder nicht konfigurierbar | 15 | `validate_retry_policy`/`validate_timeout_field` (eine Kopie in jobs.py), exponiert in cronjob-Tool (create+update, Clear-Semantik) + CLI-Flags (`--retry-attempts/--retry-backoff/--timeout-seconds/--delivery-timeout-seconds`) | `9fbff42c04` |
+| Restore validiert nur Hülle; kein Rollback; keine Konkurrenztests | 15 | `_is_plausible_job_record` (Pflichtfelder/Typen), korrupte Records verworfen; Rollback der Quarantäne bei Schreibfehler; Recovery unter `_jobs_lock` (4-Thread-Test) | `9fbff42c04` |
+| Retention mengenbasiert, keine 30d | 15 | Zeithorizont: löschen nur jenseits keep-N UND >30d (`HERMES_CRON_EXECUTIONS_KEEP_DAYS`) UND kein failed/unknown in Frist; Kappe 20000 hart (gepinnt) | `9fbff42c04` |
+| systemctl nonzero rc ignoriert | 14 | rc-Matrix: 0=parse; 1+leer=still; sonst Sensorfehler (systemd 255 live vermessen) | `ac016ed` (scripts) |
+| notify Deadline nicht durchgängig; retry_after nur Header | 14 | monotonic-Gesamtbudget (Requests+Sleeps+Fallback, 1s-Floor, Fallback-Mindestbudget); retry_after Header>JSON-Body | `43265dd` (scripts) |
+| Proposals nicht appliziert | — | BEWUSST: Operator-Auftrag „kein Deploy/Merge". Liegt reviewfähig in proposals/ (C1–C9 inkl. E2E-Canary) | `ea2096e` u.a. |
+| Gate-Kommandos nicht reproduzierbar | 16 | Sektion G: exakte Kommandos + Counts (931 vs 915 erklärt) | (docs) |
+
+**Teststand final:** hermes 976/976 (49 Dateien) + tool-nah 228/228 · scripts 54/54.
