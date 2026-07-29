@@ -243,3 +243,60 @@ def test_registry_covers_every_v1_category() -> None:
     }
     assert set(pa_actions.ACTION_HANDLERS) == expected
     assert set(aq._PA_ACTION_SCHEMAS) == expected
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_build_reminders_question_reason_fallback_to_envelope():
+    """Kill bool_op_swap L277: or -> and would drop envelope reason."""
+    envelope = {
+        "category": "reminders.create",
+        "payload": {"title": "Test", "body": "Body", "due_at": "2026-07-29T10:00:00Z"},
+        "reason": "envelope-reason",
+    }
+    result = pa_actions._build_reminders_question(envelope)
+    assert "Grund: envelope-reason" in result
+
+
+def test_build_reminders_question_no_body_line():
+    """Kill bool_op_swap L275: if payload.get('body') guard."""
+    envelope = {
+        "category": "reminders.create",
+        "payload": {"title": "OnlyTitle", "due_at": "2026-07-29T10:00:00Z"},
+    }
+    result = pa_actions._build_reminders_question(envelope)
+    assert "Text:" not in result
+    assert "Titel: OnlyTitle" in result
+
+
+def test_thread_message_fallback_defaults():
+    """Kill bool_op_swap L387/L388: or -> and would yield None strings."""
+    result = pa_actions._thread_message({})
+    assert "unbekannt" in result
+
+
+def test_thread_message_non_dict_result_ignored():
+    """Kill bool_op_swap L390: isinstance guard on result."""
+    evidence = {"category": "test", "status": "ok", "result": "not-a-dict"}
+    result = pa_actions._thread_message(evidence)
+    assert "test" in result
+    assert "ok" in result
+
+
+def test_thread_message_task_ids_list():
+    """Kill bool_op_swap L403: isinstance + truthiness on task_ids."""
+    evidence = {
+        "category": "test",
+        "status": "ok",
+        "result": {"task_ids": ["t1", "t2"]},
+    }
+    result = pa_actions._thread_message(evidence)
+    assert "Task-IDs: t1, t2" in result
+
+
+def test_build_action_question_unknown_category_fallback():
+    """Kill bool_op_swap L293: or -> and would yield empty category string."""
+    envelope = {"category": "nonexistent.category"}
+    result = pa_actions.build_action_question(envelope)
+    assert "nonexistent.category" in result
