@@ -298,3 +298,152 @@ def test_explicit_limit_is_enforced_independently_of_config(monkeypatch):
     )
 
     assert len(rendered) <= 64
+
+
+# --- mutation-hardening tests (night-run 2026-07-29) ---
+
+
+def test_acceptance_section_equality():
+    """Kill comparison_flip L44: flipped __eq__ would make identical sections unequal."""
+    from hermes_cli.goal_judge_rendering import AcceptanceSection
+
+    a = AcceptanceSection(start=1, end=5, text="hello")
+    b = AcceptanceSection(start=1, end=5, text="hello")
+    c = AcceptanceSection(start=1, end=6, text="hello")
+    assert a == b
+    assert a != c
+
+
+def test_acceptance_item_equality():
+    """Kill comparison_flip L53: flipped __eq__ would make identical items unequal."""
+    from hermes_cli.goal_judge_rendering import _AcceptanceItem
+
+    a = _AcceptanceItem(label="AC-1", statement="do it", details=(), rendered_statement="AC-1: do it")
+    b = _AcceptanceItem(label="AC-1", statement="do it", details=(), rendered_statement="AC-1: do it")
+    c = _AcceptanceItem(label="AC-2", statement="do it", details=(), rendered_statement="AC-2: do it")
+    assert a == b
+    assert a != c
+
+
+def test_resolve_goal_chars_caps_at_maximum():
+    """Kill comparison_flip L76: flipped min() would return value above cap."""
+    from hermes_cli.goal_judge_rendering import MAX_GOAL_JUDGE_GOAL_CHARS, resolve_goal_chars
+
+    loader = lambda: {"auxiliary": {"goal_judge": {"goal_chars": MAX_GOAL_JUDGE_GOAL_CHARS + 100}}}
+    assert resolve_goal_chars(config_loader=loader) == MAX_GOAL_JUDGE_GOAL_CHARS
+
+
+def test_acceptance_section_ends_at_same_level_heading():
+    """Kill comparison_flip L89: flipped <= to > would not stop at same-level heading."""
+    from hermes_cli.goal_judge_rendering import acceptance_criteria_section
+
+    goal = "## Acceptance Criteria\n- AC-1: test\n## Next Section\ncontent"
+    section = acceptance_criteria_section(goal)
+    assert section is not None
+    assert "Next Section" not in section.text
+    assert "AC-1" in section.text
+
+
+def test_truncate_prefix_small_limit():
+    """Kill comparison_flip L114: flipped <= would compute negative slice index."""
+    from hermes_cli.goal_judge_rendering import GOAL_TRUNCATION_SUFFIX, _truncate_prefix
+
+    limit = len(GOAL_TRUNCATION_SUFFIX) - 1
+    text = "a long text that exceeds the limit"
+    result = _truncate_prefix(text, limit)
+    assert len(result) == limit
+    assert result == text[:limit]
+
+
+def test_truncate_middle_small_limit():
+    """Kill comparison_flip L126: flipped <= would compute negative available space."""
+    from hermes_cli.goal_judge_rendering import GOAL_MIDDLE_OMITTED_MARKER, _truncate_middle
+
+    limit = len(GOAL_MIDDLE_OMITTED_MARKER) - 1
+    text = "a long text that exceeds the limit significantly"
+    result = _truncate_middle(text, limit)
+    assert len(result) == limit
+    assert result == text[:limit]
+
+
+def test_acceptance_item_empty_id_falls_back_to_index():
+    """Kill comparison_flip L286: flipped or would use empty string instead of index."""
+    from hermes_cli.goal_judge_rendering import _acceptance_item
+
+    item = {"id": "ac-", "statement": "do the thing"}
+    result = _acceptance_item(item, 7)
+    assert result is not None
+    assert result.label == "AC-7"
+
+
+def test_acceptance_item_includes_verification_detail():
+    """Kill comparison_flip L294: flipped truthiness would skip non-empty details."""
+    from hermes_cli.goal_judge_rendering import _acceptance_item
+
+    item = {"statement": "do it", "verification": "run pytest"}
+    result = _acceptance_item(item, 1)
+    assert result is not None
+    assert ("Verification", "run pytest") in result.details
+
+
+def test_render_task_goal_skips_criterion_present_in_body():
+    """Kill comparison_flip L344/L350: flipped 'not in' or skip condition would
+    render criteria already present in the body's acceptance section."""
+    from hermes_cli.goal_judge_rendering import render_task_goal
+
+    task = SimpleNamespace(
+        title="My Task",
+        body="## Acceptance Criteria\n- AC-1: The widget renders correctly\n",
+        acceptance_criteria=json.dumps([
+            {"id": "1", "statement": "The widget renders correctly"},
+        ]),
+    )
+    result = render_task_goal(task)
+    assert result.count("The widget renders correctly") == 1
+
+
+def test_acceptance_item_custom_id_preserved():
+    """Kill bool_op_swap L285: or->and would replace a truthy custom id with index."""
+    from hermes_cli.goal_judge_rendering import _acceptance_item
+
+    item = {"id": "custom", "statement": "do the thing"}
+    result = _acceptance_item(item, 7)
+    assert result is not None
+    assert result.label == "AC-custom"
+
+
+def test_render_task_goal_includes_title():
+    """Kill bool_op_swap L325: or->and would discard a truthy title."""
+    from hermes_cli.goal_judge_rendering import render_task_goal
+
+    task = SimpleNamespace(title="My Title", body="some body", acceptance_criteria=None)
+    result = render_task_goal(task)
+    assert result.startswith("My Title")
+
+
+def test_resolve_goal_chars_zero_returns_default():
+    """Kill comparison_swap L75: > -> >= would let value=0 through min() returning 0."""
+    from hermes_cli.goal_judge_rendering import DEFAULT_GOAL_JUDGE_GOAL_CHARS, resolve_goal_chars
+
+    loader = lambda: {"auxiliary": {"goal_judge": {"goal_chars": 0}}}
+    assert resolve_goal_chars(config_loader=loader) == DEFAULT_GOAL_JUDGE_GOAL_CHARS
+
+
+def test_truncate_prefix_limit_equals_suffix_length():
+    """Kill comparison_swap L114: <= -> < would fall through when limit == len(suffix)."""
+    from hermes_cli.goal_judge_rendering import GOAL_TRUNCATION_SUFFIX, _truncate_prefix
+
+    limit = len(GOAL_TRUNCATION_SUFFIX)
+    text = "a long text that exceeds the limit significantly"
+    result = _truncate_prefix(text, limit)
+    assert result == text[:limit]
+
+
+def test_truncate_middle_limit_equals_marker_length():
+    """Kill comparison_swap L126: <= -> < would fall through when limit == len(marker)."""
+    from hermes_cli.goal_judge_rendering import GOAL_MIDDLE_OMITTED_MARKER, _truncate_middle
+
+    limit = len(GOAL_MIDDLE_OMITTED_MARKER)
+    text = "a long text that exceeds the limit significantly"
+    result = _truncate_middle(text, limit)
+    assert result == text[:limit]
