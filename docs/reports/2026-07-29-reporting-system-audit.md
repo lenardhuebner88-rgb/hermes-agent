@@ -126,3 +126,30 @@ per-job), maschineller Docstring↔Live-Job-Konsistenzcheck (→ Loop 12, script
 ## D. Positive Referenzmuster (erhalten & nachahmen)
 
 `failed-unit-watch.sh` (Dedupe/Remind), `_open_decisions.py` (atomare Writes), `_kanban_db_guard.py`, green-gate OnFailure-Design (eigene cgroup), Fingerprint-Dedupes, honest-degradation im Morning-Digest.
+
+---
+
+## F. Loop-Ergebnisse (2026-07-29, Stand nach allen 12 Loops)
+
+**hermes-agent Worktree** (Branch `kimi/reporting-audit`, Integrations-Sweep: **931 Tests grün**):
+
+| Loop | Commit(s) | Ergebnis |
+|---|---|---|
+| 1 | `0e2498f3f9` | executions.py: ContextVar-Store-Scoping (gespiegelt von jobs.py, 4-stufige Präzedenz) + per-job Retention (N=50/Job, globale Kappe 1000→20000) + 11 neue Tests |
+| 2/3/10 | `eb812ceede` | Delivery-Timeout `asyncio.wait_for` (Default 60s, Job-Feld `delivery_timeout_seconds`, Cancel-Semantik, `_running_job_ids`-Freigabe e2e-getestet); per-Profil-Fehlerisolation in `_start_multiplex`; per-Job `timeout_seconds` (Cap 7200) + 28 neue Tests |
+| 4 | `3321c08e86` | jobs.json: Backup-Rotation (.bak.1–3) + Quarantäne (`jobs.json.corrupt-<ts>`) + validierter Auto-Restore |
+| 5 | `fc446ba639` | Ticker-Konstanten live; Lifecycle-Guard kanonisiert (single source in cron/lifecycle_guard.py, CLI = Wrapper); 35 String-Konsistenz-Tests |
+| 6 | `240d4bcc2f` | `cron/delivery_outbox.py`: persistente JSONL-Outbox (queued/delivered/dead, Dedupe, Backoff 5→80min, 5 Versuche → dead-letter, Replay am Tick-Anfang, Store-gescoped, fail-closed); `hermes cron status` zeigt queued/dead; per-Job Run-Retry; max_parallel Default 4 + 15 neue Tests |
+
+**scripts Worktree** (Branch `kimi/reporting-audit`, **39 Tests grün**):
+
+| Loop | Commit(s) | Ergebnis |
+|---|---|---|
+| 7 | `58f8d0b` | discord-notify: 429/`Retry-After` + Retries (exp. Backoff), 5xx/Netz-Retry, 90s-Gesamt-Deadline, `--file` Attachment (8-MiB-Guard), `--timeout`, Fallback-Channel + 7 neue Tests |
+| 8 | `89c7bad`, `c5bddbe`, `61805b2`, `235dcac` | cron-of-crons: OpenClaw-Store raus, hermes-Felder normalisiert (STALE/ERRORING feuern jetzt real — Codex-Finding), Profil-Stores; channel-health: 4 tote IDs raus, 3 aktive rein, Quellenkommentare; quick-audit: ehrliche Decommissioned-Markierung; attic/ für deadman + k3-watch; systemd-onfailure-watcher: false-green Bullet-Parsing gefixt (`--plain`) + 6 Tests |
+| 9/11 | `1ad1f64` | `proposals/`: Job-Definitionen für 3 unschedulierte Sensoren + rca deliver-Fix; Live-State-Change-Set C1–C8 — NICHT appliziert |
+| 12 | `67f4d04`, `b770943` | README-Wahrheit + `bak-retention.sh` (--dry-run Default); `reporting-consistency-check.py` (Docstring↔Live-Job↔Kanal-Drift), gegen Live-Store verifiziert + 9 Tests |
+
+**Bewusst nicht geändert (Erhaltung):** uncommittete Fremd-Arbeit im Live-Checkout
+(10 Dateien, u.a. Morning-Digest-Rewrite, green-gate-Isolation); Live `jobs.json`,
+systemd-Units, Crontab (nur Proposals). Kein Deploy, kein Merge, kein Push.
