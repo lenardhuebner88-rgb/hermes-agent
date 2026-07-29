@@ -288,3 +288,85 @@ def test_authenticate_requires_literal_ok_true(monkeypatch):
         pass
     else:
         raise AssertionError("login without ok=true must be rejected")
+
+
+# ---------------------------------------------------------------------------
+# JSON-block boundaries, receipt placeholders, request payload
+# ---------------------------------------------------------------------------
+
+def test_json_request_serializes_payload_with_content_type():
+    """A payload is sent as JSON bytes WITH the Content-Type header —
+    a silent drop would POST form-less garbage to the dashboard."""
+    mod = _load_module()
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"ok": true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _Opener:
+        last = None
+
+        def open(self, request, timeout=None):
+            _Opener.last = request
+            return _Resp()
+
+    out = mod._json_request(_Opener(), "POST", "https://h/login", payload={"a": 1}, timeout=1)
+    assert out == {"ok": True}
+    assert _Opener.last.data == b'{"a": 1}'
+    assert _Opener.last.get_header("Content-type") == "application/json"
+
+
+def test_json_block_passthrough_boundary_is_inclusive_and_raw_utf8():
+    """Serialization at exactly max_chars passes through unchanged (the
+    boundary is inclusive) and keeps Umlauts raw."""
+    mod = _load_module()
+    exact = json.dumps("x", indent=2, ensure_ascii=False)
+    assert mod._json_block("x", max_chars=len(exact)) == exact
+    assert "ü" in mod._json_block({"t": "ü"}, max_chars=1000)
+
+
+def test_json_block_list_truncation_keeps_boundary_item_raw():
+    """A prefix serialization at exactly max_chars still KEEPS that item;
+    the truncated wrapper stays raw UTF-8 and parseable."""
+    mod = _load_module()
+    umlaut = "ü" * 10
+    items = [umlaut, "b"]
+    cap = len(json.dumps([umlaut], indent=2, ensure_ascii=False))
+
+    block = mod._json_block(items, max_chars=cap)
+
+    parsed = json.loads(block)
+    assert parsed["items"] == [umlaut]
+    assert umlaut in block  # raw, not \u-escaped
+
+
+def test_write_receipt_renders_none_placeholders(tmp_path):
+    """Empty task list and empty notes render the literal '(none)'
+    placeholders — an empty string reads like a broken template."""
+    mod = _load_module()
+    receipt = tmp_path / "receipt.md"
+    mod.write_receipt(
+        str(receipt),
+        scenario="S-test",
+        task_ids=[],
+        workers_snapshots=[],
+        peak_concurrent=0,
+        task_activities={},
+        git_log=["abc fix"],
+        repo="/repo",
+        started_at="t0",
+        finished_at="t1",
+        notes="",
+        branch="main",
+    )
+    text = receipt.read_text(encoding="utf-8")
+    assert "**Task IDs:** (none)" in text
+    assert "\n(none)\n" in text  # the Notes block placeholder
