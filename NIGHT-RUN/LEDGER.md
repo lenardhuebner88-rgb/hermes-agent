@@ -229,3 +229,10 @@ REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mut
 - probe after: 15/20 = 75%
 - gate: narrow pytest 26 passed | ruff clean
 - commit: 0a17880a0
+
+## 33. hermes_cli/kanban_close_sprint.py — 2026-07-29T01:48:50Z
+- probe before: 1/20 = 5%
+- killed survivors: [K] bool_op_swap L82 (×2), [K] bool_op_swap L89, [K] bool_op_swap L249, [K] bool_op_swap L303, [K] bool_op_swap L328, [K] bool_op_swap L351
+- probe after: 7/20 = 35%
+- gate: narrow pytest 24 passed | ruff clean
+- commit: 1abc7678a
