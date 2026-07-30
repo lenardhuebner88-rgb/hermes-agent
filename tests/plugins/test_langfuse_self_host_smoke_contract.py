@@ -13,6 +13,7 @@ from scripts.langfuse_worker_audit import (
     _authenticated_dashboard_request,
     build_control_surface_live_smoke,
     build_live_smoke_contract,
+    main as audit_main,
 )
 
 
@@ -194,6 +195,7 @@ def _langfuse_env() -> dict[str, str]:
             401,
         ),
         (json.JSONDecodeError("invalid", "not-json", 0), "payload_invalid", None),
+        (RuntimeError("secret production client failure"), "payload_invalid", None),
     ],
 )
 def test_control_surface_smoke_classifies_langfuse_failures_without_details(
@@ -215,6 +217,7 @@ def test_control_surface_smoke_classifies_langfuse_failures_without_details(
     assert report["langfuse"].get("http_status") == status
     assert "error_type" not in report["langfuse"]
     assert "unauthorized" not in json.dumps(report)
+    assert "secret production client failure" not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
@@ -261,8 +264,50 @@ def test_control_surface_smoke_classifies_wrapped_production_client_failures(
     assert report["dashboard"]["fact_rows"] == 12
     assert report["status"] == "fail"
     encoded = json.dumps(report)
-    assert "secret" not in encoded
+    assert "secret-network-reason" not in encoded
+    assert "secret response" not in encoded
+    assert "secret body" not in encoded
     assert "production client summary" not in encoded
+
+
+def test_control_surface_cli_returns_structured_exit_three_for_default_client_failure(
+    monkeypatch,
+    capsys,
+) -> None:
+    from plugins.kanban.dashboard import langfuse_read_model
+
+    def fail(*_args, **_kwargs) -> dict:
+        raise RuntimeError("Langfuse unreachable") from urllib.error.URLError(
+            "secret-network-reason"
+        )
+
+    monkeypatch.setattr(langfuse_read_model, "_request_json", fail)
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit._authenticated_dashboard_request",
+        lambda *_args, **_kwargs: lambda _url: _dashboard_payload(),
+    )
+    for name, value in _langfuse_env().items():
+        monkeypatch.setenv(name, value)
+
+    exit_code = audit_main(
+        [
+            "--control-surface-smoke-url",
+            "http://127.0.0.1:9119",
+            "--no-prompt",
+        ]
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert exit_code == 3
+    assert report["status"] == "fail"
+    assert report["langfuse"] == {
+        "state": "absent",
+        "reason": "unreachable",
+        "configured_host_checked": True,
+    }
+    assert report["dashboard"]["sample_count"] == 10
+    assert report["dashboard"]["fact_rows"] == 12
+    assert "secret-network-reason" not in json.dumps(report)
 
 
 def test_dashboard_auth_rejects_non_loopback_before_any_request(monkeypatch) -> None:
