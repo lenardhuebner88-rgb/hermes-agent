@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import HTTPCookieProcessor, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, build_opener
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -26,7 +26,6 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from hermes_cli.usage_facts_db import usage_facts_db_path  # noqa: E402
 from hermes_cli.kanban_db import kanban_home  # noqa: E402
-from hermes_cli.urllib_security import SafeCredentialRedirectHandler  # noqa: E402
 
 CORRELATION_FIELDS = (
     "task_run_id",
@@ -465,6 +464,13 @@ class DashboardProbeFailed(RuntimeError):
     """An expected authenticated dashboard HTTP/payload failure."""
 
 
+class _RejectDashboardRedirectHandler(HTTPRedirectHandler):
+    """Fail closed instead of forwarding dashboard cookies or tokens."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _authenticated_dashboard_request(
     base_url: str,
     *,
@@ -481,7 +487,7 @@ def _authenticated_dashboard_request(
 
     opener = build_opener(
         HTTPCookieProcessor(CookieJar()),
-        SafeCredentialRedirectHandler(base_url),
+        _RejectDashboardRedirectHandler(),
     )
     try:
         password = auth_smoke._read_password(password_env, no_prompt=no_prompt)

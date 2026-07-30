@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 
 from scripts.langfuse_worker_audit import (
+    _RejectDashboardRedirectHandler,
     _authenticated_dashboard_request,
     build_control_surface_live_smoke,
     build_live_smoke_contract,
     main as audit_main,
 )
-from hermes_cli.urllib_security import SafeCredentialRedirectHandler
 
 
 def _seed_databases(
@@ -270,6 +270,42 @@ def test_control_surface_smoke_classifies_wrapped_production_client_failures(
     assert "production client summary" not in encoded
 
 
+def test_control_surface_smoke_classifies_production_non_object_payload(
+    monkeypatch,
+) -> None:
+    from plugins.kanban.dashboard import langfuse_read_model
+
+    class NonObjectResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return b"[]"
+
+    monkeypatch.setattr(
+        langfuse_read_model,
+        "open_credentialed_url",
+        lambda *_args, **_kwargs: NonObjectResponse(),
+    )
+
+    report = build_control_surface_live_smoke(
+        dashboard_base_url="http://127.0.0.1:9119",
+        env=_langfuse_env(),
+        dashboard_request=lambda _url: _dashboard_payload(),
+    )
+
+    assert report["langfuse"] == {
+        "state": "absent",
+        "reason": "payload_invalid",
+        "configured_host_checked": True,
+    }
+    assert report["dashboard"]["sample_count"] == 10
+    assert report["status"] == "fail"
+
+
 def test_control_surface_cli_returns_structured_exit_three_for_default_client_failure(
     monkeypatch,
     capsys,
@@ -385,7 +421,7 @@ def test_dashboard_auth_rejects_non_loopback_before_any_request(monkeypatch) -> 
     assert opener_called is False
 
 
-def test_dashboard_auth_installs_cross_origin_credential_redirect_guard(
+def test_dashboard_auth_rejects_redirects_before_cookie_or_token_forwarding(
     monkeypatch,
 ) -> None:
     from scripts import smoke_health_status_auth as auth_smoke
@@ -420,23 +456,23 @@ def test_dashboard_auth_installs_cross_origin_credential_redirect_guard(
     redirect_handler = next(
         handler
         for handler in captured_handlers
-        if isinstance(handler, SafeCredentialRedirectHandler)
+        if isinstance(handler, _RejectDashboardRedirectHandler)
     )
     request = urllib.request.Request(
         "http://127.0.0.1:9119/api/plugins/kanban/stats/observability",
         headers={"X-Hermes-Session-Token": "secret-token"},
     )
-    redirected = redirect_handler.redirect_request(
-        request,
-        None,
-        302,
-        "Found",
-        Message(),
-        "http://127.0.0.1:9120/capture",
+    assert (
+        redirect_handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            Message(),
+            "http://127.0.0.1:9120/capture",
+        )
+        is None
     )
-
-    assert redirected is not None
-    assert redirected.get_header("X-Hermes-Session-Token") is None
 
 
 def test_control_surface_smoke_requires_fresh_usage_with_known_fact_rows() -> None:
