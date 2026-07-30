@@ -65,30 +65,35 @@ export const VaultMemoryLinkSchema = z.object({
 });
 
 // GET /tasks/{task_id}/chain-costs — Kosten-Rollup je Kette + by_lane-Aufschlüsselung.
+// Canon 00-Canon/decisions/2026-07-27 (Kosten-SSOT im Lesepfad, Regel 3):
+// Token- und Run-Zähler tragen KEIN .catch(0) — die Lane kommt aus demselben
+// Rollup wie die Totals; ein gebrochener Wert wirft statt "0 = keine
+// Aktivität" zu behaupten. Coverage-Zähler bleiben optional (ältere Backends
+// lassen sie weg), ein anwesender gebrochener Wert wirft ebenfalls.
 export const ChainCostsLaneSchema = z.object({
   profile: z.string().catch("unbekannt"),
-  input_tokens: z.coerce.number().catch(0),
-  output_tokens: z.coerce.number().catch(0),
+  input_tokens: z.coerce.number(),
+  output_tokens: z.coerce.number(),
   cost_usd: nullableNumber,
   actual_cost_usd: nullableNumber,
-  run_count: z.coerce.number().catch(0),
+  run_count: z.coerce.number(),
   // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
   cost_usd_equivalent: nullableNumber,
   api_equivalent_usd: nullableNumber,
   cost_effective_usd: nullableNumber,
-  billing_neuralwatt_kwh: z.coerce.number().catch(0),
-  billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
-  token_known_runs: z.coerce.number().catch(0).optional(),
-  token_total_runs: z.coerce.number().catch(0).optional(),
+  billing_neuralwatt_kwh: z.coerce.number(),
+  billing_neuralwatt_cost_usd: z.coerce.number(),
+  token_known_runs: z.coerce.number().optional(),
+  token_total_runs: z.coerce.number().optional(),
   token_coverage: z.coerce.number().nullable().catch(null).optional(),
-  cost_usd_known_runs: z.coerce.number().catch(0).optional(),
-  cost_usd_total_runs: z.coerce.number().catch(0).optional(),
+  cost_usd_known_runs: z.coerce.number().optional(),
+  cost_usd_total_runs: z.coerce.number().optional(),
   cost_usd_coverage: z.coerce.number().nullable().catch(null).optional(),
   cost_usd_state: z.enum(["empty", "complete", "partial", "unknown"]).catch("unknown").optional(),
   cost_usd_equivalent_confidence: z.string().catch("unknown").optional(),
-  cost_usd_equivalent_coverage: z.coerce.number().catch(0).optional(),
-  cost_usd_equivalent_candidate_runs: z.coerce.number().catch(0).optional(),
-  cost_usd_equivalent_known_runs: z.coerce.number().catch(0).optional(),
+  cost_usd_equivalent_coverage: z.coerce.number().optional(),
+  cost_usd_equivalent_candidate_runs: z.coerce.number().optional(),
+  cost_usd_equivalent_known_runs: z.coerce.number().optional(),
   cost_usd_equivalent_state: z.enum(["not_applicable", "complete", "partial", "unknown"]).catch("unknown").optional(),
 });
 

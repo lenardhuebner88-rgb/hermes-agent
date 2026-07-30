@@ -67,12 +67,14 @@ export function DictateStatusTile({
       </div>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-        <KpiTile label="Diktate" value={status?.dictations ?? 0} />
+        {/* Canon Regel 3: ohne Statusbericht sind die Zähler unbekannt ("—"),
+            niemals 0 — "0 Diktate" läse sich als "nichts diktiert". */}
+        <KpiTile label="Diktate" value={status?.dictations ?? "—"} />
         <KpiTile label="Erfolg" value={status?.success_rate_percent ?? "—"} suffix={status?.success_rate_percent != null ? "%" : undefined} />
         <KpiTile label="Latenz p50" value={status?.latency_p50_ms ?? "—"} suffix={status?.latency_p50_ms != null ? "ms" : undefined} />
         <KpiTile label="Latenz p95" value={status?.latency_p95_ms ?? "—"} suffix={status?.latency_p95_ms != null ? "ms" : undefined} />
-        <KpiTile label="Retry / BUSY" value={`${status?.retries ?? 0} / ${status?.busy ?? 0}`} />
-        <KpiTile label="Fehler" value={status?.failures ?? 0} dot={(status?.failures ?? 0) > 0 ? "warn" : "idle"} delta={status?.latency_ms != null ? `zuletzt ${status.latency_ms} ms` : "keine Latenz"} />
+        <KpiTile label="Retry / BUSY" value={status ? `${status.retries} / ${status.busy}` : "—"} />
+        <KpiTile label="Fehler" value={status?.failures ?? "—"} dot={status != null && status.failures > 0 ? "warn" : "idle"} delta={status?.latency_ms != null ? `zuletzt ${status.latency_ms} ms` : "keine Latenz"} />
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">

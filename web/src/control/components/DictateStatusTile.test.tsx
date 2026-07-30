@@ -42,4 +42,14 @@ describe("DictateStatusTile", () => {
     expect(html).toContain("min-h-12");
     expect(html).not.toContain("must never appear");
   });
+
+  it("renders unknown counters as an em dash, never as 0, when no status report exists (Canon Regel 3)", () => {
+    const html = renderToStaticMarkup(<DictateStatusTile status={null} loading={false} error={null} />);
+
+    expect(html).toContain("ohne Kontakt");
+    expect(html).toContain("—");
+    // "0 Diktate" / "0 Fehler" läse sich als "nichts diktiert" — unbekannt
+    // bleibt unbekannt.
+    expect(html).not.toContain(">0<");
+  });
 });

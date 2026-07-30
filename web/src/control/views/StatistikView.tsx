@@ -29,7 +29,7 @@ import type {
 import { AccountUsageTile } from "../components/AccountUsageTile";
 import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { DEFAULT_STATS_CONFIG } from "../lib/statsFields";
-import { DrawerShell, KpiTile, SectionHeader, FleetEmptyState } from "../components/leitstand";
+import { DrawerShell, FreshnessStrip, KpiTile, SectionHeader, FleetEmptyState, ViewHeader } from "../components/leitstand";
 import { cn } from "@/lib/utils";
 import {
   acceptance,
@@ -654,13 +654,19 @@ export function WorkerEfficiencySection({
 }
 
 // ── Flotten-Effizienz (Durchsatz, Gate, Token-Burn je Lane) ──────────────────
-export function LaneBurnSection({ costs }: { costs: CostProfileRow[] }) {
+export function LaneBurnSection({ costs, error = null }: { costs: CostProfileRow[]; error?: string | null }) {
   const lanes = useMemo(() => laneBurn(costs), [costs]);
   return (
     <section className="space-y-3">
       <SectionHeader label="Lane-Burn" meta="Tokens · effektive Kosten · Läufe" />
       {lanes.length === 0 ? (
-        <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmptyDesc} />
+        // Leer ≠ Fehler (DESIGN.md W4-7, Canon Regel 3): ein gebrochener Read
+        // ist "nicht lesbar", nicht "keine Aktivität im Fenster".
+        error ? (
+          <StNote tone="warn">{error}</StNote>
+        ) : (
+          <FleetEmptyState title={de.stats.burnEmpty} desc={de.stats.burnEmptyDesc} />
+        )
       ) : (
         <div className="st-panel space-y-1.5 p-2">
           {lanes.map((lane, index) => {
@@ -881,10 +887,14 @@ function CostTrendSection({
                 ? "Kosten unbekannt"
                 : `${costPartial ? "mindestens " : ""}${usdText(cost)}`;
               const tokenCoverage = (row.token_total_runs ?? 0) > 0
-                ? `, Coverage ${row.token_known_runs ?? 0}/${row.token_total_runs} Runs`
+                ? row.token_known_runs == null
+                  ? ", Token-Coverage unbekannt"
+                  : `, Coverage ${row.token_known_runs}/${row.token_total_runs} Runs`
                 : "";
               const costCoverage = (row.equivalent_cost_total_runs ?? 0) > 0
-                ? `, Kosten-Coverage ${row.equivalent_cost_known_runs ?? 0}/${row.equivalent_cost_total_runs} Runs`
+                ? row.equivalent_cost_known_runs == null
+                  ? ", Kosten-Coverage unbekannt"
+                  : `, Kosten-Coverage ${row.equivalent_cost_known_runs}/${row.equivalent_cost_total_runs} Runs`
                 : "";
               return (
                 <div key={row.day} className="st-trend-row">
@@ -993,7 +1003,9 @@ export function SubscriptionBurnSection({
   const detail = useMemo(() => subscriptionBurnBreakdown(burn), [burn]);
   const hasRuns = detail.totals.runs > 0;
   const tokenState = detail.totals.token_state;
-  const knownRuns = detail.totals.token_known_runs ?? 0;
+  // Canon Regel 3: fehlt der Coverage-Zähler (älteres Backend), ist die
+  // Abdeckung unbekannt — "0/N Runs" wäre eine erfundene Null-Abdeckung.
+  const knownRuns = detail.totals.token_known_runs;
   const totalRuns = detail.totals.token_total_runs ?? detail.totals.runs;
   return (
     <section className="space-y-2">
@@ -1013,7 +1025,7 @@ export function SubscriptionBurnSection({
             </strong>
             <span className="st-note">{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
             <span className="st-note">
-              Token-Coverage {knownRuns}/{totalRuns} Runs · {subscriptionTokenStateLabel(tokenState)}
+              Token-Coverage {knownRuns == null ? "unbekannt" : `${knownRuns}/${totalRuns} Runs`} · {subscriptionTokenStateLabel(tokenState)}
               {burn?.now ? ` · Stand ${fmtClock(burn.now)}` : " · Stand unbekannt"}
             </span>
           </div>
@@ -1391,7 +1403,7 @@ function CoverageRow({
           style={{ width: `${Math.max(value == null ? 0 : 2, (value ?? 0) * 100)}%` }}
         />
       </span>
-      <b className="text-right font-data text-[10px]">
+      <b className="text-right font-data text-micro">
         {observed.toLocaleString("de-DE")} / {denominator.toLocaleString("de-DE")}
       </b>
     </div>
@@ -1419,16 +1431,16 @@ function ImportActivityChart({
               style={{ height: `${scale(row.fact_rows)}%` }}
               title={`${row.fact_rows.toLocaleString("de-DE")} Usage Facts`}
             />
-            <b className="absolute left-1/2 top-1 -translate-x-1/2 text-[8px] font-data text-ink-2 sm:text-[10px]">
+            <b className="absolute left-1/2 top-1 -translate-x-1/2 text-micro font-data text-ink-2">
               {fmtTokens(row.fact_rows)}
             </b>
-            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[8px] font-semibold text-ink-3">
+            <span className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-micro font-semibold text-ink-3">
               {row.date.slice(8)}
             </span>
           </div>
         ))}
       </div>
-      <div className="mt-5 flex justify-between gap-3 text-[9px] font-semibold text-ink-3">
+      <div className="mt-5 flex justify-between gap-3 text-micro font-semibold text-ink-3">
         <span>Usage Facts je Importtag</span>
         <span>logarithmisch · kein Worker-Durchsatz</span>
       </div>
@@ -1511,19 +1523,19 @@ function LangfuseSignals({ data }: { data: ObservabilityStatsResponse }) {
   return (
     <div className="mt-3">
       {partial ? (
-        <p className="mb-3 rounded-lg border border-status-warn/30 bg-status-warn/5 px-3 py-2 text-[10px] font-semibold text-status-warn">
+        <p className="mb-3 rounded-lg border border-status-warn/30 bg-status-warn/5 px-3 py-2 text-micro font-semibold text-status-warn">
           Ausschnitt · Summen sind Untergrenzen, p50 aus Stichprobe
         </p>
       ) : null}
       {models.map((row) => (
-        <div key={row.name} className="grid min-h-12 grid-cols-[minmax(110px,1fr)_56px_72px_72px] items-center gap-2 border-b border-line-soft text-[10px] last:border-0">
+        <div key={row.name} className="grid min-h-12 grid-cols-[minmax(110px,1fr)_56px_72px_72px] items-center gap-2 border-b border-line-soft text-micro last:border-0">
           <span className="min-w-0 break-words font-semibold text-ink-2">{row.name}</span>
           <b className="text-right font-data">{lowerBound}{row.calls.toLocaleString("de-DE")}</b>
           <span className="text-right text-ink-3">{fmtMillis(row.latency_p50_ms)}</span>
           <span className="text-right text-ink-3">{fmtMillis(row.ttft_p50_ms)}</span>
         </div>
       ))}
-      <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-semibold text-ink-2">
+      <div className="mt-3 grid grid-cols-2 gap-2 text-micro font-semibold text-ink-2">
         <span className="rounded-lg bg-surface-2 p-2">Generationen <b className="float-right font-data">{generationCalls == null ? "—" : `${lowerBound}${fmtTokens(generationCalls)}`}</b></span>
         <span className="rounded-lg bg-surface-2 p-2">Kosten <b className="float-right font-data">{lowerBound}{compactUsd(metricValue(data, "known_cost_usd"))}</b></span>
       </div>
@@ -1535,10 +1547,14 @@ export function ObservabilityDeck({
   data,
   loading,
   error,
+  lastUpdated,
+  onRefresh,
 }: {
   data: ObservabilityStatsResponse | null;
   loading: boolean;
   error: string | null;
+  lastUpdated?: number | null;
+  onRefresh?: () => Promise<unknown> | void;
 }) {
   if (loading && !data) return <SkeletonCard rows={6} />;
   if (!data) {
@@ -1568,22 +1584,23 @@ export function ObservabilityDeck({
   const checkedAt = new Date(data.checked_at * 1000).toLocaleString("de-DE");
   return (
     <section className="space-y-4">
-      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <p className="hc-type-label hc-dim">VOLUMEN · GESCHWINDIGKEIT · KOSTEN · {data.window_days} TAGE</p>
-          <h1 className="hc-type-display-tight mt-2">Observability</h1>
-          <p className="hc-dim mt-2 text-sm">Worker-Daten in Hermes. Langfuse bleibt unsichtbare Datenquelle.</p>
-        </div>
-        <div className={cn(
-          "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-[11px] font-semibold",
-          data.langfuse.state === "fresh"
-            ? "border-status-ok/40 text-status-ok"
-            : "border-status-warn/40 text-status-warn",
-        )}>
-          <span className="size-2 rounded-full bg-current" aria-hidden />
-          {data.langfuse.state === "fresh" ? "Langfuse fresh" : `Langfuse ${data.langfuse.state}`} · {checkedAt}
-        </div>
-      </header>
+      <ViewHeader
+        eyebrow={`VOLUMEN · GESCHWINDIGKEIT · KOSTEN · ${data.window_days} TAGE`}
+        title="Observability"
+        description="Worker-Daten in Hermes. Langfuse bleibt unsichtbare Datenquelle."
+        actions={(
+          <div className={cn(
+            "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-[11px] font-semibold",
+            data.langfuse.state === "fresh"
+              ? "border-status-ok/40 text-status-ok"
+              : "border-status-warn/40 text-status-warn",
+          )}>
+            <span className="size-2 rounded-full bg-current" aria-hidden />
+            {data.langfuse.state === "fresh" ? "Langfuse fresh" : `Langfuse ${data.langfuse.state}`} · {checkedAt}
+          </div>
+        )}
+      />
+      <FreshnessStrip lastUpdated={lastUpdated ?? null} onRefresh={onRefresh} />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <KpiTile
@@ -1646,7 +1663,7 @@ export function ObservabilityDeck({
             <CoverageRow label="TTFT" observed={coverage.ttft_known} denominator={coverage.fact_rows} />
           </div>
           {coverage.missing_columns.length ? (
-            <p className="mt-3 text-[10px] font-semibold text-status-warn">
+            <p className="mt-3 text-micro font-semibold text-status-warn">
               Fehlende Adapterfelder: {coverage.missing_columns.join(", ")}
             </p>
           ) : null}
@@ -1674,11 +1691,13 @@ export function StatistikView() {
   const costProfiles = useMemo(() => costs.data?.profiles ?? [], [costs.data]);
 
   return (
-    <div data-statistik className="mx-auto w-full max-w-[2200px] space-y-5 p-4 pb-20 md:p-6">
+    <div data-statistik className="mx-auto w-full max-w-[2200px] space-y-5 p-4 md:p-6">
       <ObservabilityDeck
         data={observability.data}
         loading={observability.loading}
         error={observability.error}
+        lastUpdated={observability.lastUpdated}
+        onRefresh={() => observability.reload()}
       />
 
       {issues.error ? (
@@ -1711,7 +1730,7 @@ export function StatistikView() {
         burn={subscriptionBurn.data ?? null}
       />
 
-      <LaneBurnSection costs={costProfiles} />
+      <LaneBurnSection costs={costProfiles} error={costs.error} />
 
       <SubscriptionBurnSection
         burn={subscriptionBurn.data ?? null}

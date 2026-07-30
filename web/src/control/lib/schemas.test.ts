@@ -503,6 +503,23 @@ describe("Cost schemas", () => {
     expect(parsed.by_lane[0].cost_usd_equivalent_state).toBe("partial");
   });
 
+  it("throws on broken chain-cost totals instead of filling every metric with 0 (Canon Regel 3)", () => {
+    // Früher trug das Totals-Objekt einen Voll-Fallback: ein gebrochener Read
+    // wurde zu lauter 0-Zählern und las sich als "keine Aktivität".
+    expect(() => parseOrThrow(ChainCostsResponseSchema, {
+      schema: "kanban-chain-costs-v1",
+      root_id: "t_root",
+      totals: {},
+      by_lane: [],
+    }, "chain-costs")).toThrow("chain-costs");
+
+    expect(() => parseOrThrow(ChainCostsResponseSchema, {
+      schema: "kanban-chain-costs-v1",
+      root_id: "t_root",
+      by_lane: [],
+    }, "chain-costs")).toThrow("chain-costs");
+  });
+
   it("preserves windowed rollup detail fields for S3 tooltips", () => {
     const parsed = parseOrThrow(WindowedRollupResponseSchema, {
       schema: "kanban-windowed-rollup-v1",
