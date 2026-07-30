@@ -1,80 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, ChartSpline, Clock, Command, FlaskConical, FolderGit2, Gauge, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor, BadgeCheck } from "lucide-react";
+import { Command, KanbanSquare, MessageSquare, MoreHorizontal, PanelLeft, Settings, Shield, Sparkles } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
-import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import type { DecisionInboxData } from "../hooks/decisionInbox";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
-import { healthLed, healthLabel } from "../lib/health";
+import { healthLed } from "../lib/health";
+import { moreRoutes, primaryRoutes, type ControlRouteEntry, type ControlTab } from "../navigation";
 import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
 import { useLiveStatus } from "../hooks/useLiveEvents";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "scorecard" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat" | "projekte" | "hebel";
+export type { ControlTab } from "../navigation";
 
-// The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
-// live in Fleet now, and System remains reachable through "Mehr" + deep-link.
-const tabs: Array<{ id: ControlTab; label: string; mobileLabel: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  // Fleet: neues erstes Tab — Operator-Lagezentrum (2026-07-03)
-  { id: "fleet", label: "Fleet", mobileLabel: "Fleet", path: "/control/fleet", icon: Anchor },
-  { id: "inbox", label: "Start", mobileLabel: "Start", path: "/control", icon: LayoutDashboard },
-  // Terminals = Haupt-Arbeitszentrale (Operator-Entscheid 2026-07-01): der Tab,
-  // in dem im tmux mit Hermes/Claude/Codex gearbeitet wird — daher primär.
-  { id: "agentTerminals", label: "Terminals", mobileLabel: "Terminal", path: "/control/agent-terminals", icon: TerminalSquare },
-  { id: "statistik", label: de.tabs.statistik, mobileLabel: "Statistik", path: "/control/statistik", icon: ChartSpline },
-  // Kurzlabel "Regal" fürs 6-Slot-Grid der mobilen Bottom-Bar (Cockpit-Slice
-  // "Bibliothek-Lesesaal + Shell-Upgrade") — Desktop-`label` bleibt "Bibliothek".
-  { id: "bibliothek", label: "Bibliothek", mobileLabel: "Regal", path: "/control/bibliothek", icon: BookOpen },
-];
-
-// Fleet ist an erster Stelle der mobilen Bottom-Bar (2026-07-03); Statistik
-// übernimmt den alten Flow-Slot (S6, 2026-07-05).
-// 5 Slots + "Mehr" = 6-Spalten-Grid. Identisch mit `tabs` (die 5 Primaries
-// SIND die mobilen Slots) — auch die Rail rendert daraus.
-const mobileTabs = tabs.filter((tab) => ["fleet", "inbox", "agentTerminals", "statistik", "bibliothek"].includes(tab.id));
-
-// Demoted control surfaces — still routed + reachable, just not in the primary
-// rail/bottom-bar. The Command home already surfaces their headline signal.
-// `id` matcht den ControlTab-Wert (Lookup für Masthead-Label + Rail-Pin).
-const moreTabs: Array<{ id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: "workstreams", label: de.tabs.workstreams, path: "/control/workstreams", icon: GitBranch },
-  { id: "backlog", label: de.tabs.backlog, path: "/control/backlog", icon: KanbanSquare },
-  { id: "orchestrator", label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
-  { id: "crons", label: de.tabs.crons, path: "/control/crons", icon: Clock },
-  { id: "loops", label: de.tabs.loops, path: "/control/loops", icon: RefreshCw },
-  // Projekte (Stufe 4, erste sichtbare Slice): Karten-Übersicht über die
-  // registrierten Projekte (~/.hermes/projects.yaml). Bewusst in "Mehr" statt
-  // in den 5 primären Tabs/mobileTabs — die Primaries sind die kuratierte
-  // "tägliche Wirbelsäule" (Fleet/Start/Terminal/Statistik/Regal) und haben
-  // seit deren Fixierung keinen weiteren Zugang bekommen (Stratege/Schmiede/
-  // Diktat liefen alle über diesen Weg). Phone-Erreichbarkeit ist über das
-  // mobile "Mehr"-Sheet identisch zu diesen (2 Taps), siehe DESIGN.md UX-
-  // Kontrakt Punkt 1 ("in höchstens zwei Interaktionen").
-  { id: "projekte", label: de.tabs.projekte, path: "/control/projekte", icon: FolderGit2 },
-  // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
-  // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
-  { id: "lanes", label: "Lanes", path: "/control/lanes", icon: Shield },
-  // System (S1-Fusion): Druck + Ops Radar + Puls in einer Leitstand-Ansicht.
-  { id: "system", label: "System", path: "/control/system", icon: Server },
-  { id: "scorecard", label: "Scorecard", path: "/control/scorecard", icon: BadgeCheck },
-  // Hebel (S7): Kosten-SSOT-Tab auf dem usage-facts.v1 Read-Pfad. Label literal
-  // (wie "Lanes"/"Diktat"): kein Edit an i18n/de.ts paralleler Sessions.
-  { id: "hebel", label: "Hebel", path: "/control/hebel", icon: Gauge },
-
-  // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
-  // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.
-  { id: "research", label: "Recherche", path: "/control/research", icon: SearchCheck },
-  { id: "autoresearch", label: de.tabs.autoresearch, path: "/control/autoresearch", icon: FlaskConical },
-  // Prompt-Schmiede: Copy-Paste-Generator für Agent-Steuerbefehle (kein Dispatch).
-  { id: "schmiede", label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
-  { id: "stratege", label: "Stratege", path: "/control/stratege", icon: Lightbulb },
-  { id: "designBoard", label: "Design", path: "/control/design-board", icon: PenTool },
-  // Label literal (wie "Lanes"): kein Edit an i18n/de.ts paralleler Sessions.
-  { id: "diktat", label: "Diktat", path: "/control/diktat", icon: Mic2 },
-];
+// Rail, Bottom-Bar und "Mehr" lesen alle aus der einen Route-Tabelle in
+// ../navigation.ts (UI/UX-Iteration 3): primaryRoutes = die 5 täglichen
+// Wirbelsäulen-Tabs (Fleet · Start · Terminal · Statistik · Regal — identisch
+// für Rail und das 5+1-Slot-Grid der mobilen Bottom-Bar), moreRoutes = die
+// demoted Kontrollflächen im "Mehr"-Flyout/-Sheet.
 
 const secondaryNav = [
   { label: "Sessions", path: "/sessions", icon: MessageSquare },
@@ -85,15 +30,15 @@ const secondaryNav = [
   { label: "Konfig", path: "/config", icon: Settings },
 ];
 
-// Lookup für Masthead-Route-Label + Rail-Pin: primäre + sekundäre Tabs in
-// einer Struktur (moreTabs deckt alle ControlTab-Werte außerhalb der 5
-// Primaries ab; "overview"/"pulse"/… sind Redirect-Zwischenzustände ohne
-// eigenen Eintrag — navLabel fällt dafür sicher auf "Control" zurück).
-type NavEntry = { id: ControlTab; label: string; path: string; icon: React.ComponentType<{ className?: string }> };
+// Lookup für Masthead-Route-Label + Rail-Pin: die Route-Tabelle deckt jeden
+// ControlTab-Wert ab; der "Control"-Fallback in navLabel bleibt defensiv.
+const navLookup: Record<ControlTab, ControlRouteEntry> = Object.fromEntries(
+  [...primaryRoutes, ...moreRoutes].map((item) => [item.id, item]),
+) as Record<ControlTab, ControlRouteEntry>;
 
-const navLookup: Partial<Record<ControlTab, NavEntry>> = Object.fromEntries(
-  [...tabs, ...moreTabs].map((item): [ControlTab, NavEntry] => [item.id, { id: item.id, label: item.label, path: item.path, icon: item.icon }]),
-);
+// 5 Slots + "Mehr" = 6-Spalten-Grid der mobilen Bottom-Bar: die 5 Primaries
+// SIND die mobilen Slots (Fleet zuerst, Operator-Entscheid 2026-07-03).
+const mobileTabs = primaryRoutes;
 
 function navLabel(active: ControlTab): string {
   return navLookup[active]?.label ?? "Control";
@@ -109,10 +54,12 @@ interface Props {
   inboxTotal: number;
   /** Worst tone present in the inbox — colours the Postfach badge. */
   inboxTone: ToneName;
-  /** Neue Bibliothek-Einträge seit dem letzten Besuch — badged den Lesesaal-Tab. */
-  libraryUnread?: number;
-  /** Offene Strategen-Vorschläge — badged den Stratege-Tab. */
-  strategistCount?: number;
+  /** Neue Bibliothek-Einträge seit dem letzten Besuch — badged den Lesesaal-Tab.
+   *  `null` = Quelle nicht lesbar → KEIN Badge (Canon: unknown bleibt unknown, nie 0). */
+  libraryUnread?: number | null;
+  /** Offene Strategen-Vorschläge — badged den Stratege-Tab.
+   *  `null` = Quelle nicht lesbar → KEIN Badge (Canon: unknown bleibt unknown, nie 0). */
+  strategistCount?: number | null;
   health: {
     data: SystemHealthResponse | null;
     error: string | null;
@@ -141,8 +88,9 @@ interface BadgeInfo { count: number; cls: string }
 // One badge model for every nav surface: the Postfach tab carries the live
 // "needs me" total (tone-coloured), Autoresearch keeps its open-proposal count
 // (relevant, falls es je in die Haupt-Nav zurückkehrt), die Bibliothek zählt
-// ungelesene Lesesaal-Einträge.
-function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName, libraryUnread: number, strategistCount: number): BadgeInfo | null {
+// ungelesene Lesesaal-Einträge. `null`-Zähler (Quelle ladend/fehlgeschlagen)
+// rendern KEINEN Badge — unknown bleibt unknown, nie 0-as-"keine Aktivität".
+function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, inboxTone: ToneName, libraryUnread: number | null, strategistCount: number | null): BadgeInfo | null {
   if (tab === "inbox" && inboxTotal > 0) {
     const cls = inboxTone === "red" || inboxTone === "rose" ? "hc-badge-red" : inboxTone === "amber" ? "hc-badge-amber" : "hc-badge-accent";
     return { count: inboxTotal, cls };
@@ -150,10 +98,10 @@ function tabBadge(tab: ControlTab, openProposals: number, inboxTotal: number, in
   if (tab === "autoresearch" && openProposals > 0) {
     return { count: openProposals, cls: "hc-badge-accent" };
   }
-  if (tab === "bibliothek" && libraryUnread > 0) {
+  if (tab === "bibliothek" && libraryUnread != null && libraryUnread > 0) {
     return { count: libraryUnread, cls: "hc-badge-accent" };
   }
-  if (tab === "stratege" && strategistCount > 0) {
+  if (tab === "stratege" && strategistCount != null && strategistCount > 0) {
     return { count: strategistCount, cls: "hc-badge-accent" };
   }
   return null;
@@ -163,8 +111,8 @@ interface NavBadgeArgs {
   openProposals: number;
   inboxTotal: number;
   inboxTone: ToneName;
-  libraryUnread: number;
-  strategistCount: number;
+  libraryUnread: number | null;
+  strategistCount: number | null;
 }
 
 export function ControlShell(props: Props) {
@@ -176,7 +124,7 @@ export function ControlShell(props: Props) {
   // per-view mastheads; that legacy mechanism (route-keyed `hasOwnMasthead`,
   // the hidden side-effect-only NotificationBridge mount, the padding fork)
   // is retired along with them — no route branching left here at all.
-  const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? 0, strategistCount: strategistCount ?? 0 };
+  const badgeArgs: NavBadgeArgs = { openProposals, inboxTotal, inboxTone, libraryUnread: libraryUnread ?? null, strategistCount: strategistCount ?? null };
 
   return (
     <div data-density={density} className="hc-page flex min-h-0">
@@ -211,9 +159,11 @@ export function ControlShell(props: Props) {
 /** Die eine geteilte Puls-Leiste für jede Route (W3-3: keine Ausnahmen mehr) —
  *  DESIGN.md "Puls-Leiste contract" / SHELL-SPEC.md W2-b. Rechts die geteilten
  *  Utilities — ⌘K nur unterhalb von `tab:` (die Rail trägt ihr eigenes ab
- *  `tab:`). */
+ *  `tab:`). Liveness-Dedup (UI/UX-Iteration 2): Gateway-Zustand tragen das
+ *  Puls-Leisten-Instrument + die Rail-LED; die alte StatusDots-Pille und die
+ *  Bronze-"Live"-Chip sind entfallen, übrig bleibt das LiveSignal (LED+Label,
+ *  nur <tab — ab `tab` deckt die Rail-LED den Verbindungs-Slot). */
 function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; pulse: Props["pulse"]; onOpenCommand: () => void }) {
-  const liveState = useLiveStatus();
   const { gateway, stale, title } = useGatewayHealth(health);
   return (
     <div data-testid="control-masthead">
@@ -227,11 +177,27 @@ function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: Con
         gateway={{ status: gateway, stale, title }}
       >
         <NotificationBridge inbox={inbox} />
-        <span className={cn("rounded-full border px-2 py-0.5 text-[10px]", liveState === "connected" ? "border-live/30 text-live" : "border-status-warn/30 text-status-warn")}>Live: {liveState === "connected" ? "verbunden" : liveState === "reconnecting" ? "verbindet" : "aus"}</span>
-        <StatusDots health={health} demoted={Boolean(pulse)} />
+        <LiveSignal />
         <CommandButton onOpen={onOpenCommand} />
       </PulsLeiste>
     </div>
+  );
+}
+
+/** SSE-Live-Verbindung als LED + Label (Akzent-Doktrin Regel 3: Bronze rendert
+ *  NIE als Chip — die alte `border-live/30 text-live`-Pille war genau das).
+ *  Status-Trio-Vokabular wie das Gateway-Instrument der Puls-Leiste: ok =
+ *  verbunden, warn = verbindet, idle = aus. Nur <tab sichtbar: ab `tab`
+ *  tragen Puls-Leisten-Gateway-Instrument + Rail-GatewayLed die Liveness. */
+function LiveSignal() {
+  const liveState = useLiveStatus();
+  const led = liveState === "connected" ? "hc-led-live" : liveState === "reconnecting" ? "hc-led-warn" : "hc-led-idle";
+  const label = liveState === "connected" ? "verbunden" : liveState === "reconnecting" ? "verbindet" : "aus";
+  return (
+    <span data-testid="live-signal" className="flex items-center gap-1.5 text-micro text-ink-2 tab:hidden">
+      <span className={cn("hc-led h-1.5 w-1.5 rounded-full", led)} />
+      Live: {label}
+    </span>
   );
 }
 
@@ -249,7 +215,7 @@ interface RailProps extends NavBadgeArgs {
 function Rail({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch, commandButtonRef, onOpenCommand, health }: RailProps) {
   // Aktiver Tab außerhalb der 5 Primaries → als 6. Slot pinnen, damit der
   // aktuelle Standort auf der Rail immer sichtbar bleibt.
-  const pinned = tabs.some((tab) => tab.id === active) ? undefined : navLookup[active];
+  const pinned = primaryRoutes.some((tab) => tab.id === active) ? undefined : navLookup[active];
   return (
     <nav
       aria-label="Hauptnavigation"
@@ -267,7 +233,7 @@ function Rail({ active, openProposals, inboxTotal, inboxTone, libraryUnread, str
         <div className="mb-2 grid h-11 w-11 place-items-center rounded-card border border-live bg-live/10 text-live">
           <Sparkles className="h-5 w-5" />
         </div>
-        {tabs.map((tab) => (
+        {primaryRoutes.map((tab) => (
           <RailItem
             key={tab.id}
             icon={tab.icon}
@@ -325,7 +291,7 @@ function RailItem({ icon: Icon, label, active, badge, to, onClick, onPrefetch, p
     <>
       {active ? <span className="absolute inset-y-1 left-0 w-[3px] rounded-full bg-live" /> : null}
       <Icon className="h-[22px] w-[22px]" />
-      <span className={cn("text-[11px] leading-none", pinned && "w-full truncate text-center")}>{label}</span>
+      <span className={cn("text-micro leading-none", pinned && "w-full truncate text-center")}>{label}</span>
       {badge ? <span className={cn("hc-badge absolute -right-1 -top-1", badge.cls)}>{badge.count}</span> : null}
     </>
   );
@@ -364,12 +330,12 @@ function RailMoreFlyout() {
       <div
         data-testid="rail-more-flyout"
         className={cn(
-          "fixed bottom-4 left-[6rem] z-50 w-56 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-1 p-2 shadow-xl transition-opacity duration-150 ease-out motion-reduce:transition-none",
+          "fixed bottom-4 left-[6rem] z-50 w-56 max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-1 p-2 shadow-floating transition-opacity duration-150 ease-out motion-reduce:transition-none",
           open ? "visible opacity-100" : "invisible opacity-0",
         )}
       >
-        <p className="px-3 pb-1 pt-1 text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
-        {moreTabs.map(renderItem)}
+        <p className="px-3 pb-1 pt-1 text-micro font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
+        {moreRoutes.map(renderItem)}
         <div className="my-1.5 border-t border-line" />
         {secondaryNav.map(renderItem)}
       </div>
@@ -390,13 +356,14 @@ function MoreSheet({ onClose }: { onClose: () => void }) {
   };
   // Primäre Tabs außerhalb der 5-Slot-Bottom-Bar sind auf Mobile sonst nur per
   // Direkt-URL erreichbar — hier mit ins "Mehr"-Sheet holen (aktuell stets
-  // leer, da `tabs` === `mobileTabs`; bleibt resilient für künftige Primaries).
-  const overflowPrimary = tabs.filter((tab) => !mobileTabs.some((m) => m.id === tab.id));
+  // leer, da die Bottom-Bar alle Primaries trägt; bleibt resilient für
+  // künftige Primaries jenseits der 5 Slots).
+  const overflowPrimary = primaryRoutes.filter((tab) => !mobileTabs.some((m) => m.id === tab.id));
   return (
     <Overlay onClose={onClose} ariaLabel="Mehr">
-      <p className="text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
-      <div className="mt-2 grid gap-0.5">{[...overflowPrimary, ...moreTabs].map(renderItem)}</div>
-      <p className="mt-4 text-[10px] font-display uppercase tracking-[0.08em] text-ink-3">System</p>
+      <p className="text-micro font-display uppercase tracking-[0.08em] text-ink-3">Ansichten</p>
+      <div className="mt-2 grid gap-0.5">{[...overflowPrimary, ...moreRoutes].map(renderItem)}</div>
+      <p className="mt-4 text-micro font-display uppercase tracking-[0.08em] text-ink-3">System</p>
       <div className="mt-2 grid gap-0.5">{secondaryNav.map(renderItem)}</div>
     </Overlay>
   );
@@ -413,7 +380,7 @@ interface BottomBarProps extends NavBadgeArgs {
 /** <`tab` (600px): fixed Bottom-Bar — funktional wie bisher (5 Primaries +
  *  Mehr → MoreSheet), Bronze-Restyle (surface-1/95 Blur, 2px Top-Indikator). */
 function BottomBar({ active, openProposals, inboxTotal, inboxTone, libraryUnread, strategistCount, onNavigate, onPrefetch, moreOpen, onToggleMore }: BottomBarProps) {
-  const moreActive = !tabs.some((tab) => tab.id === active);
+  const moreActive = !primaryRoutes.some((tab) => tab.id === active);
   return (
     <nav
       aria-label="Navigation"
@@ -435,7 +402,7 @@ function BottomBar({ active, openProposals, inboxTotal, inboxTone, libraryUnread
           onClick={onToggleMore}
           aria-label="Mehr"
           aria-expanded={moreOpen}
-          className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-[11px] text-ink-3", moreActive && "text-live")}
+          className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-micro text-ink-3", moreActive && "text-live")}
         >
           <MoreHorizontal className="h-5 w-5" />
           <span className="max-w-full truncate px-0.5">Mehr</span>
@@ -480,8 +447,9 @@ function useDismissibleMenu<T extends HTMLElement = HTMLDivElement>() {
   return { open, setOpen, ref };
 }
 
-/** Geteilte Health-Ableitung für StatusDots (Masthead) + GatewayLed (Rail) —
- *  eine Quelle für Gateway-Status/Stale/Zuletzt-aktuell-Titel. */
+/** Geteilte Health-Ableitung für das Puls-Leisten-Gateway-Instrument (Masthead)
+ *  + GatewayLed (Rail) — eine Quelle für Gateway-Status/Stale/Zuletzt-aktuell-
+ *  Titel. (Die Legacy-StatusDots-Pille ist mit UI/UX-Iteration 2 entfallen.) */
 function useGatewayHealth(health: Props["health"]): { gateway: HealthStatus | "unknown"; stale: boolean; title: string } {
   const gateway: HealthStatus | "unknown" = health.data?.subsystems.gateway.status ?? (health.error ? "offline" : "unknown");
   const stale = Boolean(health.isStale);
@@ -491,46 +459,33 @@ function useGatewayHealth(health: Props["health"]): { gateway: HealthStatus | "u
   return { gateway, stale, title };
 }
 
-/** `demoted`: die Puls-Leiste trägt ihr eigenes Gateway-Instrument (ab `tab`) —
- *  wenn `pulse` (also echte Instrument-Werte) vorliegt, ist diese Legacy-Pille
- *  darunter redundant und zeigt erst ab `lg`, statt schon ab `md` zu doppeln. */
-function StatusDots({ health, demoted }: { health: Props["health"]; demoted?: boolean }) {
-  const { gateway, stale, title } = useGatewayHealth(health);
-  const dashboard = health.data?.overall ?? (health.error ? "offline" : "unknown");
-  return (
-    <div data-testid="status-dots" title={title} className={cn("hidden items-center gap-2 rounded-full border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2", demoted ? "lg:flex" : "md:flex")}>
-      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />Hermes<span className="font-data">:9119</span><span className="font-data text-ink-3">{healthLabel(gateway, stale)}</span>
-      <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(dashboard, stale))} />Dashboard<span className="font-data text-ink-3">{healthLabel(dashboard, stale)}</span>
-    </div>
-  );
-}
-
-/** Rail-Bottom-Cluster: Gateway-LED + Label (aus der StatusDots-Ableitung). */
+/** Rail-Bottom-Cluster: Gateway-LED + Label (aus der geteilten Ableitung). */
 function GatewayLed({ health }: { health: Props["health"] }) {
   const { gateway, stale, title } = useGatewayHealth(health);
   return (
     <div title={title} className="flex flex-col items-center gap-1 py-1">
       <span className={cn("hc-led h-2 w-2 rounded-full", healthLed(gateway, stale))} />
-      <span className="text-[10px] text-ink-3">Gateway</span>
+      <span className="text-micro text-ink-3">Gateway</span>
     </div>
   );
 }
 
-function TabButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof tabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
+function TabButton({ tab, active, badge, onClick, onPrefetch }: { tab: (typeof mobileTabs)[number]; active: boolean; badge: BadgeInfo | null; onClick: () => void; onPrefetch?: () => void }) {
   const Icon = tab.icon;
+  const mobileLabel = tab.mobileLabel ?? tab.label;
   return (
     <button
       type="button"
       onClick={onClick}
       onTouchStart={onPrefetch}
       onFocus={onPrefetch}
-      aria-label={tab.label.includes(tab.mobileLabel) ? tab.label : `${tab.label} (${tab.mobileLabel})`}
+      aria-label={tab.label.includes(mobileLabel) ? tab.label : `${tab.label} (${mobileLabel})`}
       aria-current={active ? "page" : undefined}
-      className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-[11px] text-ink-3", active && "text-live")}
+      className={cn("relative flex min-h-12 flex-col items-center justify-center gap-1 text-micro text-ink-3", active && "text-live")}
     >
       {active ? <span className="absolute inset-x-2 top-0 h-0.5 rounded-full bg-live" /> : null}
       <Icon className="h-5 w-5" />
-      <span className="max-w-full truncate px-0.5">{tab.mobileLabel}</span>
+      <span className="max-w-full truncate px-0.5">{mobileLabel}</span>
       {badge ? <span className={cn("hc-badge absolute right-4 top-2", badge.cls)}>{badge.count}</span> : null}
     </button>
   );
