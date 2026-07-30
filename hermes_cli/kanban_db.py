@@ -13039,20 +13039,6 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
-class DirtyWriterWorktreeError(ValueError):
-    """An active chain writer tried to hand off an uncommitted worktree."""
-
-    def __init__(self, workspace_path: str, dirty_paths: list[str]):
-        self.workspace_path = workspace_path
-        self.dirty_paths = list(dirty_paths)
-        paths = ", ".join(dirty_paths) if dirty_paths else "status unavailable"
-        super().__init__(
-            "completion blocked: active writer worktree has uncommitted changes "
-            f"({paths}). Commit intentional files or remove accidental changes, "
-            "then retry kanban_complete."
-        )
-
-
 class WorkerGateError(Exception):
     """Raised by _submit_for_review when the enforced light worker gate
     (kanban.worker_gate) fails. The submission is aborted and the task stays
@@ -16352,9 +16338,7 @@ def complete_task(
     else:
         verified_cards = []
 
-    _refresh_worktree_writer_candidate(
-        conn, task_id, expected_run_id, require_clean=True,
-    )
+    _refresh_worktree_writer_candidate(conn, task_id, expected_run_id)
 
     # K8 workflow-step routing (D7 L2): when the task is opted into a workflow
     # template and its current step is NOT the last, advance to the next step
@@ -21178,57 +21162,28 @@ def _worktree_writer_lease_identity(
     return f"path:{worktree_path}", root_id, str(worktree_path)
 
 
-def _workspace_release_details(
-    workspace_path: str,
-) -> tuple[Optional[str], bool, list[str]]:
+def _workspace_release_state(workspace_path: str) -> tuple[Optional[str], bool]:
     path = Path(workspace_path)
     head = _git_head_sha_for_workspace(workspace_path)
     if head is None:
-        return None, path.exists(), []
+        return None, path.exists()
     try:
         proc = subprocess.run(
-            [
-                "git", "-c", "core.quotePath=false", "-C", str(path),
-                "status", "--porcelain=v1", "-z", "--untracked-files=all",
-            ],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=10, check=False,
+            ["git", "-C", str(path), "status", "--porcelain"],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return head, False, []
-    if proc.returncode != 0:
-        return head, False, []
-    records = [record for record in proc.stdout.split("\0") if record]
-    dirty_paths: list[str] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
-        status = record[:2]
-        dirty_paths.append(record[3:])
-        if status[0] in ("R", "C") or status[1] in ("R", "C"):
-            index += 1
-            if index < len(records):
-                dirty_paths.append(records[index])
-        index += 1
-    return head, not dirty_paths, sorted(set(dirty_paths))
-
-
-def _workspace_release_state(workspace_path: str) -> tuple[Optional[str], bool]:
-    head, clean, _dirty_paths = _workspace_release_details(workspace_path)
-    return head, clean
+        return head, False
+    return head, proc.returncode == 0 and not proc.stdout.strip()
 
 
 def _refresh_worktree_writer_candidate(
-    conn: sqlite3.Connection,
-    task_id: str,
-    expected_run_id: Optional[int],
-    *,
-    require_clean: bool = False,
+    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int]
 ) -> None:
     if expected_run_id is None:
         return
     lease = conn.execute(
-        "SELECT l.worktree_key, l.claim_lock, l.workspace_path, l.candidate_sha "
+        "SELECT l.worktree_key, l.claim_lock, l.workspace_path "
         "FROM worktree_writer_leases l JOIN tasks t ON t.id = l.task_id "
         "WHERE l.task_id = ? AND l.run_id = ? "
         "AND t.current_run_id = l.run_id AND t.claim_lock = l.claim_lock",
@@ -21236,33 +21191,8 @@ def _refresh_worktree_writer_candidate(
     ).fetchone()
     if lease is None:
         return
-    if require_clean and not lease["worktree_key"].startswith("chain:"):
-        return
-    if require_clean:
-        head, clean, dirty_paths = _workspace_release_details(
-            lease["workspace_path"]
-        )
-    else:
-        head, clean = _workspace_release_state(lease["workspace_path"])
-        dirty_paths = []
+    head, clean = _workspace_release_state(lease["workspace_path"])
     if not clean:
-        if require_clean:
-            with write_txn(conn):
-                _append_event(
-                    conn,
-                    task_id,
-                    "completion_blocked_dirty_worktree",
-                    {
-                        "reason_class": "dirty_writer_worktree",
-                        "worktree_key": lease["worktree_key"],
-                        "workspace_path": lease["workspace_path"],
-                        "observed_sha": head,
-                        "candidate_sha": lease["candidate_sha"],
-                        "dirty_paths": dirty_paths,
-                    },
-                    run_id=expected_run_id,
-                )
-            raise DirtyWriterWorktreeError(lease["workspace_path"], dirty_paths)
         return
     with write_txn(conn):
         conn.execute(
