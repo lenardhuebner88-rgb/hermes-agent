@@ -33,14 +33,15 @@ const DEFAULT_CLASSES: SubtabChipClasses = {
  * and warning dot, one marked active. Extracted from the inlined `fleet-chip`
  * pattern in FleetView so S2–S4 stop re-inventing it.
  *
- * Semantics: WAI-ARIA tabs with manual activation — `role="tablist"` /
- * `role="tab"` + `aria-selected`, roving tabindex, ArrowLeft/ArrowRight wrap,
- * Home/End jump; Enter/Space (native button activation) selects. The views
- * have no tabpanel wiring, so tabs carry no `aria-controls`.
+ * Semantics: a `role="group"` of toggle buttons (`aria-pressed`) with roving
+ * tabindex — ArrowLeft/ArrowRight wrap, Home/End jump; Enter/Space (native
+ * button activation) selects. Deliberately NOT `role="tablist"`/`role="tab"`:
+ * the views have no tabpanel wiring, and tabs without `aria-controls`/
+ * tabpanels are a false semantics promise (review finding 2026-07-30).
  *
- * Back-compat: chips keep their `aria-pressed` mirror — locked consumers
+ * Back-compat: chips keep their `aria-pressed` state — locked consumers
  * (FleetView's active-chip scroll-into-view selector `[aria-pressed="true"]`)
- * and older tests pin it. It is redundant next to `aria-selected` but harmless.
+ * and older tests pin it.
  *
  * DESIGN.md rule 6 caveat: these chips ARE navigation controls, not the
  * status-only chips of rule 6 — the surrounding view keeps the current state
@@ -87,7 +88,7 @@ export function SubtabChips<T extends string>({
 
   return (
     <div
-      role="tablist"
+      role="group"
       aria-label={ariaLabelPrefix}
       className={cn("flex gap-1.5 overflow-x-auto scrollbar-none", className)}
     >
@@ -101,8 +102,6 @@ export function SubtabChips<T extends string>({
               else buttonRefs.current.delete(item.id);
             }}
             type="button"
-            role="tab"
-            aria-selected={on}
             aria-pressed={on}
             tabIndex={item.id === tabbableId ? 0 : -1}
             className={cn(classes.chip, on && classes.chipActive)}

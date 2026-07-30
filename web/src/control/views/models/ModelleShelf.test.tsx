@@ -111,7 +111,7 @@ describe("ModelleShelf: ehrliche Benchmark-Abdeckung", () => {
     render(<ModelleShelf />);
 
     await screen.findByText("anthropic/claude-opus-4.8");
-    fireEvent.click(screen.getByRole("tab", { name: "Modelle Benchmarks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Modelle Benchmarks" }));
 
     await waitFor(() => {
       expect(screen.getByText(/1 von 4 unabhängig gescoret/)).toBeTruthy();

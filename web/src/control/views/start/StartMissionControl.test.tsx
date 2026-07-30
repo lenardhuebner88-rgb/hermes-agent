@@ -202,4 +202,17 @@ describe("StartMissionControl", () => {
     expect(html).not.toContain("kein Prozent-Signal");
     expect(html).not.toContain("Autonomie");
   });
+
+  it("renders unknown tmux panes as dash, never as fabricated zero (catch(0) canon)", () => {
+    installFixtures();
+    hooks.useHostUsage.mockReturnValue(poll(null));
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <StartMissionControl density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("— tmux");
+    expect(html).not.toContain("0 tmux");
+  });
 });

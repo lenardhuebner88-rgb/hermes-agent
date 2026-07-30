@@ -152,14 +152,14 @@ describe("SessionsSection", () => {
     expect(screen.getByText("Hauptsession")).toBeTruthy();
     expect(screen.queryByText("Alte Session")).toBeNull();
 
-    fireEvent.click(screen.getByRole("tab", { name: /Alle/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Alle/ }));
     expect(screen.getByText("Alte Session")).toBeTruthy();
     expect(screen.getByText("beendet")).toBeTruthy();
   });
 
   it("shows only live sessions under Aktiv", () => {
     renderSection([ROOT, makeSession({ id: "idle", label: "Idle Session", is_active: false })]);
-    fireEvent.click(screen.getByRole("tab", { name: /Aktiv/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Aktiv/ }));
     expect(screen.getByText("Hauptsession")).toBeTruthy();
     expect(screen.queryByText("Idle Session")).toBeNull();
   });

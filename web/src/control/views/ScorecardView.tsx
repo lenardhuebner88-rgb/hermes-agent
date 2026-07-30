@@ -109,7 +109,7 @@ export function ScorecardView() {
         description="Eine Entscheidung, dann ihre Begründung."
         actions={(
           <div className={cn(
-            "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-[11px] font-semibold",
+            "inline-flex min-h-10 w-fit items-center gap-2 rounded-full border px-3 text-micro font-semibold",
             sourceState === "fresh"
               ? "border-status-ok/40 text-status-ok"
               : "border-status-warn/40 text-status-warn",

@@ -48,7 +48,7 @@ export function StaleBadge({ isStale, lastUpdated, errorObj, error, now, pollInt
 }
 
 export function ModeBadge({ mode }: { mode: "skill" | "code" }) {
-  return mode === "code" ? <Badge tone="warning">Code-Änderung</Badge> : <Badge className="border-live/30 bg-live/10 text-live">Skill</Badge>;
+  return mode === "code" ? <Badge tone="warning">Code-Änderung</Badge> : <Badge className="border-line bg-surface-2 text-ink-2">Skill</Badge>;
 }
 
 export function MeterBar({ label, value, max, tone = "cyan" }: { label: string; value: number; max: number; tone?: "cyan" | "amber" | "red" }) {

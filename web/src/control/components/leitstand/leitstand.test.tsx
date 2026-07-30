@@ -12,8 +12,8 @@ afterEach(cleanup);
 /**
  * Guards for the S1 Leitstand building blocks. These prove the shared idiom
  * behaves as the extracted views rely on it — especially SubtabChips, whose
- * tablist semantics and aria-label contract the FleetView tests
- * (`getByRole("tab", { name: "Subtab Plan" })`) pin.
+ * group-of-toggle-buttons semantics and aria-label contract the FleetView
+ * tests (`getByRole("button", { name: "Subtab Plan" })`) pin.
  */
 describe("leitstand building blocks", () => {
   describe("SectionHeader", () => {
@@ -129,31 +129,32 @@ describe("leitstand building blocks", () => {
       { id: "risiko", label: "Risiko", warn: true },
     ];
 
-    it("exposes tablist semantics: role=tab, aria-selected, aria-pressed mirror, FleetView aria-label contract", () => {
+    it("exposes group-of-toggle-buttons semantics: aria-pressed state, FleetView aria-label contract", () => {
       render(<SubtabChips items={items} active="heute" onSelect={() => {}} ariaLabelPrefix="Subtab" />);
-      expect(screen.getByRole("tablist", { name: "Subtab" })).toBeTruthy();
-      const heute = screen.getByRole("tab", { name: "Subtab Heute" });
-      expect(heute.getAttribute("aria-selected")).toBe("true");
-      // aria-pressed mirror: locked FleetView code queries [aria-pressed="true"].
+      expect(screen.getByRole("group", { name: "Subtab" })).toBeTruthy();
+      const heute = screen.getByRole("button", { name: "Subtab Heute" });
+      // aria-pressed carries the state: locked FleetView code queries [aria-pressed="true"].
       expect(heute.getAttribute("aria-pressed")).toBe("true");
-      expect(screen.getByRole("tab", { name: "Subtab Plan" }).getAttribute("aria-selected")).toBe("false");
+      expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("false");
+      // No false tab promise: chips are plain toggle buttons, not role=tab.
+      expect(screen.queryByRole("tab")).toBeNull();
       // A warn chip appends the warning suffix to its aria-label.
-      expect(screen.getByRole("tab", { name: "Subtab Risiko — enthält Warnungen" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Subtab Risiko — enthält Warnungen" })).toBeTruthy();
     });
 
-    it("keeps a roving tabindex: only the active tab is tabbable by default", () => {
+    it("keeps a roving tabindex: only the active chip is tabbable by default", () => {
       render(<SubtabChips items={items} active="plan" onSelect={() => {}} ariaLabelPrefix="Subtab" />);
-      expect(screen.getByRole("tab", { name: "Subtab Plan" }).tabIndex).toBe(0);
-      expect(screen.getByRole("tab", { name: "Subtab Heute" }).tabIndex).toBe(-1);
-      expect(screen.getByRole("tab", { name: "Subtab Risiko — enthält Warnungen" }).tabIndex).toBe(-1);
+      expect(screen.getByRole("button", { name: "Subtab Plan" }).tabIndex).toBe(0);
+      expect(screen.getByRole("button", { name: "Subtab Heute" }).tabIndex).toBe(-1);
+      expect(screen.getByRole("button", { name: "Subtab Risiko — enthält Warnungen" }).tabIndex).toBe(-1);
     });
 
     it("moves focus with ArrowRight/ArrowLeft (wrapping) and Home/End without selecting", () => {
       const onSelect = vi.fn();
       render(<SubtabChips items={items} active="heute" onSelect={onSelect} ariaLabelPrefix="Subtab" />);
-      const heute = screen.getByRole("tab", { name: "Subtab Heute" });
-      const plan = screen.getByRole("tab", { name: "Subtab Plan" });
-      const risiko = screen.getByRole("tab", { name: "Subtab Risiko — enthält Warnungen" });
+      const heute = screen.getByRole("button", { name: "Subtab Heute" });
+      const plan = screen.getByRole("button", { name: "Subtab Plan" });
+      const risiko = screen.getByRole("button", { name: "Subtab Risiko — enthält Warnungen" });
 
       heute.focus();
       fireEvent.keyDown(heute, { key: "ArrowRight" });
@@ -176,14 +177,14 @@ describe("leitstand building blocks", () => {
       expect(onSelect).not.toHaveBeenCalled();
     });
 
-    it("selects via Enter/Space on the focused tab and re-anchors the roving tabindex on the new active tab", () => {
+    it("selects via Enter/Space on the focused chip and re-anchors the roving tabindex on the new active chip", () => {
       function Harness() {
         const [active, setActive] = useState("heute");
         return <SubtabChips items={items} active={active} onSelect={setActive} ariaLabelPrefix="Subtab" />;
       }
       render(<Harness />);
-      const heute = screen.getByRole("tab", { name: "Subtab Heute" });
-      const risiko = screen.getByRole("tab", { name: "Subtab Risiko — enthält Warnungen" });
+      const heute = screen.getByRole("button", { name: "Subtab Heute" });
+      const risiko = screen.getByRole("button", { name: "Subtab Risiko — enthält Warnungen" });
 
       heute.focus();
       fireEvent.keyDown(heute, { key: "End" });
@@ -191,7 +192,7 @@ describe("leitstand building blocks", () => {
       // jsdom does not synthesize click from Enter on keyDown — activate directly.
       fireEvent.click(risiko);
 
-      expect(risiko.getAttribute("aria-selected")).toBe("true");
+      expect(risiko.getAttribute("aria-pressed")).toBe("true");
       expect(risiko.tabIndex).toBe(0);
       expect(heute.tabIndex).toBe(-1);
     });
@@ -200,7 +201,7 @@ describe("leitstand building blocks", () => {
       const onSelect = vi.fn();
       render(<SubtabChips items={items} active="heute" onSelect={onSelect} ariaLabelPrefix="Subtab" />);
       expect(screen.getByText("2").tagName.toLowerCase()).toBe("sup");
-      fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
+      fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
       expect(onSelect).toHaveBeenCalledWith("plan");
     });
 
@@ -214,7 +215,7 @@ describe("leitstand building blocks", () => {
           classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
         />,
       );
-      const active = screen.getByRole("tab", { name: "Subtab Plan" });
+      const active = screen.getByRole("button", { name: "Subtab Plan" });
       expect(active.className).toContain("fleet-chip");
       expect(active.className).toContain("fleet-chip-on");
     });

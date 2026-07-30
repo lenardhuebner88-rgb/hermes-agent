@@ -283,9 +283,8 @@ describe("Lesesaal: zusammengeführte Receipt-Kategorie (P8a)", () => {
     render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
 
     const panel = lesesaalPanel();
-    // Kategorie-Chips sind SubtabChips (role=tab seit der Tablist-Semantik).
-    expect(await panel.findAllByRole("tab", { name: /Receipts$/ })).toHaveLength(1);
-    expect(panel.queryByRole("tab", { name: /Arbeit/ })).toBeNull();
+    // Kategorie-Chips sind SubtabChips (Toggle-Buttons, keine Tabs).
+    expect(await panel.findAllByRole("button", { name: /Receipts$/ })).toHaveLength(1);
     expect(panel.queryByRole("button", { name: /Arbeit/ })).toBeNull();
   });
 });
