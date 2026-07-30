@@ -183,7 +183,7 @@ function TimeAxisTrack({
           style={{ left: `${p50Pct}%` }}
           title={`${de.worker.timeAxisP50}: ${fmtDur(p50!)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-ok">{de.worker.timeAxisP50}</span>
+          <span className="absolute -top-0.5 left-1 text-micro text-status-ok">{de.worker.timeAxisP50}</span>
         </div>
       ) : null}
       {/* p90-Marker */}
@@ -193,7 +193,7 @@ function TimeAxisTrack({
           style={{ left: `${p90Pct}%` }}
           title={`${de.worker.timeAxisP90}: ${fmtDur(p90!)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-warn">{de.worker.timeAxisP90}</span>
+          <span className="absolute -top-0.5 left-1 text-micro text-status-warn">{de.worker.timeAxisP90}</span>
         </div>
       ) : null}
       {/* Budget-Marker */}
@@ -203,7 +203,7 @@ function TimeAxisTrack({
           style={{ left: `${budgetPct}%` }}
           title={`${de.worker.timeAxisBudget}: ${fmtDur(budget)}`}
         >
-          <span className="absolute -top-0.5 left-1 text-[0.6rem] text-status-alert">{de.worker.timeAxisBudget}</span>
+          <span className="absolute -top-0.5 left-1 text-micro text-status-alert">{de.worker.timeAxisBudget}</span>
         </div>
       ) : null}
       {/* „Jetzt"-Marker */}
@@ -575,7 +575,7 @@ export function WorkerCard({ worker, health, density, now, inspectLoading, onIns
               >
                 {de.worker.actions[key]}
               </Button>
-              <span className="px-1 text-[0.6rem] text-ink-3">{ACTION_EFFECT[key]}</span>
+              <span className="px-1 text-micro text-ink-3">{ACTION_EFFECT[key]}</span>
             </div>
           )) : null}
         </div>

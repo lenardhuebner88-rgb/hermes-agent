@@ -22,7 +22,7 @@ import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
 import { StaleBadge } from "../components/atoms";
 import { Disclosure } from "../components/primitives";
-import { SignalLabel, signalToneFromLegacy } from "../components/leitstand";
+import { SignalLabel, signalToneFromLegacy, ErrorNote, FreshnessStrip } from "../components/leitstand";
 
 import { ProposalQueue } from "./autoresearch/ProposalQueue";
 import { LoopControls } from "./autoresearch/LoopControls";
@@ -487,7 +487,7 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         </div>
       ) : null}
       {store.loading && open.length === 0 ? <div className="rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2">Quelle wird geprüft...</div> : null}
-      {store.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{store.error}</div> : null}
+      {store.error ? <ErrorNote message={store.error} onRetry={() => void store.reload()} /> : null}
       {busyNotice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><Spinner />{busyNotice}</div> : null}
       {latestActivity && latestActivityCard ? <LatestActivityPanel at={latestActivity.at} card={latestActivityCard} /> : null}
 
@@ -574,12 +574,13 @@ export function AutoresearchView({ density, store }: { density: Density; store: 
         onSkip={store.skip}
       />
 
-      {runs.error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{runs.error}</div> : null}
-      {runs.isStale || runs.error ? (
-        <div className="flex justify-end">
+      {runs.error ? <ErrorNote message={runs.error} onRetry={() => void runs.reload()} /> : null}
+      <div className="flex items-center justify-between gap-3">
+        <FreshnessStrip lastUpdated={runs.lastUpdated} onRefresh={() => runs.reload()} />
+        {runs.isStale || runs.error ? (
           <StaleBadge isStale={runs.isStale} lastUpdated={runs.lastUpdated} errorObj={runs.errorObj} error={runs.error} />
-        </div>
-      ) : null}
+        ) : null}
+      </div>
       <RunsList runs={runs.data?.runs ?? []} proposals={store.proposals} loading={runs.loading && !runs.data} />
       </div>
       </Disclosure>

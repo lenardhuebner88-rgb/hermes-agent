@@ -68,7 +68,7 @@ export function ProposalQueue({
             ) : null}
           </div>
           <ProposalCard proposal={current} density={density} busy={busy} onApply={onApply} onSkip={onSkip} showActions={false} />
-          <div className="sticky bottom-3 z-10 rounded-panel border border-line bg-surface-1/95 p-3 shadow-lg backdrop-blur sm:ml-auto sm:max-w-md">
+          <div className="sticky bottom-3 z-10 rounded-panel border border-line bg-surface-1/95 p-3 shadow-floating backdrop-blur sm:ml-auto sm:max-w-md">
             <div className="grid gap-2 sm:grid-cols-2">
               <Button outlined className="min-h-12 justify-center" onClick={() => { consumeFocusAt(index); onSkip(current); }} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>Ablehnen</Button>
               <Button className="min-h-12 justify-center" onClick={() => { consumeFocusAt(index); onApply(current); }} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>Annehmen</Button>

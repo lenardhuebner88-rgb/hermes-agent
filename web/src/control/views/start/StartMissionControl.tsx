@@ -114,7 +114,7 @@ function ProviderMatrixPanel({
             <div className="smc-matrix-scope" aria-label="Erfasste Host-Quellen">
               <span>Homeserver gesamt</span>
               <span>{totalSessions} Sessions</span>
-              <span>{scope?.active_tmux_panes ?? 0} tmux aktiv</span>
+              <span>{scope?.active_tmux_panes ?? "—"} tmux aktiv</span>
               {(scope?.sources ?? []).map((source) => <span key={source.source}>{source.label} {source.sessions}</span>)}
             </div>
             <div className="smc-matrix smc-matrix-head" aria-hidden>
@@ -406,7 +406,7 @@ export function StartMissionControl({ density }: { density: Density }) {
       </div>
 
       <div className="smc-instruments" aria-label="Tagesstatus">
-        <div><span>Sessions</span><strong>{hostUsage.data?.active_tmux_panes ?? 0} tmux · {liveWorkers} Worker</strong></div>
+        <div><span>Sessions</span><strong>{hostUsage.data?.active_tmux_panes ?? "—"} tmux · {liveWorkers} Worker</strong></div>
         <div><span>Blockaden</span><strong className={boardCounts.blocked ? "is-warn" : undefined}>{boardCounts.blocked} offen</strong></div>
         <div><span>Probleme</span><strong className={flow.failed ? "is-warn" : undefined}>{flow.failed} heute</strong></div>
         <div><span>Geliefert</span><strong>{flow.delivered} Vorhaben</strong></div>

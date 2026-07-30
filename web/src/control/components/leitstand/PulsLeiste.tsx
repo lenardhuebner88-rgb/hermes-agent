@@ -44,6 +44,16 @@ interface PulsLeisteProps {
  * Worker · Inbox · Kosten · Gateway — dieselbe Muskelgedächtnis-Geometrie
  * auf jeder View. Rein präsentational: KEIN eigenes Daten-Fetching, alle
  * Werte kommen von den bestehenden Hooks des Aufrufers.
+ *
+ * Compact-Vertrag (UI/UX-Iteration 1, 2026-07-30): die Instrumente waren
+ * `hidden tab:flex` — unter 600px verschwanden alle vier aus jeder Masthead
+ * und brachen damit den Puls-Leiste-Vertrag ("the same four live micro-
+ * instruments on every route") plus die UX-Regel "critical state is not
+ * removed". Jetzt liegt die Instrumenten-Zeile auf Compact als zweite,
+ * horizontal scrollbare Reihe UNTER Label + Utilities — gleiche vier
+ * Instrumente, gleiche Reihenfolge, Labels intakt (nie color-only, nie
+ * ohne Wert). Ab `tab` wieder die eine Zeile: Label links, Instrumente +
+ * Utilities rechts.
  */
 export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amber", kostenUsd, kostenIsEquivalent, gateway, children, onOpenCommand }: PulsLeisteProps) {
   const workerActive = typeof workers === "number" && workers > 0;
@@ -52,18 +62,30 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
   return (
     <div
       data-testid="puls-leiste"
-      className="flex items-center justify-between gap-3 border-b border-line bg-surface-1 px-4 py-3 sm:px-6 tab:h-14 lg:h-16 lg:px-8"
+      className="border-b border-line bg-surface-1 px-4 sm:px-6 lg:px-8"
     >
-      {/* Route-Identität darf nie verschwinden: KEIN `min-w-0` hier — die
-          rechte Instrumenten-/Utility-Seite ist die, die bei knappem Platz
-          (Medium-Tier + der bestehenden StatusDots-Pille) intern scrollt,
-          statt das Label auf 0 zusammenzuquetschen. */}
-      <div className="flex flex-col justify-center gap-0.5">
-        <p className="truncate font-display text-sec font-semibold uppercase tracking-[0.08em] text-ink tab:text-emph">{label}</p>
-        {subtitle ? <p className="truncate text-micro text-ink-3">{subtitle}</p> : null}
-      </div>
-      <div className="flex min-w-0 items-center gap-4 overflow-x-auto">
-        <div className="hidden items-center gap-6 tab:flex">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 py-2 tab:h-14 tab:flex-nowrap tab:py-0 lg:h-16">
+        {/* Route-Identität darf nie verschwinden: KEIN `min-w-0` hier — auf
+            Compact bricht die Instrumenten-Zeile in eine eigene Reihe um, ab
+            `tab` ist die Instrumenten-Seite die, die bei knappem Platz intern
+            scrollt, statt das Label auf 0 zusammenzuquetschen. */}
+        <div className="flex flex-col justify-center gap-0.5">
+          <p className="truncate font-display text-sec font-semibold uppercase tracking-[0.08em] text-ink tab:text-emph">{label}</p>
+          {subtitle ? <p className="truncate text-micro text-ink-3">{subtitle}</p> : null}
+        </div>
+        {/* Compact: order-3 + basis-full = eigene Zeile unter Label/Utilities,
+            horizontal scrollbar statt versteckt. Ab tab: normale Reihenfolge
+            (Label · Instrumente · Utilities), ml-auto hält den Block rechts.
+            Machined-Cell-Look (Modernisierungs-Welle 2026-07-30): die vier
+            Instrumente stehen als hairline-getrennte Zellen (divide-line-soft)
+            statt als freischwebende Label+Wert-Paare — dasselbe Zell-Raster auf
+            der Compact-Scroll-Zeile. KEIN hover:bg-surface-3: kein Instrument
+            ist Link/Button (Akzent-Doktrin — Hover-Füllung nur auf
+            interaktiven Zeilen). */}
+        <div
+          data-testid="puls-leiste-instruments"
+          className="order-3 flex min-w-0 basis-full items-stretch divide-x divide-line-soft overflow-x-auto tab:order-none tab:ml-auto tab:basis-auto"
+        >
           <Instrument label={de.pulsLeiste.worker} value={workers ?? "—"} valueMuted={!workerActive}>
             <span className={cn("hc-led h-1.5 w-1.5 rounded-full", workerActive ? "hc-led-live" : "hc-led-idle")} />
           </Instrument>
@@ -88,18 +110,20 @@ export function PulsLeiste({ label, subtitle, workers, fragen, fragenTone = "amb
             <span className={cn("hc-led h-1.5 w-1.5 rounded-full", healthLed(gateway.status, gateway.stale))} />
           </Instrument>
         </div>
-        {onOpenCommand ? (
-          <button
-            type="button"
-            title="Command Palette"
-            aria-label="Command Palette"
-            onClick={onOpenCommand}
-            className="hc-hit inline-flex items-center gap-2 rounded-card border border-line px-3 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink tab:hidden"
-          >
-            <Command className="h-4 w-4" />⌘K
-          </button>
-        ) : null}
-        {children}
+        <div className="flex items-center gap-2">
+          {onOpenCommand ? (
+            <button
+              type="button"
+              title="Command Palette"
+              aria-label="Command Palette"
+              onClick={onOpenCommand}
+              className="hc-hit inline-flex items-center gap-2 rounded-card border border-line px-3 text-sm text-ink-2 transition-colors duration-150 ease-out hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus tab:hidden"
+            >
+              <Command className="h-4 w-4" />⌘K
+            </button>
+          ) : null}
+          {children}
+        </div>
       </div>
     </div>
   );
@@ -116,8 +140,11 @@ function fragenIconClass(tone: ToneName): string {
   return tone === "red" || tone === "rose" ? "text-status-alert" : "text-status-warn";
 }
 
-/** Ein Mikro-Instrument: 11px Archivo-Caps-Label (optional mit LED/Icon davor)
- *  über einem font-data/tabular Wert. */
+/** Ein Mikro-Instrument als machined cell: hairline-getrennte Zelle (der
+ *  divide-x des Containers zieht die Trennlinie), Archivo-Caps-Label (micro =
+ *  Typo-Floor, optional mit LED/Icon davor) über einem font-data/tabular Wert.
+ *  px-3 gibt der Trennlinie Luft; die erste Zelle bündelt ohne Einzug mit dem
+ *  Zeilenanfang, die letzte hält auf Compact Scroll-Padding zum Rand. */
 function Instrument({ label, value, valueMuted, title, children }: {
   label: string;
   value: ReactNode;
@@ -126,8 +153,8 @@ function Instrument({ label, value, valueMuted, title, children }: {
   children?: ReactNode;
 }) {
   return (
-    <div title={title} className="flex flex-col items-end gap-1">
-      <span className="flex items-center gap-1.5 font-display text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3">
+    <div title={title} className="flex shrink-0 flex-col items-end justify-center gap-1 px-3 first:pl-0 last:pr-1 tab:px-4 tab:first:pl-0 tab:last:pr-0">
+      <span className="flex items-center gap-1.5 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">
         {children}
         {label}
       </span>

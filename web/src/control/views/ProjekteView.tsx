@@ -1,8 +1,7 @@
 import { useState } from "react";
-import { AlertTriangle, ChevronRight } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Eyebrow } from "../components/primitives";
-import { FleetEmptyState } from "../components/leitstand";
+import { ErrorNote, FleetEmptyState, FreshnessStrip, ViewHeader } from "../components/leitstand";
 import { useAgentQuestions, useProjectAgents, useProjectCommits, useProjectReceipts, useProjectSessions, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
@@ -24,6 +23,10 @@ import { CommitsFeed } from "./projekte/CommitsFeed";
 import { ReceiptsFeed } from "./projekte/ReceiptsFeed";
 
 const t = de.projekte;
+
+// Lokal gehalten (kein i18n/de.ts-Edit paralleler Sessions — StrategistView-
+// Muster). Canon-Regel: unbekannt bleibt unbekannt, nie 0.
+const KANBAN_SUMS_UNREADABLE = "… Kanban-Summen nicht lesbar";
 
 /** Projekte-Tab — der Operator-Blick auf "wer arbeitet gerade wirklich woran":
  *  Summary-Strip (live/Check-ins/offene Sessions/blockiert) → Offene Fragen
@@ -83,18 +86,24 @@ export function ProjekteView() {
   const openSessionsTotal = countOpenSessions(sessionList);
   let blockedTotal = 0;
   let needsInputTotal = 0;
+  // Ehrliche Summen: kanban == null bei gebundenem Board (kanban_project
+  // gesetzt) heißt Lese-Fehler, nicht "0 blockiert" — die Summen sind dann
+  // unbekannt und werden gemuted als "nicht lesbar" gerendert, nie als 0.
+  // kanban == null OHNE Board-Bindung ist legitim board-los (kein Fehler).
+  let kanbanSumsUnreadable = false;
   for (const project of list) {
-    blockedTotal += project.kanban?.blocked ?? 0;
-    needsInputTotal += project.kanban?.needs_input ?? 0;
+    if (project.kanban == null) {
+      if (project.kanban_project != null) kanbanSumsUnreadable = true;
+      continue;
+    }
+    blockedTotal += project.kanban.blocked;
+    needsInputTotal += project.kanban.needs_input;
   }
 
   return (
     <section aria-label={t.title} className="space-y-5">
-      <header>
-        <Eyebrow>{t.eyebrow}</Eyebrow>
-        <h2 className="mt-1 font-display text-h2 font-semibold text-ink">{t.title}</h2>
-        <p className="mt-1 text-sec text-ink-2">{t.subtitle}</p>
-      </header>
+      <ViewHeader eyebrow={t.eyebrow} title={t.title} description={t.subtitle} />
+      <FreshnessStrip lastUpdated={projects.lastUpdated} onRefresh={() => projects.reload()} />
 
       {/* Mobile (<tab): kompakter Sticky-Strip direkt unter dem App-Header —
           volle Breite (-mx-4/px-4 über den main-Gutter), eine horizontal
@@ -116,38 +125,37 @@ export function ProjekteView() {
               {t.summaryOpenSessions(openSessionsTotal)}
             </span>
           ) : null}
-          {blockedTotal > 0 ? (
-            <span className="inline-flex shrink-0 items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
-              {t.summaryBlocked(blockedTotal)}
+          {kanbanSumsUnreadable ? (
+            <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-3">
+              {KANBAN_SUMS_UNREADABLE}
             </span>
-          ) : null}
-          {needsInputTotal > 0 ? (
-            <span className="inline-flex shrink-0 items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
-              {t.summaryNeedsInput(needsInputTotal)}
-            </span>
-          ) : null}
+          ) : (
+            <>
+              {blockedTotal > 0 ? (
+                <span className="inline-flex shrink-0 items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
+                  {t.summaryBlocked(blockedTotal)}
+                </span>
+              ) : null}
+              {needsInputTotal > 0 ? (
+                <span className="inline-flex shrink-0 items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
+                  {t.summaryNeedsInput(needsInputTotal)}
+                </span>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
 
       {projects.error ? (
-        <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
-          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
-          {t.error}
-        </div>
+        <ErrorNote message={t.error} onRetry={() => void projects.reload()} />
       ) : null}
 
       {agents.error ? (
-        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
-          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
-          {t.agentsError}
-        </div>
+        <ErrorNote tone="warn" message={t.agentsError} onRetry={() => void agents.reload()} />
       ) : null}
 
       {sessions.error ? (
-        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
-          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
-          {t.sessionsError}
-        </div>
+        <ErrorNote tone="warn" message={t.sessionsError} onRetry={() => void sessions.reload()} />
       ) : null}
 
       {registryErrors.length > 0 ? (

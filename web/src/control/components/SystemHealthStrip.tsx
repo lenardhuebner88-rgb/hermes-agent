@@ -81,7 +81,7 @@ export function SystemHealthStrip({ data, error, now, metrics }: Props) {
 function MetricsTile({ metrics }: { metrics: MetricsLiteResponse | null }) {
   if (!metrics || metrics.error) {
     return (
-      <div className="mt-2 border-t border-white/10 pt-2 text-[11px] hc-dim">
+      <div className="mt-2 border-t border-line-soft pt-2 text-micro hc-dim">
         {de.systemHealth.metricsTitle}: {de.systemHealth.metricsError}
       </div>
     );
@@ -94,13 +94,13 @@ function MetricsTile({ metrics }: { metrics: MetricsLiteResponse | null }) {
   const hot = errorRate > ERROR_RATE_THRESHOLD;
 
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2 text-[11px] hc-soft">
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line-soft pt-2 text-micro text-ink-2">
       <span className="font-semibold uppercase tracking-normal hc-dim">{de.systemHealth.metricsTitle}</span>
-      <span>{de.systemHealth.requests}: <span className="hc-mono text-white">{totalRequests}</span></span>
+      <span>{de.systemHealth.requests}: <span className="font-data text-ink">{totalRequests}</span></span>
       <span className={cn(hot && "text-status-alert")}>
         {de.systemHealth.errorRate}: <span className="hc-mono">{(errorRate * 100).toFixed(1)}%</span>
       </span>
-      <span>{de.systemHealth.p95}: <span className="hc-mono text-white">{Math.round(worstP95)}ms</span></span>
+      <span>{de.systemHealth.p95}: <span className="font-data text-ink">{Math.round(worstP95)}ms</span></span>
       {hot ? <span className="rounded-full border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 text-status-alert">{de.systemHealth.metricsErrorBadge}</span> : null}
     </div>
   );
@@ -120,7 +120,7 @@ function SubsystemLight({ label, health, unknown, error }: { label: string; heal
         <span className="min-w-0 flex-1 truncate font-medium text-white">{label}</span>
         <span className="shrink-0 hc-mono">{statusLabel}</span>
       </div>
-      {showDetail ? <p className="mt-1 truncate text-[11px] opacity-90">{detail}</p> : null}
+      {showDetail ? <p className="mt-1 truncate text-micro opacity-90">{detail}</p> : null}
     </div>
   );
 }

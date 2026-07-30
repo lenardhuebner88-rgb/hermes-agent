@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { FleetEmptyState, FleetPanel, SignalChip, signalToneFromLegacy } from "../components/leitstand";
+import { ErrorNote, FleetEmptyState, FleetPanel, SignalChip, signalToneFromLegacy } from "../components/leitstand";
+import { SkeletonCard } from "../components/primitives";
+import { usePolling } from "../hooks/internal";
 import { fmtClock, fmtDur } from "../lib/derive";
 import type { ToneName } from "../lib/types";
 import type { Density } from "../hooks/useDensity";
@@ -13,7 +14,6 @@ import { eventTone } from "./RunTimelineView.helpers";
 // keine Edits an i18n/de.ts (Shared-File paralleler Sessions).
 const t = {
   title: "Run-Timeline",
-  loading: "Lade Timeline …",
   empty: "Keine Events für diesen Run.",
   emptyDesc: "Ältere Runs können per Event-GC bereinigt sein.",
   truncated: "Event-Liste gekappt — älteste zuerst.",
@@ -138,28 +138,16 @@ export function RunTimelinePanel({ data }: { data: RunTimelineResponse }) {
 
 export function RunTimelineView(_props: { density?: Density }) {
   const { runId } = useParams<{ runId: string }>();
-  const [data, setData] = useState<RunTimelineResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    if (!runId) return;
-    try {
-      setData(
-        await fetchJSON<RunTimelineResponse>(
-          `/api/plugins/kanban/runs/${encodeURIComponent(runId)}/timeline`,
-        ),
-      );
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [runId]);
-
-  useEffect(() => {
-    // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip), s.o.
-    const firstLoad = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(firstLoad);
-  }, [load]);
+  // Shared pollingStore statt One-Shot-Fetch: die Timeline bleibt frisch,
+  // solange der Run fortschreitet (10s-Kadenz wie der Research-Verlauf), und
+  // reload() ist der Retry der ErrorNote. Key pro Run → kein Cross-Run-Stale.
+  const { data, error, loading, reload } = usePolling<RunTimelineResponse>(
+    `run-timeline:${runId ?? "unknown"}`,
+    async () => fetchJSON<RunTimelineResponse>(
+      `/api/plugins/kanban/runs/${encodeURIComponent(runId ?? "")}/timeline`,
+    ),
+    10_000,
+  );
 
   return (
     <section aria-label={t.title} className="space-y-4">
@@ -172,8 +160,8 @@ export function RunTimelineView(_props: { density?: Density }) {
           {t.back}
         </a>
       </div>
-      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
-      {data === null && !error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
+      {error ? <ErrorNote message={error} onRetry={() => void reload()} /> : null}
+      {loading && !data ? <SkeletonCard rows={5} /> : null}
       {data !== null ? <RunTimelinePanel data={data} /> : null}
     </section>
   );

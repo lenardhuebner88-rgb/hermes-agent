@@ -5,7 +5,7 @@ import { useCronObservability, useCronOutput } from "../hooks/cron";
 import { de } from "../i18n/de";
 import { StaleBadge } from "../components/atoms";
 import { Disclosure, Eyebrow } from "../components/primitives";
-import { FleetEmptyState, FleetPanel, KpiTile, SignalChip, signalToneFromLegacy } from "../components/leitstand";
+import { FleetEmptyState, FleetPanel, ErrorNote, FreshnessStrip, KpiTile, SignalChip, signalToneFromLegacy } from "../components/leitstand";
 import { fmtAge, fmtClock, nowSec } from "../lib/derive";
 import type { CronJob } from "../lib/types";
 import type { Density } from "../hooks/useDensity";
@@ -173,12 +173,13 @@ export function CronView(_props: { density: Density }) {
         <Eyebrow>{t.eyebrow}</Eyebrow>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <span className="text-sec text-ink-2">{t.subtitle}</span>
+          <FreshnessStrip lastUpdated={controls.lastUpdated} onRefresh={() => controls.reload()} />
           <StaleBadge isStale={controls.isStale} lastUpdated={controls.lastUpdated} errorObj={controls.errorObj} error={controls.error} now={now} />
         </div>
       </header>
 
       {!gatewayRunning ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.gatewayDown}</div> : null}
-      {controls.error ? <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.error}</div> : null}
+      {controls.error ? <ErrorNote tone="warn" message={t.error} onRetry={() => void controls.reload()} /> : null}
       {controls.actionError ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.actionFailed}: {controls.actionError}</div> : null}
 
       <div className="flex items-center gap-2 text-sec text-ink-2">

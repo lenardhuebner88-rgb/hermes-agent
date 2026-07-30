@@ -1570,6 +1570,17 @@ describe("LaneBurnSection", () => {
     expect(html).toContain("— · 1 Läufe");
     expect(html).not.toContain("≥—");
   });
+
+  it("shows a broken read as an error note, never as an empty window (Canon Regel 3)", () => {
+    // Wirft das Zod-Schema (fehlende Kosten-/Token-Felder), landet der Fehler
+    // hier — "Noch kein Token-Burn im Fenster" wäre die 0-als-unbekannt-Lüge.
+    const html = renderToStaticMarkup(
+      <LaneBurnSection costs={[]} error="[Hermes Control] runs/costs entspricht nicht dem Vertrag: invalid" />,
+    );
+
+    expect(html).toContain("runs/costs entspricht nicht dem Vertrag");
+    expect(html).not.toContain("Noch kein Token-Burn im Fenster.");
+  });
 });
 
 describe("ProfileCostValue", () => {

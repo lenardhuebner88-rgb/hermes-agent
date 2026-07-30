@@ -12,6 +12,9 @@ import type { DotKind } from "../../lib/tones";
  *
  * The surface stays neutral; colour is carried only by the delta (status trio),
  * so the tone keeps meaning instead of becoming decoration (DESIGN.md rule 1+2).
+ * Elevation: `shadow-raised` hebt die Kachel als Rang-2-Element vom Panel ab
+ * (die Leiter existiert genau dafür); die Transition bleibt unter dem
+ * zentralen prefers-reduced-motion-Kill-Switch inert.
  */
 export function KpiTile({
   label,
@@ -33,7 +36,7 @@ export function KpiTile({
   className?: string;
 }) {
   return (
-    <div className={cn("min-w-0 rounded-card border border-line bg-surface-2 px-3 py-2.5", className)}>
+    <div className={cn("min-w-0 rounded-card border border-line bg-surface-2 px-3 py-2.5 shadow-raised transition-shadow duration-150 ease-out", className)}>
       <div className="flex min-w-0 items-center gap-2">
         {dot ? <Led kind={dot} size={7} /> : null}
         {Icon ? <Icon className="h-3.5 w-3.5 shrink-0 hc-dim" /> : null}
@@ -46,7 +49,7 @@ export function KpiTile({
       {delta != null ? (
         <div
           className={cn(
-            "mt-0.5 hc-type-label",
+            "mt-0.5 text-micro font-medium",
             deltaTone === "up" ? "text-status-ok" : deltaTone === "down" ? "text-status-alert" : "hc-dim",
           )}
         >

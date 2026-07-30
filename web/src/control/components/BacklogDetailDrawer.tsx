@@ -118,7 +118,7 @@ export function BacklogDetailDrawer({
         aria-modal="true"
         aria-labelledby="backlog-detail-title"
         className={cn(
-          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col rounded-none border-y-0 border-l border-line bg-surface-1 shadow-2xl",
+          "absolute right-0 top-0 flex h-full w-full max-w-md flex-col rounded-none border-y-0 border-l border-line bg-surface-1 shadow-floating",
         )}
         initial={drawer.initial}
         animate={drawer.animate}

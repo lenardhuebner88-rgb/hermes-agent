@@ -1,7 +1,7 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { LazyMotion, domAnimation } from "motion/react";
-import { legacyControlRedirectTarget } from "./navigation";
+import { activeFromPath, legacyControlRedirectTarget, loadableRoutes, prefetchControlView, tabPath, type ControlTab } from "./navigation";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import "./styles/control-tokens.css";
 import { useDensity } from "./hooks/useDensity";
@@ -14,7 +14,7 @@ import { useStrategistCount } from "./hooks/strategist";
 import { HEALTH_POLL_INTERVAL_MS, useSystemHealth } from "./hooks/systemReleaseHealth";
 import { useLiveEvents } from "./hooks/useLiveEvents";
 import { costDisplayValue } from "./lib/fleetHub";
-import { ControlShell, type ControlTab } from "./components/ControlShell";
+import { ControlShell } from "./components/ControlShell";
 import { CommandPalette } from "./components/CommandPalette";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
@@ -22,189 +22,44 @@ import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
 import { StartMissionControl } from "./views/start/StartMissionControl";
 
-// Start and the Decision-Inbox are eager. Every other tab is lazy-loaded
-// (its own chunk, fetched on first visit) so opening /control no
-// longer ships all 10 views up front — FlowView + AutoresearchView are the
-// fattest, and most visits never open them.
-const FleetView = lazy(() =>
-  import("./views/FleetView").then((m) => ({ default: m.FleetView })),
+// Start and the Decision-Inbox are eager. Every other tab is lazy-loaded (its
+// own chunk, fetched on first visit) so opening /control no longer ships all
+// views up front. Die lazy()-Wrapper kommen aus DER EINEN Route-Tabelle in
+// ./navigation (UI/UX-Iteration 3) — `load` ist derselbe Importer, den auch
+// der Hover/Touch-Prefetch nutzt, Vite dedupliziert den Chunk. Einzige
+// Ausnahmen: Detail-/Fallback-Routen ohne eigenen Tab (Runs-Timeline, Issues,
+// Design-Board-Card, Projekte-Klassisch) — kein Nav-Eintrag, daher bewusst
+// außerhalb der Tabelle.
+type AnyViewProps = Record<string, unknown>;
+const lazyViews: Partial<Record<ControlTab, ComponentType<AnyViewProps>>> = Object.fromEntries(
+  loadableRoutes.map((route) => [
+    route.id,
+    lazy(() =>
+      route.load().then((module) => ({
+        default: (module as Record<string, ComponentType<AnyViewProps>>)[route.exportName],
+      })),
+    ),
+  ]),
 );
+
 // AgentOpsView (Ströme) bleibt vorerst — der Worker-Health-/Fan-out-Launch-
 // Snapshot ist noch nicht 1:1 in OrchestratorBacklogView gedeckt (S4-Rescue-D1).
 // Löschung + Redirect hängen an S6/Phase 3.
-const AgentOpsView = lazy(() =>
-  import("./views/AgentOpsView").then((m) => ({ default: m.AgentOpsView })),
-);
-const AgentTerminalsView = lazy(() =>
-  import("./views/AgentTerminalsView").then((m) => ({ default: m.AgentTerminalsView })),
-);
-const StatistikView = lazy(() =>
-  import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
-);
-const ScorecardView = lazy(() =>
-  import("./views/ScorecardView").then((m) => ({ default: m.ScorecardView })),
-);
-const AutoresearchView = lazy(() =>
-  import("./views/AutoresearchView").then((m) => ({ default: m.AutoresearchView })),
-);
-const BacklogView = lazy(() =>
-  import("./views/BacklogView").then((m) => ({ default: m.BacklogView })),
-);
-const OrchestratorBacklogView = lazy(() =>
-  import("./views/OrchestratorBacklogView").then((m) => ({
-    default: m.OrchestratorBacklogView,
-  })),
-);
-const CronView = lazy(() =>
-  import("./views/CronView").then((m) => ({ default: m.CronView })),
-);
-const LoopsView = lazy(() =>
-  import("./views/LoopsView").then((m) => ({ default: m.LoopsView })),
-);
-const LanesView = lazy(() =>
-  import("./views/LanesView").then((m) => ({ default: m.LanesView })),
-);
 const RunTimelineView = lazy(() =>
   import("./views/RunTimelineView").then((m) => ({ default: m.RunTimelineView })),
 );
 const IssuesView = lazy(() =>
   import("./views/IssuesView").then((m) => ({ default: m.IssuesView })),
 );
-const ResearchView = lazy(() =>
-  import("./views/ResearchView").then((m) => ({ default: m.ResearchView })),
-);
-const BibliothekView = lazy(() =>
-  import("./views/BibliothekView").then((m) => ({ default: m.BibliothekView })),
-);
-const DesignBoardView = lazy(() =>
-  import("./views/DesignBoardView").then((m) => ({ default: m.DesignBoardView })),
-);
 const DesignBoardCardDetail = lazy(() =>
   import("./views/designboard/CardDetail").then((m) => ({ default: m.CardDetail })),
 );
-const SchmiedeView = lazy(() =>
-  import("./views/SchmiedeView").then((m) => ({ default: m.SchmiedeView })),
-);
-const StrategistView = lazy(() =>
-  import("./views/StrategistView").then((m) => ({ default: m.StrategistView })),
-);
-const DiktatView = lazy(() =>
-  import("./views/DiktatView").then((m) => ({ default: m.DiktatView })),
-);
-// Hebel (S7): Kosten-SSOT-Tab gegen den usage-facts.v1 Read-Pfad (S6).
-const HebelView = lazy(() =>
-  import("./views/HebelView").then((m) => ({ default: m.HebelView })),
-);
-const SystemView = lazy(() =>
-  import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
-);
+// Klassik-Fallback (Sprint 1 Karte e): die bisherige ProjekteView bleibt ohne
+// Inhaltsänderung erreichbar, bis S2/S3 migrieren — /control/projekte selbst
+// ist die Jarvis-Zone (Tab "projekte" in der Route-Tabelle).
 const ProjekteView = lazy(() =>
   import("./views/ProjekteView").then((m) => ({ default: m.ProjekteView })),
 );
-// Jarvis-Zone (Sprint 1 Karte e): /control/projekte wird zur A4-Shell mit
-// Chat; die bisherige ProjekteView bleibt als Klassik-Fallback erhalten.
-const JarvisShellView = lazy(() =>
-  import("./jarvis/JarvisShellView").then((m) => ({ default: m.JarvisShellView })),
-);
-
-function activeFromPath(pathname: string): ControlTab {
-  if (pathname.includes("/control/fleet")) return "fleet";
-  if (pathname.includes("/control/overview")) return "overview";
-  if (pathname.includes("/control/pulse")) return "system";
-  if (pathname.includes("/control/workstreams")) return "workstreams";
-  if (pathname.includes("/control/agent-terminals")) return "agentTerminals";
-  // Flow/Ketten/Hermes wurden ins Fleet-Cockpit absorbiert (Phase 2).
-  if (pathname.includes("/control/flow")) return "fleet";
-  if (pathname.includes("/control/ketten")) return "fleet";
-  if (pathname.includes("/control/statistik")) return "statistik";
-  if (pathname.includes("/control/scorecard")) return "scorecard";
-  if (pathname.includes("/control/autoresearch")) return "autoresearch";
-  if (pathname.includes("/control/backlog")) return "backlog";
-  if (pathname.includes("/control/orchestrator")) return "orchestrator";
-  if (pathname.includes("/control/crons")) return "crons";
-  if (pathname.includes("/control/loops")) return "loops";
-  if (pathname.includes("/control/projekte")) return "projekte";
-  if (pathname.includes("/control/lanes")) return "lanes";
-  if (pathname.includes("/control/system")) return "system";
-  if (pathname.includes("/control/pressure")) return "system";
-  if (pathname.includes("/control/ops")) return "system";
-  if (pathname.includes("/control/research")) return "research";
-  if (pathname.includes("/control/bibliothek")) return "bibliothek";
-  if (pathname.includes("/control/design-board")) return "designBoard";
-  if (pathname.includes("/control/schmiede")) return "schmiede";
-  if (pathname.includes("/control/stratege")) return "stratege";
-  if (pathname.includes("/control/diktat")) return "diktat";
-  if (pathname.includes("/control/hebel")) return "hebel";
-  // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
-  // Rail-Highlight bleibt dort, eigener Tab existiert bewusst nicht.
-  if (pathname.includes("/control/runs/")) return "workstreams";
-  // Issues (F6) ist eine Detail-Seite der Statistik — gleiche Tab-Ökonomie.
-  if (pathname.includes("/control/issues")) return "statistik";
-  // Root /control (and the legacy /control/inbox) is the Decision-Inbox landing.
-  return "inbox";
-}
-
-// Hover/Fokus-Prefetch: lädt den Lazy-Chunk einer View, bevor der Klick kommt.
-// Vite dedupliziert dynamische Imports desselben Moduls — idempotent & billig.
-// Muss dieselben import()-Ziele treffen wie die lazy()-Wrapper oben.
-const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
-  fleet: () => import("./views/FleetView"),
-  workstreams: () => import("./views/AgentOpsView"),
-  agentTerminals: () => import("./views/AgentTerminalsView"),
-  statistik: () => import("./views/StatistikView"),
-  scorecard: () => import("./views/ScorecardView"),
-  autoresearch: () => import("./views/AutoresearchView"),
-  backlog: () => import("./views/BacklogView"),
-  orchestrator: () => import("./views/OrchestratorBacklogView"),
-  crons: () => import("./views/CronView"),
-  loops: () => import("./views/LoopsView"),
-  projekte: () => import("./jarvis/JarvisShellView"),
-  lanes: () => import("./views/LanesView"),
-  system: () => import("./views/system/SystemView"),
-  research: () => import("./views/ResearchView"),
-  bibliothek: () => import("./views/BibliothekView"),
-  designBoard: () => import("./views/DesignBoardView"),
-  schmiede: () => import("./views/SchmiedeView"),
-  stratege: () => import("./views/StrategistView"),
-  diktat: () => import("./views/DiktatView"),
-  hebel: () => import("./views/HebelView"),
-};
-
-function prefetchControlView(tab: ControlTab): void {
-  // Prefetch ist best-effort — ein Netzfehler hier darf nichts kaputt machen;
-  // der echte Klick lädt den Chunk über Suspense erneut.
-  void viewImporters[tab]?.().catch(() => {});
-}
-
-const tabPath: Record<ControlTab, string> = {
-  fleet: "/control/fleet",
-  inbox: "/control",
-  overview: "/control/overview",
-  pulse: "/control/system",
-  workstreams: "/control/workstreams",
-  agentTerminals: "/control/agent-terminals",
-  flow: "/control/fleet",
-  ketten: "/control/fleet",
-  statistik: "/control/statistik",
-  scorecard: "/control/scorecard",
-  autoresearch: "/control/autoresearch",
-  backlog: "/control/backlog",
-  orchestrator: "/control/orchestrator",
-  crons: "/control/crons",
-  loops: "/control/loops",
-  projekte: "/control/projekte",
-  lanes: "/control/lanes",
-  system: "/control/system",
-  pressure: "/control/system",
-  ops: "/control/system",
-  research: "/control/research",
-  bibliothek: "/control/bibliothek",
-  designBoard: "/control/design-board",
-  schmiede: "/control/schmiede",
-  stratege: "/control/stratege",
-  diktat: "/control/diktat",
-  hebel: "/control/hebel",
-};
 
 // Shown briefly while a lazy-loaded control view chunk downloads (first visit
 // of that tab only; the browser caches it afterwards).
@@ -273,7 +128,7 @@ export default function ControlPage() {
       const key = event.key.toLowerCase();
       const now = Date.now();
       if (gPendingRef.current && now - gPendingRef.current < 800) {
-        const dest: Record<string, ControlTab> = { s: "workstreams", f: "fleet", h: "fleet", k: "fleet", t: "statistik", a: "autoresearch", b: "bibliothek", u: "overview", i: "inbox", p: "system", o: "system" };
+        const dest: Record<string, ControlTab> = { s: "workstreams", f: "fleet", h: "fleet", k: "fleet", t: "statistik", a: "autoresearch", b: "bibliothek", u: "bibliothek", i: "inbox", p: "system", o: "system" };
         if (dest[key]) { event.preventDefault(); navigate(tabPath[dest[key]]); }
         gPendingRef.current = 0;
         return;
@@ -284,52 +139,64 @@ export default function ControlPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate]);
 
+  // Route-Elemente aus der einen Route-Tabelle: `lazyViews` liefert die
+  // Lazy-Wrapper, hier kommen nur die Hook-Props der wenigen Views drauf,
+  // die welche brauchen. inbox ist eager (StartMissionControl/CommandHome)
+  // und steht explizit im <Routes>-Block, nicht in dieser Map.
+  const viewElement = (id: ControlTab): ReactNode => {
+    const View = lazyViews[id];
+    if (!View) return null; // Defensiv: loadableRoutes deckt alle lazy Tabs ab.
+    switch (id) {
+      case "workstreams":
+      case "backlog":
+      case "orchestrator":
+      case "crons":
+      case "lanes":
+      case "research":
+      case "bibliothek":
+      case "designBoard":
+      case "schmiede":
+      case "stratege":
+        return <View density={density.density} />;
+      case "autoresearch":
+        return <View density={density.density} store={proposals} />;
+      case "system":
+        return <View proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />;
+      default:
+        return <View />;
+    }
+  };
+
   const routedContent = (
     <RouteTransition pathname={active}>
       <ErrorBoundary>
       <Suspense fallback={<ControlViewFallback />}>
       <Routes location={location}>
         <Route index element={<StartMissionControl density={density.density} />} />
-        <Route path="fleet" element={<FleetView />} />
         <Route path="inbox" element={<CommandHome density={density.density} />} />
         {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
         <Route path="overview" element={<QueryPreservingRedirect to="/control/bibliothek" />} />
         {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
         <Route path="pulse" element={<QueryPreservingRedirect to="/control/system" />} />
-        <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
-        <Route path="agent-terminals" element={<AgentTerminalsView />} />
         {/* hermes wurde in Fleet absorbiert (Phase 2) */}
         <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
-        <Route path="statistik" element={<StatistikView />} />
-        <Route path="scorecard" element={<ScorecardView />} />
         {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
         <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
         {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
         <Route path="ketten" element={<QueryPreservingRedirect to="/control/fleet" />} />
-        <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
-        <Route path="backlog" element={<BacklogView density={density.density} />} />
-        <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
-        <Route path="crons" element={<CronView density={density.density} />} />
-        <Route path="loops" element={<LoopsView />} />
-        <Route path="projekte" element={<JarvisShellView />} />
-        {/* Klassik-Fallback (Sprint 1 Karte e): bisheriger Projekte-Tab
-            bleibt ohne Inhaltsänderung erreichbar, bis S2/S3 migrieren. */}
-        <Route path="projekte-klassisch" element={<ProjekteView />} />
-        <Route path="lanes" element={<LanesView density={density.density} />} />
-        <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
         {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
         <Route path="pressure" element={<QueryPreservingRedirect to="/control/system" />} />
         <Route path="ops" element={<QueryPreservingRedirect to="/control/system" />} />
+        {/* Lebende Tabs: Pfad + Lazy-View aus der Route-Tabelle (./navigation). */}
+        {loadableRoutes.map((route) => (
+          <Route key={route.id} path={route.segment} element={viewElement(route.id)} />
+        ))}
+        {/* Klassik-Fallback (Sprint 1 Karte e): bisheriger Projekte-Tab
+            bleibt ohne Inhaltsänderung erreichbar, bis S2/S3 migrieren. */}
+        <Route path="projekte-klassisch" element={<ProjekteView />} />
         <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
         <Route path="issues" element={<IssuesView density={density.density} />} />
-        <Route path="research" element={<ResearchView density={density.density} />} />
-        <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
-        <Route path="design-board" element={<DesignBoardView density={density.density} />} />
         <Route path="design-board/:cardId" element={<DesignBoardCardDetail density={density.density} />} />
-        <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
-        <Route path="stratege" element={<StrategistView density={density.density} />} />
-        <Route path="diktat" element={<DiktatView />} />
-        <Route path="hebel" element={<HebelView />} />
         <Route path="*" element={<Navigate to="/control" replace />} />
       </Routes>
       </Suspense>
@@ -354,7 +221,10 @@ export default function ControlPage() {
             inboxTotal={inbox.summary.total}
             inboxTone={inbox.worstTone}
             libraryUnread={active === "bibliothek" ? 0 : libraryUnread}
-            strategistCount={strat.data?.count ?? 0}
+            // Ehrlichkeits-Regel (Canon: unknown bleibt unknown, nie 0): der
+            // Badge zählt erst nach erfolgreichem Load — ladend/fehlgeschlagen
+            // rendern KEINEN Zähler, nie 0-as-"keine Vorschläge".
+            strategistCount={strat.data?.count ?? null}
             health={health}
             pulse={{ workers: pulseWorkers, fragen: inbox.summary.total, fragenTone: inbox.worstTone, kostenUsd: pulseKosten.value, kostenIsEquivalent: pulseKosten.isEquivalent }}
             onNavigate={(tab) => navigate(tabPath[tab])}

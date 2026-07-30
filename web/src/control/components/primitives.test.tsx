@@ -51,6 +51,15 @@ describe("primitives", () => {
       expect(html).toContain('aria-busy="true"');
     });
 
+    it("exposes the loading state to screen readers (role=status + sr-only text), shimmer stays aria-hidden", () => {
+      const html = renderToStaticMarkup(<SkeletonCard />);
+      expect(html).toContain('role="status"');
+      expect(html).toContain("sr-only");
+      expect(html).toContain("… wird geladen");
+      // The container is the live region — it must NOT be aria-hidden itself.
+      expect(html).not.toMatch(/<div[^>]*aria-hidden[^>]*aria-busy/);
+    });
+
     it("defaults to three rows", () => {
       const html = renderToStaticMarkup(<SkeletonCard />);
       const count = (html.match(/hc-skeleton/g) ?? []).length;
@@ -92,9 +101,9 @@ describe("primitives", () => {
   });
 
   describe("Text", () => {
-    it("renders the named type scale class", () => {
+    it("renders the named canonical type-scale step (I13: title → text-h1)", () => {
       const html = renderToStaticMarkup(<Text variant="title">Hallo</Text>);
-      expect(html).toContain("hc-type-title");
+      expect(html).toContain("text-h1");
       expect(html).toContain("Hallo");
     });
   });

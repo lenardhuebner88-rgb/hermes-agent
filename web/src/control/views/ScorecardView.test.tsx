@@ -2,10 +2,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ScorecardResponseSchema, type ScorecardResponse } from "../lib/schemas";
 
-const mockState = vi.hoisted(() => ({ data: null as ScorecardResponse | null }));
+const mockState = vi.hoisted(() => ({
+  data: null as ScorecardResponse | null,
+  loading: false,
+  error: null as string | null,
+  reload: vi.fn(),
+}));
 
 vi.mock("../hooks/scorecard", () => ({
-  useScorecard: () => ({ loading: false, error: null, data: mockState.data }),
+  useScorecard: () => ({
+    loading: mockState.loading,
+    error: mockState.error,
+    data: mockState.data,
+    reload: mockState.reload,
+  }),
 }));
 
 import { ScorecardView } from "./ScorecardView";
@@ -62,7 +72,32 @@ const baseData = (): ScorecardResponse => ({
 });
 
 describe("ScorecardView", () => {
-  beforeEach(() => { mockState.data = baseData(); });
+  beforeEach(() => {
+    mockState.data = baseData();
+    mockState.loading = false;
+    mockState.error = null;
+    mockState.reload.mockClear();
+  });
+
+  it("unterscheidet die drei Zustände: Skeleton beim Erst-Load, ErrorNote mit Retry bei Fehler", () => {
+    mockState.data = null;
+    mockState.loading = true;
+    const loadingMarkup = renderToStaticMarkup(<ScorecardView />);
+    expect(loadingMarkup).toContain('aria-busy="true"');
+    // A11y: SkeletonCard meldet den Ladezustand per role="status" + sr-only-
+    // Text an Screenreader — sichtbar bleibt nur der Shimmer (Leer ≠ Ladend).
+    expect(loadingMarkup).toContain('role="status"');
+    expect(loadingMarkup).toContain('sr-only');
+    expect(loadingMarkup).not.toContain("Worker Scorecard");
+
+    mockState.loading = false;
+    mockState.error = "500: boom";
+    const errorMarkup = renderToStaticMarkup(<ScorecardView />);
+    expect(errorMarkup).toContain('role="alert"');
+    expect(errorMarkup).toContain("Scorecard ist derzeit nicht verfügbar.");
+    expect(errorMarkup).toContain("Erneut laden");
+    expect(errorMarkup).not.toContain('aria-busy="true"');
+  });
 
   it("preserves materialized distributions in the response contract", () => {
     const scores = ScorecardResponseSchema.parse({
@@ -98,14 +133,14 @@ describe("ScorecardView", () => {
     mockState.data = data;
 
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("Langfuse partial · Cache 7 s");
+    expect(markup).toContain("Langfuse teilweise · Cache 7 s");
     expect(markup).not.toContain("Langfuse absent");
   });
 
   it("zeigt vollständige Outcomes und Review-Iterationen", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("Iteration budget exhausted");
-    expect(markup).toContain("Spawn failed");
+    expect(markup).toContain("Iterationsbudget erschöpft");
+    expect(markup).toContain("Spawn fehlgeschlagen");
     expect(markup).toContain("Ø 1,25 Iterationen");
   });
 
@@ -134,7 +169,7 @@ describe("ScorecardView", () => {
 
     expect(markup).toContain('aria-label="Keine Verdict-Daten"');
     expect(markup).toContain("Keine Verdict-Daten");
-    expect(markup).not.toContain('aria-label="0.0 Prozent approved"');
+    expect(markup).not.toContain('aria-label="0.0 Prozent freigegeben"');
   });
 
   it("mischt keine Kosten-, Token- oder Laufzeitmetriken in die Scorecard", () => {

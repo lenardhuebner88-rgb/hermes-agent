@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ResearchEntry, type ResearchCard } from "./ResearchView";
+import { ResearchEntry, ResearchView, type ResearchCard } from "./ResearchView";
 import { buildResearchIdempotencyKey, pickAnswer } from "./ResearchView.helpers";
 
 // Härtung (e): pickAnswer war exportiert aber ungetestet; ResearchEntry
@@ -54,8 +54,17 @@ describe("buildResearchIdempotencyKey", () => {
   });
 });
 
-describe("ResearchEntry (Render)", () => {
-  it("zeigt Titel und Status-Chip für fertige Recherchen", () => {
+describe("ResearchView (Render)", () => {
+  it("zeigt im Erst-Load einen Skeleton statt leerer Fläche — und noch keinen Leer-Zustand", () => {
+    // Static render: keine Effects → history === null, historyError === null.
+    const html = renderToStaticMarkup(<ResearchView />);
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain("Noch keine Recherchen.");
+    expect(html).not.toContain('role="alert"');
+  });
+});
+
+describe("ResearchEntry (Render)", () => {  it("zeigt Titel und Status-Chip für fertige Recherchen", () => {
     const html = renderToStaticMarkup(<ResearchEntry card={card({})} now={1781161500} />);
     expect(html).toContain("Public-Viewing mit Kindern — 3 Tipps");
     // Detail/Antwort erst nach Aufklappen — initial nicht im Markup

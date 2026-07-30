@@ -116,6 +116,54 @@ describe("PulsLeiste", () => {
     expect(screen.queryByRole("button", { name: "Command Palette" })).toBeNull();
   });
 
+  it("keeps all four instruments in the visible flow on Compact — no hidden/tab:flex gate (UI/UX-Iteration 1)", () => {
+    // Compact-Vertragsfix: die Instrumenten-Zeile war `hidden tab:flex` und
+    // entfernte unter 600px alle vier Instrumente aus jeder Masthead
+    // ("critical state is not removed"). jsdom wertet keine Media Queries aus
+    // — der Guard zieht deshalb über die Klassen: kein `hidden`-Gate mehr,
+    // stattdessen eine eigene, horizontal scrollbare Zeile (overflow-x-auto).
+    render(<PulsLeiste label="Fleet" workers={1} fragen={0} kostenUsd={null} gateway={baseGateway} />);
+    const instruments = screen.getByTestId("puls-leiste-instruments");
+    expect(instruments.className).not.toContain("hidden");
+    expect(instruments.className).toContain("overflow-x-auto");
+    // Gleiche vier Instrumente, gleiche Reihenfolge, Labels intakt.
+    const labels = ["Worker", "Inbox", "Kosten", "Gateway"].map((name) => screen.getByText(name));
+    const positions = labels.map((el) => {
+      let node: Element | null = el;
+      while (node && node.parentElement !== instruments) node = node.parentElement;
+      return node;
+    });
+    for (const pos of positions) expect(pos).not.toBeNull();
+    const order = positions.map((pos) => Array.from(instruments.children).indexOf(pos as Element));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  it("renders instrument labels at the micro type-scale floor, never sub-micro px sizes", () => {
+    render(<PulsLeiste label="Fleet" workers={0} fragen={0} kostenUsd={null} gateway={baseGateway} />);
+    expect(screen.getByText("Worker").className).toContain("text-micro");
+    expect(screen.getByText("Worker").className).not.toMatch(/text-\[\d+px\]/);
+  });
+
+  it("renders the four instruments as hairline-separated machined cells (Modernisierungs-Welle)", () => {
+    render(<PulsLeiste label="Fleet" workers={1} fragen={0} kostenUsd={null} gateway={baseGateway} />);
+    const instruments = screen.getByTestId("puls-leiste-instruments");
+    // Hairline-Trenner per divide-Utility auf dem Zell-Container.
+    expect(instruments.className).toContain("divide-x");
+    expect(instruments.className).toContain("divide-line-soft");
+    // Genau vier Zellen, eine pro Instrument, gleiche Reihenfolge.
+    expect(instruments.children.length).toBe(4);
+    const labels = ["Worker", "Inbox", "Kosten", "Gateway"].map((name) => screen.getByText(name));
+    for (const label of labels) {
+      let node: Element | null = label;
+      while (node && node.parentElement !== instruments) node = node.parentElement;
+      expect(node).not.toBeNull();
+      // Jede Zelle trägt das Zell-Padding; kein Instrument ist interaktiv,
+      // also kein Hover-Fill (Akzent-Doktrin).
+      expect((node as Element).className).toContain("px-3");
+      expect((node as Element).className).not.toContain("hover:bg-surface-3");
+    }
+  });
+
   it("marks Kosten with the äquiv. suffix when kostenIsEquivalent is set (honesty marker, s. Fleet's HeuteTab)", () => {
     render(<PulsLeiste label="Fleet" workers={0} fragen={0} kostenUsd={4.1} kostenIsEquivalent gateway={baseGateway} />);
     expect(screen.getByText(/äquiv\./)).toBeTruthy();

@@ -57,6 +57,23 @@ describe("DesignBoardView (jsdom)", () => {
     );
   });
 
+  it("shows the ErrorNote on load failure and retries via 'Erneut laden'", async () => {
+    fetchJSONMock.mockClear();
+    fetchJSONMock.mockRejectedValueOnce(new Error("network down"));
+    render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Laden fehlgeschlagen"));
+
+    fetchJSONMock.mockResolvedValueOnce([
+      { id: "c_1", kind: "bug", title: "Header overlaps",
+        target: null, status: "open", derived_status: null,
+        linked_tasks: [], updated_at: 1 },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: /Erneut laden/ }));
+    await waitFor(() => expect(screen.getByText("Header overlaps")).toBeTruthy());
+    const listCalls = fetchJSONMock.mock.calls.filter((c) => c[0] === "/api/design-board/cards" && !c[1]?.method);
+    expect(listCalls.length).toBe(2);
+  });
+
   it("clamps long target.view prose to a one-line preview", async () => {
     const longTarget =
       "Ich möchte den Kettentappen neu designen. Ich möchte tatsächlich sehen, von Anfang bis Ende, welche Steps noch sind. Zurzeit sehe ich nicht: - wann der Verifier kommt - wie der Verifier steht - ob diese Kette einen Reviewer hat oder nicht - ob da Kritik mit drin ist - was mit dem Integrator ist Ich möchte saubere States sehen, die auch tatsächlich wirklich erkennbar sind, ob diese Kette ein Problem hat, ob sie jetzt läuft oder nicht. , ein Mockup für mich zu erzeugen.";

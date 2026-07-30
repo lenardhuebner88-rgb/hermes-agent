@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { KpiTile, ListRow, SectionHeader } from "../components/leitstand";
+import { ErrorNote, KpiTile, ListRow, SectionHeader, ViewHeader } from "../components/leitstand";
+import { SkeletonCard } from "../components/primitives";
 import {
   USAGE_FACTS_CONTRACT_VERSION,
   useUsageFacts,
@@ -64,12 +65,26 @@ const SERIES_DOT_CLASSES = [
 ];
 
 export function HebelView() {
-  const { data, loading, error } = useUsageFacts();
+  const { data, loading, error, reload } = useUsageFacts();
+  // Leer ≠ ladend ≠ Fehler (DESIGN.md W4-7): Skeleton beim Erst-Load statt
+  // hc-dim-Dauertext, ErrorNote mit Retry statt passivem Text.
   if (loading && !data) {
-    return <div className="hc-dim p-6">Hebel werden geladen …</div>;
+    return (
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 p-4 md:p-6">
+        <SkeletonCard rows={6} />
+      </main>
+    );
   }
   if (error || !data) {
-    return <div className="hc-dim p-6">Hebel sind derzeit nicht verfügbar.</div>;
+    return (
+      <main className="mx-auto flex max-w-6xl flex-col gap-8 p-4 md:p-6">
+        <ErrorNote
+          message="Hebel sind derzeit nicht verfügbar."
+          detail={error ?? undefined}
+          onRetry={() => void reload()}
+        />
+      </main>
+    );
   }
   if (data.contract_version !== USAGE_FACTS_CONTRACT_VERSION) {
     return (
@@ -91,14 +106,16 @@ export function HebelView() {
 
 function HebelHeader({ data }: { data: UsageFactsResponse }) {
   return (
-    <header>
-      <p className="hc-type-label hc-dim">KOSTEN · FAKTENSCHICHT</p>
-      <h1 className="hc-type-display">Hebel</h1>
-      <p className="hc-dim">
-        Normalisierter Kontext-Input über alle Welten — Cache-Read ist die Geschichte, nicht der Roh-Input.
-        Vertrag {data.contract_version} · Normalisierung {data.normalization.version || "unbekannt"}.
-      </p>
-    </header>
+    <ViewHeader
+      eyebrow="KOSTEN · FAKTENSCHICHT"
+      title="Hebel"
+      description={
+        <>
+          Normalisierter Kontext-Input über alle Welten — Cache-Read ist die Geschichte, nicht der Roh-Input.
+          Vertrag {data.contract_version} · Normalisierung {data.normalization.version || "unbekannt"}.
+        </>
+      }
+    />
   );
 }
 

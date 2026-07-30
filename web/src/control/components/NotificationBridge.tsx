@@ -278,7 +278,7 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
           ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
           : pushStatus === "blocked" || pushStatus === "error"
             ? "border-status-warn/40 bg-status-warn/10 text-status-warn"
-            : "border-white/10 hc-soft hover:bg-white/5",
+            : "border-line text-ink-2 hover:bg-surface-3",
       )}
     >
       {enabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}

@@ -49,10 +49,17 @@ const TEST_TAB_PATH: Partial<Record<ControlTab, string>> = {
   loops: "/control/loops",
 };
 
-function renderShell(active: ControlTab, options: { path?: string; pulse?: ComponentProps<typeof ControlShell>["pulse"]; health?: ComponentProps<typeof ControlShell>["health"] } = {}) {
+function renderShell(active: ControlTab, options: { path?: string; pulse?: ComponentProps<typeof ControlShell>["pulse"]; health?: ComponentProps<typeof ControlShell>["health"]; strategistCount?: number | null; libraryUnread?: number | null } = {}) {
   return render(
     <MemoryRouter initialEntries={[options.path ?? TEST_TAB_PATH[active] ?? "/control"]}>
-      <ControlShell {...baseProps} active={active} pulse={options.pulse} health={options.health ?? baseProps.health}>
+      <ControlShell
+        {...baseProps}
+        active={active}
+        pulse={options.pulse}
+        health={options.health ?? baseProps.health}
+        strategistCount={"strategistCount" in options ? options.strategistCount : baseProps.strategistCount}
+        libraryUnread={"libraryUnread" in options ? options.libraryUnread : baseProps.libraryUnread}
+      >
         <main>content</main>
       </ControlShell>
     </MemoryRouter>,
@@ -155,15 +162,21 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(masthead.textContent).toContain("Fleet");
   });
 
-  it("renders each visible live-chip connection state", () => {
-    for (const [state, label] of [
-      ["connected", "Live: verbunden"],
-      ["reconnecting", "Live: verbindet"],
-      ["off", "Live: aus"],
-    ]) {
+  it("renders each live-signal connection state as LED + label, never a bronze chip (UI/UX-Iteration 2)", () => {
+    for (const [state, label, led] of [
+      ["connected", "Live: verbunden", "hc-led-live"],
+      ["reconnecting", "Live: verbindet", "hc-led-warn"],
+      ["off", "Live: aus", "hc-led-idle"],
+    ] as const) {
       liveStatusMock.mockReturnValue(state);
       renderShell("fleet");
-      expect(screen.getByText(label)).toBeTruthy();
+      const signal = screen.getByTestId("live-signal");
+      expect(signal.textContent).toContain(label);
+      expect(signal.querySelector(".hc-led")?.className).toContain(led);
+      // Akzent-Doktrin Regel 3: Bronze rendert nie als Chip — das Live-Signal
+      // trägt weder border-live noch text-live.
+      expect(signal.className).not.toContain("border-live");
+      expect(signal.className).not.toContain("text-live");
       cleanup();
     }
   });
@@ -255,25 +268,32 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     expect(within(masthead).getByText("3")).toBeTruthy();
     expect(within(masthead).getByText("2")).toBeTruthy();
     expect(within(masthead).getByText("$4,10")).toBeTruthy();
-    // "gesund" also appears in the legacy StatusDots (Hermes/Dashboard) that
-    // shares the masthead's right-side slot — scope to the Gateway instrument
-    // specifically via its label's sibling value.
+    // Gateway-Status gezielt am Instrument prüfen (Label-Geschwister-Wert),
+    // nicht an einer document-weiten Textabfrage.
     const gatewayValue = within(masthead).getByText("Gateway").nextElementSibling;
     expect(gatewayValue?.textContent).toBe("gesund");
   });
 
-  it("demotes the legacy StatusDots pill to lg: once the Puls-Leiste carries real instruments, since its Gateway LED already covers it (W2-c)", () => {
+  it("renders no legacy StatusDots pill — liveness is deduped to the Puls-Leiste gateway instrument + rail LED (UI/UX-Iteration 2)", () => {
     renderShell("crons", { pulse: { workers: 3, fragen: 0, kostenUsd: 4.1 } });
-    const statusDots = screen.getByTestId("status-dots");
-    expect(statusDots.className).toContain("lg:flex");
-    expect(statusDots.className).not.toContain("md:flex");
+    expect(screen.queryByTestId("status-dots")).toBeNull();
+    // Die Rail-GatewayLed bleibt als zweiter Liveness-Träger erhalten.
+    const rail = screen.getByRole("navigation", { name: "Hauptnavigation" });
+    expect(within(rail).getByText("Gateway")).toBeTruthy();
   });
 
-  it("keeps the legacy StatusDots pill at md: when no `pulse` is given", () => {
-    renderShell("crons");
-    const statusDots = screen.getByTestId("status-dots");
-    expect(statusDots.className).toContain("md:flex");
-    expect(statusDots.className).not.toContain("lg:flex");
+  it("badges the pinned Stratege tab only after a successful count load — never 0-as-unknown (UI/UX-Iteration 3b)", () => {
+    renderShell("stratege", { strategistCount: 3 });
+    // Name per Regex: der Badge-Zähler wird Teil des accessible name ("Stratege 3").
+    const pinned = screen.getAllByRole("link", { name: /Stratege/ }).find((el) => el.getAttribute("aria-current") === "page");
+    expect(pinned?.querySelector(".hc-badge")?.textContent).toBe("3");
+    cleanup();
+
+    // Quelle ladend/fehlgeschlagen (null) → KEIN Badge, kein 0-Fake.
+    renderShell("stratege", { strategistCount: null });
+    const pinnedUnknown = screen.getAllByRole("link", { name: /Stratege/ }).find((el) => el.getAttribute("aria-current") === "page");
+    expect(pinnedUnknown).toBeDefined();
+    expect(pinnedUnknown?.querySelector(".hc-badge")).toBeNull();
   });
 
   it("shows the masthead on /control/issues (same route family as statistik, no route branching left at all)", () => {

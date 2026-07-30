@@ -28,28 +28,36 @@ const NormalizedTokensSchema = z.object({
   output_tokens: z.coerce.number().nullable().catch(null),
 });
 
+// Canon 00-Canon/decisions/2026-07-27 (Kosten-SSOT im Lesepfad, Regel 3):
+// unknown bleibt unknown — die Token-Summen tragen absichtlich KEIN .catch(0).
+// Das Backend liefert alle fünf Felder aus demselben Rollup-Select; fehlt eines,
+// ist der Vertrag gebrochen. Dann wirft parseOrThrow und die View rendert
+// "nicht verfügbar" — niemals "0 = keine Aktivität".
 const TokenTotalsSchema = z.object({
-  context_input_tokens: z.coerce.number().catch(0),
-  new_input_tokens: z.coerce.number().catch(0),
-  cache_read_tokens: z.coerce.number().catch(0),
-  cache_write_tokens: z.coerce.number().catch(0),
-  output_tokens: z.coerce.number().catch(0),
+  context_input_tokens: z.coerce.number(),
+  new_input_tokens: z.coerce.number(),
+  cache_read_tokens: z.coerce.number(),
+  cache_write_tokens: z.coerce.number(),
+  output_tokens: z.coerce.number(),
   has_lower_bounds: z.boolean().catch(false),
 });
 
+// Gleiche Regel für den Preis-Block: ein gebrochener Betrag darf nicht als
+// "0.000000" durchrutschen ($0,00 läse sich als "kostet nichts"). `status`
+// behält seinen catch — "unknown" ist dort ein ehrlicher Enum-Wert, keine 0.
 const PriceSchema = z.object({
-  known_amount_usd: z.string().catch("0.000000"),
+  known_amount_usd: z.string(),
   status: z.enum(["complete", "partial", "unknown"]).catch("unknown"),
-  priced_breakdowns: z.coerce.number().catch(0),
-  unpriced_breakdowns: z.coerce.number().catch(0),
-  lower_bound_breakdowns: z.coerce.number().catch(0),
+  priced_breakdowns: z.coerce.number(),
+  unpriced_breakdowns: z.coerce.number(),
+  lower_bound_breakdowns: z.coerce.number(),
 });
 
 // Kategorie-spezifische Felder (metered_usd / marginal_usd+list_equivalent_usd /
 // reason) sind je Topf unterschiedlich besetzt und bleiben optional — die View
 // entscheidet anhand ihrer Anwesenheit, nicht anhand des Topf-Namens.
 const BillingCategorySchema = z.object({
-  fact_rows: z.coerce.number().catch(0),
+  fact_rows: z.coerce.number(),
   tokens: TokenTotalsSchema,
   metered_usd: PriceSchema.optional(),
   marginal_usd: z.string().optional(),
@@ -71,7 +79,7 @@ const GroupSchema = z.object({
     model: z.string().nullable().catch(null),
     model_label: z.string().catch("nicht_zuordenbar"),
   }),
-  fact_rows: z.coerce.number().catch(0),
+  fact_rows: z.coerce.number(),
   tokens: NormalizedTokensSchema,
   billing: z.record(z.string(), BillingCategorySchema).catch({}),
 });
@@ -79,13 +87,17 @@ const GroupSchema = z.object({
 const KanbanProjectionSchema = z.object({
   available: z.boolean().catch(false),
   reason: z.string().optional(),
-  total_runs: z.coerce.number().catch(0),
+  // Run-Zähler ohne .catch(0) (Canon Regel 3): die Projektion liefert sie aus
+  // derselben Abfrage wie `available`; ein gebrochener Block wirft statt
+  // "0 Runs" zu behaupten. `provider_classification` ist eine Map wie die
+  // Listen oben und behält ihren Leer-Fallback.
+  total_runs: z.coerce.number(),
   provider_classification: z.record(z.string(), z.coerce.number()).catch({}),
   usage_coverage: z
     .object({
-      token_bearing_runs: z.coerce.number().catch(0),
-      provider_only_fact_runs: z.coerce.number().catch(0),
-      runs_without_fact: z.coerce.number().catch(0),
+      token_bearing_runs: z.coerce.number(),
+      provider_only_fact_runs: z.coerce.number(),
+      runs_without_fact: z.coerce.number(),
       state: z.string().catch("unknown"),
     })
     .optional(),
@@ -109,9 +121,9 @@ export const UsageFactsResponseSchema = z.object({
     ).catch({}),
   }),
   summary: z.object({
-    group_count: z.coerce.number().catch(0),
-    fact_rows: z.coerce.number().catch(0),
-    raw_input_tokens: z.coerce.number().catch(0),
+    group_count: z.coerce.number(),
+    fact_rows: z.coerce.number(),
+    raw_input_tokens: z.coerce.number(),
     tokens: TokenTotalsSchema,
     billing: BillingSchema,
   }),
@@ -119,13 +131,13 @@ export const UsageFactsResponseSchema = z.object({
   unattributed: z.object({
     label: z.string().catch("nicht_zuordenbar"),
     reason: z.string().catch("model_missing"),
-    fact_rows: z.coerce.number().catch(0),
+    fact_rows: z.coerce.number(),
     tokens: TokenTotalsSchema,
     by_origin: z
       .array(
         z.object({
           origin: z.string(),
-          fact_rows: z.coerce.number().catch(0),
+          fact_rows: z.coerce.number(),
           tokens: TokenTotalsSchema,
         }),
       )

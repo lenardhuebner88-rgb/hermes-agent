@@ -90,6 +90,20 @@ describe("SubscriptionTokenBurnResponseSchema", () => {
     expect(legacy.totals.failed_runs).toBeUndefined();
     expect(legacy.totals.blocked_runs).toBeUndefined();
   });
+
+  it("throws on a broken runs counter instead of filling 0 (Canon Regel 3)", () => {
+    const result = SubscriptionTokenBurnResponseSchema.safeParse({
+      days: 7,
+      now: 1_784_642_400,
+      window_start: 1_784_037_600,
+      totals: { input_tokens: 300, output_tokens: 30, total_tokens: 330 },
+      by_lane: [],
+      by_class: [],
+      daily: [],
+      buckets: [],
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe("HostUsageResponseSchema", () => {

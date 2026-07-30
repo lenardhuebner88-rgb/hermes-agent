@@ -1184,7 +1184,7 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   .jv-chatsheet .jv-engine-stats { padding: 7px 9px; }
   .jv-chatsheet .jv-engine-row { grid-template-columns: 1fr 1fr; gap: 2px 10px; }
   .jv-chatsheet .jv-engine-row strong { grid-column: 1 / -1; }
-  .jv-rating-btn { width: 36px; height: 36px; }
+  .jv-rating-btn { width: 44px; height: 44px; }
   .jv-chatsheet .jv-warte-slot { flex: none; }
   .jv-chatsheet .jv-ticker { flex: none; }
   /* Thread: eigene Scroll-Region, Graph/Hintergrund scrollt nicht mit. */

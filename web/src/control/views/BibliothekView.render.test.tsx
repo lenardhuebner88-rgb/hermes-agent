@@ -261,7 +261,9 @@ describe("BibliothekView: Zustand bleibt beim Moduswechsel erhalten (S3)", () =>
     fireEvent.change(search, { target: { value: "quokkafund" } });
     expect((search as HTMLInputElement).value).toBe("quokkafund");
 
-    fireEvent.click(screen.getByRole("tab", { name: /Briefings/ }));
+    // ^-Anker: der Modus-Tab heisst "Briefings …", der Lesesaal-Kategorie-Chip
+    // (SubtabChips, ebenfalls role=tab) traegt den Eyebrow-Praefix davor.
+    fireEvent.click(screen.getByRole("tab", { name: /^Briefings/ }));
     fireEvent.click(screen.getByRole("tab", { name: /Lesesaal/ }));
 
     const searchAfter = screen.getByPlaceholderText("Suche in Titel + Text …") as HTMLInputElement;
@@ -281,6 +283,7 @@ describe("Lesesaal: zusammengeführte Receipt-Kategorie (P8a)", () => {
     render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
 
     const panel = lesesaalPanel();
+    // Kategorie-Chips sind SubtabChips (Toggle-Buttons, keine Tabs).
     expect(await panel.findAllByRole("button", { name: /Receipts$/ })).toHaveLength(1);
     expect(panel.queryByRole("button", { name: /Arbeit/ })).toBeNull();
   });
@@ -363,7 +366,7 @@ describe("BibliothekView: Deep-Link stellt Modus + Dokument aus der URL wieder h
   });
 });
 
-describe("Lesesaal: TwoPane ab 1024 px", () => {
+describe("Lesesaal: TwoPane ab 840 px", () => {
   it("behält den Shelf neben dem Reader und gibt Fokus an den Auslöser zurück", async () => {
     mockExpandedViewport(true);
     mockLibraryFetch((url) => {

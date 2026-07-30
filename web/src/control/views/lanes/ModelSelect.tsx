@@ -216,7 +216,7 @@ export function ModelSelect({
             role="listbox"
             aria-label={`Modell für ${row.profile}`}
             className={cn(
-              "absolute left-0 z-40 max-h-80 w-full min-w-[17rem] overflow-y-auto rounded-card border border-line bg-surface-2 p-1 shadow-2xl",
+              "absolute left-0 z-40 max-h-80 w-full min-w-[17rem] overflow-y-auto rounded-card border border-line bg-surface-2 p-1 shadow-floating",
               flipUp ? "bottom-full mb-1" : "top-full mt-1",
             )}
           >

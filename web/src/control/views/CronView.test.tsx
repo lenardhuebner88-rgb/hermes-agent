@@ -115,6 +115,30 @@ describe("CronView", () => {
     expect(html).not.toContain("status-ok");
   });
 
+  it("renders the fetch error as ErrorNote with retry wired to reload()", () => {
+    hooks.useCronObservability.mockReturnValue({
+      data: { jobs: [], gateway: { running: true, pid: 42 } },
+      error: "500: boom",
+      errorObj: { code: "500", message: "500: boom" },
+      loading: false,
+      lastUpdated: 1,
+      isStale: true,
+      busyJob: null,
+      actionError: null,
+      reload: vi.fn(),
+      updateData: vi.fn(),
+      trigger: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(<CronView density="airy" />);
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Cron-Übersicht konnte nicht geladen werden.");
+    expect(html).toContain("Erneut laden");
+  });
+
   it("renders text action buttons, not the upstream aspect-square icon variant", () => {
     // Upstream Button size="xs" became icon-only (p-1 aspect-square grid-cols-1):
     // with a text label it renders as a huge square with letter-wrapped text.

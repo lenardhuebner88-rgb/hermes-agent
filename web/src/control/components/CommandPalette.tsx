@@ -134,7 +134,7 @@ export function CommandPalette({ open, workers, onClose, onNavigate, onGenerate,
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-start bg-surface-0/80 px-3 pt-[12vh] backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Befehlspalette" className="mx-auto w-full max-w-2xl overflow-hidden rounded-panel border border-line bg-surface-1 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Befehlspalette" className="mx-auto w-full max-w-2xl overflow-hidden rounded-panel border border-line bg-surface-1 shadow-overlay" onMouseDown={(event) => event.stopPropagation()}>
         <div className="flex min-h-14 items-center gap-3 border-b border-line px-4">
           <Search className="h-4 w-4 text-ink-3" />
           <input ref={inputRef} aria-label="Befehle durchsuchen" value={query} onChange={(e) => { setQuery(e.target.value); setActive(0); }} placeholder="Springe zu..." className="h-12 flex-1 bg-transparent text-body text-ink outline-none placeholder:text-ink-3" />

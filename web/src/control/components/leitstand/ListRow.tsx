@@ -29,7 +29,11 @@ export function ListRow({
 }) {
   return (
     <article
-      className={cn("hc-surface-card p-3.5", onClick && "cursor-pointer", className)}
+      className={cn(
+        "hc-surface-card p-3.5",
+        onClick && "cursor-pointer transition-colors duration-150 ease-out hover:bg-surface-3",
+        className,
+      )}
       onClick={onClick}
     >
       {leading != null || trailing != null ? (

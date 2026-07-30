@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Lightbulb, Loader2, Moon, Play, Rocket, ScrollText, ShieldAlert, Target, TrendingUp, Trash2, TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { Hero } from "../components/Hero";
-import { FleetEmptyState, FleetPanel, KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../components/leitstand";
-import { fmtAge, fmtClock } from "../lib/derive";
+import { ErrorNote, FleetEmptyState, FleetPanel, FreshnessStrip, KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../components/leitstand";
+import { SkeletonCard } from "../components/primitives";
+import { fmtAge, fmtClock, nowSec } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
 import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/strategist";
 import type { LeverOutcome } from "../lib/schemas";
@@ -96,6 +97,7 @@ export function StrategistView({ density }: { density: Density }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const inFlightRef = useRef(false);
   const aliveRef = useRef(true);
   useEffect(() => () => { aliveRef.current = false; }, []);
@@ -108,6 +110,7 @@ export function StrategistView({ density }: { density: Density }) {
       if (aliveRef.current) {
         setData(next);
         setError(null);
+        setLastUpdated(nowSec());
       }
     } catch (e) {
       if (aliveRef.current) setError(e instanceof Error ? e.message : String(e));
@@ -160,8 +163,9 @@ export function StrategistView({ density }: { density: Density }) {
         density={density}
       />
 
-      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      {error ? <ErrorNote message={t.loadError} detail={error} onRetry={() => void load()} /> : null}
       {notice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><SignalLabel tone="ok" label="Erledigt" />{notice}</div> : null}
+      <FreshnessStrip lastUpdated={lastUpdated} onRefresh={() => load()} />
 
       <LastRunsStrip />
 
@@ -181,7 +185,7 @@ export function StrategistView({ density }: { density: Density }) {
 
       <FleetPanel eyebrow={t.listEyebrow} meta={t.listMeta}>
         {data === null ? (
-          <p className="text-sm text-ink-3">…</p>
+          <SkeletonCard rows={4} />
         ) : proposals.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
         ) : (
@@ -235,11 +239,11 @@ export function StrategistView({ density }: { density: Density }) {
  *  hier; die reine Liste ist als `OutcomeList` separat exportiert (statischer
  *  Render-Test, kein Netzwerk — ProposalList-Muster). */
 function OutcomesPanel() {
-  const { data, error } = useStrategistOutcomes();
+  const { data, error, reload } = useStrategistOutcomes();
   const outcomes = data?.outcomes ?? [];
   return (
     <FleetPanel eyebrow={t.outcomesEyebrow} meta={t.outcomesMeta}>
-      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{t.outcomesLoadError}</div> : null}
+      {error ? <ErrorNote message={t.outcomesLoadError} onRetry={() => void reload()} /> : null}
       <OutcomeList outcomes={outcomes} />
     </FleetPanel>
   );

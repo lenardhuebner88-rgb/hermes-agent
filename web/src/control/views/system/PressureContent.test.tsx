@@ -115,4 +115,17 @@ describe("PressureContent", () => {
     expect(html).not.toContain("hc-skeleton");
     expect(html).not.toContain('aria-busy="true"');
   });
+
+  it("renders an unreadable load average as unknown, never as 0 load (Canon Regel 3)", () => {
+    const noLoad: PressureStatusResponse = {
+      ...busyPressure,
+      host: { ...busyPressure.host, load_avg: [] },
+    };
+    const html = renderToStaticMarkup(<PressureContent data={noLoad} lastUpdated={1782070000} isStale={false} />);
+
+    expect(html).toContain("Load-Auslastung nicht lesbar");
+    // Kein erfundener Erfolgszustand: weder "0%"-Balken noch "0.0 / 8".
+    expect(html).not.toContain(">0%<");
+    expect(html).not.toContain("0.0 /");
+  });
 });

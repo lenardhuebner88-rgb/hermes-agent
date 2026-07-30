@@ -29,7 +29,7 @@ export function StatusChip({ icon: Icon, label, value, hint, tone = "zinc" }: {
         <span className="truncate font-display uppercase tracking-[0.08em] text-micro font-semibold text-ink-3">{label}</span>
       </div>
       <p className="mt-1 truncate font-data tabular-nums text-sec font-semibold text-ink sm:mt-2">{value}</p>
-      {hint ? <p className="mt-0.5 line-clamp-1 hc-type-label hc-soft">{hint}</p> : null}
+      {hint ? <p className="mt-0.5 line-clamp-1 text-micro font-medium text-ink-2">{hint}</p> : null}
     </div>
   );
 }

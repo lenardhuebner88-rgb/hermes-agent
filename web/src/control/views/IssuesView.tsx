@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { FleetEmptyState, FleetPanel, KpiTile, SignalLabel, type SignalTone } from "../components/leitstand";
-import { fmtClock } from "../lib/derive";
+import { ErrorNote, FleetEmptyState, FleetPanel, FreshnessStrip, KpiTile, SignalLabel, ViewHeader, type SignalTone } from "../components/leitstand";
+import { fmtClock, nowSec } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";
 
@@ -62,7 +62,7 @@ export function IssueRow({ issue }: { issue: IssueGroup }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex min-h-12 w-full flex-wrap items-center gap-2 text-left"
+        className="flex min-h-12 w-full flex-wrap items-center gap-2 rounded-card text-left transition-colors duration-150 ease-out hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
         aria-expanded={open}
       >
         <span className="shrink-0 rounded-card border border-line px-2 py-0.5 font-data text-micro tabular-nums text-ink">
@@ -127,6 +127,7 @@ export function IssuesPanel({ data }: { data: RunsIssuesResponse }) {
 export function IssuesView(_props: { density?: Density }) {
   const [data, setData] = useState<RunsIssuesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -136,6 +137,7 @@ export function IssuesView(_props: { density?: Density }) {
         ),
       );
       setError(null);
+      setLastUpdated(nowSec());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -158,16 +160,21 @@ export function IssuesView(_props: { density?: Density }) {
 
   return (
     <section aria-label={t.title} className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
-        <a
-          href="/control/statistik"
-          className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1.5 text-sec text-live hover:border-live hover:bg-live/10"
-        >
-          {t.back}
-        </a>
-      </div>
-      {error ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{error}</div> : null}
+      <ViewHeader
+        eyebrow="FEHLER · 30 TAGE"
+        title={t.title}
+        description={t.subtitle}
+        actions={(
+          <a
+            href="/control/statistik"
+            className="inline-flex min-h-12 items-center rounded-card border border-line px-3 py-1.5 text-sec text-live transition-colors duration-150 ease-out hover:border-live hover:bg-live/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          >
+            {t.back}
+          </a>
+        )}
+      />
+      <FreshnessStrip lastUpdated={lastUpdated} onRefresh={() => load()} />
+      {error ? <ErrorNote message={error} onRetry={() => void load()} /> : null}
       {data === null && !error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
       {data !== null ? <IssuesPanel data={data} /> : null}
     </section>

@@ -120,21 +120,38 @@ function CandidateCard({
 
 function ProjectLaneRow({ lane }: { lane: ProjectLane }) {
   const pressure = lane.blocked + lane.highRisk + lane.staleProof;
+  const cellLabel = "mb-1 block font-display text-micro uppercase tracking-[0.08em] text-ink-3 md:hidden";
   return (
-    <tr className="border-t border-line align-top">
-      <td className="px-3 py-2">
-        <div className="min-w-0">
-          <p className="truncate text-sec font-medium text-ink">{lane.project}</p>
-          <p className="mt-0.5 text-micro text-ink-3"><span className="font-data tabular-nums text-ink-2">{lane.activeItems}</span> Tasks · <span className="font-data tabular-nums text-ink-2">{lane.activeWorkers}</span> Worker</p>
-        </div>
-      </td>
-      <td className="px-3 py-2"><span className="font-data text-sec tabular-nums text-status-ok">{lane.ready}</span></td>
-      <td className="px-3 py-2"><span className={cn("font-data text-sec tabular-nums", lane.blocked ? "text-status-alert" : "text-ink-3")}>{lane.blocked}</span></td>
-      <td className="hidden px-3 py-2 md:table-cell"><span className="font-data text-sec tabular-nums text-ink">{lane.doing}</span></td>
-      <td className="hidden px-3 py-2 md:table-cell"><span className="font-data text-sec tabular-nums text-ink">{lane.review}</span></td>
-      <td className="hidden px-3 py-2 lg:table-cell"><span className={cn("font-data text-sec tabular-nums", pressure ? "text-status-warn" : "text-ink-3")}>{pressure}</span></td>
-      <td className="px-3 py-2"><p className="line-clamp-2 text-sec text-ink">{lane.nextAction}</p></td>
-    </tr>
+    <div className="grid grid-cols-1 gap-2 border-t border-line px-3 py-3 md:grid-cols-[minmax(180px,1.5fr)_64px_72px_64px_72px_80px_minmax(160px,1.5fr)] md:items-start md:gap-3 md:py-2">
+      <div className="min-w-0">
+        <p className="truncate text-sec font-medium text-ink">{lane.project}</p>
+        <p className="mt-0.5 text-micro text-ink-3"><span className="font-data tabular-nums text-ink-2">{lane.activeItems}</span> Tasks · <span className="font-data tabular-nums text-ink-2">{lane.activeWorkers}</span> Worker</p>
+      </div>
+      <div>
+        <span className={cellLabel}>Ready</span>
+        <span className="font-data text-sec tabular-nums text-status-ok">{lane.ready}</span>
+      </div>
+      <div>
+        <span className={cellLabel}>Blocked</span>
+        <span className={cn("font-data text-sec tabular-nums", lane.blocked ? "text-status-alert" : "text-ink-3")}>{lane.blocked}</span>
+      </div>
+      <div>
+        <span className={cellLabel}>Doing</span>
+        <span className="font-data text-sec tabular-nums text-ink">{lane.doing}</span>
+      </div>
+      <div>
+        <span className={cellLabel}>Review</span>
+        <span className="font-data text-sec tabular-nums text-ink">{lane.review}</span>
+      </div>
+      <div>
+        <span className={cellLabel}>Pressure</span>
+        <span className={cn("font-data text-sec tabular-nums", pressure ? "text-status-warn" : "text-ink-3")}>{pressure}</span>
+      </div>
+      <div className="min-w-0">
+        <span className={cellLabel}>Next</span>
+        <p className="line-clamp-2 text-sec text-ink">{lane.nextAction}</p>
+      </div>
+    </div>
   );
 }
 
@@ -362,27 +379,34 @@ export function AgentOpsView({ density }: { density: Density }) {
         eyebrow="Projekt-Lanes"
         meta="Kapazitaet, Risiko, naechster Schritt"
       >
+        {/*
+         * Labelled-card row transform (OrchestratorQueueTable-Idiom): unter md
+         * wird jede Lane zur Karte mit Eyebrow-Labels pro Feld — kein
+         * `hidden md:table-cell`, das Doing/Review/Pressure auf Phones
+         * komplett verschwinden liesse (DESIGN.md UX contract 3: umbauen,
+         * nicht verstecken). md:min-w-[48rem] gibt den 7 Spalten
+         * (180+64+72+64+72+80+160 + 6×gap-3 ≈ 764px) einen Boden, statt sie
+         * unlesbar zu quetschen; der overflow-x-auto-Wrapper scrollt.
+         */}
         <div className="-mx-1 overflow-x-auto">
-          <table className="w-full table-fixed text-left">
-            <thead className="bg-surface-2 font-display text-micro uppercase tracking-wide text-ink-3">
-              <tr>
-                <th className="w-[28%] px-3 py-2">Projekt</th>
-                <th className="w-[9%] px-3 py-2">Ready</th>
-                <th className="w-[9%] px-3 py-2">Blocked</th>
-                <th className="hidden w-[9%] px-3 py-2 md:table-cell">Doing</th>
-                <th className="hidden w-[9%] px-3 py-2 md:table-cell">Review</th>
-                <th className="hidden w-[10%] px-3 py-2 lg:table-cell">Pressure</th>
-                <th className="w-[26%] px-3 py-2">Next</th>
-              </tr>
-            </thead>
-            <tbody>
+          <div className="md:min-w-[48rem]">
+            <div className="hidden gap-3 bg-surface-2 px-3 py-2 font-display text-micro uppercase tracking-wide text-ink-3 md:grid md:grid-cols-[minmax(180px,1.5fr)_64px_72px_64px_72px_80px_minmax(160px,1.5fr)]">
+              <span>Projekt</span>
+              <span>Ready</span>
+              <span>Blocked</span>
+              <span>Doing</span>
+              <span>Review</span>
+              <span>Pressure</span>
+              <span>Next</span>
+            </div>
+            <div>
               {snapshot.projectLanes.length === 0 ? (
-                <tr><td colSpan={7} className="px-3 py-4 text-center text-sec text-ink-3">Keine Projekt-Lanes.</td></tr>
+                <p className="border-t border-line px-3 py-4 text-center text-sec text-ink-3">Keine Projekt-Lanes.</p>
               ) : (
                 snapshot.projectLanes.map((lane) => <ProjectLaneRow key={lane.project} lane={lane} />)
               )}
-            </tbody>
-          </table>
+            </div>
+          </div>
         </div>
       </FleetPanel>
 

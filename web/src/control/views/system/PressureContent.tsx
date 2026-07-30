@@ -83,7 +83,11 @@ function CauseDetail({ data }: { data: PressureStatusResponse }) {
 }
 
 function loadTone(data: PressureStatusResponse): "cyan" | "amber" | "red" {
-  const load1 = data.host.load_avg[0] ?? 0;
+  // Canon Regel 3: unbekannte Load ist nicht "0 Load". Ohne Messwert kein
+  // Erfolgs-Cyan aus einer erfundenen 0 — der Aufrufer zeigt dann "nicht
+  // lesbar" statt des MeterBar und der Punkt bleibt neutral (idle).
+  const load1 = data.host.load_avg[0];
+  if (load1 == null || Number.isNaN(load1)) return "cyan";
   const cores = Math.max(1, data.host.cpu_count || 1);
   if (load1 > cores) return "red";
   if (load1 >= cores * 0.5) return "amber";
@@ -179,7 +183,11 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
             <KpiTile label="Dashboard" value={fmtMb(data.dashboard.rss_mb)} delta={`CPU ${fmtNumber(data.dashboard.cpu_percent, "%")}`} />
           </div>
           <div className="mt-3">
-            <MeterBar label="Load-Auslastung" value={load1 ?? 0} max={cores} tone={loadTone(data)} />
+            {load1 != null ? (
+              <MeterBar label="Load-Auslastung" value={load1} max={cores} tone={loadTone(data)} />
+            ) : (
+              <p className="text-sec text-ink-3">Load-Auslastung nicht lesbar</p>
+            )}
           </div>
         </Panel>
 

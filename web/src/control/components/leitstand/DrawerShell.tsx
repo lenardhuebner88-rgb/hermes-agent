@@ -66,14 +66,14 @@ export function DrawerShell({
     // Mobile (<tab): bottom-sheet (items-end). From `tab` (600px): flush right
     // side-sheet (items-stretch, no gap/rounding — border-l is the only seam).
     <div
-      className="hc-backdrop-in fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm tab:items-stretch"
+      className="hc-backdrop-in fixed inset-0 z-50 flex items-end justify-end bg-surface-0/50 backdrop-blur-sm tab:items-stretch"
       role="presentation"
       onClick={onClose}
     >
       <div
         ref={dialogRef}
         className={cn(
-          "hc-surface-card hc-side-sheet-in flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-2xl tab:h-full tab:max-h-full tab:rounded-none tab:border-l tab:border-line tab:shadow-none",
+          "hc-surface-card hc-side-sheet-in flex max-h-[92dvh] w-full flex-col overflow-hidden rounded-t-2xl shadow-overlay tab:h-full tab:max-h-full tab:rounded-none tab:border-l tab:border-line tab:shadow-none",
           widthClassName,
         )}
         role="dialog"
@@ -81,11 +81,11 @@ export function DrawerShell({
         aria-label={ariaLabel}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start gap-3 border-b border-[var(--hc-border)] p-4">
-          {Icon ? <Icon className="mt-1 h-5 w-5 shrink-0 text-[var(--hc-accent-text)]" /> : null}
+        <div className="flex items-start gap-3 border-b border-line p-4">
+          {Icon ? <Icon className="mt-1 h-5 w-5 shrink-0 text-live" /> : null}
           <div className="min-w-0 flex-1">
             {eyebrow != null ? <Eyebrow>{eyebrow}</Eyebrow> : null}
-            <h2 className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-[var(--hc-text)]">
+            <h2 className="mt-1 line-clamp-3 break-words text-lg font-semibold leading-snug text-ink">
               {title}
             </h2>
             {headerExtra}
@@ -93,14 +93,14 @@ export function DrawerShell({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--hc-accent)]"
+            className="rounded-full border border-line p-2 text-ink-2 hover:bg-selected focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
             aria-label={closeLabel}
           >
             <X className="h-4 w-4" />
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4 pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">{children}</div>
-        {footer != null ? <div className="border-t border-[var(--hc-border)] p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{footer}</div> : null}
+        {footer != null ? <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{footer}</div> : null}
       </div>
     </div>
   );

@@ -385,7 +385,7 @@ describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
     expect(screen.getByRole("button", { name: /LLM-Wiki/ }).getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("behält das Regal ab 1024 px neben dem Reader und gibt Fokus an die DocCard zurück", async () => {
+  it("behält das Regal ab 840 px neben dem Reader und gibt Fokus an die DocCard zurück", async () => {
     mockExpandedViewport(true);
     const overview = KNOWLEDGE_CATALOG.collections[1].docs[0];
     fetchJSONMock.mockImplementation(async (url: string) => {
@@ -412,7 +412,7 @@ describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
     });
   });
 
-  it("behält unter 1024 px das Full-Replace-Muster", async () => {
+  it("behält unter 840 px das Full-Replace-Muster", async () => {
     mockExpandedViewport(false);
     const overview = KNOWLEDGE_CATALOG.collections[1].docs[0];
     fetchJSONMock.mockImplementation(async (url: string) => {

@@ -183,4 +183,38 @@ describe("UsageFactsResponseSchema", () => {
     expect(parsed.groups[0].tokens.context_input).toEqual({ tokens: null, status: "unavailable" });
     expect(parsed.groups[0].tokens.cache_read_tokens).toBeNull();
   });
+
+  it("wirft bei fehlenden Token-Summen statt sie per .catch(0) zu erfinden (Canon Regel 3)", () => {
+    const { cache_read_tokens: _dropped, ...brokenTokens } = contractShapedPayload.summary.tokens;
+    const result = UsageFactsResponseSchema.safeParse({
+      ...contractShapedPayload,
+      summary: { ...contractShapedPayload.summary, tokens: brokenTokens },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("wirft bei gebrochenem Preis-Betrag statt \"0.000000\" zu füllen (Canon Regel 3)", () => {
+    const { known_amount_usd: _dropped, ...brokenPrice } =
+      contractShapedPayload.summary.billing.metered.metered_usd;
+    const result = UsageFactsResponseSchema.safeParse({
+      ...contractShapedPayload,
+      summary: {
+        ...contractShapedPayload.summary,
+        billing: {
+          ...contractShapedPayload.summary.billing,
+          metered: { ...contractShapedPayload.summary.billing.metered, metered_usd: brokenPrice },
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("wirft bei fehlendem total_runs in der Kanban-Projektion statt 0 Runs zu behaupten", () => {
+    const { total_runs: _dropped, ...brokenKanban } = contractShapedPayload.kanban;
+    const result = UsageFactsResponseSchema.safeParse({
+      ...contractShapedPayload,
+      kanban: brokenKanban,
+    });
+    expect(result.success).toBe(false);
+  });
 });

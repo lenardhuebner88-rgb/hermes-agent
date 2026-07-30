@@ -9,7 +9,7 @@ import { providerUsageMeters, sortTerminalUsageProviders, usageProviderLabel } f
 function UsageMeter({ label, percent, detail }: { label: string; percent: number | null; detail: string | null }) {
   return (
     <div className="space-y-1">
-      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-ink-3">
+      <div className="flex items-center justify-between text-micro uppercase tracking-[0.12em] text-ink-3">
         <span>{label}</span>
         <span className="font-mono text-ink">{percent == null ? "—" : `${Math.round(percent)}%`}</span>
       </div>
@@ -21,7 +21,7 @@ function UsageMeter({ label, percent, detail }: { label: string; percent: number
           />
         ) : null}
       </div>
-      {detail ? <p className="truncate text-[10px] text-ink-3">{detail}</p> : null}
+      {detail ? <p className="truncate text-micro text-ink-3">{detail}</p> : null}
     </div>
   );
 }
@@ -39,7 +39,7 @@ function ProviderCard({ provider }: { provider: AccountUsageProvider }) {
           <h3 className="text-sm font-semibold text-ink">{title}</h3>
           <p className="truncate text-[11px] text-ink-3">{provider.plan || "Plan nicht gemeldet"}</p>
         </div>
-        <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-[10px] text-ink-2">
+        <span className="mt-1 inline-flex shrink-0 items-center gap-1 text-micro text-ink-2">
           <span aria-hidden className={`hc-led size-2 rounded-full ${provider.available ? "hc-led-live" : "hc-led-idle"}`} />
           {provider.available ? "aktiv" : "aus"}
         </span>
@@ -48,7 +48,7 @@ function ProviderCard({ provider }: { provider: AccountUsageProvider }) {
         {meters.map((meter) => <UsageMeter key={meter.key} label={meter.label} percent={meter.percent} detail={meter.detail} />)}
       </div>
       {meters.length === 0 ? (
-        <p className="mt-2 text-[10px] text-ink-2">{provider.available ? "Provider liefert aktuell kein Zeitfenster." : provider.unavailable_reason ?? "Aktuell keine verlässlichen Limitdaten."}</p>
+        <p className="mt-2 text-micro text-ink-2">{provider.available ? "Provider liefert aktuell kein Zeitfenster." : provider.unavailable_reason ?? "Aktuell keine verlässlichen Limitdaten."}</p>
       ) : null}
     </article>
   );
