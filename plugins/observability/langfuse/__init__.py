@@ -812,6 +812,7 @@ def _kanban_worker_metadata(
             "kanban_profile": normalized_profile,
             # Canonical dimensions shared with Usage Facts.
             "task_run_id": task_run_id,
+            "task_id": kanban_task_id,
             "chain_id": chain_id,
             "board": board,
             "session_id": session_id,

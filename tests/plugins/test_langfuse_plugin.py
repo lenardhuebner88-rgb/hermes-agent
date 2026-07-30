@@ -548,7 +548,7 @@ class TestKanbanWorkerTraceMetadata:
             "api_request_id": "", "platform": "cli", "provider": "provider",
             "model": "model", "api_mode": "chat", "kanban_task_id": "t-kanban",
             "kanban_run_id": "123", "kanban_board": "planspec", "kanban_profile": "coder",
-            "task_run_id": "123", "board": "planspec", "session_id": "session",
+            "task_run_id": "123", "task_id": "t-kanban", "board": "planspec", "session_id": "session",
             "origin": "hermes_agent", "profile": "coder", "lane": "coder",
         }
         assert propagated["tags"] == [
@@ -567,6 +567,7 @@ class TestKanbanWorkerTraceMetadata:
             "kanban_board": "planspec",
             "kanban_profile": "coder",
             "task_run_id": "123",
+            "task_id": "t-kanban",
             "board": "planspec",
             "session_id": "session",
             "origin": "hermes_agent",

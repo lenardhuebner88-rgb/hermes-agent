@@ -135,6 +135,33 @@ def test_live_smoke_contract_passes_only_with_exact_trace_usage_and_lifecycle(tm
     assert report["terminal"]["worker_exit_code"] == 0
 
 
+def test_live_smoke_contract_prefers_explicit_kanban_task_identity(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    metadata = {
+        "task_run_id": "42",
+        "task_id": "session-42",
+        "kanban_task_id": "task-1",
+        "board": "default",
+    }
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [{"id": "trace-1", "metadata": metadata}],
+        generation_probe=lambda _trace_id: [{
+            "id": "generation-1",
+            "traceId": "trace-1",
+            "metadata": metadata,
+        }],
+    )
+
+    assert report["status"] == "pass"
+    assert report["langfuse"]["exact_task_board_link"] is True
+
+
 def test_live_smoke_contract_fails_without_exact_generation(tmp_path: Path) -> None:
     usage_path, kanban_path = _seed_databases(tmp_path)
 

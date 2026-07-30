@@ -1179,8 +1179,11 @@ def build_live_smoke_contract(
         observed_run = metadata.get(
             "task_run_id", metadata.get("kanban_run_id")
         )
+        # ``kanban_task_id`` is the explicit worker identity. Historical
+        # traces may also carry a generic agent-turn ``task_id`` (the Hermes
+        # session id), so it must never shadow the board-native value.
         observed_task = metadata.get(
-            "task_id", metadata.get("kanban_task_id")
+            "kanban_task_id", metadata.get("task_id")
         )
         observed_board = metadata.get(
             "board", metadata.get("kanban_board")
