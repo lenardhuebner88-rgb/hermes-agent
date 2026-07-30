@@ -170,7 +170,9 @@ def _render(findings: Iterable[Finding], usages: Iterable[Usage]) -> str:
         f"{usage.path}={usage.percent:.0f}%/{usage.free_bytes / 2**30:.0f}GB-free"
         for usage in usages
     )
-    lines = [f"storage-guard: {summary}"]
+    findings = list(findings)
+    tag = "[ALARM]" if any(f.level == "alarm" for f in findings) else "[ENTSCHEIDUNG]"
+    lines = [f"{tag} storage-guard: {summary}"]
     for finding in sorted(findings, key=lambda f: f.level != "alarm"):
         lines.append(f"  [{finding.level.upper()}] {finding.message}")
     return "\n".join(lines)
