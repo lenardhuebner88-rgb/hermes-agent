@@ -23,7 +23,7 @@ import {
 import type { FoQuickView, FoSortKey } from "../lib/foBacklog";
 import type { Density } from "../hooks/useDensity";
 import type { BacklogItem, BacklogDetail } from "../lib/schemas";
-import { TwoPane, useTwoPaneExpanded } from "../components/leitstand";
+import { TwoPane, useTwoPaneExpanded, ErrorNote, FreshnessStrip } from "../components/leitstand";
 import {
   BacklogBoard,
   BacklogHeroPanel,
@@ -296,7 +296,8 @@ export function BacklogView({ density }: { density: Density }) {
         onViewMode={setViewMode}
       />
 
-      {backlog.error ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.backlog.error}</div> : null}
+      {backlog.error ? <ErrorNote message={de.backlog.error} onRetry={() => void backlog.reload()} /> : null}
+      <FreshnessStrip lastUpdated={backlog.lastUpdated} onRefresh={() => backlog.reload()} />
       <StaleBadge isStale={backlog.isStale} lastUpdated={backlog.lastUpdated} errorObj={backlog.errorObj} error={backlog.error} now={nowSec} />
       {data?.error ? <div role="alert" className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />{de.backlog.sourceMissing}</div> : null}
 

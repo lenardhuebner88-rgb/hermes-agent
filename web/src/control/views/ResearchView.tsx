@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { TriangleAlert } from "lucide-react";
 import { Hero } from "../components/Hero";
-import { FleetEmptyState, FleetPanel, SignalChip, SignalLabel } from "../components/leitstand";
-import { Eyebrow } from "../components/primitives";
+import { ErrorNote, FleetEmptyState, FleetPanel, FreshnessStrip, SignalChip, SignalLabel } from "../components/leitstand";
+import { Eyebrow, SkeletonCard } from "../components/primitives";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProseMarkdown } from "../components/ProseMarkdown";
 import { useHermesWorkers } from "../hooks/workersBoard";
@@ -138,6 +138,7 @@ export function ResearchView(_props: { density?: Density }) {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<ResearchCard[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyUpdated, setHistoryUpdated] = useState<number | null>(null);
   const now = nowSec();
 
   const loadHistory = useCallback(async () => {
@@ -149,6 +150,7 @@ export function ResearchView(_props: { density?: Density }) {
       flat.sort((a, b) => b.created_at - a.created_at);
       setHistory(flat.slice(0, 30));
       setHistoryError(null);
+      setHistoryUpdated(nowSec());
     } catch (e) {
       setHistoryError(e instanceof Error ? e.message : String(e));
     }
@@ -240,8 +242,12 @@ export function ResearchView(_props: { density?: Density }) {
       {notice ? <div className="flex items-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec text-ink-2"><SignalLabel tone="ok" label="Gestartet" />{notice}</div> : null}
 
       <FleetPanel eyebrow={t.history} meta={t.historyHint}>
-        {historyError ? <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span>{t.loadError}<br />{historyError}</span></div> : null}
-        {history !== null && history.length === 0 ? (
+        <FreshnessStrip className="mb-2" lastUpdated={historyUpdated} onRefresh={() => loadHistory()} />
+        {historyError ? <ErrorNote message={t.loadError} detail={historyError} onRetry={() => void loadHistory()} /> : null}
+        {history === null && !historyError ? (
+          // Erst-Load: Skeleton statt leerer <ul> (Leer ≠ ladend ≠ Fehler).
+          <SkeletonCard rows={4} />
+        ) : history !== null && history.length === 0 ? (
           <FleetEmptyState title={t.empty} desc={t.emptyDesc} />
         ) : (
           <ul className="space-y-1.5">

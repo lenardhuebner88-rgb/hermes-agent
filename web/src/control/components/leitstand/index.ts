@@ -4,6 +4,9 @@
  * re-inventing the idiom per view; see ./README.md for the props sketch.
  */
 export { FleetPod, FleetPanel, FleetEmptyState, RoleChip } from "./atoms";
+export { ErrorNote } from "./ErrorNote";
+export { FreshnessStrip } from "./FreshnessStrip";
+export { ViewHeader } from "./ViewHeader";
 export { KpiTile } from "./KpiTile";
 export { SectionHeader } from "./SectionHeader";
 export { SubtabChips, type SubtabItem, type SubtabChipClasses } from "./SubtabChips";

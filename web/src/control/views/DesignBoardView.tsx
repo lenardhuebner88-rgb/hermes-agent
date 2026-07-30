@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { SectionHeader, FleetPanel, FleetEmptyState, SignalLabel } from "@/control/components/leitstand";
+import { FleetPanel, FleetEmptyState, FreshnessStrip, SignalLabel, ErrorNote, ViewHeader } from "@/control/components/leitstand";
 import { Eyebrow } from "@/control/components/primitives";
 import { de } from "@/control/i18n/de";
+import { nowSec } from "@/control/lib/derive";
 import { statusLabel } from "./designboard/status";
 
 type CardSummary = {
@@ -36,6 +37,7 @@ function targetPreview(view: string): string {
 export function DesignBoardView(_props: { density?: string } = {}) {
   const [cards, setCards] = useState<CardSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState("");
   const [kind, setKind] = useState<string>("bug");
@@ -43,11 +45,23 @@ export function DesignBoardView(_props: { density?: string } = {}) {
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    fetchJSON<CardSummary[]>("/api/design-board/cards")
-      .then(setCards)
-      .catch((e) => setError(String(e)));
+  const load = useCallback(async () => {
+    try {
+      setCards(await fetchJSON<CardSummary[]>("/api/design-board/cards"));
+      setError(null);
+      setLastUpdated(nowSec());
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
+
+  useEffect(() => {
+    // Erst-Load direkt (nicht per setTimeout): der POST im Anlege-Formular muss
+    // die Mock-Reihenfolge des List-Loads nicht überholen können — ein späterer
+    // Load mit Nicht-Array-Payload crashte `cards.some` (Gate 2026-07-30).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- async Load; kein synchrones setState im Effect-Body
+    void load();
+  }, [load]);
 
   async function createCard() {
     if (!title.trim()) return;
@@ -70,15 +84,20 @@ export function DesignBoardView(_props: { density?: string } = {}) {
 
   return (
     <div className="min-h-full bg-surface-0 p-4">
-      <div className="flex items-baseline justify-between gap-3">
-        <SectionHeader label="Design Board" meta={`${cards.length} Karten`} className="flex-1" />
-        <button
-          onClick={() => setShowForm((v) => !v)}
-          className="min-h-12 shrink-0 rounded-card border border-line px-3 py-1 text-sec text-live hover:border-live hover:bg-live/10"
-        >
-          {showForm ? "Abbrechen" : "＋ Neue Karte"}
-        </button>
-      </div>
+      <ViewHeader
+        eyebrow="FEEDBACK · VARIANTEN"
+        title="Design Board"
+        description={`${cards.length} Karten`}
+        actions={(
+          <button
+            onClick={() => setShowForm((v) => !v)}
+            className="min-h-12 shrink-0 rounded-card border border-line px-3 py-1 text-sec text-live transition-colors duration-150 ease-out hover:border-live hover:bg-live/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+          >
+            {showForm ? "Abbrechen" : "＋ Neue Karte"}
+          </button>
+        )}
+      />
+      <FreshnessStrip lastUpdated={lastUpdated} onRefresh={() => load()} />
 
       {showForm && (
         <div className="mt-3 rounded-panel border border-line bg-surface-2 p-3">
@@ -125,22 +144,17 @@ export function DesignBoardView(_props: { density?: string } = {}) {
       )}
 
       {error && (
-        <div role="alert" className="mt-4 flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
-          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
-          <span><strong>Laden fehlgeschlagen</strong><br />{error}</span>
-        </div>
+        <ErrorNote className="mt-4" message="Laden fehlgeschlagen" detail={error} onRetry={() => void load()} />
       )}
       {!error && cards.length === 0 && (
         <div className="mt-4">
           <FleetEmptyState
             title="Noch keine Design-Karten"
-            desc={(
-              <span className="inline-flex flex-col items-start gap-2">
-                <span>Der Arbeitsbereich ist noch unbestückt.</span>
-                <button type="button" onClick={() => setShowForm(true)} className="inline-flex min-h-12 items-center rounded-card border border-live px-3 text-sec text-live hover:bg-live/10">
-                  Neue Karte anlegen
-                </button>
-              </span>
+            desc="Der Arbeitsbereich ist noch unbestückt."
+            action={(
+              <button type="button" onClick={() => setShowForm(true)} className="inline-flex min-h-12 items-center rounded-card border border-live px-3 text-sec text-live hover:bg-live/10">
+                Neue Karte anlegen
+              </button>
             )}
           />
         </div>

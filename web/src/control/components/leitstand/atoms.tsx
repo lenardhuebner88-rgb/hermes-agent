@@ -70,12 +70,16 @@ export function FleetPanel({
 }
 
 /** Quiet dashed empty state — calm title + one explaining line. `ok` greens the
- *  title (a deliberately reassuring "all clear", not an error). */
-export function FleetEmptyState({ title, desc, ok }: { title: ReactNode; desc: ReactNode; ok?: boolean }) {
+ *  title (a deliberately reassuring "all clear", not an error). `action` is the
+ *  doctrine's third element (Situation → Bewertung → nächste Aktion, W4-7): an
+ *  optional calm link/button row for the ONE obvious next step — omit it when
+ *  there is none, never use it to celebrate neutral emptiness with ok-green. */
+export function FleetEmptyState({ title, desc, action, ok }: { title: ReactNode; desc: ReactNode; action?: ReactNode; ok?: boolean }) {
   return (
     <div className={cn("hc-fleet-empty", ok && "ok")}>
       <span className="hc-fleet-empty-title">{title}</span>
       <span className="hc-fleet-empty-desc">{desc}</span>
+      {action != null ? <span className="mt-1 inline-flex flex-wrap items-center gap-2">{action}</span> : null}
     </div>
   );
 }

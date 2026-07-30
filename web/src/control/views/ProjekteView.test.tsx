@@ -348,6 +348,34 @@ describe("ProjekteView", () => {
     const html = renderView();
     expect(html).toContain("Projekt-Übersicht konnte nicht geladen werden.");
     expect(html).toContain("Agent-Belegung konnte nicht geladen werden.");
+    // ErrorNote: beide Banner tragen role="alert" und einen Retry (reload()).
+    expect(html.match(/role="alert"/g) ?? []).toHaveLength(2);
+    expect(html.match(/Erneut laden/g) ?? []).toHaveLength(2);
+  });
+
+  it("marks the kanban sums as unreadable when a bound board returns null (never 0)", () => {
+    // Canon: unbekannt bleibt unbekannt. kanban null bei gebundenem Board
+    // (kanban_project gesetzt) ist ein Lese-Fehler, kein "0 blockiert".
+    const unreadable: ProjectEntry = {
+      ...REAL_PROJECT,
+      kanban_project: "default",
+      kanban: null,
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [unreadable] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
+    const html = renderView();
+    expect(html).toContain("Kanban-Summen nicht lesbar");
+    expect(html).not.toContain("0 blockiert");
+    expect(html).not.toContain("0 Input");
+  });
+
+  it("treats a board-less project (kanban_project null, kanban null) as legitimately quiet", () => {
+    // Ohne Board-Bindung ist kanban null kein Fehler — keine "nicht lesbar"-Markierung.
+    const boardless: ProjectEntry = { ...REAL_PROJECT, kanban: null };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [boardless] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
+    const html = renderView();
+    expect(html).not.toContain("Kanban-Summen nicht lesbar");
   });
 
   it("renders the card grid in attention order (alert → active → quiet), not registry order", () => {

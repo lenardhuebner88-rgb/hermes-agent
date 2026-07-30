@@ -6,6 +6,7 @@ const mockState = vi.hoisted(() => ({
   data: null as UsageFactsResponse | null,
   loading: false,
   error: null as string | null,
+  reload: vi.fn(),
 }));
 
 vi.mock("../hooks/usageFacts", async (importOriginal) => {
@@ -16,6 +17,7 @@ vi.mock("../hooks/usageFacts", async (importOriginal) => {
       data: mockState.data,
       loading: mockState.loading,
       error: mockState.error,
+      reload: mockState.reload,
     }),
   };
 });
@@ -273,9 +275,17 @@ describe("HebelView", () => {
   it("unterscheidet Ladend und Fehler vom Datenstand", () => {
     mockState.data = null;
     mockState.loading = true;
-    expect(renderToStaticMarkup(<HebelView />)).toContain("Hebel werden geladen");
+    // Ladend: Skeleton (aria-busy), kein Dauer-Platzhaltertext.
+    const loadingMarkup = renderToStaticMarkup(<HebelView />);
+    expect(loadingMarkup).toContain('aria-busy="true"');
+    expect(loadingMarkup).not.toContain("Hebel werden geladen");
     mockState.loading = false;
     mockState.error = "boom";
-    expect(renderToStaticMarkup(<HebelView />)).toContain("Hebel sind derzeit nicht verfügbar");
+    // Fehler: ErrorNote (role=alert) mit Retry, kein Skeleton.
+    const errorMarkup = renderToStaticMarkup(<HebelView />);
+    expect(errorMarkup).toContain('role="alert"');
+    expect(errorMarkup).toContain("Hebel sind derzeit nicht verfügbar");
+    expect(errorMarkup).toContain("Erneut laden");
+    expect(errorMarkup).not.toContain('aria-busy="true"');
   });
 });

@@ -1,11 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { OutcomeList, ProposalList } from "./StrategistView";
+import { OutcomeList, ProposalList, StrategistView } from "./StrategistView";
 import type { StrategistProposal } from "../lib/strategist";
 import type { LeverOutcome } from "../lib/schemas";
 
 // Static render tests (RunTimelineView/ResearchView pattern): no polling, just
 // the pure list. Asserts the held proposal surfaces its annotations + actions.
+
+describe("StrategistView (Render)", () => {
+  it("zeigt im Erst-Load einen Skeleton im Vorschlags-Panel statt nacktem …", () => {
+    // Static render: keine Effects → data === null → Lade-Zustand.
+    const html = renderToStaticMarkup(<StrategistView density="airy" />);
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain(">…</p>");
+    // Der Leer-Zustand darf im Lade-Zustand nicht behauptet werden.
+    expect(html).not.toContain("Keine Vorschläge warten auf Freigabe.");
+  });
+});
 
 const proposal = (over: Partial<StrategistProposal> = {}): StrategistProposal => ({
   id: "t_abc123",

@@ -1,11 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import {
   RunTimelinePanel,
+  RunTimelineView,
   type RunTimelineResponse,
   type TimelineItem,
 } from "./RunTimelineView";
 import { eventTone } from "./RunTimelineView.helpers";
+
+// View-Ebene: der Store-Hook wird gemockt, die drei Zustände (ladend / Fehler
+// mit Retry / Daten) werden am statischen Markup geprüft.
+const mockPolling = vi.hoisted(() => ({
+  state: {
+    data: null as RunTimelineResponse | null,
+    error: null as string | null,
+    loading: true,
+    reload: vi.fn(),
+  },
+}));
+
+vi.mock("../hooks/internal", () => ({
+  usePolling: () => mockPolling.state,
+}));
 
 function item(partial: Partial<TimelineItem> & { kind: string; at: number }): TimelineItem {
   return {
@@ -92,5 +109,41 @@ describe("RunTimelinePanel", () => {
 
     const empty = renderToStaticMarkup(<RunTimelinePanel data={fixture([])} />);
     expect(empty).toContain("Keine Events");
+  });
+});
+
+describe("RunTimelineView (drei Zustände über usePolling)", () => {
+  function renderView() {
+    return renderToStaticMarkup(
+      <MemoryRouter>
+        <RunTimelineView />
+      </MemoryRouter>,
+    );
+  }
+
+  it("zeigt beim Erst-Load einen Skeleton, weder Leer-Zustand noch Fehler", () => {
+    mockPolling.state = { data: null, error: null, loading: true, reload: vi.fn() };
+    const html = renderView();
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain("Keine Events");
+    expect(html).not.toContain('role="alert"');
+  });
+
+  it("zeigt bei Fehler die ErrorNote mit Retry statt eines passiven Banners", () => {
+    mockPolling.state = { data: null, error: "network down", loading: false, reload: vi.fn() };
+    const html = renderView();
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("network down");
+    expect(html).toContain("Erneut laden");
+    expect(html).not.toContain('aria-busy="true"');
+  });
+
+  it("rendert bei Daten das Panel und keinen Lade- oder Fehlerzustand", () => {
+    mockPolling.state = { data: fixture([]), error: null, loading: false, reload: vi.fn() };
+    const html = renderView();
+    expect(html).toContain("Run #42");
+    expect(html).toContain("Keine Events");
+    expect(html).not.toContain('aria-busy="true"');
+    expect(html).not.toContain('role="alert"');
   });
 });
