@@ -339,11 +339,11 @@ describe("FleetView deep-link ?board=&status=", () => {
     // Operator verlässt den Board-Subtab und kommt zurück → der Deep-Link-Status
     // ist verbraucht; der Filter startet wie immer auf "all" statt still auf
     // "blocked" zurückzuspringen.
-    getByRole("button", { name: "Subtab Heute" }).click();
+    getByRole("tab", { name: "Subtab Heute" }).click();
     await waitFor(() => {
       expect(screen.queryByRole("combobox", { name: "Nach Status filtern" })).toBeNull();
     });
-    getByRole("button", { name: "Subtab Board" }).click();
+    getByRole("tab", { name: "Subtab Board" }).click();
     await waitFor(() => {
       expect(selectValue("Nach Status filtern")).toBe("all");
     });
@@ -402,7 +402,7 @@ describe("FleetView deep-link ?board=&status=", () => {
   it("does not open any drawer without a ?task= param", async () => {
     renderFleet("/control/fleet");
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Subtab Heute" })).toBeTruthy();
+      expect(screen.getByRole("tab", { name: "Subtab Heute" })).toBeTruthy();
     });
     expect(screen.queryByText("Task t_blocked")).toBeNull();
   });

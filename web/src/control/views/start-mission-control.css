@@ -658,7 +658,7 @@
   .smc-panel-head { min-height: 2.45rem; padding: 0 .68rem; }
   .smc-panel-head .hc-eyebrow { letter-spacing: .12em; }
   .smc-capacity-panel { order: -1; }
-  .smc-tabs button { min-height: 1.8rem; padding: 0 .43rem; }
+  .smc-tabs button { min-height: 2.75rem; padding: 0 .43rem; }
   .smc-matrix-body { padding: .58rem .66rem .45rem; }
   .smc-matrix-summary { min-height: 2.25rem; }
   .smc-matrix-summary strong { font-size: 1.12rem; }

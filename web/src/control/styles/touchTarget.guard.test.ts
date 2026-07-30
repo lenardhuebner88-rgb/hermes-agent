@@ -16,11 +16,10 @@ function productionFiles(extension: ".tsx" | ".css"): SourceFile[] {
       const path = resolve(directory, entry.name);
       const controlPath = relative(CONTROL_ROOT, path);
       if (entry.isDirectory()) {
-        if (entry.name !== "jarvis") walk(path);
+        walk(path);
       } else if (
         extname(entry.name) === extension &&
-        !/\.(?:test|spec|stories)\./.test(entry.name) &&
-        !(extension === ".css" && /(?:^|\/)jarvis[^/]*\.css$/.test(controlPath))
+        !/\.(?:test|spec|stories)\./.test(entry.name)
       ) {
         files.push({ path: controlPath, source: readFileSync(path, "utf8") });
       }
@@ -172,9 +171,11 @@ describe("Control authored touch-target floor", () => {
 
     // Deliberate limits: rules without an explicit px size or their own padding+font
     // pair are not statically measurable (for example a multi-line
-    // .st-ledger-worker-row). The Jarvis zone, non-semantic div/span click targets,
-    // dead CSS classes absent from production TSX, and documented WCAG exceptions
-    // are outside this guard's contract.
+    // .st-ledger-worker-row). Non-semantic div/span click targets, dead CSS
+    // classes absent from production TSX, and documented WCAG exceptions are
+    // outside this guard's contract. The Jarvis zone (jarvis.css + jarvis/*.tsx)
+    // is covered since 2026-07-30 — its ≥44px mobile mandate sits above this
+    // guard's 24px floor.
     expect(
       violations,
       `${violations.join("\n")}\n${TARGET_CONTRACT}`,

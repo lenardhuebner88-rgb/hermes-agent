@@ -15,7 +15,7 @@ export interface TwoPaneProps {
 
 /**
  * Canonical expanded list-detail composition. The caller owns the viewport
- * fork: below 1024px it passes no detail and mounts its DrawerShell instead.
+ * fork: below 840px it passes no detail and mounts its DrawerShell instead.
  */
 export function TwoPane({
   list,

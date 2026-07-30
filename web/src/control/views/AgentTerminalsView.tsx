@@ -1910,7 +1910,7 @@ export function AgentTerminalsView() {
                           {!managed && (
                             <span
                               data-testid={`extern-badge-${win.session}:${win.window}`}
-                              className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+                              className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-micro font-medium uppercase tracking-wide text-ink-3"
                               title="Externes Fenster — gehört einem anderen Agenten/Prozess"
                             >
                               extern
@@ -1919,8 +1919,8 @@ export function AgentTerminalsView() {
                         </span>
                         <span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} />
                       </span>
-                      <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-ink-3" title={win.cwd?.trim() || undefined}>
+                      <span className="mt-0.5 block truncate text-micro text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
+                      <span className="mt-0.5 block truncate font-mono text-micro text-ink-3" title={win.cwd?.trim() || undefined}>
                         {formatCwdShort(win.cwd)}
                       </span>
                       <Sparkline state={laneState} className="mt-1" />
@@ -2033,7 +2033,7 @@ export function AgentTerminalsView() {
       <div className="flex items-center gap-2">
         <Sparkles className="h-4 w-4 text-brand" />
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-3">Skills / Tools</p>
+          <p className="text-micro font-semibold uppercase tracking-[0.18em] text-ink-3">Skills / Tools</p>
           <h3 className="text-sm font-semibold text-ink">Fähigkeiten sichtbar</h3>
         </div>
       </div>
@@ -2052,7 +2052,7 @@ export function AgentTerminalsView() {
             <span
               title={state.detail}
               className={cn(
-                "shrink-0 rounded-full border px-2 py-0.5 text-[10px]",
+                "shrink-0 rounded-full border px-2 py-0.5 text-micro",
                 state.tone === "ok"
                   ? "border-status-ok/35 text-status-ok"
                   : state.tone === "warn"
@@ -2065,7 +2065,7 @@ export function AgentTerminalsView() {
           </div>
         ))}
       </div>
-      <div className="grid gap-1 text-[11px] text-ink-3">
+      <div className="grid gap-1 text-micro text-ink-3">
         <div className="flex items-start gap-2">
           <Wrench className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0">
@@ -2089,7 +2089,7 @@ export function AgentTerminalsView() {
       <div className="flex items-center gap-2">
         <Gauge className="h-4 w-4 text-status-ok" />
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-ink-3">Tageslage</p>
+          <p className="text-micro font-semibold uppercase tracking-[0.18em] text-ink-3">Tageslage</p>
           <h3 className="text-sm font-semibold text-ink">Was läuft / was ist belegt</h3>
         </div>
       </div>
@@ -2099,7 +2099,7 @@ export function AgentTerminalsView() {
         <StatTile label="Blockiert" value={blockedTasks.length + decisionCount} tone={blockedTasks.length + decisionCount > 0 ? "warn" : "ok"} />
         <StatTile label="Claims" value={openClaims.length} tone={openClaims.length > 0 ? "warn" : "ok"} />
       </div>
-      <div className="grid min-w-0 gap-2 text-[11px] text-ink-2 [&>div]:min-w-0">
+      <div className="grid min-w-0 gap-2 text-micro text-ink-2 [&>div]:min-w-0">
         <div className="flex items-center gap-1.5">
           <CheckCircle2 className="h-3.5 w-3.5 text-status-ok" />
           <span>Health: <span className="font-medium text-ink">{healthOverall}</span></span>
@@ -2353,7 +2353,7 @@ export function AgentTerminalsView() {
             onMouseDown={(event) => event.preventDefault()}
             onClick={toggleStickyCtrl}
             className={cn(
-              "grid min-h-[44px] w-full min-w-0 place-items-center rounded-card border font-mono text-[11px] transition",
+              "grid min-h-[44px] w-full min-w-0 place-items-center rounded-card border font-mono text-micro transition",
               ctrlArmed
                 ? "border-live/50 bg-live/15 text-live"
                 : "border-line bg-surface-2 text-ink-2 hover:border-live/40 hover:bg-live/10 hover:text-live active:bg-live/15",
@@ -2364,7 +2364,7 @@ export function AgentTerminalsView() {
           </button>
           {QUICK_KEYS.map((key) => (
             <TerminalControlButton key={key.label} label={`Send ${key.label}`} disabled={!activeSocketReady} onClick={() => sendKey(key.sequence)}>
-              <span className="font-mono text-[11px]">{key.label}</span>
+              <span className="font-mono text-micro">{key.label}</span>
             </TerminalControlButton>
           ))}
         </div>
@@ -2460,7 +2460,7 @@ export function AgentTerminalsView() {
   );
 
   const sessionSheet = compactLayout && sessionSheetOpen && selectedWindow && (
-    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+    <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-overlay">
       <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -2470,7 +2470,7 @@ export function AgentTerminalsView() {
             {!sessionSheetManaged && (
               <span
                 data-testid={`extern-badge-${selectedWindow.session}:${selectedWindow.window}`}
-                className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+                className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-micro font-medium uppercase tracking-wide text-ink-3"
                 title="Externes Fenster — gehört einem anderen Agenten/Prozess"
               >
                 extern
@@ -2498,7 +2498,7 @@ export function AgentTerminalsView() {
           {renameBusy ? "…" : "Umbenennen"}
         </button>
       </div>
-      {renameError && <div className="mt-1.5 rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-[11px] text-status-alert">{renameError}</div>}
+      {renameError && <div className="mt-1.5 rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-micro text-status-alert">{renameError}</div>}
       <div className="mt-3 grid gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
         <div className="flex items-center justify-between gap-2">
           <span>cwd</span>
@@ -2749,14 +2749,14 @@ export function AgentTerminalsView() {
 
   const createSheet = createSheetOpen && (
     compactLayout ? (
-      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-2xl">
+      <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 pb-[calc(1rem+env(safe-area-inset-bottom,0px))] shadow-overlay">
         <div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />
         {createSheetHeader}
         {createSessionForm}
       </div>
     ) : (
       <div className="fixed inset-0 z-50 grid place-items-center bg-surface-0/60 p-4">
-        <div className="w-full max-w-sm rounded-panel border border-line bg-surface-1 p-4 shadow-2xl">
+        <div className="w-full max-w-sm rounded-panel border border-line bg-surface-1 p-4 shadow-overlay">
           {createSheetHeader}
           {createSessionForm}
         </div>
@@ -2867,10 +2867,10 @@ export function AgentTerminalsView() {
               </button>
             </div>
           )}
-          {broadcastError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-[11px] text-status-alert">{broadcastError}</div>}
+          {broadcastError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-micro text-status-alert">{broadcastError}</div>}
         </div>
       )}
-      <p className="text-center text-[10px] text-ink-3">Zustände: Heuristik aus Terminal-Ausgabe</p>
+      <p className="text-center text-micro text-ink-3">Zustände: Heuristik aus Terminal-Ausgabe</p>
     </div>
   );
 
@@ -2896,7 +2896,7 @@ export function AgentTerminalsView() {
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-line-soft bg-surface-1 px-2">
         <button
           type="button"
-          className="inline-flex min-h-6 shrink-0 items-center gap-1.5 rounded-card px-1 text-[10px] text-ink-2 hover:bg-surface-3"
+          className="inline-flex min-h-6 shrink-0 items-center gap-1.5 rounded-card px-1 text-micro text-ink-2 hover:bg-surface-3"
           aria-label={`Pane ${paneIndex + 1} aktivieren (${connection.ready ? "verbunden" : connection.connecting ? "verbindet…" : "getrennt"})`}
           onClick={() => setActivePane(paneIndex)}
         >
@@ -2910,7 +2910,7 @@ export function AgentTerminalsView() {
             const next = windows.find((item) => `${item.session}:${item.window}` === event.target.value);
             if (next) selectPaneTarget(paneIndex, targetFromWindow(next));
           }}
-          className="min-w-0 flex-1 truncate bg-transparent font-mono text-[11px] text-ink outline-none"
+          className="min-w-0 flex-1 truncate bg-transparent font-mono text-micro text-ink outline-none"
         >
           <option value="" disabled>Terminal wählen</option>
           {windows.map((item) => {
@@ -2922,7 +2922,7 @@ export function AgentTerminalsView() {
             );
           })}
         </select>
-        <span className="font-mono text-[10px] text-ink-3">{paneIndex + 1}/{visiblePaneCount}</span>
+        <span className="font-mono text-micro text-ink-3">{paneIndex + 1}/{visiblePaneCount}</span>
       </div>
     );
   };
@@ -2954,8 +2954,8 @@ export function AgentTerminalsView() {
         visiblePaneCount === 1
           ? "flex"
           : "grid gap-2 p-2",
-        visiblePaneCount === 2 && "grid-cols-2 grid-rows-1",
-        visiblePaneCount === 4 && "grid-cols-2 grid-rows-2",
+        visiblePaneCount === 2 && "grid-cols-1 grid-rows-2 tab:grid-cols-2 tab:grid-rows-1",
+        visiblePaneCount === 4 && "grid-cols-1 grid-rows-4 tab:grid-cols-2 tab:grid-rows-2",
       )}
     >
       {paneTargets.slice(0, visiblePaneCount).map((paneTarget, paneIndex) => (
@@ -2992,7 +2992,7 @@ export function AgentTerminalsView() {
   );
 
   return (
-    <div className="flex min-h-[calc(100vh-8rem)] flex-col gap-2 text-ink sm:gap-3">
+    <div className="flex min-h-[calc(100svh-8rem)] flex-col gap-2 text-ink sm:gap-3">
       {!compactLayout && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-panel border border-line bg-surface-1 p-3">
           <div className="min-w-0">
@@ -3117,7 +3117,7 @@ export function AgentTerminalsView() {
                 <Activity className="h-3.5 w-3.5 shrink-0" />
                 <span className="truncate">{activeTarget ? `${activeTarget.session}:${activeTarget.window}` : "missing window"}</span>
                 {copyState !== "idle" && (
-                  <span role="status" className={cn("shrink-0 text-[10px]", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
+                  <span role="status" className={cn("shrink-0 text-micro", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
                     {copyState === "copied" ? "Kopiert" : copyState === "empty" ? "Keine Auswahl" : "Kopieren fehlgeschlagen"}
                   </span>
                 )}
@@ -3189,8 +3189,8 @@ export function AgentTerminalsView() {
                     <Link2 className="h-3.5 w-3.5" />
                   </button>
                 )}
-                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A−</button>
-                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A+</button>
+                <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A−</button>
+                <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A+</button>
                 <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">
                   {zen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
                 </button>
@@ -3198,7 +3198,7 @@ export function AgentTerminalsView() {
             </div>
           )}
           {compactLayout && error && (
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-status-alert/25 bg-status-alert/10 px-3 py-1.5 text-[11px] text-status-alert">
+            <div className="flex shrink-0 items-center gap-1.5 border-b border-status-alert/25 bg-status-alert/10 px-3 py-1.5 text-micro text-status-alert">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 truncate">{error}</span>
             </div>
@@ -3213,7 +3213,7 @@ export function AgentTerminalsView() {
                   type="button"
                   data-testid="desktop-execution-capsule-binding"
                   onClick={openExecutionCapsule}
-                  className="flex shrink-0 items-center gap-2 border-b border-live/15 bg-live/[0.04] px-3 py-1.5 text-left text-[10px] text-ink-3 hover:bg-live/[0.08]"
+                  className="flex shrink-0 items-center gap-2 border-b border-live/15 bg-live/[0.04] px-3 py-1.5 text-left text-micro text-ink-3 hover:bg-live/[0.08]"
                 >
                   <Link2 className="h-3 w-3 shrink-0 text-live" />
                   <span>Kanban</span>
@@ -3228,12 +3228,12 @@ export function AgentTerminalsView() {
                 // view's data (no model/effort/token-budget/permission-mode
                 // field on AgentTerminalWindow/-OverviewWindow), so they are
                 // deliberately omitted rather than fabricated.
-                <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-line-soft bg-live/[0.03] px-3 py-1.5 text-[10px] text-ink-3">
+                <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-b border-line-soft bg-live/[0.03] px-3 py-1.5 text-micro text-ink-3">
                   <span>letztes Event <b className="font-semibold text-ink-2">{formatActivityAge(overviewNow, selectedOverview.activity ?? null)}</b></span>
                 </div>
               )}
               {state === "dead pane" && selectedWindow && isManagedWindow(selectedWindow) && (
-                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-[11px] text-status-warn">
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-micro text-status-warn">
                   <span className="min-w-0 truncate">Prozess beendet — Startaktion wählen</span>
                   <span className="inline-flex shrink-0 items-center gap-1">
                     {deadWindowActions(selectedWindow).fresh && (
@@ -3292,7 +3292,7 @@ export function AgentTerminalsView() {
 
       {sessionSheet}
       {createSheet}
-      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />{toolsDrawer}</div>}
+      {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-overlay"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />{toolsDrawer}</div>}
 
       {executionCapsuleOpen && executionCapsuleTarget && (
         <div className="fixed inset-0 z-[70] grid place-items-end bg-black/65 p-0 sm:place-items-center sm:p-4">
@@ -3300,7 +3300,7 @@ export function AgentTerminalsView() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="execution-capsule-title"
-            className="max-h-[92svh] w-full overflow-y-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl sm:max-w-2xl sm:rounded-panel sm:p-5"
+            className="max-h-[92svh] w-full overflow-y-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-overlay sm:max-w-2xl sm:rounded-panel sm:p-5"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -3377,7 +3377,7 @@ export function AgentTerminalsView() {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <strong className="text-live">Context-Handoff</strong>
-                      <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-ink-3">
+                      <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-micro text-ink-3">
                         {executionCapsuleDetail.context.profile}
                       </span>
                     </div>
@@ -3391,7 +3391,7 @@ export function AgentTerminalsView() {
                         ["Risiken", executionCapsuleDetail.context.risks],
                       ] as const).map(([label, items]) => (
                         <div key={label} className="grid content-start gap-1.5 rounded-card border border-line bg-surface-2 p-2.5">
-                          <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">{label}</span>
+                          <span className="text-micro font-semibold uppercase tracking-wide text-ink-3">{label}</span>
                           {items.length > 0 ? (
                             <ul className="grid gap-1 text-xs leading-relaxed">
                               {items.map((item, index) => <li key={`${label}-${index}`}>• {item}</li>)}

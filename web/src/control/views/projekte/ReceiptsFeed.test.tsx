@@ -186,7 +186,7 @@ describe("ReceiptsFeed", () => {
     expect(screen.getByText("Projekte receipts feed frontend")).toBeTruthy();
     expect(screen.getByText("HT harvest deploy looplaunch")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Agent-Filter Codex" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agent-Filter Codex" }));
 
     expect(screen.getByText("B3 coordination parser drift receipt")).toBeTruthy();
     expect(screen.queryByText("Projekte receipts feed frontend")).toBeNull();
@@ -196,18 +196,18 @@ describe("ReceiptsFeed", () => {
   it("shows resolved project names on chips, filters by project, and exposes Ohne-Projekt only for nulls", () => {
     renderFeed();
     // Aufgelöster Anzeigename im Chip (nicht der rohe Slug hermes-infra).
-    expect(screen.getByRole("button", { name: "Projekt-Filter Hermes Infra" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Projekt-Filter Hermes Infra" })).toBeTruthy();
     // Unbekannter Slug bleibt roh.
-    expect(screen.getByRole("button", { name: "Projekt-Filter unknown-slug" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Projekt-Filter unknown-slug" })).toBeTruthy();
     // Fixture hat project:null → Chip erscheint.
-    expect(screen.getByRole("button", { name: "Projekt-Filter Ohne Projekt" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Projekt-Filter Ohne Projekt" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Projekt-Filter Hermes Infra" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Projekt-Filter Hermes Infra" }));
     expect(screen.getByText("B3 coordination parser drift receipt")).toBeTruthy();
     expect(screen.queryByText("Projekte receipts feed frontend")).toBeNull();
     expect(screen.queryByText("HT harvest deploy looplaunch")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Projekt-Filter Ohne Projekt" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Projekt-Filter Ohne Projekt" }));
     expect(screen.getByText("HT harvest deploy looplaunch")).toBeTruthy();
     expect(screen.queryByText("B3 coordination parser drift receipt")).toBeNull();
   });
@@ -220,7 +220,7 @@ describe("ReceiptsFeed", () => {
         .map((r) => ({ ...r })),
     });
     renderFeed(allAssigned);
-    expect(screen.queryByRole("button", { name: "Projekt-Filter Ohne Projekt" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Projekt-Filter Ohne Projekt" })).toBeNull();
   });
 
   it("combines agent + project filters as AND", () => {
@@ -259,8 +259,8 @@ describe("ReceiptsFeed", () => {
     });
     renderFeed(mixed);
 
-    fireEvent.click(screen.getByRole("button", { name: "Agent-Filter Codex" }));
-    fireEvent.click(screen.getByRole("button", { name: "Projekt-Filter Hermes Infra" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agent-Filter Codex" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Projekt-Filter Hermes Infra" }));
 
     expect(screen.getByText("Codex hermes")).toBeTruthy();
     expect(screen.queryByText("Codex other")).toBeNull();
@@ -297,7 +297,7 @@ describe("ReceiptsFeed", () => {
     // Ungefiltert: 19 > 12 → Alle 19
     expect(screen.getByRole("button", { name: "Alle 19 anzeigen" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Agent-Filter Codex" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agent-Filter Codex" }));
     expect(screen.getAllByRole("button", { name: /^Receipt / })).toHaveLength(12);
     expect(screen.getByRole("button", { name: "Alle 14 anzeigen" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Alle 19 anzeigen" })).toBeNull();
@@ -306,9 +306,9 @@ describe("ReceiptsFeed", () => {
 
   it("shows the filtered-empty text when no receipts match", () => {
     renderFeed();
-    fireEvent.click(screen.getByRole("button", { name: "Agent-Filter Codex" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Agent-Filter Codex" }));
     // Codex + Ohne-Projekt: Fixture-Codex hat project hermes-infra → leer
-    fireEvent.click(screen.getByRole("button", { name: "Projekt-Filter Ohne Projekt" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Projekt-Filter Ohne Projekt" }));
     expect(screen.getByText("Keine Receipts für diesen Filter.")).toBeTruthy();
     expect(
       screen.queryByText("Noch keine Receipts — Agents legen sie nach abgeschlossener Arbeit im Vault ab."),

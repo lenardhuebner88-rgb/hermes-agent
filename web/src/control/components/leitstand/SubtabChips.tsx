@@ -1,3 +1,5 @@
+import { useRef, useState, type KeyboardEvent } from "react";
+
 import { cn } from "@/lib/utils";
 
 export interface SubtabItem {
@@ -31,9 +33,18 @@ const DEFAULT_CLASSES: SubtabChipClasses = {
  * and warning dot, one marked active. Extracted from the inlined `fleet-chip`
  * pattern in FleetView so S2–S4 stop re-inventing it.
  *
- * DESIGN.md rule 6 caveat: these chips ARE navigation controls (real buttons
- * with `aria-pressed`), not the status-only chips of rule 6 — the surrounding
- * view keeps the current state reachable by other means.
+ * Semantics: WAI-ARIA tabs with manual activation — `role="tablist"` /
+ * `role="tab"` + `aria-selected`, roving tabindex, ArrowLeft/ArrowRight wrap,
+ * Home/End jump; Enter/Space (native button activation) selects. The views
+ * have no tabpanel wiring, so tabs carry no `aria-controls`.
+ *
+ * Back-compat: chips keep their `aria-pressed` mirror — locked consumers
+ * (FleetView's active-chip scroll-into-view selector `[aria-pressed="true"]`)
+ * and older tests pin it. It is redundant next to `aria-selected` but harmless.
+ *
+ * DESIGN.md rule 6 caveat: these chips ARE navigation controls, not the
+ * status-only chips of rule 6 — the surrounding view keeps the current state
+ * reachable by other means.
  */
 export function SubtabChips<T extends string>({
   items,
@@ -54,17 +65,52 @@ export function SubtabChips<T extends string>({
   className?: string;
   classes?: SubtabChipClasses;
 }) {
+  const buttonRefs = useRef(new Map<T, HTMLButtonElement>());
+  /** Roving-tabindex focus position; null tracks the active tab. Reset on
+   *  pointer/keyboard selection so the strip never strands focus on a tab the
+   *  view already left. */
+  const [focusId, setFocusId] = useState<T | null>(null);
+  const tabbableId = focusId ?? active;
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next = -1;
+    if (event.key === "ArrowRight") next = (index + 1) % items.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else return;
+    event.preventDefault();
+    const target = items[next];
+    setFocusId(target.id);
+    buttonRefs.current.get(target.id)?.focus();
+  }
+
   return (
-    <div className={cn("flex gap-1.5 overflow-x-auto scrollbar-none", className)}>
-      {items.map((item) => {
+    <div
+      role="tablist"
+      aria-label={ariaLabelPrefix}
+      className={cn("flex gap-1.5 overflow-x-auto scrollbar-none", className)}
+    >
+      {items.map((item, index) => {
         const on = active === item.id;
         return (
           <button
             key={item.id}
+            ref={(node) => {
+              if (node) buttonRefs.current.set(item.id, node);
+              else buttonRefs.current.delete(item.id);
+            }}
             type="button"
-            className={cn(classes.chip, on && classes.chipActive)}
-            onClick={() => onSelect(item.id)}
+            role="tab"
+            aria-selected={on}
             aria-pressed={on}
+            tabIndex={item.id === tabbableId ? 0 : -1}
+            className={cn(classes.chip, on && classes.chipActive)}
+            onClick={() => {
+              setFocusId(null);
+              onSelect(item.id);
+            }}
+            onKeyDown={(event) => handleKeyDown(event, index)}
             aria-label={`${ariaLabelPrefix} ${item.label}${item.warn ? warnSuffix : ""}`}
           >
             {item.label}

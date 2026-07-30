@@ -82,7 +82,7 @@ describe("TwoPane", () => {
     expect(screen.queryByRole("button", { name: "Detail schließen" })).toBeNull();
   });
 
-  it("renders only the list below 1024px even when detail was provided", () => {
+  it("renders only the list below 840px even when detail was provided", () => {
     vi.mocked(window.matchMedia).mockImplementation((query: string) => ({
       matches: false,
       media: query,

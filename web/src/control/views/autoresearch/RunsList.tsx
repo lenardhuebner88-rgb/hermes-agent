@@ -42,7 +42,10 @@ export function RunsList({ runs, proposals, loading = false }: { runs: Autoresea
           {runs.length > runCards.length ? <p className="text-xs text-ink-3">Weitere {runs.length - runCards.length} ältere Läufe stehen in der technischen Tabelle.</p> : null}
           <Disclosure className="rounded-panel border border-line bg-surface-2 p-3" summary={<span className="text-sm font-medium text-ink">Technische Tabelle anzeigen</span>}>
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-sm">
+              {/* min-w-Boden: 7 Spalten (Zeit, Lane mit min-w-40, 5 numerisch)
+               * quetschen sich sonst unter ~512px unlesbar, statt im
+               * overflow-x-auto-Wrapper zu scrollen. */}
+              <table className="w-full min-w-[32rem] text-left text-sm">
                 <thead className="text-ink-3"><tr className="border-b border-line"><th className="py-1 pr-3 font-medium">{de.autoresearch.runsColTime}</th><th className="py-1 pr-3 font-medium">{de.autoresearch.runsColLane}</th><th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColTokens}</th><th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColProposed}</th><th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColScanned}</th><th className="py-1 pr-3 text-right font-medium">{de.autoresearch.runsColErrors}</th><th className="py-1 text-right font-medium">{de.autoresearch.runsColVetoed}</th></tr></thead>
                 <tbody className="text-ink-2">
                   {runs.map((run, i) => {

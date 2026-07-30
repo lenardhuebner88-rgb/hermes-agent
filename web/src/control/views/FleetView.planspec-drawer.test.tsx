@@ -345,7 +345,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     });
 
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Board" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Board" }));
 
     expect(screen.getByText(/Daten von vor/)).toBeTruthy();
     expect(screen.getByText("Default aktive Kette")).toBeTruthy();
@@ -404,22 +404,22 @@ describe("FleetView PlanSpec detail drawer", () => {
       expect(screen.getByText(label)).toBeTruthy();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Worker" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Worker" }));
     for (const label of ["Worker (alle Boards)", "Worker (aktuelles Board)", "Verlässlichkeit", "Kosten", "Live-Ereignisse"]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Ketten" }));
     for (const label of ["Kettengraph", "Kettenkosten", "Review-Signale", "Worker (Kette)"]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
     expect(screen.getByText("PlanSpecs")).toBeTruthy();
     expect(screen.queryByText("Kosten")).toBeNull();
     expect(screen.queryByText("Account-Nutzung")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /Subtab Risiko/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Subtab Risiko/ }));
     for (const label of [
       "Worker (aktuelles Board)",
       "Verlässlichkeit",
@@ -478,7 +478,7 @@ describe("FleetView PlanSpec detail drawer", () => {
 
     renderFleetView();
 
-    const kettenTab = screen.getByRole("button", { name: "Subtab Ketten" });
+    const kettenTab = screen.getByRole("tab", { name: "Subtab Ketten" });
     expect(within(kettenTab).getByText("1")).toBeTruthy();
   });
 
@@ -503,10 +503,10 @@ describe("FleetView PlanSpec detail drawer", () => {
     });
 
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Board" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Board" }));
 
     expect(screen.queryByText("Fleet kompakte Kette")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Ketten" }));
     const item = screen.getByText("Fleet kompakte Kette").closest(".lk-done-row");
     expect(item).not.toBeNull();
     expect(within(item as HTMLElement).getByText(/35\/35/)).toBeTruthy();
@@ -514,7 +514,7 @@ describe("FleetView PlanSpec detail drawer", () => {
 
   it("places the chain release action in the selected PlanSpec check detail", () => {
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
     fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
     const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
     fireEvent.click(within(drawer).getByRole("tab", { name: "Übergabe" }));
@@ -525,7 +525,7 @@ describe("FleetView PlanSpec detail drawer", () => {
   it("opens the PlanSpec detail drawer from the Plan register row", () => {
     renderFleetView();
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
     fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
 
     expect(hooks.usePlanSpecDetail).toHaveBeenLastCalledWith(planSpec.path);
@@ -544,14 +544,14 @@ describe("FleetView PlanSpec detail drawer", () => {
   it("schließt das modale PlanSpec-Detail beim Subtab-Wechsel unter lg", () => {
     renderFleetView();
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
     fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
     expect(screen.getByRole("dialog", { name: "PlanSpec Details" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Ketten" }));
 
-    expect(screen.getByRole("button", { name: "Subtab Ketten" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("tab", { name: "Subtab Ketten" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
   });
 
@@ -573,7 +573,7 @@ describe("FleetView PlanSpec detail drawer", () => {
       expect(screen.getByLabelText("Aktuelle URL-Suche").textContent).toBe("");
     });
     expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("rekonstruiert Plan-Filter aus der URL und ersetzt History-Einträge", async () => {
@@ -635,7 +635,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     }));
 
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
 
     expect(screen.getByText("Signed Complete Plan")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Signed Complete Plan/ }));
@@ -758,7 +758,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     }));
 
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Worker" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Worker" }));
     fireEvent.click(screen.getByRole("button", { name: "Worker coder öffnen: Default alter Worker-Task" }));
     fireEvent.click(screen.getByRole("button", { name: de.fleet.drawerKetteOeffnen }));
     await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(DEFAULT_OLD_ROOT.id, null));
@@ -795,7 +795,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     }));
 
     renderFleetView();
-    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Subtab Plan" }));
     hooks.useChainGraph.mockClear();
     fireEvent.change(screen.getByRole("combobox", { name: "Board auswählen" }), { target: { value: "health-track" } });
 

@@ -14,7 +14,11 @@
   flex-direction: column;
 }
 
-@media (min-width: 1024px) {
+/* Split ab 840px — die dokumentierte Medium/Expanded-Grenze (DESIGN.md
+ * "UX contract — feature visibility and window classes"). 600–839px ist der
+ * deliberate Medium-Tier (kein gestrecktes Compact-Layout); unter 600px bleibt
+ * es bei einer Spalte. Mindestbreiten: 340 + 420 + 16 gap = 776px ≤ 840px. */
+@media (min-width: 840px) {
   .leitstand-two-pane--split {
     --two-pane-columns: minmax(340px, 2fr) minmax(420px, 3fr);
 
