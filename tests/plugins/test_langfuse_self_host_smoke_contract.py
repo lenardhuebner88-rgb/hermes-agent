@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 import urllib.error
+import urllib.request
 from email.message import Message
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from scripts.langfuse_worker_audit import (
     build_live_smoke_contract,
     main as audit_main,
 )
+from hermes_cli.urllib_security import SafeCredentialRedirectHandler
 
 
 def _seed_databases(
@@ -195,7 +197,6 @@ def _langfuse_env() -> dict[str, str]:
             401,
         ),
         (json.JSONDecodeError("invalid", "not-json", 0), "payload_invalid", None),
-        (RuntimeError("secret production client failure"), "payload_invalid", None),
     ],
 )
 def test_control_surface_smoke_classifies_langfuse_failures_without_details(
@@ -217,7 +218,6 @@ def test_control_surface_smoke_classifies_langfuse_failures_without_details(
     assert report["langfuse"].get("http_status") == status
     assert "error_type" not in report["langfuse"]
     assert "unauthorized" not in json.dumps(report)
-    assert "secret production client failure" not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
@@ -335,6 +335,60 @@ def test_dashboard_auth_rejects_non_loopback_before_any_request(monkeypatch) -> 
     assert opener_called is False
 
 
+def test_dashboard_auth_installs_cross_origin_credential_redirect_guard(
+    monkeypatch,
+) -> None:
+    from scripts import smoke_health_status_auth as auth_smoke
+
+    captured_handlers: list[object] = []
+    dummy_opener = object()
+
+    def capture_opener(*handlers):
+        captured_handlers.extend(handlers)
+        return dummy_opener
+
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit.build_opener",
+        capture_opener,
+    )
+    monkeypatch.setattr(auth_smoke, "_read_password", lambda *_args, **_kwargs: "secret")
+    monkeypatch.setattr(
+        auth_smoke,
+        "_json_request",
+        lambda *_args, **_kwargs: {"authenticated": True},
+    )
+    monkeypatch.setattr(auth_smoke, "_text_request", lambda *_args, **_kwargs: "")
+
+    _authenticated_dashboard_request(
+        "http://127.0.0.1:9119",
+        provider="basic",
+        username="operator",
+        password_env="HERMES_DASHBOARD_PASSWORD",
+        no_prompt=True,
+    )
+
+    redirect_handler = next(
+        handler
+        for handler in captured_handlers
+        if isinstance(handler, SafeCredentialRedirectHandler)
+    )
+    request = urllib.request.Request(
+        "http://127.0.0.1:9119/api/plugins/kanban/stats/observability",
+        headers={"X-Hermes-Session-Token": "secret-token"},
+    )
+    redirected = redirect_handler.redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        Message(),
+        "http://127.0.0.1:9120/capture",
+    )
+
+    assert redirected is not None
+    assert redirected.get_header("X-Hermes-Session-Token") is None
+
+
 def test_control_surface_smoke_requires_fresh_usage_with_known_fact_rows() -> None:
     def langfuse(*_args, **_kwargs) -> dict:
         return {"data": [{"id": "safe"}], "meta": {"totalPages": 1}}
@@ -352,6 +406,33 @@ def test_control_surface_smoke_requires_fresh_usage_with_known_fact_rows() -> No
     assert report["dashboard"]["budget"]["passed"] is True
     assert report["dashboard"]["usage_acceptable"] is False
     assert report["dashboard"]["sample_count"] >= 10
+    assert report["status"] == "fail"
+
+
+def test_control_surface_smoke_fails_when_one_warm_read_exceeds_wall_budget() -> None:
+    def langfuse(*_args, **_kwargs) -> dict:
+        return {"data": [{"id": "safe"}], "meta": {"totalPages": 1}}
+
+    dashboard_calls = 0
+
+    def dashboard(_url: str) -> dict:
+        nonlocal dashboard_calls
+        dashboard_calls += 1
+        if dashboard_calls == 2:
+            time.sleep(0.31)
+        return _dashboard_payload()
+
+    report = build_control_surface_live_smoke(
+        dashboard_base_url="http://127.0.0.1:9119",
+        warm_calls=5,
+        env=_langfuse_env(),
+        langfuse_request=langfuse,
+        dashboard_request=dashboard,
+    )
+
+    assert report["dashboard"]["wall_ms"]["maximum"] >= 300
+    assert report["dashboard"]["wall_ms"]["mean"] < 300
+    assert report["dashboard"]["budget"]["passed"] is False
     assert report["status"] == "fail"
 
 
@@ -380,6 +461,19 @@ def test_control_surface_smoke_does_not_mask_programming_errors() -> None:
         raise AssertionError("programming bug")
 
     with pytest.raises(AssertionError, match="programming bug"):
+        build_control_surface_live_smoke(
+            dashboard_base_url="http://127.0.0.1:9119",
+            env=_langfuse_env(),
+            langfuse_request=broken,
+            dashboard_request=lambda _url: _dashboard_payload(),
+        )
+
+
+def test_control_surface_smoke_does_not_mask_unexpected_runtime_errors() -> None:
+    def broken(*_args, **_kwargs) -> dict:
+        raise RuntimeError("programming bug")
+
+    with pytest.raises(RuntimeError, match="programming bug"):
         build_control_surface_live_smoke(
             dashboard_base_url="http://127.0.0.1:9119",
             env=_langfuse_env(),
@@ -607,6 +701,7 @@ def test_control_surface_smoke_proves_full_partial_and_warm_budget() -> None:
     assert report["dashboard"]["cache_age_seconds"] == [2, 3, 4, 5, 6]
     assert report["dashboard"]["client_cpu_ms"]["maximum"] >= 0.5
     assert report["dashboard"]["budget"]["server_cpu_budget"] == "not_observable_over_http"
+    assert report["dashboard"]["budget"]["wall_maximum_limit_ms"] == 300
     assert "cpu_mean_limit_ms" not in report["dashboard"]["budget"]
     assert report["dashboard"]["budget"]["passed"] is True
     assert len(dashboard_calls) == 6

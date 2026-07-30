@@ -26,6 +26,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from hermes_cli.usage_facts_db import usage_facts_db_path  # noqa: E402
 from hermes_cli.kanban_db import kanban_home  # noqa: E402
+from hermes_cli.urllib_security import SafeCredentialRedirectHandler  # noqa: E402
 
 CORRELATION_FIELDS = (
     "task_run_id",
@@ -478,7 +479,10 @@ def _authenticated_dashboard_request(
 
     from scripts import smoke_health_status_auth as auth_smoke
 
-    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    opener = build_opener(
+        HTTPCookieProcessor(CookieJar()),
+        SafeCredentialRedirectHandler(base_url),
+    )
     try:
         password = auth_smoke._read_password(password_env, no_prompt=no_prompt)
         login = auth_smoke._json_request(
@@ -560,7 +564,11 @@ def _classified_langfuse_failure(exc: BaseException) -> dict[str, Any] | None:
     elif isinstance(
         cause,
         (json.JSONDecodeError, UnicodeDecodeError, LangfusePayloadInvalid),
-    ) or isinstance(cause, RuntimeError):
+    ) or (
+        cause is exc
+        and isinstance(exc, RuntimeError)
+        and exc.args == ("Langfuse returned a non-object payload",)
+    ):
         receipt["reason"] = "payload_invalid"
     else:
         return None
@@ -796,6 +804,7 @@ def build_control_surface_live_smoke(
         )
         summary = usage.get("summary") if isinstance(usage.get("summary"), dict) else {}
         mean_wall = statistics.fmean(wall_samples)
+        maximum_wall = max(wall_samples)
         mean_cpu = statistics.fmean(cpu_samples)
         fact_rows = summary.get("fact_rows")
         usage_acceptable = usage.get("state") == "fresh" and isinstance(fact_rows, int)
@@ -805,7 +814,7 @@ def build_control_surface_live_smoke(
             "sample_count": len(wall_samples),
             "wall_ms": {
                 "median": statistics.median(wall_samples),
-                "maximum": max(wall_samples),
+                "maximum": maximum_wall,
                 "mean": mean_wall,
             },
             "client_cpu_ms": {
@@ -818,10 +827,10 @@ def build_control_surface_live_smoke(
             "usage_state": usage.get("state"),
             "langfuse_state": langfuse.get("state"),
             "budget": {
-                "wall_mean_limit_ms": 300,
+                "wall_maximum_limit_ms": 300,
                 "server_cpu_budget": "not_observable_over_http",
                 "server_cpu_budget_test": "LRM-4 in-process",
-                "passed": mean_wall < 300,
+                "passed": maximum_wall < 300,
             },
             "usage_acceptable": usage_acceptable,
         }
