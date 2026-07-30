@@ -82,7 +82,7 @@ def _profiles_identity(root: Path) -> tuple[Any, ...]:
             continue
         candidates.extend(
             profile_dir / name
-            for name in ("config.yaml", "state.db", "state.db-wal", "state.db-shm")
+            for name in ("config.yaml", "state.db", "state.db-wal")
         )
     return tuple(_path_identity(path) for path in candidates)
 

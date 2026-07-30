@@ -339,6 +339,27 @@ def test_usage_projection_cache_is_identity_scoped_and_single_flight(monkeypatch
     assert len(calls) == 2
 
 
+def test_profiles_identity_ignores_sqlite_shm_read_churn(tmp_path):
+    module = _load_plugin_module()
+    profile = tmp_path / "profiles" / "coder"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("model: test\n", encoding="utf-8")
+    (profile / "state.db").write_bytes(b"db")
+    wal = profile / "state.db-wal"
+    wal.write_bytes(b"wal")
+    shm = profile / "state.db-shm"
+    shm.write_bytes(b"shm")
+
+    before = module._profiles_identity(tmp_path / "profiles")
+    shm.write_bytes(b"read-side shared-memory churn")
+    after_shm_read = module._profiles_identity(tmp_path / "profiles")
+    wal.write_bytes(b"durable wal revision")
+    after_wal_write = module._profiles_identity(tmp_path / "profiles")
+
+    assert after_shm_read == before
+    assert after_wal_write != after_shm_read
+
+
 def test_usage_projection_refresh_failure_returns_explicit_stale(monkeypatch):
     module = _load_plugin_module()
     module.clear_usage_projection_cache()
