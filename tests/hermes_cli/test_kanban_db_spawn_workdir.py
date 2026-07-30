@@ -18,6 +18,8 @@ import unittest.mock
 from pathlib import Path
 import pytest
 from hermes_cli import kanban_db as kb
+from hermes_cli import gate_evidence
+from hermes_cli import kanban_runtime_facts as runtime_facts
 
 def _make_task(**overrides) -> "kb.Task":
     """Minimal Task with all required fields filled in. Override anything."""
@@ -1369,3 +1371,113 @@ def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
     assert "push" not in boundary
     assert "deploy" not in boundary
     assert "restart" not in boundary
+
+
+# ---------------------------------------------------------------------------
+# Worker-gate test-count stamps
+# ---------------------------------------------------------------------------
+
+def test_worker_gate_stamps_zero_tests_for_clean_run_affected_head(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """A clean ``run-affected.sh HEAD`` skip is a successful gate with zero tests."""
+    workspace = tmp_path / "clean-worktree"
+    workspace.mkdir()
+    command = "scripts/run-affected.sh HEAD"
+    monkeypatch.setattr(
+        kb,
+        "_worker_gate_config",
+        lambda: {
+            "enabled": True,
+            "repos": {str(workspace): [command]},
+            "default": [],
+            "timeout": 60,
+            "code_roles": frozenset({"coder"}),
+        },
+    )
+
+    def fake_run(argv, **_kwargs):
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return types.SimpleNamespace(returncode=0, stdout="a" * 40, stderr="")
+        assert argv == ["scripts/run-affected.sh", "HEAD"]
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "run-affected: no applicable Python production paths for this diff "
+                "— skipping pytest (targeted scope; full suite is nightly only)\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="gate", assignee="coder", workspace_path=str(workspace))
+        stamp = kb._run_worker_gate(conn, tid)
+
+    assert stamp["passed"] is True
+    assert stamp["exit_codes"] == [0]
+    assert stamp["test_counts"] == [
+        {"command_index": 0, "test_files": 0, "tests_passed": 0},
+    ]
+    gate_evidence._assert_raw_free(stamp)
+
+
+def test_worker_gate_stamps_executed_test_counts(kanban_home, tmp_path, monkeypatch):
+    """A successful runner summary records both selected files and passed tests."""
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    command = "scripts/run-affected.sh HEAD~1"
+    monkeypatch.setattr(
+        kb,
+        "_worker_gate_config",
+        lambda: {
+            "enabled": True,
+            "repos": {str(workspace): [command]},
+            "default": [],
+            "timeout": 60,
+            "code_roles": frozenset({"coder"}),
+        },
+    )
+
+    def fake_run(argv, **_kwargs):
+        if argv == ["git", "rev-parse", "HEAD"]:
+            return types.SimpleNamespace(returncode=0, stdout="b" * 40, stderr="")
+        assert argv == ["scripts/run-affected.sh", "HEAD~1"]
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="=== Summary: 2 files, 13 tests passed, 0 failed/errors (100% complete) ===\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="gate", assignee="coder", workspace_path=str(workspace))
+        stamp = kb._run_worker_gate(conn, tid)
+
+    assert stamp["passed"] is True
+    assert stamp["exit_codes"] == [0]
+    assert stamp["test_counts"] == [
+        {"command_index": 0, "test_files": 2, "tests_passed": 13},
+    ]
+    gate_evidence._assert_raw_free(stamp)
+
+
+def test_set_worker_pid_records_direct_locator_and_process_end(kanban_home, monkeypatch):
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="runtime", assignee="coder", kind="code")
+        assert kb.claim_task(conn, task_id) is not None
+        run_id = conn.execute(
+            "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()["current_run_id"]
+        assert kb._set_worker_pid(conn, task_id, 4242) is True
+        assert kb._end_run(conn, task_id, outcome="completed") == run_id
+
+        locator = runtime_facts.get_locator(conn, task_run_id=run_id)
+        event_kinds = [
+            item["event_kind"]
+            for item in runtime_facts.list_timeline(conn, task_run_id=run_id)
+        ]
+
+    assert locator == {"locator_type": "pid", "pid": 4242}
+    assert {"queued", "claimed", "process_started", "ended"} <= set(event_kinds)

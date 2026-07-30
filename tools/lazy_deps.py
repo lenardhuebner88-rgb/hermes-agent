@@ -153,6 +153,12 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "memory.supermemory": ("supermemory==3.50.0",),
     "memory.mem0": ("mem0ai==2.0.10",),
 
+    # ─── Observability plugins ─────────────────────────────────────────────
+    # The Langfuse hook is explicitly enabled and credential-gated. Its SDK
+    # must be ready before the first model request, so the plugin invokes this
+    # non-interactively only after both activation gates have passed.
+    "observability.langfuse": ("langfuse==4.14.1",),
+
     # ─── Messaging platforms (lazy-installable on demand) ──────────────────
     "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),
     # brotlicffi gives aiohttp a working 2-arg Decompressor.process() for

@@ -21,7 +21,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
+from hermes_cli.kanban_runtime_facts import SPAWN_IDENTITY_METADATA_FIELDS
 from hermes_cli import projects_db
+
+
+def _completion_payload(metadata):
+    assert metadata["worker_runtime"] == "hermes"
+    ignored = SPAWN_IDENTITY_METADATA_FIELDS | {"cost"}
+    return {key: value for key, value in metadata.items() if key not in ignored}
 
 
 # ---------------------------------------------------------------------------
@@ -4534,7 +4541,7 @@ def test_task_detail_includes_runs(client):
     assert run["outcome"] == "completed"
     assert run["profile"] == "worker"
     assert run["summary"] == "tested on rate limiter"
-    md = {k: v for k, v in run["metadata"].items() if k != "cost"}
+    md = _completion_payload(run["metadata"])
     assert md == {"changed_files": ["limiter.py"], "worker_session_id": "hermes-worker-42"}
     assert run["worker_session_id"] == "hermes-worker-42"
     assert run["ended_at"] is not None
@@ -4840,7 +4847,7 @@ def test_patch_status_done_with_summary_and_metadata(client):
         run = kb.latest_run(conn, tid)
         assert run.outcome == "completed"
         assert run.summary == "shipped the thing"
-        md = {k: v for k, v in run.metadata.items() if k != "cost"}
+        md = _completion_payload(run.metadata)
         assert md == {"changed_files": ["a.py", "b.py"], "tests_run": 7}
     finally:
         conn.close()

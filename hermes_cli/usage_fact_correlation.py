@@ -87,6 +87,25 @@ class CorrelationScan:
     ambiguous_session_ids: frozenset[str]
     databases_scanned: int
     databases_failed: int
+    database_results: tuple[DatabaseScanResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseScanResult:
+    """Session-content-free outcome for one board database read."""
+
+    path: str
+    board: str | None
+    status: str
+    error: str | None = None
+
+    def as_dict(self) -> dict[str, str | None]:
+        return {
+            "path": self.path,
+            "board": self.board,
+            "status": self.status,
+            "error": self.error,
+        }
 
 
 def discover_kanban_databases(
@@ -149,12 +168,13 @@ def scan_claude_session_correlations(
     """
     wanted = sorted({_text(value) for value in session_ids} - {None})
     if not wanted:
-        return CorrelationScan({}, frozenset(), 0, 0)
+        return CorrelationScan({}, frozenset(), 0, 0, ())
 
     matches: dict[str, list[dict[str, str | None]]] = defaultdict(list)
     database_paths = discover_kanban_databases(kanban_paths)
     databases_scanned = 0
     databases_failed = 0
+    database_results: list[DatabaseScanResult] = []
     for path in database_paths:
         board = _board_for_path(path)
         board_key = str(path.resolve(strict=False))
@@ -192,10 +212,18 @@ def scan_claude_session_correlations(
                             "profile": _text(row["profile"]),
                         })
             databases_scanned += 1
-        except sqlite3.Error:
+            database_results.append(
+                DatabaseScanResult(str(path), board, "ok")
+            )
+        except sqlite3.Error as exc:
             # Correlation is enrichment. An unavailable/old board must not
             # break the usage harvester or turn absence into guessed data.
             databases_failed += 1
+            database_results.append(
+                DatabaseScanResult(
+                    str(path), board, "error", type(exc).__name__
+                )
+            )
             continue
 
     resolved: dict[str, WorkerCorrelation] = {}
@@ -229,6 +257,7 @@ def scan_claude_session_correlations(
         ambiguous_session_ids=frozenset(ambiguous_session_ids),
         databases_scanned=databases_scanned,
         databases_failed=databases_failed,
+        database_results=tuple(database_results),
     )
 
 

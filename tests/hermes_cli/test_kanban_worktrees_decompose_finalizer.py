@@ -397,6 +397,100 @@ def test_decompose_root_with_open_child_not_finalized(
     assert _git(repo, "log", "--merges", "--oneline") == ""
 
 
+def test_decompose_root_finalizer_uses_valid_respec_replacement(kanban_home):
+    """An archived original must not block once its in-chain replacement is done."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="respecced root", triage=True)
+        original, sibling = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "original", "assignee": "coder", "parents": []},
+                {"title": "sibling", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        replacement = kb.respec_task(
+            conn, original, body="replacement implementation", author="operator",
+        )
+        assert replacement is not None
+
+        for task_id in (replacement, sibling):
+            assert kb.claim_task(conn, task_id) is not None
+            assert kb.complete_task(conn, task_id, result="done")
+        assert kb.get_task(conn, original).status == "archived"
+        assert kb.get_task(conn, root).status == "ready"
+
+        action = kwt.finalize_decompose_root_at_dispatch(conn, root, dry_run=False)
+
+        assert action == "auto_completed_commitless"
+        assert kb.get_task(conn, root).status == "done"
+        event = _events(conn, root, "decompose_root_auto_completed")[-1]
+        assert set(event["children"]) == {replacement, sibling}
+
+
+def test_decompose_root_finalizer_keeps_archived_child_without_respec_fail_closed(
+    kanban_home,
+):
+    """Archive status alone is not evidence that a child was superseded."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="archived child root", triage=True)
+        archived, sibling = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "archived", "assignee": "coder", "parents": []},
+                {"title": "sibling", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert kb.block_task(
+            conn, archived, reason="SUPERSEDED: no replacement exists",
+        )
+        assert kb.claim_task(conn, sibling) is not None
+        assert kb.complete_task(conn, sibling, result="done")
+        assert kb.get_task(conn, root).status == "ready"
+
+        action = kwt.finalize_decompose_root_at_dispatch(conn, root, dry_run=False)
+
+        assert action == "children_pending"
+        assert kb.get_task(conn, root).status == "ready"
+
+
+def test_decompose_root_finalizer_rejects_respec_replacement_from_other_chain(
+    kanban_home,
+):
+    """A respecced event cannot substitute an unrelated existing task."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="foreign replacement root", triage=True)
+        archived, sibling = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "archived", "assignee": "coder", "parents": []},
+                {"title": "sibling", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        foreign = kb.create_task(conn, title="foreign", assignee="coder")
+        assert kb.block_task(
+            conn, archived, reason="SUPERSEDED: invalid replacement",
+        )
+        kb._append_event(conn, archived, "respecced", {"new_task": foreign})
+        for task_id in (sibling, foreign):
+            assert kb.claim_task(conn, task_id) is not None
+            assert kb.complete_task(conn, task_id, result="done")
+        assert kb.get_task(conn, root).status == "ready"
+
+        action = kwt.finalize_decompose_root_at_dispatch(conn, root, dry_run=False)
+
+        assert action == "children_pending"
+        assert kb.get_task(conn, root).status == "ready"
+
+
 def test_auto_complete_decompose_root_refuses_when_all_children_archived(
     kanban_home,
 ):

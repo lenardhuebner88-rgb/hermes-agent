@@ -22,24 +22,28 @@ Optional env vars:
 """
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import json
 import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-try:
-    from langfuse import Langfuse, propagate_attributes
-except Exception:  # pragma: no cover - fail-open when optional dep is missing
-    Langfuse = None
-    propagate_attributes = None
+Langfuse: Any = None
+propagate_attributes: Any = None
+_EXPECTED_LANGFUSE_SDK_VERSION = "4.14.1"
+_LANGFUSE_INIT_LOCK = threading.RLock()
+_LANGFUSE_SDK_READY = False
 
 
 @dataclass
@@ -80,6 +84,8 @@ _READ_FILE_TAIL_LINES = 15
 _LANGFUSE_KEY_PREFIXES: Dict[str, str] = {
     "HERMES_LANGFUSE_PUBLIC_KEY": "pk-lf-",
     "HERMES_LANGFUSE_SECRET_KEY": "sk-lf-",
+    "LANGFUSE_PUBLIC_KEY": "pk-lf-",
+    "LANGFUSE_SECRET_KEY": "sk-lf-",
 }
 
 
@@ -104,6 +110,60 @@ def _debug(message: str) -> None:
         logger.info("Langfuse tracing: %s", message)
 
 
+def _ensure_langfuse_sdk() -> bool:
+    """Verify, lazy-install, and bind exactly the pinned activated SDK once."""
+    global Langfuse, propagate_attributes, _LANGFUSE_SDK_READY
+    with _LANGFUSE_INIT_LOCK:
+        if _LANGFUSE_SDK_READY:
+            return True
+        loaded_module = sys.modules.get("langfuse")
+        try:
+            installed_before = importlib.metadata.version("langfuse")
+        except importlib.metadata.PackageNotFoundError:
+            installed_before = None
+        if (
+            loaded_module is not None
+            and (
+                installed_before != _EXPECTED_LANGFUSE_SDK_VERSION
+                or getattr(loaded_module, "__version__", None)
+                != _EXPECTED_LANGFUSE_SDK_VERSION
+                or not hasattr(loaded_module, "Langfuse")
+                or not hasattr(loaded_module, "propagate_attributes")
+            )
+        ):
+            logger.warning(
+                "Langfuse plugin SDK version is incompatible with the pinned "
+                "runtime; restart after installing the configured version"
+            )
+            return False
+        try:
+            from tools.lazy_deps import ensure
+
+            ensure("observability.langfuse", prompt=False)
+            installed_after = importlib.metadata.version("langfuse")
+            if installed_after != _EXPECTED_LANGFUSE_SDK_VERSION:
+                raise RuntimeError("langfuse_sdk_version_mismatch")
+            importlib.invalidate_caches()
+            module = importlib.import_module("langfuse")
+            if (
+                getattr(module, "__version__", None)
+                != _EXPECTED_LANGFUSE_SDK_VERSION
+            ):
+                raise RuntimeError("loaded_langfuse_sdk_version_mismatch")
+            sdk_class = getattr(module, "Langfuse")
+            propagate = getattr(module, "propagate_attributes")
+        except Exception as exc:
+            logger.warning(
+                "Langfuse plugin SDK unavailable (%s); traces will NOT be emitted",
+                type(exc).__name__,
+            )
+            return False
+        Langfuse = sdk_class
+        propagate_attributes = propagate
+        _LANGFUSE_SDK_READY = True
+        return True
+
+
 def _fail_soft_hook(func: Any) -> Any:
     """Prevent an optional Langfuse export failure from escaping a Hermes hook."""
     @wraps(func)
@@ -111,7 +171,7 @@ def _fail_soft_hook(func: Any) -> Any:
         try:
             func(*args, **kwargs)
         except Exception as exc:
-            _debug(f"{func.__name__} failed: {exc}")
+            _debug(f"{func.__name__} failed ({type(exc).__name__})")
 
     return guarded
 
@@ -125,43 +185,93 @@ def _fail_soft_hook(func: Any) -> Any:
 _INIT_FAILED = object()
 
 
-def _redact_key_preview(value: str) -> str:
-    """Return a brief, log-safe preview of a credential value.
-
-    Keeps enough characters to disambiguate common placeholders
-    (``placeholder``, ``test-key``, ``your-key``) without echoing a
-    real secret in full if an operator pasted one into the wrong env
-    var.  Used only for the once-per-process placeholder-detection
-    warning in :func:`_get_langfuse`.
-    """
-    if not value:
-        return "<empty>"
-    if len(value) <= 12:
-        return repr(value)
-    return repr(value[:6] + "...")
-
-
 def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
     """Return an error message if ``value`` is not a real Langfuse key.
 
     Returns ``None`` when the value matches the documented Langfuse
     prefix for ``env_name``, or when no prefix is registered for the
     name (in which case we trust the operator).  When validation
-    fails the returned string is suitable for direct inclusion in a
-    single log line — it names the env var and shows a safe preview.
+    fails the returned string names the env var without including any
+    credential characters.
     """
     expected = _LANGFUSE_KEY_PREFIXES.get(env_name, "")
     if not expected:
         return None
     if value.startswith(expected):
         return None
+    return f"{env_name} has an invalid prefix (expected {expected!r})"
+
+
+def _resolve_langfuse_config() -> tuple[tuple[str, str, str, str, str] | None, str | None]:
+    namespaces = (
+        (
+            "HERMES_LANGFUSE_BASE_URL",
+            "HERMES_LANGFUSE_HOST",
+            "HERMES_LANGFUSE_PUBLIC_KEY",
+            "HERMES_LANGFUSE_SECRET_KEY",
+        ),
+        (
+            "LANGFUSE_BASE_URL",
+            "LANGFUSE_HOST",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+        ),
+    )
+    selected_index = next(
+        (
+            index
+            for index, namespace in enumerate(namespaces)
+            if any(_env(name) for name in namespace)
+        ),
+        None,
+    )
+    if selected_index is None:
+        return None, "missing"
+
+    selected = namespaces[selected_index]
+    base_url_name, host_name, public_name, secret_name = selected
+    base_url = _env(base_url_name) or _env(host_name)
+    public_key = _env(public_name)
+    secret_key = _env(secret_name)
+    lower_level_has_host = any(
+        _env(name)
+        for namespace in namespaces[selected_index + 1 :]
+        for name in namespace[:2]
+    )
+    if not base_url and not lower_level_has_host:
+        base_url = "https://cloud.langfuse.com"
+    if not base_url or not public_key or not secret_key:
+        return None, "incomplete"
+
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        _ = parsed.port
+        invalid_url = (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() for char in base_url)
+        )
+    except ValueError:
+        invalid_url = True
+    if invalid_url:
+        return None, "invalid_url"
     return (
-        f"{env_name}={_redact_key_preview(value)} "
-        f"(expected {expected!r} prefix)"
+        (base_url.rstrip("/"), public_key, secret_key, public_name, secret_name),
+        None,
     )
 
 
 def _get_langfuse() -> Optional[Langfuse]:
+    """Serialize first-use SDK verification and client construction."""
+    with _LANGFUSE_INIT_LOCK:
+        return _get_langfuse_locked()
+
+
+def _get_langfuse_locked() -> Optional[Langfuse]:
     """Return a cached Langfuse client, or ``None`` if unavailable.
 
     Activation of this plugin is controlled by the Hermes plugin system —
@@ -184,15 +294,13 @@ def _get_langfuse() -> Optional[Langfuse]:
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
 
-    if Langfuse is None:
+    config, config_error = _resolve_langfuse_config()
+    if config is None:
+        if config_error not in {None, "missing"}:
+            logger.warning("Langfuse plugin configuration is %s; traces will NOT be emitted", config_error)
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
-
-    public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
-    secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
-    if not (public_key and secret_key):
-        _LANGFUSE_CLIENT = _INIT_FAILED
-        return None
+    base_url, public_key, secret_key, public_name, secret_name = config
 
     # Reject placeholder credentials with a one-shot warning so the
     # operator sees the misconfiguration instead of silently shipping a
@@ -205,23 +313,26 @@ def _get_langfuse() -> Optional[Langfuse]:
     placeholder_issues = [
         msg
         for msg in (
-            _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
-            _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key),
+            _validate_langfuse_key(public_name, public_key),
+            _validate_langfuse_key(secret_name, secret_key),
         )
         if msg
     ]
     if placeholder_issues:
         logger.warning(
-            "Langfuse plugin: credentials look like placeholders, traces will "
+            "Langfuse plugin: credentials are invalid, traces will "
             "NOT be emitted (%s). Set real Langfuse keys (pk-lf-... / sk-lf-...) "
-            "or unset HERMES_LANGFUSE_PUBLIC_KEY / HERMES_LANGFUSE_SECRET_KEY to "
+            "or unset the configured Langfuse key variables to "
             "silence this warning.",
             "; ".join(placeholder_issues),
         )
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
 
-    base_url = _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
+    if not _ensure_langfuse_sdk():
+        _LANGFUSE_CLIENT = _INIT_FAILED
+        return None
+
     environment = _env("HERMES_LANGFUSE_ENV") or _env("LANGFUSE_ENV")
     release = _env("HERMES_LANGFUSE_RELEASE") or _env("LANGFUSE_RELEASE")
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
@@ -254,7 +365,7 @@ def _get_langfuse() -> Optional[Langfuse]:
     try:
         _LANGFUSE_CLIENT = Langfuse(**kwargs)
     except Exception as exc:  # pragma: no cover - fail-open
-        logger.warning("Could not initialize Langfuse client: %s", exc)
+        logger.warning("Could not initialize Langfuse client (%s)", type(exc).__name__)
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
 
@@ -648,7 +759,7 @@ def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, 
             except Exception:
                 cost_details["total"] = float(cost.amount_usd)
     except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"usage normalization failed: {exc}")
+        _debug(f"usage normalization failed ({type(exc).__name__})")
 
     return usage_details, cost_details
 
@@ -830,7 +941,7 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
             observation.update(**update_kwargs)
         observation.end()
     except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"end observation failed: {exc}")
+        _debug(f"end observation failed ({type(exc).__name__})")
 
 
 def _merge_trace_output(output: Any, state: TraceState) -> Any:
@@ -863,7 +974,7 @@ def _evict_stale_locked() -> None:
         try:
             state.root_span.end()
         except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"evict stale trace failed: {exc}")
+            _debug(f"evict stale trace failed ({type(exc).__name__})")
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
@@ -894,7 +1005,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             state.root_span.update(output=safe_final_output)
         state.root_span.end()
     except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"finish trace failed: {exc}")
+        _debug(f"finish trace failed ({type(exc).__name__})")
     finally:
         try:
             client.flush()
@@ -968,7 +1079,7 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
                     billing_snapshot=billing_snapshot,
                 )
             except Exception as exc:  # Observability must never break the run.
-                _debug(f"start trace failed: {exc}")
+                _debug(f"start trace failed ({type(exc).__name__})")
                 return
             _evict_stale_locked()
             _TRACE_STATE[task_key] = state
@@ -1053,7 +1164,7 @@ def on_pre_llm_request(
                     billing_snapshot=billing_snapshot,
                 )
             except Exception as exc:  # Observability must never break the run.
-                _debug(f"start trace failed: {exc}")
+                _debug(f"start trace failed ({type(exc).__name__})")
                 return
             _evict_stale_locked()
             _TRACE_STATE[task_key] = state

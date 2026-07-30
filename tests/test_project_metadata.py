@@ -190,6 +190,31 @@ def test_dev_extra_excluded_from_all():
     )
 
 
+def test_langfuse_plugin_dependency_is_exact_and_lazy_only():
+    """The opt-in trace hook must not silently skip its real SDK."""
+    from tools.lazy_deps import LAZY_DEPS
+
+    optional_dependencies = _load_optional_dependencies()
+    assert optional_dependencies["langfuse"] == ["langfuse==4.14.1"]
+    assert LAZY_DEPS["observability.langfuse"] == ("langfuse==4.14.1",)
+    assert not any(
+        spec == "hermes-agent[langfuse]"
+        for spec in optional_dependencies["all"]
+    )
+
+    manifest_path = (
+        Path(__file__).resolve().parents[1]
+        / "plugins"
+        / "observability"
+        / "langfuse"
+        / "plugin.yaml"
+    )
+    import yaml
+
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["pip_dependencies"] == ["langfuse==4.14.1"]
+
+
 def test_messaging_extra_includes_qrcode_for_weixin_setup():
     optional_dependencies = _load_optional_dependencies()
 

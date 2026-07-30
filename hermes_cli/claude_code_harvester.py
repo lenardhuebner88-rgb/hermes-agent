@@ -871,6 +871,131 @@ def recorrelate_existing_calls(
         connection.close()
 
 
+def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
+    """Return one correlation state per stored Claude session, without contents."""
+    resolved = db_path.expanduser().resolve()
+    connection = sqlite3.connect(
+        f"file:{quote(str(resolved), safe='/')}?mode=ro",
+        uri=True,
+        timeout=2.0,
+    )
+    try:
+        rows = connection.execute(
+            "SELECT session_id, correlation_source FROM run_usage_facts "
+            "WHERE origin=? AND session_id IS NOT NULL AND TRIM(session_id) != ''",
+            (ORIGIN,),
+        )
+        states: dict[str, str | None] = {}
+        for session_id, source in rows:
+            key = str(session_id).strip()
+            value = str(source).strip() if source is not None else None
+            previous = states.get(key)
+            if value == "claude_session_id_run" or previous is None:
+                states[key] = value
+        return states
+    finally:
+        connection.close()
+
+
+def _backfill_snapshot(
+    states: Mapping[str, str | None],
+    *,
+    correlations: Mapping[str, Any],
+    ambiguous_session_ids: Iterable[str],
+    projected: bool,
+) -> dict[str, int]:
+    candidate_ids = set(states)
+    ambiguous = candidate_ids & set(ambiguous_session_ids)
+    if projected:
+        projected_states = dict(states)
+        for session_id in ambiguous:
+            projected_states[session_id] = None
+        for session_id, correlation in correlations.items():
+            if session_id not in candidate_ids:
+                continue
+            if (
+                projected_states.get(session_id) == "claude_session_id_run"
+                and correlation.task_run_id is None
+            ):
+                continue
+            projected_states[session_id] = (
+                "claude_session_id_run"
+                if correlation.task_run_id is not None
+                else "claude_session_id_task"
+            )
+        exact_run = {
+            session_id
+            for session_id, source in projected_states.items()
+            if source == "claude_session_id_run"
+        }
+        task_only = {
+            session_id
+            for session_id, source in projected_states.items()
+            if source == "claude_session_id_task"
+        }
+    else:
+        exact_run = {
+            session_id
+            for session_id, source in states.items()
+            if source == "claude_session_id_run"
+        }
+        task_only = {
+            session_id
+            for session_id, source in states.items()
+            if source == "claude_session_id_task"
+        }
+    return {
+        "candidate_sessions": len(candidate_ids),
+        "exact_run_links": len(exact_run),
+        "task_only_links": len(task_only),
+        "ambiguous_sessions": len(ambiguous),
+        "unresolved_sessions": len(candidate_ids - exact_run - task_only),
+    }
+
+
+def backfill_existing_correlations(
+    *,
+    db_path: Path | str | None = None,
+    kanban_paths: Optional[Sequence[Path | str]] = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply the exact-session join to existing Claude usage facts.
+
+    This explicit path reads no transcript contents. Its report contains only
+    aggregate counts and per-board database status/error classes.
+    """
+    from hermes_cli.usage_fact_correlation import scan_claude_session_correlations
+
+    resolved_db = usage_facts_db_path(db_path)
+    states = _existing_claude_correlation_state(resolved_db)
+    scan = scan_claude_session_correlations(states, kanban_paths=kanban_paths)
+    before = _backfill_snapshot(
+        states,
+        correlations=scan.correlations,
+        ambiguous_session_ids=scan.ambiguous_session_ids,
+        projected=False,
+    )
+    updated = recorrelate_existing_calls(
+        scan.correlations,
+        db_path=resolved_db,
+        dry_run=not apply,
+        ambiguous_session_ids=scan.ambiguous_session_ids,
+    )
+    after = _backfill_snapshot(
+        states,
+        correlations=scan.correlations,
+        ambiguous_session_ids=scan.ambiguous_session_ids,
+        projected=True,
+    )
+    return {
+        "applied": apply,
+        "before": before,
+        "after": after,
+        "updated_facts": updated,
+        "board_databases": [result.as_dict() for result in scan.database_results],
+    }
+
+
 def harvest(
     *,
     projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
@@ -1037,6 +1162,16 @@ def build_arg_parser():
         help="Parse and merge only; do not write the DB or update HWM",
     )
     parser.add_argument(
+        "--backfill-correlations",
+        action="store_true",
+        help="Preview exact-session correlation backfill for existing Claude facts",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply --backfill-correlations (preview is the default)",
+    )
+    parser.add_argument(
         "--update-existing-only",
         action="store_true",
         help=(
@@ -1056,6 +1191,15 @@ def build_arg_parser():
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    if args.apply and not args.backfill_correlations:
+        parser.error("--apply requires --backfill-correlations")
+    if args.backfill_correlations:
+        report = backfill_existing_correlations(
+            db_path=args.db,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
     stats = harvest(
         projects_root=args.projects_root,
         db_path=args.db,
