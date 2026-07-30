@@ -21538,6 +21538,7 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
     """
     if not pid or pid <= 0:
         return
+    _runtime_facts.release_worker_process_handle(pid, raw_status)
     now = time.time()
     identity = _worker_process_identities.get(int(pid))
     board: Optional[str] = None
@@ -21828,15 +21829,20 @@ def reap_worker_zombies() -> "list[int]":
     reaped: "list[int]" = []
     if os.name != "nt":
         try:
-            while True:
-                try:
-                    pid, status = os.waitpid(-1, os.WNOHANG)
-                except ChildProcessError:
-                    break
-                if pid == 0:
-                    break
-                _record_worker_exit(pid, status)
-                reaped.append(pid)
+            # Share the process-generation lock with Popen + handle/identity
+            # registration.  Otherwise a newly spawned child can reuse the
+            # just-reaped numeric PID between waitpid() and the registry write,
+            # causing the old wait status to release the new generation.
+            with _worker_exit_registry_lock:
+                while True:
+                    try:
+                        pid, status = os.waitpid(-1, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid == 0:
+                        break
+                    _record_worker_exit(pid, status)
+                    reaped.append(pid)
         except Exception:
             pass
     return reaped
@@ -32139,28 +32145,6 @@ def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(spec.log_path, rotate_bytes, backup_count)
     log_f = open(spec.log_path, "ab")
-    try:
-        _runtime_facts.record_event_from_environment(
-            "spawn_started",
-            source="kanban_db._launch_worker_process",
-            env=spec.env,
-        )
-        proc = subprocess.Popen(  # noqa: S603 -- argv is a resolved fixed list
-            _maybe_scope_worker_cmd(list(spec.argv)),
-            cwd=spec.cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            env=dict(spec.env),
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-        )
-    except FileNotFoundError:
-        log_f.close()
-        raise RuntimeError(spec.missing_executable_message)
-    except BaseException:
-        log_f.close()
-        raise
     raw_run_id = spec.env.get("HERMES_KANBAN_RUN_ID")
     task_id = str(spec.env.get("HERMES_KANBAN_TASK") or "")
     board = str(spec.env.get("HERMES_KANBAN_BOARD") or "")
@@ -32168,13 +32152,41 @@ def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
         task_run_id = int(raw_run_id) if raw_run_id is not None else None
     except (TypeError, ValueError):
         task_run_id = None
-    if task_run_id is not None and task_id and board:
-        _register_worker_process_identity(
-            int(proc.pid),
-            board=board,
-            task_run_id=task_run_id,
-            task_id=task_id,
+    try:
+        _runtime_facts.record_event_from_environment(
+            "spawn_started",
+            source="kanban_db._launch_worker_process",
+            env=spec.env,
         )
+        # One lifecycle lock spans Popen, strong-handle retention, and exact
+        # board/run/task identity registration.  The parent reaper holds the
+        # same lock across waitpid + exit recording, so neither a short-lived
+        # child nor a recycled numeric PID can cross process generations.
+        with _worker_exit_registry_lock:
+            proc = subprocess.Popen(  # noqa: S603 -- argv is a resolved fixed list
+                _maybe_scope_worker_cmd(list(spec.argv)),
+                cwd=spec.cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                env=dict(spec.env),
+                start_new_session=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            )
+            _runtime_facts.retain_worker_process_handle(proc)
+            if task_run_id is not None and task_id and board:
+                _register_worker_process_identity(
+                    int(proc.pid),
+                    board=board,
+                    task_run_id=task_run_id,
+                    task_id=task_id,
+                )
+    except FileNotFoundError:
+        log_f.close()
+        raise RuntimeError(spec.missing_executable_message)
+    except BaseException:
+        log_f.close()
+        raise
     # The child inherits the descriptor and keeps writing after this function
     # returns. The parent's Python handle can fall out of scope safely.
     return int(proc.pid)

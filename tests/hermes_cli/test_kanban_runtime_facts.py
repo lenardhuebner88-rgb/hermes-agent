@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import os
+import platform
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_runtime_facts as facts
+from hermes_cli import kanban_worker_runtime as worker_runtime
 
 
 def _claimed_run(conn, *, assignee: str = "coder") -> tuple[str, int]:
@@ -225,6 +232,216 @@ def test_reaped_clean_exit_fills_process_facts_without_rewriting_terminal_meanin
         "task_id": task_id,
         "board": "default",
     }
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected_returncode"),
+    [(0, 0), (7 << 8, 7)],
+)
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no waitpid reaper")
+def test_reaped_worker_releases_retained_popen_with_exact_returncode(
+    raw_status,
+    expected_returncode,
+):
+    class FakeProcess:
+        pid = 414141
+        returncode = None
+
+    process = FakeProcess()
+    assert facts.retain_worker_process_handle(process) == process.pid
+
+    kb._record_worker_exit(process.pid, raw_status)
+
+    assert process.returncode == expected_returncode
+    assert not facts.release_worker_process_handle(process.pid, raw_status)
+
+
+def test_windows_worker_handle_is_not_retained_without_a_waitpid_reaper(
+    monkeypatch,
+):
+    class FakeProcess:
+        pid = 424242
+        returncode = None
+
+    process = FakeProcess()
+    monkeypatch.setattr(facts.os, "name", "nt")
+
+    assert facts.retain_worker_process_handle(process) == process.pid
+    assert not facts.release_worker_process_handle(process.pid, 0)
+    assert process.returncode is None
+
+
+def test_worker_launcher_retains_popen_handle_until_parent_reaper(
+    monkeypatch,
+    tmp_path,
+):
+    class FakeProcess:
+        pid = 515151
+        returncode = None
+
+    process = FakeProcess()
+    retained = []
+
+    monkeypatch.setattr(
+        "subprocess.Popen",
+        lambda *args, **kwargs: process,
+    )
+    monkeypatch.setattr(kb, "_maybe_scope_worker_cmd", lambda argv: argv)
+    monkeypatch.setattr(
+        facts,
+        "record_event_from_environment",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        facts,
+        "retain_worker_process_handle",
+        lambda candidate: retained.append(candidate) or candidate.pid,
+    )
+
+    pid = kb._launch_worker_process(
+        worker_runtime.WorkerLaunchSpec(
+            argv=("hermes", "chat"),
+            env={},
+            cwd=None,
+            log_path=tmp_path / "worker.log",
+            missing_executable_message="missing",
+        )
+    )
+
+    assert pid == process.pid
+    assert retained == [process]
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or platform.python_implementation() != "CPython",
+    reason="regression pins CPython's POSIX Popen cleanup behavior",
+)
+def test_real_popen_cleanup_cannot_steal_retained_worker_exit(
+    tmp_path,
+):
+    # Control: dropping the only reference while the delayed child still runs
+    # registers it in subprocess._active. A later Popen constructor cleans that
+    # list and reaps the child before a dispatcher waitpid can observe it.
+    control = subprocess.Popen(  # noqa: S603 -- fixed test interpreter argv
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; time.sleep(0.15); sys.exit(9)",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    control_pid = control.pid
+    del control
+    gc.collect()
+    time.sleep(0.25)
+    trigger = subprocess.Popen(  # noqa: S603 -- fixed test interpreter argv
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert trigger.wait(timeout=5) == 0
+    with pytest.raises(ChildProcessError):
+        os.waitpid(control_pid, os.WNOHANG)
+
+    # Production path: _launch_worker_process keeps a strong handle outside
+    # subprocess._active. The same later-Popen cleanup cannot steal its status,
+    # and the dispatcher reaper records the exact nonzero exit.
+    retained_pid = kb._launch_worker_process(
+        worker_runtime.WorkerLaunchSpec(
+            argv=(
+                sys.executable,
+                "-c",
+                "import sys,time; time.sleep(0.15); sys.exit(7)",
+            ),
+            env={},
+            cwd=None,
+            log_path=tmp_path / "real-worker.log",
+            missing_executable_message="missing",
+        )
+    )
+    time.sleep(0.25)
+    trigger = subprocess.Popen(  # noqa: S603 -- fixed test interpreter argv
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert trigger.wait(timeout=5) == 0
+
+    assert retained_pid in kb.reap_worker_zombies()
+    assert kb._classify_worker_exit(retained_pid) == ("nonzero_exit", 7)
+
+
+def test_spawn_and_reap_serialize_numeric_pid_generations(
+    monkeypatch,
+    tmp_path,
+):
+    reused_pid = 616161
+    wait_entered = threading.Event()
+    allow_wait_to_return = threading.Event()
+    popen_entered = threading.Event()
+    wait_calls = 0
+
+    def fake_waitpid(_pid, _flags):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            wait_entered.set()
+            assert allow_wait_to_return.wait(timeout=5)
+            return reused_pid, 7 << 8
+        raise ChildProcessError
+
+    class NewGenerationProcess:
+        pid = reused_pid
+        returncode = None
+
+    new_process = NewGenerationProcess()
+
+    def fake_popen(*args, **kwargs):
+        popen_entered.set()
+        return new_process
+
+    monkeypatch.setattr(kb.os, "waitpid", fake_waitpid)
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr(kb, "_maybe_scope_worker_cmd", lambda argv: argv)
+    monkeypatch.setattr(
+        facts,
+        "record_event_from_environment",
+        lambda *args, **kwargs: True,
+    )
+
+    reaped: list[int] = []
+    spawned: list[int] = []
+    reaper = threading.Thread(target=lambda: reaped.extend(kb.reap_worker_zombies()))
+    spawner = threading.Thread(
+        target=lambda: spawned.append(
+            kb._launch_worker_process(
+                worker_runtime.WorkerLaunchSpec(
+                    argv=("hermes", "chat"),
+                    env={},
+                    cwd=None,
+                    log_path=tmp_path / "reused-pid-worker.log",
+                    missing_executable_message="missing",
+                )
+            )
+        )
+    )
+
+    reaper.start()
+    assert wait_entered.wait(timeout=5)
+    spawner.start()
+    assert not popen_entered.wait(timeout=0.1)
+    allow_wait_to_return.set()
+    reaper.join(timeout=5)
+    spawner.join(timeout=5)
+
+    assert not reaper.is_alive()
+    assert not spawner.is_alive()
+    assert reaped == [reused_pid]
+    assert spawned == [reused_pid]
+    assert new_process.returncode is None
+    assert facts.release_worker_process_handle(reused_pid, 0)
+    assert new_process.returncode == 0
 
 
 def test_reaped_pid_reuse_updates_only_the_exact_historical_run(kanban_home):

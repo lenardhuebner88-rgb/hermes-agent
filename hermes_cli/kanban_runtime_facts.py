@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -102,6 +103,48 @@ CREATE TABLE IF NOT EXISTS pending_worker_run_retry_links (
 """
 
 RETRY_CLASSES = frozenset({"auto", "integration", "transient", "operator"})
+
+# Keep the launcher's ``Popen`` object alive until the dispatcher records the
+# exact wait status.  If the last reference disappears while the child still
+# runs, CPython registers the handle in ``subprocess._active``; constructing a
+# later worker can then reap the earlier child inside ``Popen._cleanup`` before
+# the dispatcher-owned ``waitpid`` sees it.  The OS exit is unrecoverable after
+# that race, leaving an honestly unknown terminal fact.  This small registry is
+# process-local like the parent-side PID identity registry and is bounded by the
+# live worker count.
+_retained_worker_processes: dict[int, subprocess.Popen] = {}
+_retained_worker_processes_lock = threading.RLock()
+
+
+def retain_worker_process_handle(process: subprocess.Popen) -> int:
+    """Retain one launched child until the dispatcher reaps its exact exit."""
+    pid = int(process.pid)
+    if pid <= 0:
+        raise ValueError("worker process pid must be positive")
+    if os.name == "nt":
+        # The dispatcher has no waitpid reaper on Windows. Preserve the
+        # existing handle lifecycle there instead of retaining forever.
+        return pid
+    with _retained_worker_processes_lock:
+        _retained_worker_processes[pid] = process
+    return pid
+
+
+def release_worker_process_handle(pid: int, raw_wait_status: int) -> bool:
+    """Release a reaped handle after preserving its observed return code."""
+    with _retained_worker_processes_lock:
+        process = _retained_worker_processes.pop(int(pid), None)
+    if process is None:
+        return False
+    if process.returncode is None:
+        try:
+            process.returncode = os.waitstatus_to_exitcode(int(raw_wait_status))
+        except (AttributeError, ValueError):
+            # The raw status is still recorded by the caller.  Leaving the
+            # Python handle's returncode unknown is safer than inventing one.
+            pass
+    return True
+
 
 # Lifecycle event kinds that prove the *next* worker run of a task is a retry,
 # mapped to the retry class each one proves. Keys are ``kanban_db`` event kinds;
