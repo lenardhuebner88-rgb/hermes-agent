@@ -16304,6 +16304,10 @@ def complete_task(
         from hermes_cli.memory_digest import normalize_completion_metadata
 
         metadata = normalize_completion_metadata(metadata)
+    if expected_run_id is not None:
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata["worker_protocol_state"] = "completed"
+        metadata["worker_end_reason"] = "kanban_complete"
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -17948,6 +17952,14 @@ def block_task(
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
     _refresh_worktree_writer_candidate(conn, task_id, expected_run_id)
+    if expected_run_id is not None:
+        reviewer_metadata = (
+            dict(reviewer_metadata)
+            if isinstance(reviewer_metadata, dict)
+            else {}
+        )
+        reviewer_metadata["worker_protocol_state"] = "blocked"
+        reviewer_metadata["worker_end_reason"] = "kanban_block"
     block_kind = _normalize_block_kind(kind)
     with write_txn(conn):
         if _reject_code_worker_review_required_block(
@@ -21448,15 +21460,76 @@ class DispatchResult:
 # reap loop at the top of ``dispatch_once`` and consulted by
 # ``detect_crashed_workers`` to classify a dead-pid task.
 #
-# Entry: ``pid -> (raw_wait_status, reaped_at_epoch)``. We keep raw status
-# so both ``os.WIFEXITED`` / ``os.WEXITSTATUS`` and ``os.WIFSIGNALED`` can
-# be consulted. Entries are trimmed by age (and total size cap as a
-# belt-and-braces against unbounded growth on exotic platforms).
+# The process-identity registry is attached only after the pid has committed to
+# one exact board/run.  The reap registry snapshots that identity with the raw
+# wait status; a dispatcher tick for another board may observe the exit, but it
+# cannot consume or mis-attach it.
+#
+# Identity entry: ``pid -> (board, task_run_id, task_id, attached_at_epoch)``.
+# Exit entry: ``pid -> (raw_wait_status, reaped_at_epoch, board, run_id, task_id)``.
+# Both registries are trimmed by age and size.
 _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
-_recent_worker_exits: "dict[int, tuple[int, float]]" = {}
+_worker_process_identities: "dict[int, tuple[str, int, str, float]]" = {}
+_recent_worker_exits: (
+    "dict[int, list[tuple[int, float, Optional[str], Optional[int], Optional[str]]]]"
+) = {}
+_worker_exit_registry_lock = threading.RLock()
 
 
+def _with_worker_exit_registry_lock(func):
+    """Serialize every identity/queue read-modify-write operation."""
+    def locked(*args, **kwargs):
+        with _worker_exit_registry_lock:
+            return func(*args, **kwargs)
+
+    return locked
+
+
+@_with_worker_exit_registry_lock
+def _register_worker_process_identity(
+    pid: int,
+    *,
+    board: str,
+    task_run_id: int,
+    task_id: str,
+) -> None:
+    """Bind a spawned pid to the exact committed board/run that owns it."""
+    if pid <= 0:
+        return
+    now = time.time()
+    pending = _recent_worker_exits.get(int(pid), [])
+    # A reaper in another thread may win the tiny Popen→identity-registration
+    # race. Adopt only the newest still-unbound status for this exact PID; the
+    # normal launcher registers immediately after Popen, before DB attachment.
+    for index in range(len(pending) - 1, -1, -1):
+        raw, reaped_at, owner_board, run_id, owner_task_id = pending[index]
+        if owner_board is None and now - reaped_at <= 5.0:
+            pending[index] = (
+                raw,
+                reaped_at,
+                str(board),
+                int(task_run_id),
+                str(task_id),
+            )
+            break
+    _worker_process_identities[int(pid)] = (
+        str(board),
+        int(task_run_id),
+        str(task_id),
+        now,
+    )
+    if len(_worker_process_identities) > _RECENT_WORKER_EXITS_MAX:
+        ordered = sorted(
+            _worker_process_identities.items(),
+            key=lambda item: item[1][3],
+        )
+        for old_pid, _ in ordered[: len(ordered) // 2]:
+            if not _recent_worker_exits.get(old_pid):
+                _worker_process_identities.pop(old_pid, None)
+
+
+@_with_worker_exit_registry_lock
 def _record_worker_exit(pid: int, raw_status: int) -> None:
     """Record a reaped child's exit status for later classification.
 
@@ -21466,22 +21539,70 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
     if not pid or pid <= 0:
         return
     now = time.time()
-    _recent_worker_exits[int(pid)] = (int(raw_status), now)
+    identity = _worker_process_identities.get(int(pid))
+    board: Optional[str] = None
+    run_id: Optional[int] = None
+    task_id: Optional[str] = None
+    if identity is not None:
+        board, run_id, task_id, _ = identity
+    _recent_worker_exits.setdefault(int(pid), []).append((
+        int(raw_status),
+        now,
+        board,
+        run_id,
+        task_id,
+    ))
     # Age-based trim: drop entries older than the TTL.
-    if len(_recent_worker_exits) > _RECENT_WORKER_EXITS_MAX // 2:
-        cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
-        for _pid in [p for p, (_s, t) in _recent_worker_exits.items() if t < cutoff]:
-            _recent_worker_exits.pop(_pid, None)
+    cutoff = now - _RECENT_WORKER_EXIT_TTL_SECONDS
+    for queued_pid, records in list(_recent_worker_exits.items()):
+        retained = [record for record in records if record[1] >= cutoff]
+        if retained:
+            _recent_worker_exits[queued_pid] = retained
+        else:
+            _recent_worker_exits.pop(queued_pid, None)
+            identity = _worker_process_identities.get(queued_pid)
+            if identity is not None and identity[3] < cutoff:
+                _worker_process_identities.pop(queued_pid, None)
     # Size cap as a final guard.
-    if len(_recent_worker_exits) > _RECENT_WORKER_EXITS_MAX:
-        # Drop oldest half.
-        ordered = sorted(_recent_worker_exits.items(), key=lambda kv: kv[1][1])
-        for _pid, _ in ordered[: len(ordered) // 2]:
-            _recent_worker_exits.pop(_pid, None)
+    exit_count = sum(len(records) for records in _recent_worker_exits.values())
+    if exit_count > _RECENT_WORKER_EXITS_MAX:
+        ordered = sorted(
+            (
+                (record[1], queued_pid, record)
+                for queued_pid, records in _recent_worker_exits.items()
+                for record in records
+            ),
+            key=lambda item: item[0],
+        )
+        remove_count = exit_count - (_RECENT_WORKER_EXITS_MAX // 2)
+        for _at, queued_pid, record in ordered[:remove_count]:
+            records = _recent_worker_exits.get(queued_pid, [])
+            if record in records:
+                records.remove(record)
+            if not records:
+                _recent_worker_exits.pop(queued_pid, None)
 
 
+def _classify_raw_worker_exit(raw: int) -> "tuple[str, Optional[int]]":
+    """Classify one immutable POSIX raw wait status."""
+    try:
+        if os.WIFEXITED(raw):
+            code = os.WEXITSTATUS(raw)
+            if code == 0:
+                return ("clean_exit", 0)
+            if code == KANBAN_RATE_LIMIT_EXIT_CODE:
+                return ("rate_limited", code)
+            return ("nonzero_exit", code)
+        if os.WIFSIGNALED(raw):
+            return ("signaled", os.WTERMSIG(raw))
+    except Exception:
+        pass
+    return ("unknown", None)
+
+
+@_with_worker_exit_registry_lock
 def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
-    """Classify a recently-reaped worker by pid.
+    """Classify the newest exact recently-reaped generation for a pid.
 
     Returns ``(kind, code)`` where ``kind`` is one of:
 
@@ -21504,23 +21625,124 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     ``nonzero_exit``) or the signal number (for ``signaled``), or ``None``
     for ``unknown``.
     """
-    entry = _recent_worker_exits.get(int(pid))
-    if entry is None:
+    entries = _recent_worker_exits.get(int(pid), [])
+    if not entries:
         return ("unknown", None)
-    raw, _ = entry
-    try:
-        if os.WIFEXITED(raw):
-            code = os.WEXITSTATUS(raw)
-            if code == 0:
-                return ("clean_exit", 0)
-            if code == KANBAN_RATE_LIMIT_EXIT_CODE:
-                return ("rate_limited", code)
-            return ("nonzero_exit", code)
-        if os.WIFSIGNALED(raw):
-            return ("signaled", os.WTERMSIG(raw))
-    except Exception:
-        pass
-    return ("unknown", None)
+    identity = _worker_process_identities.get(int(pid))
+    if identity is not None:
+        entry = next(
+            (
+                record for record in reversed(entries)
+                if record[2:5] == identity[:3]
+            ),
+            None,
+        )
+        if entry is None:
+            return ("unknown", None)
+    else:
+        entry = next(
+            (
+                record for record in reversed(entries)
+                if record[2] is None
+            ),
+            None,
+        )
+        if entry is None:
+            return ("unknown", None)
+    return _classify_raw_worker_exit(entry[0])
+
+
+@_with_worker_exit_registry_lock
+def _reaped_worker_exits_for_board(board: str) -> "list[dict[str, Any]]":
+    """Return unacknowledged exact exit records owned by ``board``."""
+    records: list[dict[str, Any]] = []
+    for pid, queued in list(_recent_worker_exits.items()):
+        for raw, _at, owner_board, run_id, task_id in queued:
+            if (
+                owner_board != board
+                or run_id is None
+                or task_id is None
+            ):
+                continue
+            kind, code = _classify_raw_worker_exit(raw)
+            records.append(
+                {
+                    "pid": int(pid),
+                    "task_run_id": int(run_id),
+                    "task_id": str(task_id),
+                    "board": str(owner_board),
+                    "classified_kind": kind,
+                    "exit_code": code,
+                }
+            )
+    return records
+
+
+@_with_worker_exit_registry_lock
+def _exact_reaped_worker_exit(
+    *,
+    pid: int,
+    board: str,
+    task_run_id: int,
+    task_id: str,
+) -> "Optional[tuple[str, Optional[int]]]":
+    """Return one retained exit without consulting current PID liveness."""
+    for raw, _at, owner_board, run_id, owner_task_id in _recent_worker_exits.get(
+        int(pid), []
+    ):
+        if (
+            owner_board == board
+            and run_id == int(task_run_id)
+            and owner_task_id == task_id
+        ):
+            return _classify_raw_worker_exit(raw)
+    return None
+
+
+@_with_worker_exit_registry_lock
+def _acknowledge_reaped_worker_exit(
+    *,
+    pid: int,
+    board: str,
+    task_run_id: int,
+) -> bool:
+    """Consume one exit only when its immutable identity still matches."""
+    entries = _recent_worker_exits.get(int(pid), [])
+    if not entries:
+        return False
+    match = next(
+        (
+            entry for entry in entries
+            if entry[2] == board and entry[3] == int(task_run_id)
+        ),
+        None,
+    )
+    if match is None:
+        return False
+    entries.remove(match)
+    if not entries:
+        _recent_worker_exits.pop(int(pid), None)
+    identity = _worker_process_identities.get(int(pid))
+    if identity is not None and identity[:2] == (board, int(task_run_id)):
+        _worker_process_identities.pop(int(pid), None)
+    return True
+
+
+def _reconcile_worker_exits_for_board(conn: sqlite3.Connection) -> list[int]:
+    """Persist and then acknowledge exact reaped exits owned by this board."""
+    board = board_slug_for_conn(conn) or "default"
+    reconciled = _runtime_facts.reconcile_reaped_worker_exits(
+        conn,
+        exits=_reaped_worker_exits_for_board(board),
+        board=board,
+    )
+    for item in reconciled:
+        _acknowledge_reaped_worker_exit(
+            pid=int(item["pid"]),
+            board=board,
+            task_run_id=int(item["task_run_id"]),
+        )
+    return [int(item["task_run_id"]) for item in reconciled]
 
 
 def _title_terms(title: Optional[str]) -> set[str]:
@@ -22886,9 +23108,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     crash_details: list[tuple[str, int, str, bool, str, Optional[int]]] = []
     # (task_id, pid, claimer, protocol_violation, error_text, run_id)
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
-    confirmed_absent: dict[tuple[str, int, str], dict] = {}
+    confirmed_absent: dict[
+        tuple[str, int, str],
+        tuple[dict, Optional[tuple[str, Optional[int]]]],
+    ] = {}
+    board_name = board_slug_for_conn(conn) or "default"
     candidates = conn.execute(
-        "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
+        "SELECT id, worker_pid, claim_lock, started_at, current_run_id FROM tasks "
         "WHERE status = 'running' AND worker_pid IS NOT NULL "
         "  AND continuation_pending_exit_run_id IS NULL"
     ).fetchall()
@@ -22901,12 +23127,34 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             grace = _resolve_crash_grace_seconds()
             if time.time() - started_at < grace:
                 continue
-        if _pid_alive(candidate["worker_pid"]):
-            continue
-        termination = _terminate_reclaimed_worker(
-            candidate["worker_pid"],
-            candidate["claim_lock"],
+        exact_exit = (
+            _exact_reaped_worker_exit(
+                pid=int(candidate["worker_pid"]),
+                board=board_name,
+                task_run_id=int(candidate["current_run_id"]),
+                task_id=str(candidate["id"]),
+            )
+            if candidate["current_run_id"] is not None
+            else None
         )
+        if exact_exit is None:
+            if _pid_alive(candidate["worker_pid"]):
+                continue
+            termination = _terminate_reclaimed_worker(
+                candidate["worker_pid"],
+                candidate["claim_lock"],
+            )
+        else:
+            # The OS may already have reused this numeric PID for a different
+            # board/run. Exact retained wait status proves this generation is
+            # gone; never signal the possibly unrelated newer process.
+            termination = {
+                "prev_pid": int(candidate["worker_pid"]),
+                "host_local": True,
+                "termination_attempted": False,
+                "terminated": True,
+                "exact_reaped_exit": True,
+            }
         if _worker_survived_termination(termination):
             _defer_reclaim_for_live_worker(
                 conn,
@@ -22922,7 +23170,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             int(candidate["worker_pid"]),
             str(candidate["claim_lock"]),
         )
-        confirmed_absent[key] = termination
+        confirmed_absent[key] = (termination, exact_exit)
 
     with write_txn(conn):
         rows = conn.execute(
@@ -22944,15 +23192,15 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 grace = _resolve_crash_grace_seconds()
                 if time.time() - started_at < grace:
                     continue
-            if _pid_alive(row["worker_pid"]):
-                continue
-
             pid = int(row["worker_pid"])
             confirmed_key = (str(row["id"]), pid, str(row["claim_lock"]))
-            termination = confirmed_absent.get(confirmed_key)
-            if termination is None:
+            confirmed = confirmed_absent.get(confirmed_key)
+            if confirmed is None:
                 continue
-            kind, code = _classify_worker_exit(pid)
+            termination, exact_exit = confirmed
+            if exact_exit is None and _pid_alive(row["worker_pid"]):
+                continue
+            kind, code = exact_exit or _classify_worker_exit(pid)
             rate_limited_exit = False
             recoverable_protocol_miss = False
             transient_pid_loss = False
@@ -24654,6 +24902,8 @@ def _set_worker_pid(
     spawn; an operator completion/reclaim or a newer claim therefore makes this
     write lose its CAS instead of attaching a stale pid to the new task state.
     """
+    attached_run_id: Optional[int] = None
+    attached_board: Optional[str] = None
     with write_txn(conn):
         predicates = [
             "id = ?",
@@ -24698,7 +24948,17 @@ def _set_worker_pid(
             source="kanban_db._set_worker_pid",
             board=board_slug_for_conn(conn),
         )
-        return True
+        attached_run_id = run_id
+        attached_board = board_slug_for_conn(conn) or "default"
+    assert attached_run_id is not None
+    assert attached_board is not None
+    _register_worker_process_identity(
+        int(pid),
+        board=attached_board,
+        task_run_id=attached_run_id,
+        task_id=task_id,
+    )
+    return True
 
 
 def _attach_or_reap_spawned_worker(
@@ -30142,6 +30402,7 @@ def _dispatch_once_locked(
         # The hold report reuses only candidate evaluation. All maintenance
         # before it can write and therefore remains exclusive to real ticks.
         reap_worker_zombies()
+        _reconcile_worker_exits_for_board(conn)
         reap_pending_continuations(conn)
         result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
         result.reclaimed = release_stale_claims(conn)
@@ -30151,6 +30412,9 @@ def _dispatch_once_locked(
         )
         result.reaped_worktree_writer_leases = _reap_worktree_writer_leases(conn)
         result.crashed = detect_crashed_workers(conn)
+        # A crash may have been ended by the detector above. The retained,
+        # exact reap record is deliberately retried in the same tick.
+        _reconcile_worker_exits_for_board(conn)
         result.directive_redelivered = redeliver_live_worker_directives(conn)
         _crash_auto_blocked = getattr(
             detect_crashed_workers, "_last_auto_blocked", []
@@ -31897,6 +32161,20 @@ def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
     except BaseException:
         log_f.close()
         raise
+    raw_run_id = spec.env.get("HERMES_KANBAN_RUN_ID")
+    task_id = str(spec.env.get("HERMES_KANBAN_TASK") or "")
+    board = str(spec.env.get("HERMES_KANBAN_BOARD") or "")
+    try:
+        task_run_id = int(raw_run_id) if raw_run_id is not None else None
+    except (TypeError, ValueError):
+        task_run_id = None
+    if task_run_id is not None and task_id and board:
+        _register_worker_process_identity(
+            int(proc.pid),
+            board=board,
+            task_run_id=task_run_id,
+            task_id=task_id,
+        )
     # The child inherits the descriptor and keeps writing after this function
     # returns. The parent's Python handle can fall out of scope safely.
     return int(proc.pid)

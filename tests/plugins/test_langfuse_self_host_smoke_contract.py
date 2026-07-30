@@ -11,8 +11,12 @@ from pathlib import Path
 import pytest
 
 from scripts.langfuse_worker_audit import (
+    LangfuseGenerationProbeIncomplete,
     _RejectDashboardRedirectHandler,
+    _RejectLangfuseRedirectHandler,
     _authenticated_dashboard_request,
+    _configured_langfuse_generation_probe,
+    _langfuse_public_request,
     build_control_surface_live_smoke,
     build_live_smoke_contract,
     main as audit_main,
@@ -29,10 +33,10 @@ def _seed_databases(
     with sqlite3.connect(usage_path) as conn:
         conn.execute(
             "CREATE TABLE run_usage_facts (run_id TEXT PRIMARY KEY, task_run_id TEXT, "
-            "task_id TEXT, captured_at TEXT)"
+            "task_id TEXT, board TEXT, captured_at TEXT)"
         )
         conn.execute(
-            "INSERT INTO run_usage_facts VALUES ('usage-1', '42', 'task-1', "
+            "INSERT INTO run_usage_facts VALUES ('usage-1', '42', 'task-1', 'default', "
             "'2026-07-29T20:00:00+00:00')"
         )
 
@@ -56,7 +60,7 @@ def _seed_databases(
                 task_id TEXT, board TEXT
             );
             INSERT INTO worker_run_terminal_facts VALUES
-                (42, 'exited', 0, 'complete', 'completed', 'completed', 'task-1', 'default');
+                (42, 'exited', 0, 'completed', 'completed', 'kanban_complete', 'task-1', 'default');
             """
         )
         conn.execute(
@@ -91,12 +95,24 @@ def test_live_smoke_contract_passes_only_with_exact_trace_usage_and_lifecycle(tm
         usage_path=usage_path,
         kanban_path=kanban_path,
         trace_probe=lambda: [
-            {"id": "trace-1234567890", "metadata": {"task_run_id": "42", "task_id": "task-1"}}
+            {"id": "trace-1234567890", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }}
+        ],
+        generation_probe=lambda _trace_id: [
+            {
+                "id": "generation-1234567890",
+                "traceId": "trace-1234567890",
+                "type": "GENERATION",
+                "metadata": {
+                    "task_run_id": "42", "task_id": "task-1", "board": "default"
+                },
+            }
         ],
     )
 
     assert report["status"] == "pass"
-    assert report["contract_version"] == 1
+    assert report["contract_version"] == 2
     assert report["schema"] == {
         "worker_runtime_facts_version": 1,
         "usage_correlation_version": 1,
@@ -107,11 +123,207 @@ def test_live_smoke_contract_passes_only_with_exact_trace_usage_and_lifecycle(tm
         "tcp_http_reachable": True,
         "authenticated_public_api_readable": True,
         "exact_trace_link": True,
+        "exact_task_board_link": True,
         "trace_id_short": "trace-12…7890",
+        "exact_generation_link": True,
+        "generation_id_short": "generati…7890",
+        "generation_trace_match": True,
     }
     assert report["usage_fact"]["exact_rows"] == 1
+    assert report["usage_fact"]["exact_task_board_match"] is True
     assert report["lifecycle"]["missing_events"] == []
     assert report["terminal"]["worker_exit_code"] == 0
+
+
+def test_live_smoke_contract_fails_without_exact_generation(tmp_path: Path) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [
+            {"id": "trace-1", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }}
+        ],
+        generation_probe=lambda _trace_id: [],
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["exact_trace_link"] is True
+    assert report["langfuse"]["exact_generation_link"] is False
+    assert report["langfuse"]["generation_trace_match"] is False
+
+
+def test_live_smoke_contract_fails_when_generation_belongs_to_another_trace(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [
+            {"id": "trace-1", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }}
+        ],
+        generation_probe=lambda _trace_id: [
+            {
+                "id": "generation-1",
+                "traceId": "trace-other",
+                "metadata": {
+                    "task_run_id": "42", "task_id": "task-1", "board": "default"
+                },
+            }
+        ],
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["exact_generation_link"] is False
+    assert report["langfuse"]["generation_trace_match"] is False
+
+
+def test_live_smoke_contract_selects_generation_from_matching_trace(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    requested_trace_ids: list[str] = []
+
+    def generations(trace_id: str) -> list[dict]:
+        requested_trace_ids.append(trace_id)
+        if trace_id == "trace-2":
+            return [{
+                "id": "generation-2",
+                "traceId": "trace-2",
+                "metadata": {
+                    "task_run_id": "42", "task_id": "task-1", "board": "default"
+                },
+            }]
+        return [{
+            "id": "foreign-generation",
+            "traceId": "foreign-trace",
+            "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            },
+        }]
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [
+            {"id": "trace-1", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }},
+            {"id": "trace-2", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }},
+        ],
+        generation_probe=generations,
+    )
+
+    assert requested_trace_ids == ["trace-1", "trace-2"]
+    assert report["status"] == "pass"
+    assert report["langfuse"]["trace_id_short"] == "trace-2"
+    assert report["langfuse"]["generation_id_short"] == "generation-2"
+
+
+@pytest.mark.parametrize(
+    ("dimension", "wrong_value"),
+    [("task_id", "task-other"), ("board", "other")],
+)
+def test_live_smoke_contract_rejects_cross_identity_langfuse_records(
+    tmp_path: Path,
+    dimension: str,
+    wrong_value: str,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    metadata = {
+        "task_run_id": "42",
+        "task_id": "task-1",
+        "board": "default",
+    }
+    metadata[dimension] = wrong_value
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [{"id": "trace-wrong", "metadata": metadata}],
+        generation_probe=lambda _trace_id: [{
+            "id": "generation-wrong",
+            "traceId": "trace-wrong",
+            "metadata": metadata,
+        }],
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["exact_trace_link"] is False
+
+
+def test_live_smoke_contract_rejects_unobserved_worker_protocol(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    with sqlite3.connect(kanban_path) as conn:
+        conn.execute(
+            "UPDATE worker_run_terminal_facts "
+            "SET worker_protocol_state='unobserved' WHERE task_run_id=42"
+        )
+    metadata = {
+        "task_run_id": "42",
+        "task_id": "task-1",
+        "board": "default",
+    }
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [{"id": "trace-1", "metadata": metadata}],
+        generation_probe=lambda _trace_id: [{
+            "id": "generation-1",
+            "traceId": "trace-1",
+            "metadata": metadata,
+        }],
+    )
+
+    assert report["status"] == "fail"
+    assert report["terminal"]["worker_protocol_state"] == "unobserved"
+
+
+def test_live_smoke_contract_rejects_usage_fact_from_wrong_board(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    with sqlite3.connect(usage_path) as conn:
+        conn.execute(
+            "UPDATE run_usage_facts SET board='other' WHERE task_run_id='42'"
+        )
+    metadata = {
+        "task_run_id": "42",
+        "task_id": "task-1",
+        "board": "default",
+    }
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [{"id": "trace-1", "metadata": metadata}],
+        generation_probe=lambda _trace_id: [{
+            "id": "generation-1",
+            "traceId": "trace-1",
+            "metadata": metadata,
+        }],
+    )
+
+    assert report["status"] == "fail"
+    assert report["usage_fact"]["exact_rows"] == 0
+    assert report["usage_fact"]["exact_task_board_match"] is False
 
 
 def test_live_smoke_contract_is_structurally_red_when_langfuse_is_unreachable(tmp_path: Path) -> None:
@@ -134,6 +346,9 @@ def test_live_smoke_contract_is_structurally_red_when_langfuse_is_unreachable(tm
         "authenticated_public_api_readable": False,
         "exact_trace_link": False,
         "trace_id_short": None,
+        "exact_generation_link": False,
+        "generation_id_short": None,
+        "generation_trace_match": False,
         "error_type": "RuntimeError",
     }
     assert "secret-key-value" not in json.dumps(report)
@@ -160,6 +375,9 @@ def test_live_smoke_contract_distinguishes_http_auth_failure(tmp_path: Path) -> 
         "authenticated_public_api_readable": False,
         "exact_trace_link": False,
         "trace_id_short": None,
+        "exact_generation_link": False,
+        "generation_id_short": None,
+        "generation_trace_match": False,
         "error_type": "HTTPError",
         "http_status": 401,
     }
@@ -184,6 +402,192 @@ def _langfuse_env() -> dict[str, str]:
         "HERMES_LANGFUSE_PUBLIC_KEY": "pk-test",
         "HERMES_LANGFUSE_SECRET_KEY": "sk-test",
     }
+
+
+def test_configured_generation_probe_is_trace_scoped_bounded_and_content_free(
+    monkeypatch,
+) -> None:
+    for name, value in _langfuse_env().items():
+        monkeypatch.setenv(name, value)
+    requested_urls: list[str] = []
+
+    def request_json(
+        url: str,
+        authorization: str,
+        *,
+        timeout: float,
+        **_kwargs,
+    ) -> dict:
+        requested_urls.append(url)
+        assert authorization.startswith("Basic ")
+        assert 0 < timeout <= 4.0
+        if len(requested_urls) == 1:
+            return {
+                "data": [
+                    {
+                        "id": "generation-1",
+                        "traceId": "trace-1",
+                        "metadata": {
+                            "task_run_id": "42",
+                            "raw_prompt": "must-not-be-retained",
+                        },
+                        "secret_note": "must-not-be-retained",
+                        "input": "must-not-be-retained",
+                        "output": "must-not-be-retained",
+                    },
+                    {"id": None, "traceId": "trace-1"},
+                    {"id": "foreign", "traceId": "trace-other"},
+                ],
+                "meta": {"totalPages": "2"},
+            }
+        return {"data": [], "meta": {"totalPages": "2"}}
+
+    rows = _configured_langfuse_generation_probe(
+        "trace-1",
+        request_json=request_json,
+    )
+
+    assert len(requested_urls) == 2
+    assert all("traceId=trace-1" in url for url in requested_urls)
+    assert rows == [
+        {
+            "id": "generation-1",
+            "traceId": "trace-1",
+            "metadata": {"task_run_id": "42"},
+        }
+    ]
+    assert "must-not-be-retained" not in json.dumps(rows)
+
+
+def test_langfuse_redirect_handler_never_forwards_authorization() -> None:
+    handler = _RejectLangfuseRedirectHandler()
+    request = urllib.request.Request("http://127.0.0.1:3000/api/public/traces")
+    request.add_header("Authorization", "Basic secret")
+
+    redirected = handler.redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://attacker.example/collect",
+    )
+
+    assert redirected is None
+
+
+def test_langfuse_public_request_rejects_oversized_response(
+    monkeypatch,
+) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, limit: int) -> bytes:
+            return b"x" * limit
+
+    class Opener:
+        def open(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit.build_opener",
+        lambda *_handlers: Opener(),
+    )
+
+    with pytest.raises(
+        LangfuseGenerationProbeIncomplete,
+        match="response_too_large",
+    ):
+        _langfuse_public_request(
+            "http://127.0.0.1:3000/api/public/traces",
+            "Basic secret",
+            timeout=1.0,
+            expected_origin=("http", "127.0.0.1", 3000),
+            max_bytes=16,
+        )
+
+
+def test_live_smoke_contract_bounds_duplicate_exact_traces(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+    metadata = {
+        "task_run_id": "42",
+        "task_id": "task-1",
+        "board": "default",
+    }
+    generation_calls: list[str] = []
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [
+            {"id": f"trace-{index}", "metadata": metadata}
+            for index in range(6)
+        ],
+        generation_probe=lambda trace_id: generation_calls.append(trace_id) or [],
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["reason"] == "candidate_trace_limit"
+    assert generation_calls == []
+
+
+def test_configured_generation_probe_fails_closed_at_page_cap(monkeypatch) -> None:
+    for name, value in _langfuse_env().items():
+        monkeypatch.setenv(name, value)
+
+    def full_page(*_args, **_kwargs) -> dict:
+        return {
+            "data": [
+                {"id": f"generation-{index}", "traceId": "trace-1"}
+                for index in range(100)
+            ],
+            "meta": {"totalPages": 999},
+        }
+
+    with pytest.raises(LangfuseGenerationProbeIncomplete, match="page_limit"):
+        _configured_langfuse_generation_probe(
+            "trace-1",
+            request_json=full_page,
+            max_pages=2,
+            max_rows=1_000,
+        )
+
+
+def test_live_smoke_contract_classifies_generation_payload_invalid_as_reachable(
+    tmp_path: Path,
+) -> None:
+    usage_path, kanban_path = _seed_databases(tmp_path)
+
+    def payload_invalid(_trace_id: str) -> list[dict]:
+        from scripts.langfuse_worker_audit import LangfusePayloadInvalid
+
+        raise LangfusePayloadInvalid("secret response must not be copied")
+
+    report = build_live_smoke_contract(
+        task_run_id=42,
+        usage_path=usage_path,
+        kanban_path=kanban_path,
+        trace_probe=lambda: [
+            {"id": "trace-1", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }}
+        ],
+        generation_probe=payload_invalid,
+    )
+
+    assert report["status"] == "fail"
+    assert report["langfuse"]["credentials_configured"] is True
+    assert report["langfuse"]["tcp_http_reachable"] is True
+    assert report["langfuse"]["authenticated_public_api_readable"] is False
+    assert report["langfuse"]["reason"] == "payload_invalid"
+    assert "secret response" not in json.dumps(report)
 
 
 @pytest.mark.parametrize(
@@ -663,8 +1067,11 @@ def test_live_smoke_contract_requires_first_token_after_model_request(tmp_path: 
         usage_path=usage_path,
         kanban_path=kanban_path,
         trace_probe=lambda: [
-            {"id": "trace-1", "metadata": {"task_run_id": "42", "task_id": "task-1"}}
+            {"id": "trace-1", "metadata": {
+                "task_run_id": "42", "task_id": "task-1", "board": "default"
+            }}
         ],
+        generation_probe=lambda _trace_id: [],
     )
 
     assert report["status"] == "fail"
@@ -686,6 +1093,7 @@ def test_live_smoke_contract_does_not_require_first_token_before_model_request(
         usage_path=usage_path,
         kanban_path=kanban_path,
         trace_probe=lambda: [],
+        generation_probe=lambda _trace_id: [],
     )
 
     assert report["status"] == "fail"
@@ -706,6 +1114,7 @@ def test_live_smoke_contract_marks_claude_cli_run_ineligible_not_lifecycle_defec
         usage_path=usage_path,
         kanban_path=kanban_path,
         trace_probe=lambda: [],
+        generation_probe=lambda _trace_id: [],
     )
 
     assert report["status"] == "fail"

@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
+import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -108,6 +110,150 @@ class TestRuntimeGate:
         langfuse_plugin = self._fresh_plugin()
         assert langfuse_plugin._get_langfuse() is None
 
+    def test_activated_plugin_lazy_installs_and_binds_real_sdk(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "http://127.0.0.1:13000")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        mod = self._fresh_plugin()
+        mod.Langfuse = None
+        mod.propagate_attributes = None
+        calls = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        fake_sdk = types.SimpleNamespace()
+        fake_sdk.__version__ = "4.14.1"
+        fake_sdk.Langfuse = FakeClient
+        fake_sdk.propagate_attributes = object()
+        real_import_module = mod.importlib.import_module
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            lambda name: (
+                fake_sdk
+                if name == "langfuse"
+                else real_import_module(name)
+            ),
+        )
+        monkeypatch.setattr(
+            mod.importlib.metadata,
+            "version",
+            lambda name: "4.14.1" if name == "langfuse" else None,
+        )
+        from tools import lazy_deps
+
+        monkeypatch.setattr(
+            lazy_deps,
+            "ensure",
+            lambda feature, **kwargs: calls.append((feature, kwargs)),
+        )
+
+        client = mod._get_langfuse()
+
+        assert isinstance(client, FakeClient)
+        assert calls == [("observability.langfuse", {"prompt": False})]
+        assert mod.propagate_attributes is fake_sdk.propagate_attributes
+
+    def test_loaded_incompatible_sdk_fails_closed_until_restart(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "http://127.0.0.1:13000")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        mod = self._fresh_plugin()
+        monkeypatch.setitem(
+            sys.modules,
+            "langfuse",
+            types.SimpleNamespace(
+                __version__="3.0.0",
+                Langfuse=object,
+                propagate_attributes=object(),
+            ),
+        )
+        monkeypatch.setattr(
+            mod.importlib.metadata,
+            "version",
+            lambda name: "4.14.1" if name == "langfuse" else None,
+        )
+        ensure_calls: list[str] = []
+        from tools import lazy_deps
+
+        monkeypatch.setattr(
+            lazy_deps,
+            "ensure",
+            lambda feature, **_kwargs: ensure_calls.append(feature),
+        )
+
+        with caplog.at_level(logging.WARNING, logger=mod.__name__):
+            assert mod._get_langfuse() is None
+
+        assert ensure_calls == []
+        assert "restart" in caplog.text.lower()
+
+    def test_concurrent_first_use_initializes_sdk_and_client_once(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "http://127.0.0.1:13000")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        mod = self._fresh_plugin()
+        ensure_calls: list[str] = []
+        clients: list[object] = []
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                clients.append(self)
+
+        fake_sdk = types.SimpleNamespace(
+            __version__="4.14.1",
+            Langfuse=FakeClient,
+            propagate_attributes=object(),
+        )
+        real_import_module = mod.importlib.import_module
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            lambda name: (
+                fake_sdk
+                if name == "langfuse"
+                else real_import_module(name)
+            ),
+        )
+        monkeypatch.setattr(
+            mod.importlib.metadata,
+            "version",
+            lambda name: "4.14.1" if name == "langfuse" else None,
+        )
+        from tools import lazy_deps
+
+        monkeypatch.setattr(
+            lazy_deps,
+            "ensure",
+            lambda feature, **_kwargs: ensure_calls.append(feature),
+        )
+        results: list[object | None] = []
+        threads = [
+            threading.Thread(target=lambda: results.append(mod._get_langfuse()))
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert ensure_calls == ["observability.langfuse"]
+        assert len(clients) == 1
+        assert len(results) == 8
+        assert len({id(result) for result in results}) == 1
+
     def test_default_disabled_has_zero_client_initializations_and_sends(self, monkeypatch):
         for key in ("HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY",
                     "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
@@ -162,6 +308,7 @@ class TestRuntimeGate:
                 raise TimeoutError("synthetic connection timeout")
 
         monkeypatch.setattr(mod, "Langfuse", UnreachableClient)
+        monkeypatch.setattr(mod, "_LANGFUSE_SDK_READY", True)
         plugin_free_result = None
         plugin_failure_result = mod.on_pre_llm_request(
             task_id="synthetic-task", session_id="synthetic-session", request_messages=[]
@@ -184,6 +331,7 @@ class TestRuntimeGate:
                 raise TimeoutError("synthetic connection timeout")
 
         monkeypatch.setattr(mod, "Langfuse", UnreachableClient)
+        monkeypatch.setattr(mod, "_LANGFUSE_SDK_READY", True)
         assert mod.on_pre_llm_request(
             task_id="synthetic-task", session_id="synthetic-session", request_messages=[]
         ) is None
@@ -1004,6 +1152,7 @@ class TestPlaceholderKeyDetection:
             # return before constructing a client.
             _FakeLangfuse.instances.clear()
             monkeypatch.setattr(mod, "Langfuse", _FakeLangfuse, raising=False)
+            monkeypatch.setattr(mod, "_LANGFUSE_SDK_READY", True, raising=False)
         return mod
 
     @staticmethod
@@ -1223,26 +1372,32 @@ class TestPlaceholderKeyDetection:
                     and r.name == self.LOGGER_NAME]
         assert warnings == []
 
-    def test_sdk_not_installed_still_skips_silently(self, monkeypatch, caplog):
-        """If the langfuse SDK isn't installed at all, the placeholder
-        check should never run — there's nothing the operator can do
-        about a credential mismatch when the package is missing, and
-        re-warning here would dilute the actually-actionable SDK-missing
-        signal upstream.  The ``Langfuse is None`` guard at the top of
-        ``_get_langfuse`` already handles this; this test pins that
-        behaviour."""
+    def test_sdk_lazy_install_failure_warns_once_and_skips(self, monkeypatch, caplog):
+        """An enabled, configured plugin must surface an unavailable SDK once."""
         self._clear_env(monkeypatch)
-        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "placeholder")
-        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "placeholder")
-        # NO monkeypatch on Langfuse here — falls back to whatever the
-        # plugin imported at module load (None if SDK absent).
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "http://127.0.0.1:13000")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
         plugin = self._fresh_plugin()
         monkeypatch.setattr(plugin, "Langfuse", None, raising=False)
+        monkeypatch.setattr(plugin, "propagate_attributes", None, raising=False)
+        from tools import lazy_deps
+
+        monkeypatch.setattr(
+            lazy_deps,
+            "ensure",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("secret installer detail")
+            ),
+        )
         with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
-            assert plugin._get_langfuse() is None
+            for _ in range(2):
+                assert plugin._get_langfuse() is None
         warnings = [r for r in caplog.records if r.levelname == "WARNING"
                     and r.name == self.LOGGER_NAME]
-        assert warnings == []
+        assert len(warnings) == 1
+        assert "SDK unavailable (RuntimeError)" in warnings[0].getMessage()
+        assert "secret installer detail" not in warnings[0].getMessage()
 
     def test_valid_prefixes_do_not_trigger_placeholder_warning(self, monkeypatch, caplog):
         """Real Langfuse keys (``pk-lf-…`` / ``sk-lf-…``) must pass the

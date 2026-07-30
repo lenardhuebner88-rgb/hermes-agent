@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from http.cookiejar import CookieJar
+import inspect
 import json
 import os
 import sqlite3
@@ -14,11 +15,17 @@ import time
 import urllib.error
 from collections import defaultdict
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, build_opener
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPCookieProcessor,
+    Request,
+    build_opener,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -62,7 +69,7 @@ SIGNAL_FIELDS = (
     "context_window_used",
     "billing_mode",
 )
-LIVE_SMOKE_CONTRACT_VERSION = 1
+LIVE_SMOKE_CONTRACT_VERSION = 2
 WORKER_RUNTIME_FACTS_SCHEMA_VERSION = 1
 USAGE_CORRELATION_SCHEMA_VERSION = 1
 
@@ -415,6 +422,63 @@ class LangfuseCredentialsMissing(RuntimeError):
     """The live probe cannot start without configured endpoint credentials."""
 
 
+class LangfuseGenerationProbeIncomplete(RuntimeError):
+    """A bounded generation lookup could not establish a complete result."""
+
+
+@dataclass
+class _LangfuseProbeBudget:
+    """One shared deadline and scan budget for trace plus generation proof."""
+
+    deadline: float
+    pages_remaining: int = 40
+    rows_remaining: int = 4_000
+    candidate_traces_remaining: int = 5
+
+    @classmethod
+    def create(cls, timeout_seconds: float = 4.0) -> "_LangfuseProbeBudget":
+        return cls(deadline=time.monotonic() + timeout_seconds)
+
+    def timeout(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise LangfuseGenerationProbeIncomplete("deadline")
+        return min(4.0, max(0.1, remaining))
+
+    def consume_page(self) -> None:
+        self.timeout()
+        if self.pages_remaining <= 0:
+            raise LangfuseGenerationProbeIncomplete("page_limit")
+        self.pages_remaining -= 1
+
+    def consume_rows(self, count: int) -> None:
+        self.rows_remaining -= max(0, int(count))
+        if self.rows_remaining < 0:
+            raise LangfuseGenerationProbeIncomplete("row_limit")
+
+    def consume_candidate_trace(self) -> None:
+        if self.candidate_traces_remaining <= 0:
+            raise LangfuseGenerationProbeIncomplete("candidate_trace_limit")
+        self.candidate_traces_remaining -= 1
+
+
+_CORRELATION_METADATA_KEYS = frozenset(
+    {
+        "task_run_id",
+        "kanban_run_id",
+        "task_id",
+        "kanban_task_id",
+        "board",
+        "kanban_board",
+        "chain_id",
+        "profile",
+        "lane",
+        "origin",
+    }
+)
+_LANGFUSE_RESPONSE_MAX_BYTES = 2 * 1024 * 1024
+
+
 def _short_identifier(value: Any) -> str | None:
     text = str(value or "")
     if not text:
@@ -422,15 +486,194 @@ def _short_identifier(value: Any) -> str | None:
     return text if len(text) <= 12 else f"{text[:8]}…{text[-4:]}"
 
 
-def _configured_langfuse_trace_probe() -> list[dict[str, Any]]:
-    """Read the authenticated public trace API without exposing credentials."""
-    from hermes_cli.langfuse_scores_export import _credentials, _trace_records
+def _correlation_metadata(value: Any) -> dict[str, Any]:
+    """Project arbitrary Langfuse metadata to non-content correlation keys."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in _CORRELATION_METADATA_KEYS
+        if key in value
+        and isinstance(value[key], (str, int, float, bool))
+    }
+
+
+class _RejectLangfuseRedirectHandler(HTTPRedirectHandler):
+    """Never forward an authenticated public-API request across a redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _http_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlparse(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise LangfusePayloadInvalid("langfuse_url_invalid")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme, parsed.hostname.lower(), port
+
+
+def _configured_langfuse_trace_probe(
+    *,
+    budget: _LangfuseProbeBudget | None = None,
+    request_json: Callable[..., dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Read bounded, correlation-only authenticated public trace pages."""
+    from hermes_cli.langfuse_scores_export import _credentials
 
     try:
         host, authorization = _credentials(os.environ)
     except RuntimeError:
         raise LangfuseCredentialsMissing from None
-    return _trace_records(host, authorization)
+    budget = budget or _LangfuseProbeBudget.create()
+    request_json = request_json or _langfuse_public_request
+    records: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        budget.consume_page()
+        query = urlencode({"page": page, "limit": 100, "tags": "kanban-worker"})
+        response = request_json(
+            f"{host}/api/public/traces?{query}",
+            authorization,
+            timeout=budget.timeout(),
+            expected_origin=_http_origin(host),
+        )
+        traces = response.get("data")
+        if not isinstance(traces, list):
+            raise LangfusePayloadInvalid("langfuse_traces_payload_invalid")
+        budget.consume_rows(len(traces))
+        for trace in traces:
+            if isinstance(trace, dict) and isinstance(trace.get("id"), str):
+                records.append(
+                    {
+                        "id": trace["id"],
+                        "metadata": _correlation_metadata(trace.get("metadata")),
+                    }
+                )
+        meta = response.get("meta")
+        total_pages = meta.get("totalPages") if isinstance(meta, dict) else None
+        try:
+            total_pages = int(total_pages) if total_pages is not None else None
+        except (TypeError, ValueError):
+            total_pages = None
+        if (
+            not traces
+            or (total_pages is not None and page >= total_pages)
+            or (total_pages is None and len(traces) < 100)
+        ):
+            return records
+        page += 1
+
+
+def _langfuse_public_request(
+    url: str,
+    authorization: str,
+    *,
+    timeout: float,
+    expected_origin: tuple[str, str, int],
+    max_bytes: int = _LANGFUSE_RESPONSE_MAX_BYTES,
+) -> dict[str, Any]:
+    """Read one bounded page without redirects or credential-bearing URLs."""
+    if _http_origin(url) != expected_origin:
+        raise LangfusePayloadInvalid("langfuse_origin_mismatch")
+    request = Request(url)
+    request.add_header("Authorization", authorization)
+    request.add_header("Accept", "application/json")
+    opener = build_opener(_RejectLangfuseRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:  # noqa: S310 -- validated configured service
+        raw = response.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise LangfuseGenerationProbeIncomplete("response_too_large")
+    if not raw:
+        return {}
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise LangfusePayloadInvalid("langfuse_generations_payload_invalid")
+    return payload
+
+
+def _configured_langfuse_generation_probe(
+    trace_id: str,
+    *,
+    budget: _LangfuseProbeBudget | None = None,
+    request_json: Callable[..., dict[str, Any]] | None = None,
+    max_pages: int = 20,
+    max_rows: int = 2_000,
+    timeout_seconds: float = 4.0,
+) -> list[dict[str, Any]]:
+    """Read bounded, content-free generation records for one exact trace."""
+    from hermes_cli.langfuse_scores_export import _credentials
+
+    try:
+        host, authorization = _credentials(os.environ)
+    except RuntimeError:
+        raise LangfuseCredentialsMissing from None
+
+    request_json = request_json or _langfuse_public_request
+    records: list[dict[str, Any]] = []
+    if budget is None:
+        budget = _LangfuseProbeBudget.create(timeout_seconds)
+        budget.pages_remaining = max(1, int(max_pages))
+        budget.rows_remaining = max(1, int(max_rows))
+    page = 1
+    while True:
+        budget.consume_page()
+        query = urlencode({
+            "page": page,
+            "limit": 100,
+            "type": "GENERATION",
+            "traceId": trace_id,
+        })
+        response = request_json(
+            f"{host}/api/public/observations?{query}",
+            authorization,
+            timeout=budget.timeout(),
+            expected_origin=_http_origin(host),
+        )
+        observations = response.get("data")
+        if not isinstance(observations, list):
+            raise LangfusePayloadInvalid("langfuse_generations_payload_invalid")
+        budget.consume_rows(len(observations))
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            observation_id = observation.get("id")
+            observation_trace_id = observation.get("traceId")
+            if (
+                isinstance(observation_id, str)
+                and observation_id
+                and str(observation_trace_id or "") == trace_id
+            ):
+                records.append({
+                    "id": observation_id,
+                    "traceId": observation_trace_id,
+                    "metadata": _correlation_metadata(
+                        observation.get("metadata")
+                    ),
+                })
+        meta = response.get("meta")
+        total_pages = meta.get("totalPages") if isinstance(meta, dict) else None
+        try:
+            total_pages = int(total_pages) if total_pages is not None else None
+        except (TypeError, ValueError):
+            total_pages = None
+        if (
+            not observations
+            or (total_pages is not None and page >= total_pages)
+            or (total_pages is None and len(observations) < 100)
+        ):
+            return records
+        page += 1
 
 
 def _langfuse_failure_receipt(exc: Exception) -> dict[str, Any]:
@@ -444,10 +687,22 @@ def _langfuse_failure_receipt(exc: Exception) -> dict[str, Any]:
         "authenticated_public_api_readable": False,
         "exact_trace_link": False,
         "trace_id_short": None,
+        "exact_generation_link": False,
+        "generation_id_short": None,
+        "generation_trace_match": False,
         "error_type": type(cause).__name__,
     }
     if isinstance(exc, LangfuseCredentialsMissing):
         receipt["credentials_configured"] = False
+    elif isinstance(exc, LangfuseGenerationProbeIncomplete):
+        receipt["credentials_configured"] = True
+        receipt["tcp_http_reachable"] = True
+        receipt["authenticated_public_api_readable"] = True
+        receipt["reason"] = str(exc)
+    elif isinstance(exc, LangfusePayloadInvalid):
+        receipt["credentials_configured"] = True
+        receipt["tcp_http_reachable"] = True
+        receipt["reason"] = "payload_invalid"
     elif isinstance(cause, urllib.error.HTTPError):
         receipt["credentials_configured"] = True
         receipt["tcp_http_reachable"] = True
@@ -874,25 +1129,139 @@ def build_live_smoke_contract(
     task_run_id: int,
     usage_path: Path,
     kanban_path: Path,
-    trace_probe: Callable[[], list[dict[str, Any]]] = _configured_langfuse_trace_probe,
+    trace_probe: Callable[..., list[dict[str, Any]]] = _configured_langfuse_trace_probe,
+    generation_probe: Callable[..., list[dict[str, Any]]] = _configured_langfuse_generation_probe,
 ) -> dict[str, Any]:
     """Build a fail-closed, content-free receipt for one approved worker run."""
     run_id = str(int(task_run_id))
+    with closing(_read_only(kanban_path)) as connection:
+        run = connection.execute(
+            "SELECT task_id, outcome, worker_exit_code, metadata "
+            "FROM task_runs WHERE id = ?",
+            (int(task_run_id),),
+        ).fetchone()
+        if run is None:
+            raise ValueError(f"unknown task run {task_run_id}")
+        observed_events = {
+            str(row["event_kind"])
+            for row in connection.execute(
+                "SELECT event_kind FROM worker_run_timeline_events "
+                "WHERE task_run_id = ?",
+                (int(task_run_id),),
+            )
+        }
+        terminal = connection.execute(
+            "SELECT worker_exit_kind, worker_exit_code, worker_protocol_state, "
+            "task_outcome, end_reason, board "
+            "FROM worker_run_terminal_facts WHERE task_run_id = ?",
+            (int(task_run_id),),
+        ).fetchone()
+        locator = None
+        if terminal is None or not terminal["board"]:
+            locator_table = connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='worker_run_runtime_locators'"
+            ).fetchone()
+            if locator_table is not None:
+                locator = connection.execute(
+                    "SELECT board FROM worker_run_runtime_locators "
+                    "WHERE task_run_id = ?",
+                    (int(task_run_id),),
+                ).fetchone()
+    expected_task_id = str(run["task_id"])
+    expected_board = str(
+        (terminal["board"] if terminal is not None else None)
+        or (locator["board"] if locator is not None else None)
+        or ""
+    )
+
+    def metadata_matches(metadata: Mapping[str, Any]) -> bool:
+        observed_run = metadata.get(
+            "task_run_id", metadata.get("kanban_run_id")
+        )
+        observed_task = metadata.get(
+            "task_id", metadata.get("kanban_task_id")
+        )
+        observed_board = metadata.get(
+            "board", metadata.get("kanban_board")
+        )
+        return (
+            str(observed_run or "") == run_id
+            and str(observed_task or "") == expected_task_id
+            and bool(expected_board)
+            and str(observed_board or "") == expected_board
+        )
+
     exact_trace: dict[str, Any] | None = None
+    exact_generation: dict[str, Any] | None = None
     try:
-        for trace in trace_probe():
+        budget = _LangfuseProbeBudget.create()
+        def invoke_probe(probe: Callable[..., Any], *args: Any) -> Any:
+            parameters = inspect.signature(probe).parameters.values()
+            accepts_budget = any(
+                parameter.name == "budget"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+            return (
+                probe(*args, budget=budget)
+                if accepts_budget
+                else probe(*args)
+            )
+
+        exact_traces: list[dict[str, Any]] = []
+        for trace in invoke_probe(trace_probe):
             metadata = _trace_metadata(trace)
-            observed = metadata.get("task_run_id", metadata.get("kanban_run_id"))
-            if observed is not None and str(observed) == run_id:
-                exact_trace = trace
+            if (
+                metadata_matches(metadata)
+                and isinstance(trace.get("id"), str)
+                and trace["id"]
+            ):
+                budget.consume_candidate_trace()
+                exact_traces.append(trace)
+        for candidate in exact_traces:
+            candidate_trace_id = candidate["id"]
+            for generation in invoke_probe(
+                generation_probe,
+                candidate_trace_id,
+            ):
+                metadata = _trace_metadata(generation)
+                if (
+                    metadata_matches(metadata)
+                    and isinstance(generation.get("id"), str)
+                    and generation["id"]
+                    and str(generation.get("traceId") or "") == candidate_trace_id
+                ):
+                    exact_trace = candidate
+                    exact_generation = generation
+                    break
+            if exact_generation is not None:
                 break
+        if exact_trace is None and exact_traces:
+            exact_trace = exact_traces[0]
+        trace_id = exact_trace.get("id") if exact_trace is not None else None
+        generation_trace_id = (
+            exact_generation.get("traceId")
+            if exact_generation is not None
+            else None
+        )
         langfuse: dict[str, Any] = {
             "credentials_configured": True,
             "tcp_http_reachable": True,
             "authenticated_public_api_readable": True,
             "exact_trace_link": exact_trace is not None,
-            "trace_id_short": _short_identifier(
-                exact_trace.get("id") if exact_trace is not None else None
+            "exact_task_board_link": exact_trace is not None,
+            "trace_id_short": _short_identifier(trace_id),
+            "exact_generation_link": exact_generation is not None,
+            "generation_id_short": _short_identifier(
+                exact_generation.get("id")
+                if exact_generation is not None
+                else None
+            ),
+            "generation_trace_match": bool(
+                trace_id
+                and generation_trace_id
+                and str(trace_id) == str(generation_trace_id)
             ),
         }
     except Exception as exc:  # fail closed; never serialize a possibly sensitive message
@@ -901,34 +1270,13 @@ def build_live_smoke_contract(
     with closing(_read_only(usage_path)) as connection:
         usage_columns = _columns(connection, "run_usage_facts")
         usage_schema_missing = sorted(
-            {"task_run_id", "task_id", "captured_at"} - usage_columns
+            {"task_run_id", "task_id", "board", "captured_at"} - usage_columns
         )
         usage_rows = [] if usage_schema_missing else connection.execute(
-            "SELECT task_id FROM run_usage_facts WHERE task_run_id = ?", (run_id,)
+            "SELECT task_id, board FROM run_usage_facts "
+            "WHERE task_run_id = ? AND task_id = ? AND board = ?",
+            (run_id, expected_task_id, expected_board),
         ).fetchall()
-        usage_task_ids = {str(row["task_id"]) for row in usage_rows if row["task_id"]}
-
-
-    with closing(_read_only(kanban_path)) as connection:
-        run = connection.execute(
-            "SELECT task_id, outcome, worker_exit_code, metadata FROM task_runs WHERE id = ?",
-            (int(task_run_id),),
-        ).fetchone()
-        if run is None:
-            raise ValueError(f"unknown task run {task_run_id}")
-        observed_events = {
-            str(row["event_kind"])
-            for row in connection.execute(
-                "SELECT event_kind FROM worker_run_timeline_events WHERE task_run_id = ?",
-                (int(task_run_id),),
-            )
-        }
-        terminal = connection.execute(
-            "SELECT worker_exit_kind, worker_exit_code, worker_protocol_state, "
-            "task_outcome, end_reason FROM worker_run_terminal_facts WHERE task_run_id = ?",
-            (int(task_run_id),),
-        ).fetchone()
-
 
     try:
         run_metadata = json.loads(run["metadata"] or "{}")
@@ -949,7 +1297,7 @@ def build_live_smoke_contract(
     else:
         missing_events = []
         lifecycle_assessment = "not_applicable"
-    usage_exact = bool(usage_rows) and usage_task_ids == {str(run["task_id"])}
+    usage_exact = bool(usage_rows)
     terminal_report = dict(terminal) if terminal is not None else {
         "worker_exit_kind": None,
         "worker_exit_code": None,
@@ -961,18 +1309,26 @@ def build_live_smoke_contract(
         langfuse["tcp_http_reachable"],
         langfuse["authenticated_public_api_readable"],
         langfuse["exact_trace_link"],
+        langfuse.get("exact_task_board_link"),
+        langfuse["exact_generation_link"],
+        langfuse["generation_trace_match"],
         not usage_schema_missing,
         usage_exact,
         runtime_eligible,
         not missing_events,
         terminal is not None,
+        terminal_report["worker_exit_kind"] == "exited",
         terminal_report["worker_exit_code"] == 0,
+        terminal_report["worker_protocol_state"] == "completed",
         terminal_report["task_outcome"] == "completed",
+        terminal_report["end_reason"] == "kanban_complete",
     ))
     return {
         "contract_version": LIVE_SMOKE_CONTRACT_VERSION,
         "status": "pass" if passed else "fail",
         "task_run_id": int(task_run_id),
+        "task_id": expected_task_id,
+        "board": expected_board or None,
         "worker_runtime": worker_runtime,
         "runtime_eligible": runtime_eligible,
         "schema": {
@@ -982,7 +1338,7 @@ def build_live_smoke_contract(
         "langfuse": langfuse,
         "usage_fact": {
             "exact_rows": len(usage_rows),
-            "exact_task_match": usage_exact,
+            "exact_task_board_match": usage_exact,
             "schema_missing": usage_schema_missing,
         },
         "lifecycle": {

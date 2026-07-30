@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 
 import pytest
 
@@ -185,6 +187,417 @@ def test_terminal_facts_keep_process_protocol_outcome_and_reason_independent(
     assert terminal["worker_protocol_state"] == protocol_state
     assert terminal["task_outcome"] == outcome
     assert terminal["end_reason"] == "worker_process_observed"
+
+
+def test_reaped_clean_exit_fills_process_facts_without_rewriting_terminal_meaning(
+    kanban_home,
+):
+    with kb.connect_closing() as conn:
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_exit_kind TEXT")
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_exit_code INTEGER")
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_protocol_state TEXT")
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=4242, env={})
+        kb._end_run(conn, task_id, outcome="completed")
+
+        reconciled = facts.reconcile_reaped_worker_exits(
+            conn,
+            exits=[{
+                "pid": 4242,
+                "task_run_id": run_id,
+                "task_id": task_id,
+                "board": "default",
+                "classified_kind": "clean_exit",
+                "exit_code": 0,
+            }],
+            board="default",
+        )
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert reconciled == [{"pid": 4242, "task_run_id": run_id}]
+    assert terminal == {
+        "task_run_id": run_id,
+        "worker_exit_kind": "exited",
+        "worker_exit_code": 0,
+        "worker_protocol_state": "unobserved",
+        "task_outcome": "completed",
+        "end_reason": "completed",
+        "task_id": task_id,
+        "board": "default",
+    }
+
+
+def test_reaped_pid_reuse_updates_only_the_exact_historical_run(kanban_home):
+    with kb.connect_closing() as conn:
+        old_task, old_run = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=old_run, pid=5151, env={})
+        kb._end_run(conn, old_task, outcome="completed")
+        _new_task, new_run = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=new_run, pid=5151, env={})
+
+        reconciled = facts.reconcile_reaped_worker_exits(
+            conn,
+            exits=[{
+                "pid": 5151,
+                "task_run_id": old_run,
+                "task_id": old_task,
+                "board": "default",
+                "classified_kind": "clean_exit",
+                "exit_code": 0,
+            }],
+            board="default",
+        )
+        old_terminal = facts.get_terminal_facts(conn, task_run_id=old_run)
+
+    assert new_run > old_run
+    assert reconciled == [{"pid": 5151, "task_run_id": old_run}]
+    assert old_terminal["worker_exit_kind"] == "exited"
+    assert old_terminal["worker_exit_code"] == 0
+
+
+def test_reaped_exit_never_overwrites_an_already_observed_process_fact(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=6262, env={})
+        kb._end_run(
+            conn,
+            task_id,
+            outcome="completed",
+            metadata={
+                "worker_exit_kind": "exited",
+                "worker_exit_code": 0,
+                "worker_protocol_state": "completed",
+                "worker_end_reason": "worker_reported",
+            },
+        )
+
+        reconciled = facts.reconcile_reaped_worker_exits(
+            conn,
+            exits=[{
+                "pid": 6262,
+                "task_run_id": run_id,
+                "task_id": task_id,
+                "board": "default",
+                "classified_kind": "nonzero_exit",
+                "exit_code": 17,
+            }],
+            board="default",
+        )
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert reconciled == [{"pid": 6262, "task_run_id": run_id}]
+    assert terminal["worker_exit_kind"] == "exited"
+    assert terminal["worker_exit_code"] == 0
+    assert terminal["worker_protocol_state"] == "completed"
+    assert terminal["end_reason"] == "worker_reported"
+
+
+def test_dispatch_tick_reconciles_the_reaped_pid_before_other_maintenance(
+    kanban_home,
+    monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=7373, env={})
+        kb._end_run(conn, task_id, outcome="completed")
+        kb._register_worker_process_identity(
+            7373,
+            board="default",
+            task_run_id=run_id,
+            task_id=task_id,
+        )
+        monkeypatch.setattr(
+            kb,
+            "reap_worker_zombies",
+            lambda: kb._record_worker_exit(7373, 0),
+        )
+
+        kb.dispatch_once(conn, dry_run=True, max_spawn=0)
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert terminal["worker_exit_kind"] == "exited"
+    assert terminal["worker_exit_code"] == 0
+
+
+def test_reaped_exit_is_retained_until_its_exact_board_dispatches(
+    kanban_home,
+):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=8484, env={})
+        kb._end_run(conn, task_id, outcome="completed")
+        kb._register_worker_process_identity(
+            8484,
+            board="default",
+            task_run_id=run_id,
+            task_id=task_id,
+        )
+        kb._record_worker_exit(8484, 0)
+
+        assert kb._reaped_worker_exits_for_board("other") == []
+        assert kb._reconcile_worker_exits_for_board(conn) == [run_id]
+        assert kb._reaped_worker_exits_for_board("default") == []
+
+
+def test_reap_registry_keeps_two_pid_generations_until_exact_ack() -> None:
+    pid = 8585
+    kb._register_worker_process_identity(
+        pid,
+        board="board-a",
+        task_run_id=101,
+        task_id="task-a",
+    )
+    kb._record_worker_exit(pid, 0)
+    kb._register_worker_process_identity(
+        pid,
+        board="board-b",
+        task_run_id=202,
+        task_id="task-b",
+    )
+    kb._record_worker_exit(pid, 7 << 8)
+
+    board_a = kb._reaped_worker_exits_for_board("board-a")
+    board_b = kb._reaped_worker_exits_for_board("board-b")
+    assert board_a[0]["task_run_id"] == 101
+    assert board_a[0]["exit_code"] == 0
+    assert board_b[0]["task_run_id"] == 202
+    assert board_b[0]["exit_code"] == 7
+
+    assert kb._acknowledge_reaped_worker_exit(
+        pid=pid,
+        board="board-a",
+        task_run_id=101,
+    )
+    assert kb._reaped_worker_exits_for_board("board-a") == []
+    assert kb._reaped_worker_exits_for_board("board-b") == board_b
+
+
+def test_registration_adopts_a_just_reaped_unbound_worker_exit() -> None:
+    pid = 8686
+    kb._record_worker_exit(pid, 0)
+
+    kb._register_worker_process_identity(
+        pid,
+        board="default",
+        task_run_id=303,
+        task_id="task-race",
+    )
+
+    records = kb._reaped_worker_exits_for_board("default")
+    assert records == [{
+        "pid": pid,
+        "task_run_id": 303,
+        "task_id": "task-race",
+        "board": "default",
+        "classified_kind": "clean_exit",
+        "exit_code": 0,
+    }]
+
+
+def test_concurrent_registration_and_reap_preserve_exact_worker_identity() -> None:
+    pid = 8736
+    barrier = threading.Barrier(3)
+
+    def register() -> None:
+        barrier.wait()
+        kb._register_worker_process_identity(
+            pid,
+            board="default",
+            task_run_id=304,
+            task_id="task-concurrent-race",
+        )
+
+    def reap() -> None:
+        barrier.wait()
+        kb._record_worker_exit(pid, 0)
+
+    register_thread = threading.Thread(target=register)
+    reap_thread = threading.Thread(target=reap)
+    register_thread.start()
+    reap_thread.start()
+    barrier.wait()
+    register_thread.join(timeout=5)
+    reap_thread.join(timeout=5)
+
+    assert not register_thread.is_alive()
+    assert not reap_thread.is_alive()
+    records = [
+        record
+        for record in kb._reaped_worker_exits_for_board("default")
+        if record["pid"] == pid
+    ]
+    assert records == [{
+        "pid": pid,
+        "task_run_id": 304,
+        "task_id": "task-concurrent-race",
+        "board": "default",
+        "classified_kind": "clean_exit",
+        "exit_code": 0,
+    }]
+
+
+def test_current_pid_generation_never_falls_back_to_older_exit() -> None:
+    pid = 8746
+    kb._register_worker_process_identity(
+        pid,
+        board="previous",
+        task_run_id=305,
+        task_id="task-previous-generation",
+    )
+    kb._record_worker_exit(pid, 0)
+    kb._register_worker_process_identity(
+        pid,
+        board="current",
+        task_run_id=306,
+        task_id="task-current-generation",
+    )
+
+    assert kb._classify_worker_exit(pid) == ("unknown", None)
+    assert kb._reaped_worker_exits_for_board("previous")[0]["task_run_id"] == 305
+    assert kb._reaped_worker_exits_for_board("current") == []
+
+
+def test_exact_old_exit_wins_over_liveness_of_reused_pid_generation(
+    kanban_home,
+    monkeypatch,
+) -> None:
+    pid = 8787
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=pid, env={})
+        conn.execute(
+            "UPDATE tasks SET worker_pid = ? WHERE id = ?",
+            (pid, task_id),
+        )
+        kb._register_worker_process_identity(
+            pid,
+            board="default",
+            task_run_id=run_id,
+            task_id=task_id,
+        )
+        kb._record_worker_exit(pid, 0)
+        kb._register_worker_process_identity(
+            pid,
+            board="other",
+            task_run_id=404,
+            task_id="new-generation",
+        )
+        monkeypatch.setattr(kb, "reap_worker_zombies", lambda: None)
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 0)
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_args, **_kwargs: pytest.fail(
+                "must not signal a reused PID generation"
+            ),
+        )
+
+        kb.dispatch_once(conn, dry_run=True, max_spawn=0)
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+        task_status = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()["status"]
+
+    assert task_status != "running"
+    assert terminal["worker_exit_kind"] == "exited"
+    assert terminal["worker_exit_code"] == 0
+
+
+def test_active_same_tick_crash_reconciles_after_detector_ends_run(
+    kanban_home,
+    monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=9595, env={})
+        conn.execute(
+            "UPDATE tasks SET worker_pid = ? WHERE id = ?",
+            (9595, task_id),
+        )
+        kb._register_worker_process_identity(
+            9595,
+            board="default",
+            task_run_id=run_id,
+            task_id=task_id,
+        )
+        monkeypatch.setattr(kb, "reap_worker_zombies", lambda: None)
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 0)
+        kb._record_worker_exit(9595, 9 << 8)
+
+        kb.dispatch_once(conn, dry_run=True, max_spawn=0)
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert terminal["worker_exit_kind"] == "exited"
+    assert terminal["worker_exit_code"] == 9
+
+
+def test_exit_reconciliation_rolls_back_both_projections_on_mirror_failure(
+    kanban_home,
+):
+    with kb.connect_closing() as conn:
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_exit_kind TEXT")
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_exit_code INTEGER")
+        conn.execute("ALTER TABLE task_runs ADD COLUMN worker_protocol_state TEXT")
+        task_id, run_id = _claimed_run(conn)
+        facts.record_locator(conn, task_run_id=run_id, pid=9696, env={})
+        kb._end_run(conn, task_id, outcome="completed")
+
+        class FaultConnection:
+            def execute(self, sql, parameters=()):
+                if sql.startswith("UPDATE task_runs SET"):
+                    raise sqlite3.OperationalError("synthetic mirror failure")
+                return conn.execute(sql, parameters)
+
+        reconciled = facts.reconcile_reaped_worker_exits(
+            FaultConnection(),
+            exits=[{
+                "pid": 9696,
+                "task_run_id": run_id,
+                "task_id": task_id,
+                "board": "default",
+                "classified_kind": "clean_exit",
+                "exit_code": 0,
+            }],
+            board="default",
+        )
+        terminal = facts.get_terminal_facts(conn, task_run_id=run_id)
+
+    assert reconciled == []
+    assert terminal["worker_exit_kind"] == "unobserved"
+    assert terminal["worker_exit_code"] is None
+
+
+def test_worker_terminal_tools_stamp_observed_protocol_and_end_reason(
+    kanban_home,
+):
+    with kb.connect_closing() as conn:
+        complete_task_id, complete_run_id = _claimed_run(conn)
+        assert kb.complete_task(
+            conn,
+            complete_task_id,
+            expected_run_id=complete_run_id,
+        )
+        completed = facts.get_terminal_facts(
+            conn,
+            task_run_id=complete_run_id,
+        )
+
+        block_task_id, block_run_id = _claimed_run(conn)
+        assert kb.block_task(
+            conn,
+            block_task_id,
+            reason="controlled test block",
+            expected_run_id=block_run_id,
+        )
+        blocked = facts.get_terminal_facts(conn, task_run_id=block_run_id)
+
+    assert completed["worker_protocol_state"] == "completed"
+    assert completed["end_reason"] == "kanban_complete"
+    assert blocked["worker_protocol_state"] == "blocked"
+    assert blocked["end_reason"] == "kanban_block"
 
 
 @pytest.mark.parametrize(

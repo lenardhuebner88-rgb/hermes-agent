@@ -22,11 +22,14 @@ Optional env vars:
 """
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import json
 import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -36,11 +39,11 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-try:
-    from langfuse import Langfuse, propagate_attributes
-except Exception:  # pragma: no cover - fail-open when optional dep is missing
-    Langfuse = None
-    propagate_attributes = None
+Langfuse: Any = None
+propagate_attributes: Any = None
+_EXPECTED_LANGFUSE_SDK_VERSION = "4.14.1"
+_LANGFUSE_INIT_LOCK = threading.RLock()
+_LANGFUSE_SDK_READY = False
 
 
 @dataclass
@@ -105,6 +108,60 @@ def _debug_enabled() -> bool:
 def _debug(message: str) -> None:
     if _debug_enabled():
         logger.info("Langfuse tracing: %s", message)
+
+
+def _ensure_langfuse_sdk() -> bool:
+    """Verify, lazy-install, and bind exactly the pinned activated SDK once."""
+    global Langfuse, propagate_attributes, _LANGFUSE_SDK_READY
+    with _LANGFUSE_INIT_LOCK:
+        if _LANGFUSE_SDK_READY:
+            return True
+        loaded_module = sys.modules.get("langfuse")
+        try:
+            installed_before = importlib.metadata.version("langfuse")
+        except importlib.metadata.PackageNotFoundError:
+            installed_before = None
+        if (
+            loaded_module is not None
+            and (
+                installed_before != _EXPECTED_LANGFUSE_SDK_VERSION
+                or getattr(loaded_module, "__version__", None)
+                != _EXPECTED_LANGFUSE_SDK_VERSION
+                or not hasattr(loaded_module, "Langfuse")
+                or not hasattr(loaded_module, "propagate_attributes")
+            )
+        ):
+            logger.warning(
+                "Langfuse plugin SDK version is incompatible with the pinned "
+                "runtime; restart after installing the configured version"
+            )
+            return False
+        try:
+            from tools.lazy_deps import ensure
+
+            ensure("observability.langfuse", prompt=False)
+            installed_after = importlib.metadata.version("langfuse")
+            if installed_after != _EXPECTED_LANGFUSE_SDK_VERSION:
+                raise RuntimeError("langfuse_sdk_version_mismatch")
+            importlib.invalidate_caches()
+            module = importlib.import_module("langfuse")
+            if (
+                getattr(module, "__version__", None)
+                != _EXPECTED_LANGFUSE_SDK_VERSION
+            ):
+                raise RuntimeError("loaded_langfuse_sdk_version_mismatch")
+            sdk_class = getattr(module, "Langfuse")
+            propagate = getattr(module, "propagate_attributes")
+        except Exception as exc:
+            logger.warning(
+                "Langfuse plugin SDK unavailable (%s); traces will NOT be emitted",
+                type(exc).__name__,
+            )
+            return False
+        Langfuse = sdk_class
+        propagate_attributes = propagate
+        _LANGFUSE_SDK_READY = True
+        return True
 
 
 def _fail_soft_hook(func: Any) -> Any:
@@ -209,6 +266,12 @@ def _resolve_langfuse_config() -> tuple[tuple[str, str, str, str, str] | None, s
 
 
 def _get_langfuse() -> Optional[Langfuse]:
+    """Serialize first-use SDK verification and client construction."""
+    with _LANGFUSE_INIT_LOCK:
+        return _get_langfuse_locked()
+
+
+def _get_langfuse_locked() -> Optional[Langfuse]:
     """Return a cached Langfuse client, or ``None`` if unavailable.
 
     Activation of this plugin is controlled by the Hermes plugin system —
@@ -228,10 +291,6 @@ def _get_langfuse() -> Optional[Langfuse]:
     # credentials or a plugin registration are present.
     enabled = _env("HERMES_LANGFUSE_ENABLED")
     if enabled and enabled.strip().lower() not in {"1", "true", "yes", "on"}:
-        _LANGFUSE_CLIENT = _INIT_FAILED
-        return None
-
-    if Langfuse is None:
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
 
@@ -267,6 +326,10 @@ def _get_langfuse() -> Optional[Langfuse]:
             "silence this warning.",
             "; ".join(placeholder_issues),
         )
+        _LANGFUSE_CLIENT = _INIT_FAILED
+        return None
+
+    if not _ensure_langfuse_sdk():
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
 

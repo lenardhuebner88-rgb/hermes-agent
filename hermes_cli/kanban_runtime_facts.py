@@ -12,7 +12,7 @@ import os
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 EVENT_KINDS = frozenset(
@@ -238,6 +238,148 @@ def get_terminal_facts(
         (int(task_run_id),),
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+def reconcile_reaped_worker_exits(
+    conn: sqlite3.Connection,
+    *,
+    exits: Iterable[Mapping[str, Any]],
+    board: str | None = None,
+) -> list[dict[str, int]]:
+    """Atomically attach exact parent-side child exits to their owning run.
+
+    Regular workers end their run from inside the child, before the process
+    itself exits. The parent can therefore observe the wait status only on a
+    later dispatcher tick. This function fills in process facts for that
+    already-ended run while preserving protocol state, outcome, and end reason.
+
+    Every input already carries the immutable board/run/task identity registered
+    when the PID was attached. Bare-PID lookup is forbidden: run ids are scoped
+    to board DBs and operating-system PIDs are reusable. Successful results are
+    safe for the parent registry to acknowledge only after the SAVEPOINT has
+    released; skipped or failed records remain retryable.
+    """
+    board_name = board or os.environ.get("HERMES_KANBAN_BOARD") or "default"
+    reconciled: list[dict[str, int]] = []
+    exit_kinds = {
+        "clean_exit": "exited",
+        "rate_limited": "exited",
+        "nonzero_exit": "exited",
+        "signaled": "signaled",
+    }
+    for exit_record in exits:
+        if not isinstance(exit_record, Mapping):
+            continue
+        try:
+            pid = int(exit_record["pid"])
+            run_id = int(exit_record["task_run_id"])
+        except (TypeError, ValueError):
+            continue
+        task_id = str(exit_record.get("task_id") or "")
+        record_board = str(exit_record.get("board") or "")
+        classified_kind = str(exit_record.get("classified_kind") or "")
+        exit_code_raw = exit_record.get("exit_code")
+        try:
+            exit_code = int(exit_code_raw) if exit_code_raw is not None else None
+        except (TypeError, ValueError):
+            continue
+        worker_exit_kind = exit_kinds.get(classified_kind)
+        if (
+            worker_exit_kind is None
+            or not task_id
+            or record_board != board_name
+        ):
+            continue
+        candidate = conn.execute(
+            """
+            SELECT loc.task_run_id, loc.task_id, loc.board, run.ended_at
+              FROM worker_run_runtime_locators AS loc
+              JOIN task_runs AS run ON run.id = loc.task_run_id
+             WHERE loc.pid = ?
+               AND loc.task_run_id = ?
+               AND loc.task_id = ?
+               AND loc.board = ?
+             LIMIT 1
+            """,
+            (pid, run_id, task_id, record_board),
+        ).fetchone()
+        if (
+            candidate is None
+            or candidate["ended_at"] is None
+        ):
+            continue
+        terminal = conn.execute(
+            """
+            SELECT worker_exit_kind, worker_exit_code, worker_protocol_state,
+                   task_outcome, end_reason, task_id, board
+              FROM worker_run_terminal_facts
+             WHERE task_run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if (
+            terminal is None
+            or str(terminal["task_id"]) != task_id
+            or str(terminal["board"]) != board_name
+        ):
+            continue
+        if (
+            terminal["worker_exit_kind"] != "unobserved"
+            and terminal["worker_exit_code"] is not None
+        ):
+            reconciled.append({"pid": pid, "task_run_id": run_id})
+            continue
+        savepoint = f"worker_exit_{pid}_{run_id}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            conn.execute(
+                """
+                UPDATE worker_run_terminal_facts
+                   SET worker_exit_kind = ?,
+                       worker_exit_code = ?
+                 WHERE task_run_id = ?
+                   AND task_id = ?
+                   AND board = ?
+                """,
+                (worker_exit_kind, exit_code, run_id, task_id, board_name),
+            )
+            task_run_columns = {
+                str(column["name"])
+                for column in conn.execute("PRAGMA table_info(task_runs)")
+            }
+            assignments: list[str] = []
+            parameters: list[Any] = []
+            if "worker_exit_kind" in task_run_columns:
+                assignments.append(
+                    "worker_exit_kind = CASE "
+                    "WHEN worker_exit_kind IS NULL OR worker_exit_kind = 'unobserved' "
+                    "THEN ? ELSE worker_exit_kind END"
+                )
+                parameters.append(worker_exit_kind)
+            if "worker_exit_code" in task_run_columns:
+                assignments.append(
+                    "worker_exit_code = COALESCE(worker_exit_code, ?)"
+                )
+                parameters.append(exit_code)
+            if "worker_protocol_state" in task_run_columns:
+                assignments.append(
+                    "worker_protocol_state = COALESCE(worker_protocol_state, ?)"
+                )
+                parameters.append(terminal["worker_protocol_state"])
+            if assignments:
+                conn.execute(
+                    "UPDATE task_runs SET "
+                    + ", ".join(assignments)
+                    + " WHERE id = ? AND task_id = ? AND ended_at IS NOT NULL",
+                    (*parameters, run_id, task_id),
+                )
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            continue
+        reconciled.append({"pid": pid, "task_run_id": run_id})
+    return reconciled
 
 
 def _retry_link_diagnostic(
