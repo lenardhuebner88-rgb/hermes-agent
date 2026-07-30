@@ -474,6 +474,8 @@ def _authenticated_dashboard_request(
     timeout: float = 30.0,
 ) -> Callable[[str], dict[str, Any]]:
     """Reuse the dashboard's canonical password/cookie smoke authentication."""
+    _validated_dashboard_url(base_url, days=1)
+
     from scripts import smoke_health_status_auth as auth_smoke
 
     opener = build_opener(HTTPCookieProcessor(CookieJar()))
@@ -540,6 +542,33 @@ def _validated_dashboard_url(base_url: str, *, days: int) -> str:
 
 class LangfusePayloadInvalid(RuntimeError):
     """A Langfuse response was reachable but did not satisfy the public API shape."""
+
+
+def _classified_langfuse_failure(exc: BaseException) -> dict[str, Any] | None:
+    """Classify only the known, secret-safe failures from the production client."""
+    cause: BaseException = exc
+    while isinstance(cause, RuntimeError) and cause.__cause__ is not None:
+        cause = cause.__cause__
+    receipt: dict[str, Any] = {
+        "state": "absent",
+        "configured_host_checked": True,
+    }
+    if isinstance(cause, urllib.error.HTTPError):
+        receipt.update(reason="http_error", http_status=cause.code)
+    elif isinstance(cause, (urllib.error.URLError, OSError, TimeoutError)):
+        receipt["reason"] = "unreachable"
+    elif isinstance(
+        cause,
+        (json.JSONDecodeError, UnicodeDecodeError, LangfusePayloadInvalid),
+    ) or (
+        cause is exc
+        and isinstance(exc, RuntimeError)
+        and exc.args == ("Langfuse returned a non-object payload",)
+    ):
+        receipt["reason"] = "payload_invalid"
+    else:
+        return None
+    return receipt
 
 
 def _langfuse_page(
@@ -731,25 +760,18 @@ def build_control_surface_live_smoke(
                     reason="intentional_limit",
                 ),
             }
-        except urllib.error.HTTPError as exc:
-            report["langfuse"] = {
-                "state": "absent",
-                "reason": "http_error",
-                "http_status": exc.code,
-                "configured_host_checked": True,
-            }
-        except urllib.error.URLError:
-            report["langfuse"] = {
-                "state": "absent",
-                "reason": "unreachable",
-                "configured_host_checked": True,
-            }
-        except (json.JSONDecodeError, UnicodeDecodeError, LangfusePayloadInvalid):
-            report["langfuse"] = {
-                "state": "absent",
-                "reason": "payload_invalid",
-                "configured_host_checked": True,
-            }
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            LangfusePayloadInvalid,
+            RuntimeError,
+        ) as exc:
+            classified = _classified_langfuse_failure(exc)
+            if classified is None:
+                raise
+            report["langfuse"] = classified
 
     try:
         dashboard_probe(dashboard_url)
@@ -1009,6 +1031,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.control_surface_smoke_url is not None:
             if args.warm_calls < 5:
                 raise ValueError("warm_calls_below_minimum")
+            _validated_dashboard_url(
+                args.control_surface_smoke_url,
+                days=args.days,
+            )
             dashboard_probe = _authenticated_dashboard_request(
                 args.control_surface_smoke_url,
                 provider=args.dashboard_auth_provider,

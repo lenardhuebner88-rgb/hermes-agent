@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from scripts.langfuse_worker_audit import (
+    _authenticated_dashboard_request,
     build_control_surface_live_smoke,
     build_live_smoke_contract,
 )
@@ -214,6 +215,79 @@ def test_control_surface_smoke_classifies_langfuse_failures_without_details(
     assert report["langfuse"].get("http_status") == status
     assert "error_type" not in report["langfuse"]
     assert "unauthorized" not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    ("cause", "reason", "status"),
+    [
+        (
+            urllib.error.HTTPError(
+                "http://127.0.0.1", 401, "secret", Message(), None
+            ),
+            "http_error",
+            401,
+        ),
+        (
+            urllib.error.URLError("secret-network-reason"),
+            "unreachable",
+            None,
+        ),
+        (
+            json.JSONDecodeError("secret response", "secret body", 0),
+            "payload_invalid",
+            None,
+        ),
+    ],
+)
+def test_control_surface_smoke_classifies_wrapped_production_client_failures(
+    cause: Exception,
+    reason: str,
+    status: int | None,
+) -> None:
+    def fail(*_args, **_kwargs) -> dict:
+        raise RuntimeError("production client summary") from cause
+
+    report = build_control_surface_live_smoke(
+        dashboard_base_url="http://127.0.0.1:9119",
+        env=_langfuse_env(),
+        langfuse_request=fail,
+        dashboard_request=lambda _url: _dashboard_payload(),
+    )
+
+    assert report["langfuse"]["reason"] == reason
+    assert report["langfuse"].get("http_status") == status
+    assert report["langfuse"]["configured_host_checked"] is True
+    assert report["dashboard"]["sample_count"] == 10
+    assert report["dashboard"]["fact_rows"] == 12
+    assert report["status"] == "fail"
+    encoded = json.dumps(report)
+    assert "secret" not in encoded
+    assert "production client summary" not in encoded
+
+
+def test_dashboard_auth_rejects_non_loopback_before_any_request(monkeypatch) -> None:
+    opener_called = False
+
+    def forbidden_opener(*_args, **_kwargs):
+        nonlocal opener_called
+        opener_called = True
+        raise AssertionError("network setup must not run")
+
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit.build_opener",
+        forbidden_opener,
+    )
+
+    with pytest.raises(ValueError, match="dashboard_url_invalid"):
+        _authenticated_dashboard_request(
+            "https://external.example",
+            provider="basic",
+            username="operator",
+            password_env="HERMES_DASHBOARD_PASSWORD",
+            no_prompt=True,
+        )
+
+    assert opener_called is False
 
 
 def test_control_surface_smoke_requires_fresh_usage_with_known_fact_rows() -> None:
