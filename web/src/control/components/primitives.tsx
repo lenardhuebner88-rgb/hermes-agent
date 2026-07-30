@@ -10,7 +10,8 @@
  *  · type-only imports for types (verbatimModuleSyntax),
  *  · every animated component calls useReducedMotion() and collapses to
  *    opacity-only / instant when the user prefers reduced motion,
- *  · no ad-hoc font sizes — text renders a named scale step via .hc-type-*.
+ *  · no ad-hoc font sizes — text renders a named step of the canonical
+ *    theme.css type scale (text-micro … text-hero).
  */
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
@@ -33,13 +34,16 @@ import {
 } from "../lib/motion";
 
 /* ── Text ──────────────────────────────────────────────────────────────────
-   Renders a named step of the type scale. One voice, no inline font-size. */
+   Renders a named step of the canonical theme.css type scale (I13, 2026-07-30:
+   migrated off the deprecated .hc-type-* compat classes; mapping: display→hero,
+   title→h1, subtitle→emph, body→sec, label→micro — each the closest scale step).
+   One voice, no inline font-size. */
 type TypeStep = "display" | "title" | "subtitle" | "body" | "label" | "eyebrow";
 const TYPE_CLASS: Record<TypeStep, string> = {
-  display: "hc-type-display",
-  title: "hc-type-title",
-  subtitle: "hc-type-subtitle",
-  body: "hc-type-body",
+  display: "font-display text-hero font-semibold tracking-tight",
+  title: "text-h1 font-semibold tracking-tight",
+  subtitle: "text-emph font-semibold",
+  body: "text-sec",
   label: "text-micro font-medium",
   eyebrow: "hc-eyebrow",
 };
@@ -200,7 +204,7 @@ export function Stat({ label, value, hint, accent, tone, className }: StatProps)
     return (
       <div className={cn("space-y-1", className)}>
         <Eyebrow>{label}</Eyebrow>
-        <div className="hc-aurora-text hc-type-display font-data tabular-nums">{value}</div>
+        <div className="hc-aurora-text font-data text-hero font-semibold tracking-tight tabular-nums">{value}</div>
         {hint ? <Text variant="label" className="text-ink-2">{hint}</Text> : null}
       </div>
     );
@@ -234,13 +238,20 @@ export function SkeletonRow({ className }: { className?: string }) {
 
 export function SkeletonCard({ rows = 3, className }: { rows?: number; className?: string }) {
   return (
-    <div className={cn("hc-surface-card space-y-3 p-4", className)} aria-hidden aria-busy="true">
-      <Skeleton className="h-5 w-2/5" />
-      <div className="space-y-2">
-        {Array.from({ length: rows }).map((_, i) => (
-          <SkeletonRow key={i} className={i === rows - 1 ? "w-3/5" : undefined} />
-        ))}
+    // LanesView idiom: the container is the live status (role="status" +
+    // sr-only loading text), the shimmer blocks stay aria-hidden inside it.
+    // aria-hidden AND aria-busy on the same node would be contradictory —
+    // screen readers would learn nothing about the loading state.
+    <div className={cn("hc-surface-card space-y-3 p-4", className)} role="status" aria-busy="true">
+      <div aria-hidden className="space-y-3">
+        <Skeleton className="h-5 w-2/5" />
+        <div className="space-y-2">
+          {Array.from({ length: rows }).map((_, i) => (
+            <SkeletonRow key={i} className={i === rows - 1 ? "w-3/5" : undefined} />
+          ))}
+        </div>
       </div>
+      <span className="sr-only">… wird geladen</span>
     </div>
   );
 }

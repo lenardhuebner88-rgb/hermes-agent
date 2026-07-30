@@ -79,7 +79,7 @@ export function TerminalIdentityBar({
   const cwdShort = formatCwdShort(window?.cwd);
   const process = terminalProcessLabel(window, kind);
   return (
-    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">
+    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-micro text-ink-2 backdrop-blur sm:px-3">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <span className="shrink-0 font-semibold text-ink">{label}</span>
         <span className="text-ink-3">·</span>
@@ -204,9 +204,9 @@ export const FleetStripCard = memo(function FleetStripCard({
     >
       <div className="flex min-w-0 items-center justify-between gap-2">
         <span className={cn("min-w-0 truncate font-mono text-xs font-semibold", isCurrent ? "text-live" : "text-ink")}>{chipLabel(win)}</span>
-        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[9px]" />
+        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-micro" />
       </div>
-      <div className="mt-1.5 truncate text-[10px] text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
+      <div className="mt-1.5 truncate text-micro text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
     </button>
   );
 });
@@ -275,20 +275,20 @@ export const FleetCard = memo(function FleetCard({
         </span>
       )}
       <div className="flex min-w-0 items-center gap-1.5 pr-5">
-        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[10px]" />
+        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-micro" />
         <span className="min-w-0 truncate font-mono text-xs text-ink-2">{chipLabel(win)}</span>
         {!managed && (
           <span
             data-testid={`extern-badge-${win.session}:${win.window}`}
-            className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+            className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-micro font-medium uppercase tracking-wide text-ink-3"
             title="Externes Fenster — gehört einem anderen Agenten/Prozess"
           >
             extern
           </span>
         )}
       </div>
-      <div className="text-[10px] text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
-      <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-card bg-surface-2 p-1.5 font-mono text-[10px] leading-tight text-ink-2">
+      <div className="text-micro text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
+      <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-card bg-surface-2 p-1.5 font-mono text-micro leading-tight text-ink-2">
         {(win.tail ?? "").split("\n").slice(-5).join("\n") || "—"}
       </pre>
       {dead && (
@@ -302,7 +302,7 @@ export const FleetCard = memo(function FleetCard({
                 event.stopPropagation();
                 onRespawn();
               }}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-live/40 hover:text-live"
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-micro text-ink-2 hover:border-live/40 hover:text-live"
             >
               <RotateCcw className="h-3 w-3" />Respawn
             </button>
@@ -313,7 +313,7 @@ export const FleetCard = memo(function FleetCard({
               event.stopPropagation();
               onKill();
             }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-status-alert/40 hover:text-status-alert"
+            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-micro text-ink-2 hover:border-status-alert/40 hover:text-status-alert"
           >
             <Trash2 className="h-3 w-3" />Entfernen
           </button>
@@ -334,7 +334,7 @@ export const FleetCard = memo(function FleetCard({
                   onConfirmTerminate();
                 }}
                 className={cn(
-                  "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
+                  "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-micro text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
                   managed
                     ? "border border-status-alert/60 bg-status-alert/15 hover:bg-status-alert/25"
                     : "border-2 border-status-alert/70 bg-status-alert/25 hover:bg-status-alert/35",
@@ -351,7 +351,7 @@ export const FleetCard = memo(function FleetCard({
                   event.stopPropagation();
                   onCancelTerminate();
                 }}
-                className="inline-flex items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-micro text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label={`Beenden abbrechen ${win.session}:${win.window}`}
               >
                 <X className="h-3 w-3" />Abbrechen
@@ -365,7 +365,7 @@ export const FleetCard = memo(function FleetCard({
                 onTerminate();
               }}
               className={cn(
-                "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert",
+                "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-micro text-status-alert",
                 managed
                   ? "border border-status-alert/30 hover:border-status-alert/60 hover:bg-status-alert/10"
                   : "border-2 border-status-alert/50 bg-status-alert/10 hover:border-status-alert/70 hover:bg-status-alert/20",

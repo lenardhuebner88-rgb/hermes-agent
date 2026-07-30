@@ -34,7 +34,7 @@ describe("Hero", () => {
     expect(html).toContain("Drei Aufträge laufen");
     expect(html).toContain("Live aus dem Board.");
     expect(html).toContain("hc-hero");
-    expect(html).toContain("hc-type-title");
+    expect(html).toContain("text-h1");
   });
 
   it("renders the count as an aurora display number with its hint", () => {
@@ -44,7 +44,7 @@ describe("Hero", () => {
     expect(html).toContain("39");
     expect(html).toContain("39 warten");
     expect(html).toContain("hc-aurora-text");
-    expect(html).toContain("hc-type-display");
+    expect(html).toContain("text-hero");
   });
 
   it("drives the shell accent from the tone", () => {

@@ -14,9 +14,9 @@ describe("DrawerShell", () => {
       </DrawerShell>,
     );
     const dialog = screen.getByRole("dialog", { name: "Test-Drawer" });
-    // <tab bottom-sheet, unchanged: bottom-anchored, top-rounded, shadow.
+    // <tab bottom-sheet, unchanged: bottom-anchored, top-rounded, overlay shadow.
     expect(dialog.className).toContain("rounded-t-2xl");
-    expect(dialog.className).toContain("shadow-2xl");
+    expect(dialog.className).toContain("shadow-overlay");
     // >=tab (600px) flush right side-sheet: full height, no rounding/shadow,
     // border-l is the only seam, default width min(420px, 60vw).
     expect(dialog.className).toContain("tab:h-full");

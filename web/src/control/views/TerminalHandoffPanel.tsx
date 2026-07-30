@@ -285,7 +285,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
 
   return (
     <div className="fixed inset-0 z-[60] flex items-stretch justify-center bg-surface-0/60 p-0 sm:items-center sm:p-4">
-      <div className="flex h-full w-full max-w-3xl flex-col overflow-hidden rounded-none border border-line bg-surface-1 shadow-2xl sm:h-auto sm:max-h-[90vh] sm:rounded-panel">
+      <div className="flex h-full w-full max-w-3xl flex-col overflow-hidden rounded-none border border-line bg-surface-1 shadow-overlay sm:h-auto sm:max-h-[90vh] sm:rounded-panel">
         <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
           <div>
             <Eyebrow>Terminal → Handoff</Eyebrow>
@@ -331,7 +331,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                 {busy === "candidate" ? "Prüfe und importiere…" : "Kandidaten gehalten einreichen"}
               </button>
               {candidateResult && (
-                <div className="mt-2 font-mono text-[11px] text-status-ok">
+                <div className="mt-2 font-mono text-micro text-status-ok">
                   Root {candidateResult.root_task_id} · Intake {candidateResult.intake_task_id} ·{" "}
                   {candidateResult.imported_commit}
                   {candidateResult.idempotent ? " · bereits vorhanden" : ""}
@@ -393,7 +393,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
               </button>
             </div>
             {captured && (
-              <pre className="max-h-28 overflow-auto rounded-card border border-line bg-surface-2 p-2 text-[11px] text-ink-2">
+              <pre className="max-h-28 overflow-auto rounded-card border border-line bg-surface-2 p-2 text-micro text-ink-2">
                 {captured.slice(0, 4000)}
               </pre>
             )}
@@ -467,7 +467,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                   type="button"
                   onClick={rebuildDraft}
                   disabled={!captured}
-                  className="rounded-card border border-line px-2 py-1 text-[11px] text-ink-2 hover:bg-surface-3 disabled:opacity-40"
+                  className="rounded-card border border-line px-2 py-1 text-micro text-ink-2 hover:bg-surface-3 disabled:opacity-40"
                 >
                   Aus Capture neu bauen
                 </button>
@@ -478,7 +478,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                 rows={10}
                 aria-label="PlanSpec-Draft"
                 placeholder="Text übernehmen, dann erscheint hier ein PlanSpec-Draft mit freigabe: operator."
-                className="w-full rounded-card border border-line bg-surface-2 p-2 font-mono text-[11px] text-ink"
+                className="w-full rounded-card border border-line bg-surface-2 p-2 font-mono text-micro text-ink"
               />
               <div className="flex flex-wrap gap-2">
                 <button
@@ -602,13 +602,13 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
                 type="button"
                 onClick={() => void doDispatchDryRun()}
                 disabled={busy !== null}
-                className="inline-flex items-center gap-1.5 rounded-card border border-line px-2.5 py-1 text-[11px] text-ink-2 hover:bg-surface-3 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-card border border-line px-2.5 py-1 text-micro text-ink-2 hover:bg-surface-3 disabled:opacity-50"
               >
                 <Play className="h-3 w-3" />
                 {busy === "dispatch" ? "Vorschau…" : "dispatch --dry-run"}
               </button>
             </div>
-            <p className="text-[11px] text-ink-2">
+            <p className="text-micro text-ink-2">
               Nur Vorschau (<code>dry_run=true</code>) — dispatcht nichts. Echtes Dispatch erfolgt
               ausschließlich über das Board, getrennt von dieser Ansicht.
             </p>

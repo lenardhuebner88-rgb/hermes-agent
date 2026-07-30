@@ -243,7 +243,7 @@ export function QueueActionSummaryPanel({ summary }: { summary: AutoresearchQueu
 
 export function SelectionActionBar({ summary, selectedCount, canConfirm, busy, onConfirm, onClear }: { summary: AutoresearchQueueActionSummary; selectedCount: number; canConfirm: boolean; busy: boolean; onConfirm: () => void; onClear: () => void }) {
   return (
-    <div className={cn("sticky bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] z-30 rounded-panel border p-3 shadow-2xl shadow-black/40 backdrop-blur lg:bottom-3", reviewStepToneClass(summary.tone))}>
+    <div className={cn("sticky bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] z-30 rounded-panel border p-3 shadow-floating backdrop-blur lg:bottom-3", reviewStepToneClass(summary.tone))}>
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2"><Eyebrow>Auswahl bereit</Eyebrow><SignalChip tone={signalToneFromLegacy(summary.tone)} label={`${selectedCount} markiert`} /></div>

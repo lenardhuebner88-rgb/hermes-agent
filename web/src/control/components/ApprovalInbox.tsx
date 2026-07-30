@@ -399,7 +399,7 @@ export function ApprovalInbox() {
       <div className="flex items-baseline justify-between gap-3">
         <Eyebrow>{t.eyebrow}</Eyebrow>
         {settling ? null : (
-          <span className="shrink-0 truncate text-right text-[11px] text-ink-3">
+          <span className="shrink-0 truncate text-right text-micro text-ink-3">
             {drafts.length + items.length === 0
               ? "ruhig"
               : [

@@ -41,8 +41,8 @@ function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSele
         {active ? <span className="h-2 w-2 rounded-full bg-[var(--hc-accent-text)]" /> : null}
       </span>
       <span className="min-w-0">
-        <span className="block text-sm font-medium text-white">{title}</span>
-        <span className="mt-0.5 block text-[0.72rem] hc-dim">{hint}</span>
+        <span className="block text-sm font-medium text-ink">{title}</span>
+        <span className="mt-0.5 block text-micro hc-dim">{hint}</span>
       </span>
     </button>
   );
@@ -51,7 +51,7 @@ function ModeOption({ active, onSelect, title, hint }: { active: boolean; onSele
 function GateToggle({ gate, onChange }: { gate: boolean; onChange: (g: boolean) => void }) {
   return (
     <div className="mt-3 rounded-lg border border-[var(--hc-border)] p-2.5">
-      <p className="hc-type-label text-white">{de.flow.capture.gateLabel}</p>
+      <p className="text-micro font-medium text-ink">{de.flow.capture.gateLabel}</p>
       <div className="mt-2 flex gap-2" role="radiogroup" aria-label={de.flow.capture.gateLabel}>
         {[
           { val: false, title: de.flow.capture.gateAuto, hint: de.flow.capture.gateAutoHint },
@@ -68,8 +68,8 @@ function GateToggle({ gate, onChange }: { gate: boolean; onChange: (g: boolean) 
               gate === opt.val ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)]" : "border-[var(--hc-border)] hover:border-[var(--hc-border-strong)]",
             )}
           >
-            <span className="block text-sm font-medium text-white">{opt.title}</span>
-            <span className="mt-0.5 block text-[0.7rem] hc-dim">{opt.hint}</span>
+            <span className="block text-sm font-medium text-ink">{opt.title}</span>
+            <span className="mt-0.5 block text-micro hc-dim">{opt.hint}</span>
           </button>
         ))}
       </div>
@@ -92,7 +92,7 @@ function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChang
     <div className="mt-3 rounded-lg border border-[var(--hc-border)] p-2.5">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <div className="inline-flex items-center gap-1">
-          <span className="hc-type-label hc-soft">{de.flow.capture.reviewTierLabel}</span>
+          <span className="text-micro font-medium hc-soft">{de.flow.capture.reviewTierLabel}</span>
           {(["standard", "review", "critical"] as ReviewTier[]).map((tier) => (
             <button
               key={tier}
@@ -100,7 +100,7 @@ function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChang
               aria-pressed={reviewTier === tier}
               onClick={() => onTierChange(reviewTier === tier ? "" : tier)}
               className={cn(
-                "inline-flex min-h-8 items-center rounded-full border px-2.5 hc-type-label transition",
+                "inline-flex min-h-8 items-center rounded-full border px-2.5 text-micro font-medium transition",
                 reviewTier === tier
                   ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
                   : "border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]",
@@ -110,7 +110,7 @@ function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChang
             </button>
           ))}
         </div>
-        <label className={cn("inline-flex items-center gap-1.5 hc-type-label hc-soft", !scoutEnabled && "opacity-40")}>
+        <label className={cn("inline-flex items-center gap-1.5 text-micro font-medium hc-soft", !scoutEnabled && "opacity-40")}>
           <input
             type="checkbox"
             checked={scoutEnabled && injectScout}
@@ -121,8 +121,8 @@ function TierScoutControls({ reviewTier, onTierChange, injectScout, onScoutChang
           {de.flow.capture.scoutLabel}
         </label>
       </div>
-      <p className="mt-1.5 hc-type-label hc-dim">{de.flow.capture.reviewTierHint}</p>
-      <p className="mt-1 hc-type-label hc-dim">{scoutEnabled ? de.flow.capture.scoutHint : de.flow.capture.scoutParkHint}</p>
+      <p className="mt-1.5 text-micro font-medium hc-dim">{de.flow.capture.reviewTierHint}</p>
+      <p className="mt-1 text-micro font-medium hc-dim">{scoutEnabled ? de.flow.capture.scoutHint : de.flow.capture.scoutParkHint}</p>
     </div>
   );
 }
@@ -186,7 +186,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
   return (
     <Overlay onClose={onClose} ariaLabel={de.flow.capture.sheetTitle}>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="hc-type-label text-white">{de.flow.capture.sheetTitle}</h2>
+        <h2 className="text-micro font-medium text-ink">{de.flow.capture.sheetTitle}</h2>
         <button type="button" onClick={onClose} aria-label={de.flow.capture.cancel} className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--hc-border)] hc-soft hover:border-[var(--hc-border-strong)]"><X className="h-4 w-4" /></button>
       </div>
 
@@ -196,7 +196,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
         onChange={(e) => { setTitle(e.target.value); if (state === "error") reset(); }}
         onKeyDown={(e) => { if (e.key === "Enter" && title.trim() && !busy) void submit(); }}
         placeholder={de.flow.capture.titlePlaceholder}
-        className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+        className="mt-3 min-h-11 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 text-base text-ink outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
       />
 
       <textarea
@@ -204,7 +204,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
         onChange={(e) => { setDesc(e.target.value); if (state === "error") reset(); }}
         placeholder={de.flow.capture.descriptionPlaceholder}
         rows={2}
-        className="mt-2 w-full resize-y rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-sm text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
+        className="mt-2 w-full resize-y rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-sm text-ink outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
       />
 
       <div className="mt-3 space-y-2" role="radiogroup" aria-label={de.flow.capture.methodLabel}>
@@ -268,7 +268,7 @@ export function FlowCapture({ onCreated }: { onCreated?: (taskId: string) => voi
             type="button"
             onClick={() => setOpen(true)}
             aria-label={de.flow.capture.fabAria}
-            className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom,0px))] right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-lg shadow-black/40 backdrop-blur transition active:scale-95 sm:hidden"
+            className="fixed bottom-[calc(5rem+env(safe-area-inset-bottom,0px))] right-4 z-40 inline-flex h-14 w-14 items-center justify-center rounded-full border border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)] shadow-floating backdrop-blur transition active:scale-95 sm:hidden"
           >
             <Plus className="h-6 w-6" />
           </button>

@@ -82,10 +82,11 @@ export function Hero({
         <div className="min-w-0 sm:max-w-[34rem]">
           <Eyebrow>{eyebrow}</Eyebrow>
           {count != null ? (
-            // The signature: an oversized aurora number in the editorial serif.
+            // The signature: an oversized aurora number in the display voice.
             // `tight` swaps in a smaller mobile-only step of the same voice
-            // (.hc-type-display-tight mirrors .hc-type-display from sm up).
-            <div className={cn("hc-aurora-text mt-1.5 tabular-nums", tight ? "hc-type-display-tight" : "hc-type-display")}>{count}</div>
+            // (canonical h1 below sm, hero from sm up — mirrors the former
+            // .hc-type-display-tight two-step on the theme.css scale, I13).
+            <div className={cn("hc-aurora-text mt-1.5 font-display font-semibold tracking-tight tabular-nums", tight ? "text-h1 sm:text-hero" : "text-hero")}>{count}</div>
           ) : null}
           {countHint != null ? (
             <Text variant="label" className="mt-1 text-ink-2">{countHint}</Text>

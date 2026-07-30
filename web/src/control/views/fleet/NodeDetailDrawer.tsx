@@ -258,7 +258,7 @@ export function NodeDetailContent({
                 aria-label={de.fleet.detailKopieren}
               >
                 {effectiveTaskId}
-                <span className="text-[9px] opacity-70">{copied ? " ✓" : " ⊕"}</span>
+                <span className="text-micro opacity-70">{copied ? " ✓" : " ⊕"}</span>
               </button>
             </span>
           </div>

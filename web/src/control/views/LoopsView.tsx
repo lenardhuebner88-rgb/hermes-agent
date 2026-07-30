@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils";
 import { extractDetail } from "../hooks/internal";
 import { duplicateLoop, getLoopNightOverrides, landLoop, putLoopNightOverrides, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
 import { de } from "../i18n/de";
-import { SignalLabel, type SignalTone } from "../components/leitstand";
+import { SignalLabel, FreshnessStrip, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";
 import {
   isLoopPackError,
@@ -356,7 +356,7 @@ function SourceBadge({ source }: { source?: "repo" | "custom" }) {
   if (!source) return null;
   return (
     <span
-      className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.1em]"
+      className="inline-flex items-center rounded-full border px-2 py-0.5 text-micro uppercase tracking-[0.1em]"
       style={{ borderColor: "var(--ln-line)", color: "var(--ln-ink-soft)" }}
     >
       {source === "custom" ? t.sourceCustom : t.sourceRepo}
@@ -466,7 +466,7 @@ function PhaseHistoryBars({ last }: { last: LoopHeartbeatHistoryEntry[] }) {
               className="block h-4 rounded-sm"
               style={{ width: widthPx, backgroundColor: ok ? "var(--ln-ok)" : "var(--ln-fail)" }}
             />
-            <span className="hidden font-data text-[10px] sm:inline" style={{ color: "var(--ln-ink-soft)" }}>
+            <span className="hidden font-data text-micro sm:inline" style={{ color: "var(--ln-ink-soft)" }}>
               {entry.phase} {entry.secs}s {ok ? "✓" : "✗"}
             </span>
           </div>
@@ -521,7 +521,7 @@ const VERDICT_META: Record<NonNullable<LedgerVerdict>, { Icon: LucideIcon; color
 function LogChip({ children }: { children: ReactNode }) {
   return (
     <span
-      className="rounded border px-1 font-data text-[10px]"
+      className="rounded border px-1 font-data text-micro"
       style={{ borderColor: "var(--ln-line)", color: "var(--ln-ink)" }}
     >
       {children}
@@ -2423,6 +2423,7 @@ export function LoopsView() {
         <p className="text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--ln-ink-soft)" }}>{t.eyebrow}</p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <span className="text-sm" style={{ color: "var(--ln-ink-soft)" }}>{t.subtitle}</span>
+          <FreshnessStrip lastUpdated={loops.lastUpdated} onRefresh={() => loops.reload()} />
         </div>
       </header>
 

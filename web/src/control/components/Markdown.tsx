@@ -139,9 +139,9 @@ function formatInline(text: string, keyPrefix = ""): React.ReactNode[] {
         parts.push(<a key={key} href={href} className="text-live underline underline-offset-2" target="_blank" rel="noreferrer">{m[1]}</a>);
       }
     } else if (m[3]) {
-      parts.push(<code key={key} className="rounded bg-white/10 px-1 font-mono text-xs text-ink">{m[3]}</code>);
+      parts.push(<code key={key} className="rounded bg-surface-2 px-1 font-mono text-xs text-ink">{m[3]}</code>);
     } else if (m[4] ?? m[6]) {
-      parts.push(<strong key={key} className="font-semibold text-white">{m[4] ?? m[6]}</strong>);
+      parts.push(<strong key={key} className="font-semibold text-ink">{m[4] ?? m[6]}</strong>);
     } else if (m[5] ?? m[7]) {
       parts.push(<em key={key} className="italic text-ink-2">{m[5] ?? m[7]}</em>);
     }
@@ -152,8 +152,8 @@ function formatInline(text: string, keyPrefix = ""): React.ReactNode[] {
 }
 
 const H_CLASS: Record<number, string> = {
-  1: "mt-5 mb-2 text-base font-bold text-white",
-  2: "mt-4 mb-2 text-sm font-semibold text-white",
+  1: "mt-5 mb-2 text-base font-bold text-ink",
+  2: "mt-4 mb-2 text-sm font-semibold text-ink",
   3: "mt-3 mb-1 text-sm font-medium text-ink",
   4: "mt-3 mb-1 text-xs font-medium text-ink-2",
   5: "mt-2 mb-1 text-xs text-ink-3",
@@ -170,7 +170,7 @@ export function Markdown({ body, className }: { body: string; className?: string
       {blocks.map((block, idx) => {
         switch (block.type) {
           case "hr":
-            return <hr key={idx} className="border-white/10" />;
+            return <hr key={idx} className="border-line-soft" />;
           case "h": {
             const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
             return <Tag key={idx} className={H_CLASS[block.level]}>{formatInline(block.text, String(idx))}</Tag>;
@@ -179,7 +179,7 @@ export function Markdown({ body, className }: { body: string; className?: string
             return <p key={idx} className="leading-relaxed">{formatInline(block.text, String(idx))}</p>;
           case "code":
             return (
-              <pre key={idx} className="overflow-x-auto rounded-lg bg-black/40 px-3 py-2 text-xs leading-5 text-ink hc-mono">
+              <pre key={idx} className="overflow-x-auto rounded-lg bg-surface-0 px-3 py-2 text-xs leading-5 text-ink hc-mono">
                 <code>{block.text}</code>
               </pre>
             );
@@ -203,10 +203,10 @@ export function Markdown({ body, className }: { body: string; className?: string
             );
           case "table":
             return (
-              <div key={idx} className="overflow-x-auto rounded-lg border border-white/10">
+              <div key={idx} className="overflow-x-auto rounded-lg border border-line">
                 <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-white/10 bg-white/5">
+                    <tr className="border-b border-line bg-surface-2">
                       {block.headers.map((h, j) => (
                         <th key={j} className="px-3 py-2 text-left font-semibold text-ink">{h}</th>
                       ))}
@@ -214,7 +214,7 @@ export function Markdown({ body, className }: { body: string; className?: string
                   </thead>
                   <tbody>
                     {block.rows.map((row, j) => (
-                      <tr key={j} className={cn("border-b border-white/5", j % 2 === 1 && "bg-white/[.02]")}>
+                      <tr key={j} className={cn("border-b border-line-soft", j % 2 === 1 && "bg-surface-2/50")}>
                         {row.map((cell, k) => (
                           <td key={k} className="px-3 py-1.5 text-ink-2">{formatInline(cell, `${idx}-${j}-${k}`)}</td>
                         ))}

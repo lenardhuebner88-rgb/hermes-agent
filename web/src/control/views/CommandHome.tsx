@@ -70,7 +70,7 @@ function ChSection({ label, meta }: { label: ReactNode; meta?: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <Eyebrow>{label}</Eyebrow>
-      {meta ? <span className="truncate text-right text-[11px] text-ink-3">{meta}</span> : null}
+      {meta ? <span className="truncate text-right text-micro text-ink-3">{meta}</span> : null}
     </div>
   );
 }
@@ -267,7 +267,7 @@ function AttentionCount({ label, value }: { label: string; value: number }) {
   return (
     <div className="ch-card px-2 py-2 text-center">
       <div className="font-data text-base font-semibold tabular-nums text-ink">{value}</div>
-      <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] text-ink-3">{label}</div>
+      <div className="mt-0.5 truncate text-micro font-semibold uppercase tracking-[.12em] text-ink-3">{label}</div>
     </div>
   );
 }
@@ -308,7 +308,7 @@ function OperatorDigestCard() {
             {decisions.map((d) => (
               <div key={d.id} className="ch-card flex min-h-11 flex-col justify-center gap-1 px-3.5 py-2.5">
                 <div className="flex items-center gap-2">
-                  <span className="font-data text-[10px] tabular-nums text-ink-3">{d.age_days}d</span>
+                  <span className="font-data text-micro tabular-nums text-ink-3">{d.age_days}d</span>
                   <span className="min-w-0 flex-1 text-sm font-medium text-ink">{d.title}</span>
                 </div>
                 <span className="break-words text-xs text-ink-2">{d.action.replace(/`/g, "")}</span>
@@ -388,9 +388,9 @@ export function TopDecision({ item, onOpen, fix, repair, veto }: { item: InboxIt
       <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
         <div className="flex flex-wrap items-center gap-2">
           <SignalChip tone={surface.tone} label={surface.label} />
-          <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">Als Erstes</span>
+          <span className="text-micro font-semibold uppercase tracking-[.16em] text-ink-3">Als Erstes</span>
           {item.ageSeconds != null ? (
-            <span className="font-data text-[10px] tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
+            <span className="font-data text-micro tabular-nums text-ink-3">vor {fmtDur(item.ageSeconds)}</span>
           ) : null}
         </div>
         <p title={item.title} className="mt-1.5 line-clamp-3 text-base font-semibold leading-snug text-ink sm:line-clamp-2">{item.title}</p>
@@ -441,7 +441,7 @@ function FixRedispatchButton({ taskId, fix }: { taskId: string; fix: ReturnType<
       >
         {busy ? "startet…" : arming ? "Sicher? Erneut klicken" : "Fix-Lauf starten"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-micro leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -475,7 +475,7 @@ function RepairButton({ taskId, repair }: { taskId: string; repair: ReturnType<t
       >
         {busy ? "repariert…" : arming ? "Sicher? Erneut klicken" : "Repair starten"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-micro leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -508,7 +508,7 @@ function VetoSignalButton({ taskId, veto }: { taskId: string; veto: ReturnType<t
       >
         {busy ? "unterdrücke…" : arming ? "Sicher? Erneut klicken" : "Signal künftig unterdrücken"}
       </button>
-      {err ? <span className="max-w-[14rem] text-[10px] leading-tight text-status-alert">{err}</span> : null}
+      {err ? <span className="max-w-[14rem] text-micro leading-tight text-status-alert">{err}</span> : null}
     </span>
   );
 }
@@ -537,7 +537,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
       </div>
       <div className="border-t border-line pt-3">
         <div className="mb-2 flex items-center justify-between">
-          <span className="text-[10px] font-semibold uppercase tracking-[.16em] text-ink-3">System</span>
+          <span className="text-micro font-semibold uppercase tracking-[.16em] text-ink-3">System</span>
           <SignalChip tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} />
         </div>
         <div className="mb-2 flex flex-wrap gap-1.5">
