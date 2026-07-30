@@ -131,6 +131,44 @@ the receipt.
    .venv/bin/python scripts/langfuse_worker_audit.py --live-smoke-run-id "$TASK_RUN_ID" > live-smoke.json
    ```
 
+4. After the separate operational approval and after the configured Langfuse
+   listener has been repaired, confirm that the already-running dashboard is
+   listening on its canonical loopback port `9119`, then run the control-surface
+   smoke. It deliberately accepts loopback dashboard URLs only. Authentication
+   reuses the password-login and in-memory cookie flow from
+   `scripts/smoke_health_status_auth.py`; it does not require an operator to
+   extract or paste the ephemeral dashboard token. Supply the password only
+   through the environment; never put it in an argument or redirect an HTTP
+   trace containing cookies or headers:
+
+   ```bash
+   HERMES_DASHBOARD_PASSWORD="$DASHBOARD_PASSWORD" \
+     .venv/bin/python scripts/langfuse_worker_audit.py \
+       --control-surface-smoke-url http://127.0.0.1:9119 \
+       --dashboard-auth-provider basic \
+       --dashboard-username "$DASHBOARD_USERNAME" \
+       --warm-calls 10 \
+       --no-prompt \
+       --days 7 > control-surface-smoke.json
+   ```
+
+   This performs a configured-host check, an authenticated Langfuse Public API
+   page, a complete pagination scan, an intentionally one-page-limited scan,
+   one dashboard warm-up, and ten measured authenticated dashboard reads. The
+   CLI enforces the PlanSpec minimum of five reads. A
+   complete scan can report `fresh` only after an explicit total-page boundary
+   or a short final page. The limited scan always reports `partial`, count
+   lower bounds, and unknown total-window coverage. The complete scan is bounded
+   by a 30-second deadline and 100,000-row ceiling; reaching either fails closed
+   as `partial`. The receipt records wall and client-process-CPU median, maximum,
+   and mean, every measured Usage cache age, and the Usage fact count. HTTP
+   cannot observe server CPU, so the receipt marks that budget
+   `not_observable_over_http`; the LRM-4 in-process test remains its proof and
+   only the 300 ms wall budget participates in this smoke's HTTP budget result.
+   Overall pass additionally requires fresh Usage with a known fact count. A refused Langfuse
+   connection remains red while the dashboard receipt may still show Usage as
+   available. The command does not start or restart Langfuse or the dashboard.
+
 The command exits `0` only when the authenticated public trace API is readable,
 an explicit trace metadata field and a usage fact carry that exact run ID, the
 usage fact agrees on task ID, all required lifecycle observations exist, and the
@@ -146,6 +184,7 @@ worker-runtime-facts and exact-usage-correlation contracts rather than SQLite's
 internal DDL counter.
 
 Archive `audit-before.json`, `backfill-preview.json`, `backfill-applied.json`,
-`audit-after.json`, and `live-smoke.json` together with the exact commands and
-their exit codes. A green contract test is only evidence that this acceptance
-logic works; it is never a substitute for a green operator live-smoke receipt.
+`audit-after.json`, `live-smoke.json`, and `control-surface-smoke.json` together
+with the exact commands and their exit codes. A green contract test is only
+evidence that this acceptance logic works; it is never a substitute for a green
+operator live-smoke receipt.

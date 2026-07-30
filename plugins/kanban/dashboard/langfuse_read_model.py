@@ -42,6 +42,19 @@ class _PageScan:
     pages: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedConfig:
+    host: str
+    public_key: str
+    secret_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfigResolution:
+    config: _ResolvedConfig | None
+    error: str | None = None
+
+
 _CACHE_LOCK = threading.Condition(threading.Lock())
 _CACHE: dict[tuple[int, str], _CacheEntry] = {}
 _IN_FLIGHT: set[tuple[int, str]] = set()
@@ -100,55 +113,137 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 def _metric(
     value: float | int | None,
     *,
-    denominator: int,
+    sample_denominator: int,
     observed: int,
     source: str,
     captured_at: str,
+    truncation_reason: str | None = None,
+    aggregate_kind: str = "statistic",
 ) -> dict[str, Any]:
+    window_denominator = (
+        sample_denominator if truncation_reason is None else None
+    )
+    sample_coverage = (
+        observed / sample_denominator if sample_denominator else None
+    )
+    window_coverage = (
+        sample_coverage if window_denominator is not None else None
+    )
+    if aggregate_kind == "count":
+        completeness = "complete" if truncation_reason is None else "partial"
+        value_semantics = "exact" if truncation_reason is None else "lower_bound"
+    elif observed == 0:
+        completeness = "unknown"
+        value_semantics = "unknown"
+    elif truncation_reason is not None or observed < sample_denominator:
+        completeness = "partial"
+        value_semantics = (
+            "lower_bound" if aggregate_kind == "sum" else "sample_statistic"
+        )
+    else:
+        completeness = "complete"
+        value_semantics = "exact"
     return {
         "value": value,
-        "denominator": denominator,
+        "denominator": window_denominator,
+        "sample_denominator": sample_denominator,
         "observed": observed,
-        "coverage": observed / denominator if denominator else None,
+        "coverage": window_coverage,
+        "sample_coverage": sample_coverage,
+        "coverage_reason": truncation_reason,
+        "completeness": completeness,
+        "value_semantics": value_semantics,
+        "truncation_reason": truncation_reason,
         "source": source,
         "captured_at": captured_at,
     }
 
 
-def _credentials(env: Mapping[str, str]) -> tuple[str, str] | None:
-    host = (
-        env.get("HERMES_LANGFUSE_BASE_URL")
-        or env.get("HERMES_LANGFUSE_HOST")
-        or ""
-    ).rstrip("/")
-    public_key = env.get("HERMES_LANGFUSE_PUBLIC_KEY", "")
-    secret_key = env.get("HERMES_LANGFUSE_SECRET_KEY", "")
+def _resolve_config(env: Mapping[str, str]) -> _ConfigResolution:
+    namespaces = (
+        (
+            "HERMES_LANGFUSE_BASE_URL",
+            "HERMES_LANGFUSE_HOST",
+            "HERMES_LANGFUSE_PUBLIC_KEY",
+            "HERMES_LANGFUSE_SECRET_KEY",
+        ),
+        (
+            "LANGFUSE_BASE_URL",
+            "LANGFUSE_HOST",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_SECRET_KEY",
+        ),
+    )
+    values = {
+        name: env.get(name, "").strip()
+        for namespace in namespaces
+        for name in namespace
+    }
+    selected_index = next(
+        (
+            index
+            for index, namespace in enumerate(namespaces)
+            if any(values[name] for name in namespace)
+        ),
+        None,
+    )
+    if selected_index is None:
+        return _ConfigResolution(None, "credentials_missing")
+
+    selected = namespaces[selected_index]
+    base_url_name, host_name, public_name, secret_name = selected
+    host = values[base_url_name] or values[host_name]
+    public_key = values[public_name]
+    secret_key = values[secret_name]
+    lower_level_has_host = any(
+        values[name]
+        for namespace in namespaces[selected_index + 1 :]
+        for name in namespace[:2]
+    )
+    if not host and not lower_level_has_host:
+        host = "https://cloud.langfuse.com"
     if not host or not public_key or not secret_key:
-        return None
-    parsed = urllib.parse.urlparse(host)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return None
+        return _ConfigResolution(None, "configuration_invalid")
+
+    try:
+        parsed = urllib.parse.urlsplit(host)
+        _ = parsed.port
+        invalid_url = (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() for char in host)
+        )
+    except ValueError:
+        invalid_url = True
+    if invalid_url:
+        return _ConfigResolution(None, "configuration_invalid")
+    return _ConfigResolution(
+        _ResolvedConfig(host.rstrip("/"), public_key, secret_key)
+    )
+
+
+def _credentials(config: _ResolvedConfig) -> tuple[str, str]:
     authorization = base64.b64encode(
-        f"{public_key}:{secret_key}".encode("utf-8")
+        f"{config.public_key}:{config.secret_key}".encode("utf-8")
     ).decode("ascii")
-    return host, f"Basic {authorization}"
+    return config.host, f"Basic {authorization}"
 
 
-def _cache_identity(env: Mapping[str, str]) -> str:
+def _cache_identity(resolution: _ConfigResolution) -> str:
     """Scope cached projections to the configured Langfuse project.
 
     The digest changes on host/key rotation without retaining credentials in a
     cache key or exposing them in the returned payload.
     """
-    material = "\0".join(
-        (
-            env.get("HERMES_LANGFUSE_BASE_URL")
-            or env.get("HERMES_LANGFUSE_HOST")
-            or "",
-            env.get("HERMES_LANGFUSE_PUBLIC_KEY", ""),
-            env.get("HERMES_LANGFUSE_SECRET_KEY", ""),
-        )
-    )
+    config = resolution.config
+    if config is None:
+        material = f"langfuse-config:{resolution.error or 'invalid'}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    material = "\0".join((config.host, config.public_key, config.secret_key))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -216,6 +311,8 @@ def _all_pages(
         )
         page_rows = _page_data(payload)
         rows.extend(page_rows)
+        if time.monotonic() >= deadline_monotonic:
+            return _PageScan(rows, True, "deadline", page)
         meta = payload.get("meta")
         total_pages = (
             meta.get("totalPages")
@@ -293,22 +390,23 @@ def _usage_total(row: Mapping[str, Any]) -> float | None:
     known = [value for value in values if value is not None]
     return sum(known) if known else None
 
-
 def _build_remote_snapshot(
     *,
     days: int,
     env: Mapping[str, str],
+    resolved: _ResolvedConfig | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    credentials = _credentials(env)
-    now = _utc_now()
-    if credentials is None:
+    now = now or _utc_now()
+    resolution = _resolve_config(env) if resolved is None else _ConfigResolution(resolved)
+    if resolution.config is None:
         return _absent_payload(
             days=days,
             state="absent",
-            reason="credentials_missing",
+            reason=resolution.error or "configuration_invalid",
             generated_at=_iso(now),
         )
-    host, authorization = credentials
+    host, authorization = _credentials(resolution.config)
     since = now - timedelta(days=days)
     scan = _all_pages(
         host,
@@ -322,7 +420,13 @@ def _build_remote_snapshot(
         for row in scan.rows
         if _observation_is_worker(row)
     ]
-    payload = _aggregate(selected, days=days, generated_at=_iso(now))
+    truncation_reason = f"scan_{scan.reason}" if scan.truncated else None
+    payload = _aggregate(
+        selected,
+        days=days,
+        generated_at=_iso(now),
+        truncation_reason=truncation_reason,
+    )
     payload["coverage"].update({
         "scanned_generations": len(scan.rows),
         "scan_pages": scan.pages,
@@ -330,7 +434,7 @@ def _build_remote_snapshot(
     })
     if scan.truncated:
         payload["state"] = "partial"
-        payload["reason"] = f"scan_{scan.reason}"
+        payload["reason"] = truncation_reason
     return payload
 
 
@@ -339,6 +443,7 @@ def _aggregate(
     *,
     days: int,
     generated_at: str,
+    truncation_reason: str | None = None,
 ) -> dict[str, Any]:
     captured_times = [
         parsed
@@ -396,18 +501,58 @@ def _aggregate(
             for row in rows
             if (value := _observation_cost(row)) is not None
         ]
+        model_sample_cost_coverage = len(model_cost) / len(rows) if rows else None
+        model_sample_latency_coverage = (
+            len(model_latency) / len(rows) if rows else None
+        )
+        model_sample_ttft_coverage = len(model_ttft) / len(rows) if rows else None
         models.append(
             {
                 "name": name,
                 "calls": len(rows),
+                "denominator": len(rows) if truncation_reason is None else None,
+                "sample_denominator": len(rows),
+                "observed": len(rows),
+                "completeness": (
+                    "complete" if truncation_reason is None else "partial"
+                ),
+                "calls_semantics": (
+                    "exact" if truncation_reason is None else "lower_bound"
+                ),
+                "truncation_reason": truncation_reason,
+                "source": "langfuse.generations",
+                "captured_at": captured_at,
                 "known_cost_usd": sum(model_cost) if model_cost else None,
-                "cost_coverage": len(model_cost) / len(rows) if rows else None,
+                "known_cost_semantics": (
+                    "unknown"
+                    if not model_cost
+                    else "exact"
+                    if truncation_reason is None and len(model_cost) == len(rows)
+                    else "lower_bound"
+                ),
+                "cost_coverage": (
+                    model_sample_cost_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_cost_coverage": model_sample_cost_coverage,
                 "latency_p50_ms": _percentile(model_latency, 0.50),
                 "latency_p95_ms": _percentile(model_latency, 0.95),
-                "latency_coverage": len(model_latency) / len(rows) if rows else None,
+                "latency_coverage": (
+                    model_sample_latency_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_latency_coverage": model_sample_latency_coverage,
                 "ttft_p50_ms": _percentile(model_ttft, 0.50),
                 "ttft_p95_ms": _percentile(model_ttft, 0.95),
-                "ttft_coverage": len(model_ttft) / len(rows) if rows else None,
+                "ttft_coverage": (
+                    model_sample_ttft_coverage
+                    if truncation_reason is None
+                    else None
+                ),
+                "sample_ttft_coverage": model_sample_ttft_coverage,
+                "coverage_reason": truncation_reason,
             }
         )
     models.sort(key=lambda row: (-int(row["calls"]), str(row["name"])))
@@ -424,56 +569,77 @@ def _aggregate(
         "metrics": {
             "generation_calls": _metric(
                 total,
-                denominator=total,
+                sample_denominator=total,
                 observed=total,
                 source="langfuse.generations",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="count",
             ),
             "known_cost_usd": _metric(
                 sum(cost) if cost else None,
-                denominator=total,
+                sample_denominator=total,
                 observed=len(cost),
                 source="langfuse.generations.cost",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="sum",
             ),
             "latency_p50_ms": _metric(
                 _percentile(latency, 0.50),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(latency),
                 source="langfuse.generations.time",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "latency_p95_ms": _metric(
                 _percentile(latency, 0.95),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(latency),
                 source="langfuse.generations.time",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "ttft_p50_ms": _metric(
                 _percentile(ttft, 0.50),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(ttft),
                 source="langfuse.generations.completionStartTime",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "ttft_p95_ms": _metric(
                 _percentile(ttft, 0.95),
-                denominator=total,
+                sample_denominator=total,
                 observed=len(ttft),
                 source="langfuse.generations.completionStartTime",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
             ),
             "tokens_total": _metric(
                 sum(tokens) if tokens else None,
-                denominator=total,
+                sample_denominator=total,
                 observed=len(tokens),
                 source="langfuse.generations.usageDetails",
                 captured_at=captured_at,
+                truncation_reason=truncation_reason,
+                aggregate_kind="sum",
             ),
         },
         "coverage": {
             "worker_traces": total,
+            "worker_traces_semantics": (
+                "exact" if truncation_reason is None else "lower_bound"
+            ),
+            "counts_semantics": (
+                "exact" if truncation_reason is None else "lower_bound"
+            ),
+            "sample_denominator": total,
+            "window_denominator": (
+                total if truncation_reason is None else None
+            ),
+            "truncation_reason": truncation_reason,
             "model_known": total - unknown_model,
             "model_unknown": unknown_model,
             "latency_known": len(latency),
@@ -536,7 +702,8 @@ def get_langfuse_snapshot(
     """Return one sanitized snapshot with TTL, single-flight and stale fallback."""
     safe_days = max(1, min(30, int(days)))
     selected_env = env if env is not None else os.environ
-    cache_key = (safe_days, _cache_identity(selected_env))
+    resolution = _resolve_config(selected_env)
+    cache_key = (safe_days, _cache_identity(resolution))
     now_mono = time.monotonic()
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
@@ -599,6 +766,7 @@ def get_langfuse_snapshot(
         payload = _build_remote_snapshot(
             days=safe_days,
             env=selected_env,
+            resolved=resolution.config,
         )
         # A bounded negative cache prevents every Scorecard/Statistik poll from
         # retrying a stopped or unconfigured Langfuse instance. It expires

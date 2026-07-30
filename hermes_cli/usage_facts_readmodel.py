@@ -539,27 +539,38 @@ def _workload_rollup(rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
         role: {
             "fact_rows": fact_rows_by_role[role],
             "context_input_tokens": role_totals[role]["context_input_tokens"],
+            "coverage": role_totals[role]["coverage"]["context_input_tokens"],
         }
         for role in _WORKLOAD_ROLES
     }
-    all_context = sum(
-        result[role]["context_input_tokens"] for role in _WORKLOAD_ROLES
+    all_totals = _sum_normalized_tokens(
+        item for role in _WORKLOAD_ROLES for item in normalized_by_role[role]
     )
-    classified_context = (
-        result["main"]["context_input_tokens"]
-        + result["subagent"]["context_input_tokens"]
+    classified_totals = _sum_normalized_tokens(
+        item
+        for role in ("main", "subagent")
+        for item in normalized_by_role[role]
     )
+    all_context = all_totals["context_input_tokens"]
+    classified_context = classified_totals["context_input_tokens"]
     subagent_context = result["subagent"]["context_input_tokens"]
     result["subagent_share"] = {
         "context_input_tokens": subagent_context,
         "all_context_input_tokens": all_context,
         "of_all_context": (
-            subagent_context / all_context if all_context else None
+            subagent_context / all_context
+            if subagent_context is not None
+            and all_context
+            and all_totals["coverage"]["context_input_tokens"]["status"] == "complete"
+            else None
         ),
         "classified_context_input_tokens": classified_context,
         "of_classified_context": (
             subagent_context / classified_context
-            if classified_context
+            if subagent_context is not None
+            and classified_context
+            and classified_totals["coverage"]["context_input_tokens"]["status"]
+            == "complete"
             else None
         ),
         "classification_status": (
@@ -924,39 +935,101 @@ def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _derived_observed_rows(item: Mapping[str, Any], metric: str) -> int:
+    observed = item.get("observed_rows") or {}
+    semantics = item.get("semantics")
+    if metric == "context_input_tokens":
+        required = (
+            ("input", "cache_read", "cache_write")
+            if semantics == INPUT_CACHE_EXCLUSIVE
+            else ("input",)
+        )
+    else:
+        required = (
+            ("input", "cache_write")
+            if semantics == INPUT_CACHE_EXCLUSIVE
+            else ("input", "cache_read")
+        )
+    if semantics == INPUT_NOT_DERIVABLE:
+        return 0
+    return min(int(observed.get(name) or 0) for name in required)
+
+
+def aggregate_normalized_tokens(
+    normalized_items: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Sum normalized token facts without manufacturing zeroes for missing data."""
+    items = list(normalized_items)
+    specs = {
+        "raw_input_tokens": (
+            lambda item: item.get("raw_input_tokens"),
+            lambda item: int((item.get("observed_rows") or {}).get("input") or 0),
+        ),
+        "context_input_tokens": (
+            lambda item: (item.get("context_input") or {}).get("tokens"),
+            lambda item: _derived_observed_rows(item, "context_input_tokens"),
+        ),
+        "new_input_tokens": (
+            lambda item: (item.get("new_input") or {}).get("tokens"),
+            lambda item: _derived_observed_rows(item, "new_input_tokens"),
+        ),
+        "cache_read_tokens": (
+            lambda item: item.get("cache_read_tokens"),
+            lambda item: int((item.get("observed_rows") or {}).get("cache_read") or 0),
+        ),
+        "cache_write_tokens": (
+            lambda item: item.get("cache_write_tokens"),
+            lambda item: int((item.get("observed_rows") or {}).get("cache_write") or 0),
+        ),
+        "output_tokens": (
+            lambda item: item.get("output_tokens"),
+            lambda item: int((item.get("observed_rows") or {}).get("output") or 0),
+        ),
+        "reasoning_tokens": (
+            lambda item: item.get("reasoning_tokens"),
+            lambda item: int((item.get("observed_rows") or {}).get("reasoning") or 0),
+        ),
+    }
+    denominator = sum(
+        int((item.get("observed_rows") or {}).get("token_rows") or 0)
+        for item in items
+    )
+    result: dict[str, Any] = {}
+    coverage: dict[str, Any] = {}
+    for metric, (value_of, observed_of) in specs.items():
+        values = [value_of(item) for item in items]
+        known_values = [int(value) for value in values if value is not None]
+        observed_rows = sum(observed_of(item) for item in items)
+        status = (
+            "complete"
+            if denominator > 0 and observed_rows >= denominator
+            else "partial"
+            if observed_rows > 0
+            else "unknown"
+        )
+        result[metric] = sum(known_values) if known_values else None
+        coverage[metric] = {
+            "observed_rows": observed_rows,
+            "denominator_rows": denominator,
+            "status": status,
+        }
+    result["coverage"] = coverage
+    result["has_lower_bounds"] = any(
+        item.get("context_input", {}).get("status") != STATUS_EXACT
+        or item.get("new_input", {}).get("status") != STATUS_EXACT
+        for item in items
+    )
+    return result
+
+
 def _sum_normalized_tokens(
     normalized_items: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    items = list(normalized_items)
-    return {
-        "context_input_tokens": sum(
-            int(item["context_input"]["tokens"] or 0) for item in items
-        ),
-        "new_input_tokens": sum(
-            int(item["new_input"]["tokens"] or 0) for item in items
-        ),
-        "cache_read_tokens": sum(
-            int(item["cache_read_tokens"] or 0) for item in items
-        ),
-        "cache_write_tokens": sum(
-            int(item["cache_write_tokens"] or 0) for item in items
-        ),
-        "output_tokens": sum(
-            int(item["output_tokens"] or 0) for item in items
-        ),
-        "has_lower_bounds": any(
-            item["context_input"]["status"] != STATUS_EXACT
-            or item["new_input"]["status"] != STATUS_EXACT
-            for item in items
-        ),
-    }
+    return aggregate_normalized_tokens(normalized_items)
 
 
 def _payload_summary(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     tokens = _sum_normalized_tokens(group["tokens"] for group in groups)
-    raw_input = sum(
-        int(group["tokens"]["raw_input_tokens"] or 0) for group in groups
-    )
     all_breakdowns = [
         breakdown
         for group in groups
@@ -965,7 +1038,7 @@ def _payload_summary(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "group_count": len(groups),
         "fact_rows": sum(int(group["fact_rows"]) for group in groups),
-        "raw_input_tokens": raw_input,
+        "raw_input_tokens": tokens["raw_input_tokens"],
         "tokens": tokens,
         "billing": _billing_rollup(all_breakdowns),
     }
