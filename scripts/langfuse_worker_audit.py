@@ -560,11 +560,7 @@ def _classified_langfuse_failure(exc: BaseException) -> dict[str, Any] | None:
     elif isinstance(
         cause,
         (json.JSONDecodeError, UnicodeDecodeError, LangfusePayloadInvalid),
-    ) or (
-        cause is exc
-        and isinstance(exc, RuntimeError)
-        and exc.args == ("Langfuse returned a non-object payload",)
-    ):
+    ) or isinstance(cause, RuntimeError):
         receipt["reason"] = "payload_invalid"
     else:
         return None
