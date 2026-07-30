@@ -68,6 +68,25 @@ def _claim_and_provision(conn, task_id, repo):
     return kwt.provision_for_task(conn, task, str(repo))
 
 
+def _acquire_writer_lease(conn, task_id, worktree):
+    task = kb.get_task(conn, task_id)
+    assert task is not None
+    assert task.current_run_id is not None
+    assert task.claim_lock is not None
+    candidate_sha = _git(worktree, "rev-parse", "HEAD")
+    conn.execute(
+        "INSERT INTO worktree_writer_leases "
+        "(worktree_key, root_task_id, task_id, run_id, claim_lock, worker_pid, "
+        "workspace_path, candidate_sha, acquired_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            f"chain:{task_id}", task_id, task_id, task.current_run_id,
+            task.claim_lock, None, str(worktree), candidate_sha, 1, 1,
+        ),
+    )
+    conn.commit()
+
+
 def _resolve_real_conflict_rebase(repo, worktree, branch, approved_commit):
     """Rebase *branch* with a real add/add conflict and resolve it."""
     _commit_in(
@@ -220,6 +239,154 @@ def test_changed_files_between_uses_shared_changed_path_set(repo):
 
     assert standalone == ["a.txt", "added.py"]
     assert integration == standalone
+
+
+@pytest.mark.parametrize("dirty_kind", ["untracked", "modified", "staged"])
+@pytest.mark.parametrize(
+    ("assignee", "task_kind"),
+    [("writer", "text"), ("researcher", "research")],
+)
+def test_complete_task_rejects_dirty_active_chain_writer(
+    kanban_home, repo, dirty_kind, assignee, task_kind,
+):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=f"dirty {dirty_kind} writer",
+            assignee=assignee,
+            kind=task_kind,
+        )
+        worktree = _claim_and_provision(conn, task_id, repo)
+        _acquire_writer_lease(conn, task_id, worktree)
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        run_id = task.current_run_id
+        assert run_id is not None
+        head = _git(worktree, "rev-parse", "HEAD")
+
+        if dirty_kind == "untracked":
+            dirty_path = "intentional-note.md"
+            (worktree / dirty_path).write_text("keep me\n")
+        else:
+            dirty_path = "a.txt"
+            (worktree / dirty_path).write_text(f"{dirty_kind}\n")
+            if dirty_kind == "staged":
+                _git(worktree, "add", dirty_path)
+
+        with pytest.raises(kb.DirtyWriterWorktreeError) as exc_info:
+            kb.complete_task(
+                conn,
+                task_id,
+                summary="must not hand off",
+                expected_run_id=run_id,
+                review_gate=True,
+            )
+
+        assert exc_info.value.dirty_paths == [dirty_path]
+        assert "commit intentional files or remove accidental changes" in str(
+            exc_info.value
+        ).lower()
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.status == "running"
+        run = kb.latest_run(conn, task_id)
+        assert run is not None
+        assert run.status == "running"
+        lease = conn.execute(
+            "SELECT candidate_sha FROM worktree_writer_leases WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert lease is not None
+        assert lease["candidate_sha"] == head
+
+        blocked = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "completion_blocked_dirty_worktree"
+        ]
+        assert len(blocked) == 1
+        assert blocked[0].payload == {
+            "reason_class": "dirty_writer_worktree",
+            "worktree_key": f"chain:{task_id}",
+            "workspace_path": str(worktree),
+            "observed_sha": head,
+            "candidate_sha": head,
+            "dirty_paths": [dirty_path],
+        }
+        assert not any(
+            (event.payload or {}).get("diff_candidate_commit")
+            for event in kb.list_events(conn, task_id)
+        )
+
+
+def test_complete_task_refreshes_clean_chain_writer_candidate(
+    kanban_home, repo,
+):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn, title="clean writer", assignee="writer", kind="text",
+        )
+        worktree = _claim_and_provision(conn, task_id, repo)
+        _acquire_writer_lease(conn, task_id, worktree)
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        run_id = task.current_run_id
+        assert run_id is not None
+        _commit_in(
+            worktree,
+            "writer-output.md",
+            "review this commit\n",
+            msg="writer output",
+        )
+        reviewed_head = _git(worktree, "rev-parse", "HEAD")
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="clean handoff",
+            expected_run_id=run_id,
+            review_gate=True,
+        )
+
+        lease = conn.execute(
+            "SELECT candidate_sha FROM worktree_writer_leases WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert lease is not None
+        assert lease["candidate_sha"] == reviewed_head
+        assert not any(
+            event.kind == "completion_blocked_dirty_worktree"
+            for event in kb.list_events(conn, task_id)
+        )
+
+
+def test_complete_task_does_not_gate_dirty_workspace_without_active_writer_lease(
+    kanban_home, repo,
+):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn, title="read-only dirty view", assignee="writer", kind="text",
+        )
+        worktree = _claim_and_provision(conn, task_id, repo)
+        task = kb.get_task(conn, task_id)
+        assert task is not None
+        assert task.current_run_id is not None
+        (worktree / "diagnostic-only.txt").write_text("not a writer lease\n")
+
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="no active writer lease",
+            expected_run_id=task.current_run_id,
+            review_gate=False,
+        )
+        completed = kb.get_task(conn, task_id)
+        assert completed is not None
+        assert completed.status == "done"
+        assert not any(
+            event.kind == "completion_blocked_dirty_worktree"
+            for event in kb.list_events(conn, task_id)
+        )
 
 
 def test_affected_git_timeout_parks_integration_as_transient(

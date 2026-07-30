@@ -498,8 +498,8 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
         review_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
             "INSERT INTO task_runs "
-            "(task_id, profile, status, started_at, cost_usd, metadata) "
-            "VALUES (?, 'coder', 'done', 2.5, 0.0, ?)",
+            "(task_id, profile, status, started_at, cost_usd, input_tokens, output_tokens, metadata) "
+            "VALUES (?, 'coder', 'done', 2.5, 0.0, 10, 20, ?)",
             (
                 task_id,
                 json.dumps(
