@@ -1815,6 +1815,11 @@ class LoopRunner:
             result = subprocess.run(
                 list(cfg.command),
                 cwd=str(self.wt),
+                env={
+                    **os.environ,
+                    "HERMES_LOOP_STATE_DIR": str(self.state),
+                    "HERMES_LOOP_STOP_PATH": str(self.stop_path),
+                },
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",

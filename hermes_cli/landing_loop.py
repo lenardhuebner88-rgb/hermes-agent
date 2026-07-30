@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -18,6 +21,10 @@ from pathlib import Path
 from typing import Literal
 
 from hermes_constants import get_hermes_home
+from hermes_cli.control_loops import (
+    get_landing_automation_enabled,
+    write_landing_runtime_status,
+)
 from hermes_cli.vision_metrics import read_gate_records
 from loops.runner import _land_gates
 
@@ -241,6 +248,10 @@ class LandingLoop:
         dry_run: bool = False,
         gate_runner: GateRunner | None = None,
         baseline_records: BaselineRecords | None = None,
+        automation_enabled: Callable[[], bool] | None = None,
+        recovery_request: Callable[[LL2Candidate], str | bool] | None = None,
+        state_dir: Path | None = None,
+        stop_path: Path | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.repo = repo.resolve()
@@ -250,7 +261,60 @@ class LandingLoop:
         self.dry_run = dry_run
         self.gate_runner = gate_runner
         self.baseline_records = baseline_records or read_gate_records
+        self.automation_enabled = automation_enabled or (lambda: True)
+        self.recovery_request = recovery_request
+        self.state_dir = state_dir
+        self.stop_path = stop_path
         self.now = now or (lambda: datetime.now(timezone.utc))
+
+    def _automation_checkpoint(self) -> str | None:
+        if self.dry_run:
+            return None
+        if self.stop_path is not None and self.stop_path.exists():
+            return "kooperativer STOP angefordert"
+        try:
+            enabled = self.automation_enabled()
+        except Exception:
+            enabled = False
+        if not enabled:
+            return "Landing-Automatik deaktiviert"
+        return None
+
+    def _write_runtime_status(
+        self,
+        *,
+        baseline: BaselineProbe,
+        inventory: tuple[BranchInventory, ...],
+        outcomes: tuple[BranchOutcome, ...],
+    ) -> None:
+        if self.state_dir is None or self.dry_run:
+            return
+        write_landing_runtime_status(
+            {
+                "baseline_sha": baseline.baseline_sha,
+                "baseline_ok": baseline.green,
+                "queue_summary": {
+                    "total": len(inventory),
+                    "landed": sum(item.action == "landed" for item in outcomes),
+                    "cleaned": sum(item.action == "cleaned" for item in outcomes),
+                    "parked": sum(item.action == "parked" for item in outcomes),
+                },
+                "last_result": "green"
+                if all(item.action != "parked" for item in outcomes)
+                else "held",
+                "candidates": [
+                    {
+                        "branch": item.branch,
+                        "head": item.head,
+                        "ahead": item.ahead,
+                        "behind": item.behind,
+                    }
+                    for item in inventory
+                ],
+                "updated_at": self.now().isoformat(),
+            },
+            state_dir=self.state_dir,
+        )
 
     def _git(
         self,
@@ -591,6 +655,9 @@ class LandingLoop:
         diagnostics_list: list[CandidateOutcome] = []
         stop_reason: str | None = baseline.reason if plan.stop_rest else None
         for item in inventory:
+            checkpoint_reason = self._automation_checkpoint()
+            if checkpoint_reason is not None:
+                stop_reason = checkpoint_reason
             if stop_reason is not None:
                 result = self._park(item, f"Rest-Queue gestoppt: {stop_reason}")
                 failure_class = (
@@ -613,6 +680,24 @@ class LandingLoop:
             else:
                 result = self._cleanup(item) if item.ahead == 0 else self._land(item)
                 diagnosed = self._diagnose_outcome(item, result, baseline_sha)
+                if (
+                    diagnosed.failure_class is FailureClass.CANDIDATE_REGRESSION
+                    and self.recovery_request is not None
+                    and self._automation_checkpoint() is None
+                ):
+                    recovery_result = self.recovery_request(diagnosed.candidate)
+                    if recovery_result in (False, "exhausted"):
+                        result = BranchOutcome(
+                            result.branch,
+                            result.action,
+                            f"{result.reason}; Recovery held_escalated",
+                        )
+                        diagnosed = CandidateOutcome(
+                            diagnosed.candidate,
+                            diagnosed.action,
+                            result.reason,
+                            stop_rest=diagnosed.stop_rest,
+                        )
                 if diagnosed.stop_rest:
                     stop_reason = (
                         f"{diagnosed.failure_class.value} bei {item.branch} "
@@ -627,6 +712,11 @@ class LandingLoop:
                 self._freshen_completed(item, result)
                 for item, result in zip(inventory, outcomes, strict=True)
             )
+        self._write_runtime_status(
+            baseline=baseline,
+            inventory=inventory,
+            outcomes=outcomes,
+        )
         run = LandingRun(
             started_at=started_at,
             finished_at=self.now(),
@@ -746,6 +836,45 @@ def notify_discord(
     return result.returncode == 0
 
 
+def request_candidate_recovery(candidate: LL2Candidate) -> str:
+    """Request one idempotent same-card recovery for a task-backed candidate."""
+    task_id = candidate.task_or_branch_id.rsplit("/", 1)[-1]
+    if re.fullmatch(r"t_[a-z0-9]+", task_id) is None:
+        return "not_applicable"
+    from hermes_cli import kanban_db
+
+    with kanban_db.connect() as conn:
+        created = kanban_db.request_landing_recovery(
+            conn,
+            task_id,
+            fingerprint=candidate.fingerprint,
+            candidate_commit=candidate.candidate_commit,
+            failure_class=candidate.failure_class.value,
+            failing_gate=candidate.failing_gate,
+            blocking_findings=[
+                f"Candidate regression in {candidate.failing_gate} at "
+                f"{candidate.candidate_commit}"
+            ],
+            required_verification=[candidate.failing_gate],
+        )
+        if created:
+            return "requested"
+        rows = conn.execute(
+            "SELECT kind, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'landing_recovery_exhausted' "
+            "ORDER BY id DESC LIMIT 10",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if payload.get("fingerprint") == candidate.fingerprint:
+                return "exhausted"
+    return "deduplicated"
+
+
 def main(argv: list[str] | None = None) -> int:
     hermes_home = get_hermes_home()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -770,12 +899,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
+    state_dir_value = os.environ.get("HERMES_LOOP_STATE_DIR")
+    stop_path_value = os.environ.get("HERMES_LOOP_STOP_PATH")
+    state_dir = Path(state_dir_value) if state_dir_value else None
+    stop_path = Path(stop_path_value) if stop_path_value else None
+
     loop = LandingLoop(
         args.repo,
         args.loops_root,
         args.ledger_dir,
         base=args.base,
         dry_run=args.dry_run,
+        automation_enabled=(
+            (lambda: get_landing_automation_enabled(state_dir))
+            if state_dir is not None
+            else None
+        ),
+        recovery_request=request_candidate_recovery,
+        state_dir=state_dir,
+        stop_path=stop_path,
     )
     try:
         result = loop.run()

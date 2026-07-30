@@ -25,7 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,10 @@ _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
 _NIGHT_OVERRIDE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
 _NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT)$")
 NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
+LANDING_AUTOMATION_FILENAME = "automation.json"
+LANDING_TRIGGER_FILENAME = "trigger-state.json"
+LANDING_RUNTIME_FILENAME = "runtime-status.json"
+LANDING_COLLECTION_WINDOW_SECONDS = 600
 
 
 def _packs_dir() -> Path:
@@ -162,6 +166,162 @@ def _night_overrides_lock(name: str) -> Iterator[None]:
 
 def _night_overrides_path(name: str) -> Path:
     return _state_root() / name / NIGHT_OVERRIDES_FILENAME
+
+
+@contextmanager
+def _landing_state_lock(state_dir: Path | None = None) -> Iterator[None]:
+    """Serialize the landing automation, trigger, and runtime state files."""
+    root = state_dir or (_state_root() / "landing")
+    lock_path = root / ".automation.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _landing_state_dir(state_dir: Path | None = None) -> Path:
+    return state_dir or (_state_root() / "landing")
+
+
+def get_landing_automation_enabled(state_dir: Path | None = None) -> bool:
+    """Read the persistent kill switch fail-closed and without side effects."""
+    value = _read_json_object(
+        _landing_state_dir(state_dir) / LANDING_AUTOMATION_FILENAME
+    )
+    return value.get("schema_version") == 1 and value.get("enabled") is True
+
+
+def set_landing_automation_enabled(
+    enabled: bool,
+    *,
+    updated_by: str,
+    state_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically persist the operator-controlled landing kill switch."""
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled must be a boolean")
+    if not updated_by.strip():
+        raise ValueError("updated_by must not be empty")
+    root = _landing_state_dir(state_dir)
+    payload = {
+        "schema_version": 1,
+        "enabled": enabled,
+        "updated_at": (now or datetime.now(timezone.utc)).isoformat(),
+        "updated_by": updated_by,
+    }
+    with _landing_state_lock(root):
+        _atomic_write(
+            root / LANDING_AUTOMATION_FILENAME,
+            (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return payload
+
+
+def register_landing_trigger(
+    signal_id: str,
+    *,
+    running: bool,
+    state_dir: Path | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Register one signal without extending an open fixed collection window."""
+    root = _landing_state_dir(state_dir)
+    timestamp = now or datetime.now(timezone.utc)
+    with _landing_state_lock(root):
+        state = _read_json_object(root / LANDING_TRIGGER_FILENAME)
+        if not get_landing_automation_enabled(root):
+            return {"accepted": False, "reason": "automation_disabled"}
+        seen = [item for item in state.get("seen_signals", []) if isinstance(item, str)]
+        if signal_id in seen:
+            return {**state, "accepted": False, "reason": "duplicate"}
+        seen = (seen + [signal_id])[-256:]
+        if running:
+            accepted = not bool(state.get("followup_pending"))
+            state["followup_pending"] = True
+            reason = "followup_queued" if accepted else "followup_already_queued"
+        else:
+            window = state.get("collection_window")
+            closes_at = None
+            if isinstance(window, dict):
+                try:
+                    closes_at = datetime.fromisoformat(str(window.get("closes_at")))
+                except ValueError:
+                    closes_at = None
+            if closes_at is None or timestamp >= closes_at:
+                closes_at = timestamp + timedelta(seconds=LANDING_COLLECTION_WINDOW_SECONDS)
+                window = {
+                    "opened_at": timestamp.isoformat(),
+                    "closes_at": closes_at.isoformat(),
+                }
+                reason = "window_opened"
+            else:
+                reason = "window_collected"
+            state["collection_window"] = window
+            state["next_trigger_at"] = closes_at.isoformat()
+            accepted = True
+        state.update({"schema_version": 1, "seen_signals": seen})
+        _atomic_write(
+            root / LANDING_TRIGGER_FILENAME,
+            (json.dumps(state, sort_keys=True) + "\n").encode("utf-8"),
+        )
+    return {**state, "accepted": accepted, "reason": reason}
+
+
+def consume_landing_followup(state_dir: Path | None = None) -> bool:
+    """Consume the single pending follow-up run after an active run finishes."""
+    root = _landing_state_dir(state_dir)
+    with _landing_state_lock(root):
+        path = root / LANDING_TRIGGER_FILENAME
+        state = _read_json_object(path)
+        pending = state.get("followup_pending") is True
+        if pending:
+            state["followup_pending"] = False
+            _atomic_write(
+                path,
+                (json.dumps(state, sort_keys=True) + "\n").encode("utf-8"),
+            )
+    return pending
+
+
+def write_landing_runtime_status(
+    status: dict[str, Any], *, state_dir: Path | None = None
+) -> None:
+    root = _landing_state_dir(state_dir)
+    with _landing_state_lock(root):
+        _atomic_write(
+            root / LANDING_RUNTIME_FILENAME,
+            (json.dumps({"schema_version": 1, **status}, sort_keys=True) + "\n").encode(
+                "utf-8"
+            ),
+        )
+
+
+def _landing_control_payload(state_dir: Path | None = None) -> dict[str, Any]:
+    root = _landing_state_dir(state_dir)
+    runtime = _read_json_object(root / LANDING_RUNTIME_FILENAME)
+    trigger = _read_json_object(root / LANDING_TRIGGER_FILENAME)
+    return {
+        "automation_enabled": get_landing_automation_enabled(root),
+        "baseline_sha": runtime.get("baseline_sha"),
+        "baseline_ok": runtime.get("baseline_ok"),
+        "queue_summary": runtime.get("queue_summary", {}),
+        "next_trigger_at": trigger.get("next_trigger_at"),
+        "last_result": runtime.get("last_result"),
+        "collection_window": trigger.get("collection_window"),
+        "candidates": runtime.get("candidates", []),
+    }
 
 
 def _read_night_overrides(name: str) -> dict[str, str]:
@@ -819,6 +979,8 @@ def _pack_summary(
     }
     if commits_error:
         summary["error"] = commits_error
+    if pack.name == "landing":
+        summary.update(_landing_control_payload(state))
     return summary
 
 
@@ -845,6 +1007,10 @@ class DuplicateBody(BaseModel):
 
 class NightOverridesBody(BaseModel):
     overrides: dict[str, Any] = {}
+
+
+class LandingAutomationBody(BaseModel):
+    enabled: bool
 
 
 def register_loops_routes(app: FastAPI) -> None:
@@ -907,6 +1073,12 @@ def register_loops_routes(app: FastAPI) -> None:
             "overrides": loop_runner.parse_overrides(overrides_path),
             "phase_usage": phase_usage,
         }
+
+    @app.put("/api/loops/landing/automation")
+    @app.post("/api/loops/landing/automation")
+    def set_landing_automation(body: LandingAutomationBody) -> dict[str, Any]:
+        _load_pack_or_404("landing")
+        return set_landing_automation_enabled(body.enabled, updated_by="control-api")
 
     @app.post("/api/loops/{pack}/start")
     def start_loop(pack: str, body: StartBody) -> dict[str, Any]:

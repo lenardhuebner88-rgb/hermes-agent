@@ -534,3 +534,64 @@ def test_candidate_regression_isolated_and_next_candidate_rebased_on_main(git_wo
     assert outcome(run, "loop/a-regression").action == "parked"
     assert outcome(run, "loop/b-clean").action == "landed"
     assert git(repo, "rev-parse", "main").stdout.strip() == second_head
+
+
+def test_automation_off_holds_queue_without_recovery_or_gate(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("t_disabled")
+    head = commit_loop(worktree, "candidate")
+    gate_calls: list[str] = []
+    recovery_calls = []
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        automation_enabled=lambda: False,
+        gate_runner=lambda _repo, _base: gate_calls.append("gate") or (True, "green"),
+        recovery_request=lambda candidate: recovery_calls.append(candidate) or "requested",
+    ).run()
+
+    assert gate_calls == []
+    assert recovery_calls == []
+    assert outcome(run, "loop/t_disabled").action == "parked"
+    assert "Landing-Automatik deaktiviert" in outcome(run, "loop/t_disabled").reason
+    assert git(repo, "rev-parse", "loop/t_disabled").stdout.strip() == head
+
+
+def test_candidate_regression_requests_exactly_one_recovery(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("t_recovery")
+    commit_loop(worktree, "regression")
+    recovery_calls = []
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (False, "FAILED tests/test_feature.py"),
+        recovery_request=lambda candidate: recovery_calls.append(candidate) or "requested",
+    ).run()
+
+    assert run.diagnostics[0].failure_class is FailureClass.CANDIDATE_REGRESSION
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0] == run.diagnostics[0].candidate
+
+
+def test_stop_file_holds_at_safe_checkpoint(git_world, tmp_path):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("stopped")
+    commit_loop(worktree, "candidate")
+    stop_path = tmp_path / "STOP"
+    stop_path.touch()
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        stop_path=stop_path,
+        gate_runner=lambda _repo, _base: pytest.fail("gate must not run after STOP"),
+    ).run()
+
+    assert outcome(run, "loop/stopped").action == "parked"
+    assert "STOP angefordert" in outcome(run, "loop/stopped").reason
