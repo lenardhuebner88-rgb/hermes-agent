@@ -117,6 +117,16 @@ body:has([data-fleet-theme]) [data-control] {
 }
 
 /* ── Chips (Subtabs) ──────────────────────────────────────────────────────── */
+/* Kein z-index-Versuch auf der Chip-Leiste — er kann nicht wirken.
+ *
+ * Gemessen 2026-07-30 im Browser: DrawerShell portalt nach document.body und
+ * malt dort mit z-50. Die Fleet-Leiste liegt dagegen in `.hc-page`
+ * (isolation: isolate) innerhalb eines `.relative z-2`-Wrappers — der ganze
+ * Teilbaum wird also im Wurzelkontext bei z=2 gemalt. Ein z-index INNERHALB
+ * dieses Kontexts, egal wie hoch, bleibt darum immer unter dem Backdrop.
+ * Wer das ändern will, muss das Portal-Ziel oder die Overlay-Geometrie in
+ * DrawerShell anfassen (geteilte Komponente, eigener Slice). */
+
 /* Fleet-Subtab-Leiste: horizontal scrollbar, mit Fade-/Peek-Affordanz am
    rechten Rand, damit „Risiko" nie kaputt abgeschnitten wirkt (AC-R2). Der
    aktive Chip wird von FleetView automatisch in den sichtbaren Bereich
@@ -3036,6 +3046,24 @@ body:has([data-fleet-theme]) [data-control] {
   gap: var(--fleet-space-2);
 }
 
+/* Die Übergabe-Aktion steht direkt unter der Wirkungszeile, nicht am Ende.
+ *
+ * Live gemessen 2026-07-30 (Playwright, 1440x1000, Landing-Loop): nach
+ * „Übergabe prüfen" wächst die Vorschau um Schrittliste, Guards, Befunde und
+ * technische Parameter — der Knopf landete bei y=1021 und damit UNTER dem
+ * Viewport (innerHeight 1000), document.elementFromPoint dort null. Ein echter
+ * Pointer-Klick konnte ihn nicht treffen: UI und DB blieben unverändert, ohne
+ * jede Fehlermeldung.
+ *
+ * `position: sticky` löst das hier NICHT: der nächste Scrollport ist der
+ * Detail-Body (`overflow-y: auto`), dessen eigene Box bis y=1145 reicht — die
+ * Aktion klebte damit weiterhin außerhalb des Viewports. Deshalb die
+ * Reihenfolge im Markup: erst was passiert, dann der Knopf, dann die Details. */
+.fleet-plan-ingest {
+  justify-self: start;
+  padding-inline: 16px;
+}
+
 .fleet-plan-preview-effect {
   display: grid;
   gap: 4px;
@@ -3103,6 +3131,19 @@ body:has([data-fleet-theme]) [data-control] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 14px;
   margin: 4px 0;
+}
+
+/* Kriterien im Arbeitsvertrag eines Schritts: nummeriert, damit im Review auf
+ * ein einzelnes Kriterium gezeigt werden kann. */
+.fleet-plan-step-criteria {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+  list-style: decimal;
+  color: var(--fleet-t2);
+  font: 400 var(--text-micro)/1.5 var(--hc-font-sans);
+}
+.fleet-plan-step-criteria > li {
+  margin-bottom: 4px;
 }
 
 .fleet-plan-transition-actions button,
