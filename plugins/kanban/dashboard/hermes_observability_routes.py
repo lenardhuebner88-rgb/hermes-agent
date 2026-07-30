@@ -68,7 +68,7 @@ def _path_identity(path: Path) -> tuple[Any, ...]:
 def _sqlite_identity(path: Path) -> tuple[Any, ...]:
     """Identify a SQLite snapshot without opening or mutating the database."""
     return tuple(
-        _path_identity(Path(f"{path}{suffix}")) for suffix in ("", "-wal", "-shm")
+        _path_identity(Path(f"{path}{suffix}")) for suffix in ("", "-wal")
     )
 
 

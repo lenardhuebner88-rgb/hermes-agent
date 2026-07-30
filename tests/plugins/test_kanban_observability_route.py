@@ -360,6 +360,25 @@ def test_profiles_identity_ignores_sqlite_shm_read_churn(tmp_path):
     assert after_wal_write != after_shm_read
 
 
+def test_sqlite_identity_ignores_shm_but_tracks_wal(tmp_path):
+    module = _load_plugin_module()
+    database = tmp_path / "usage.db"
+    database.write_bytes(b"db")
+    wal = Path(f"{database}-wal")
+    wal.write_bytes(b"wal")
+    shm = Path(f"{database}-shm")
+    shm.write_bytes(b"shm")
+
+    before = module._sqlite_identity(database)
+    shm.write_bytes(b"read-side shared-memory churn")
+    after_shm_read = module._sqlite_identity(database)
+    wal.write_bytes(b"durable wal revision")
+    after_wal_write = module._sqlite_identity(database)
+
+    assert after_shm_read == before
+    assert after_wal_write != after_shm_read
+
+
 def test_usage_projection_refresh_failure_returns_explicit_stale(monkeypatch):
     module = _load_plugin_module()
     module.clear_usage_projection_cache()
