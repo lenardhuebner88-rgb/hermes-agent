@@ -1,8 +1,7 @@
 import { usePromptForgeCatalog } from "../hooks/promptForge";
 import type { Density } from "../hooks/useDensity";
 import { TriangleAlert } from "lucide-react";
-import { FleetEmptyState, FleetPanel } from "../components/leitstand";
-import { Eyebrow } from "../components/primitives";
+import { FleetEmptyState, FleetPanel, ViewHeader } from "../components/leitstand";
 import { Konfigurator } from "./schmiede/Konfigurator";
 import { Kanon } from "./schmiede/Kanon";
 
@@ -11,11 +10,11 @@ export function SchmiedeView(_props: { density?: Density }) {
 
   return (
     <div className="grid grid-cols-1 gap-4">
-      <header>
-        <Eyebrow>Prompt-Schmiede</Eyebrow>
-        <h2 className="mt-1 font-display text-h2 font-semibold text-ink">Best-Practice-Prompts für Agent-Steuerbefehle</h2>
-        <p className="mt-1 text-body text-ink-2">Konfigurieren → kopieren → in Claude Code / Codex einfügen. Kein Dispatch, nur Text.</p>
-      </header>
+      <ViewHeader
+        eyebrow="Prompt-Schmiede"
+        title="Best-Practice-Prompts für Agent-Steuerbefehle"
+        description="Konfigurieren → kopieren → in Claude Code / Codex einfügen. Kein Dispatch, nur Text."
+      />
 
       {loading && !data ? (
         <FleetPanel eyebrow="Lädt"><p className="text-ink-2 text-sm">Katalog wird geladen …</p></FleetPanel>

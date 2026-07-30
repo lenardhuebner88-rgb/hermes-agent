@@ -4,7 +4,7 @@ import { z } from "zod";
 import { authedFetch, downloadAuthedArtifact, fetchJSON } from "@/lib/api";
 import { DictateStatusTile } from "../components/DictateStatusTile";
 import { DictateTrend } from "../components/DictateTrend";
-import { FleetEmptyState, FleetPanel } from "../components/leitstand";
+import { FleetEmptyState, FleetPanel, ViewHeader } from "../components/leitstand";
 import { Eyebrow } from "../components/primitives";
 import { useDictateStatus } from "../hooks/systemReleaseHealth";
 import { fmtRelativeTime, nowSec } from "../lib/derive";
@@ -213,14 +213,16 @@ export function DiktatBody({
 
   return (
     <div className="grid grid-cols-1 gap-4">
-      <header>
-        <Eyebrow>Hermes Diktat</Eyebrow>
-        <h2 className="mt-1 font-display text-h2 font-semibold text-ink">Systemweites Diktat — der Wispr-Flow-Ersatz</h2>
-        <p className="mt-1 text-body text-ink-2">
-          Push-to-Talk-Tastatur + Bubble für jedes Android-Textfeld. On-Device by default, Cloud-Whisper als Opt-in —
-          Audio und Text bleiben auf dem Homeserver. Diese Seite bündelt Download, Einrichtung und Live-Status.
-        </p>
-      </header>
+      <ViewHeader
+        eyebrow="Hermes Diktat"
+        title="Systemweites Diktat — der Wispr-Flow-Ersatz"
+        description={
+          <>
+            Push-to-Talk-Tastatur + Bubble für jedes Android-Textfeld. On-Device by default, Cloud-Whisper als Opt-in —
+            Audio und Text bleiben auf dem Homeserver. Diese Seite bündelt Download, Einrichtung und Live-Status.
+          </>
+        }
+      />
 
       <DictateStatusTile status={status} loading={statusLoading} error={statusError} />
       <DictateTrend history={status?.history} today={status?.today} />
