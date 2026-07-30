@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
-import { CronObservabilityResponseSchema, CronOutputSchema, parseOrThrow } from "../lib/schemas";
-import type { CronObservabilityResponse, CronOutput } from "../lib/types";
+import { CronObservabilityResponseSchema, CronOutboxResponseSchema, CronOutputSchema, parseOrThrow } from "../lib/schemas";
+import type { CronObservabilityResponse, CronOutboxResponse, CronOutput } from "../lib/types";
 import { usePolling } from "./internal";
 
 // Read-only cron observability. Polled slowly (30s) — cron metadata changes
@@ -19,7 +19,6 @@ export function useCronObservability() {
   const [busyJob, setBusyJob] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const state = usePolling<CronObservabilityResponse>("cron/observability", cronObservabilityLoader, 30000);
-
   const runControl = useCallback(async (action: "trigger" | "pause" | "resume", job: CronControlJob) => {
     setBusyJob(job.id);
     setActionError(null);
@@ -70,3 +69,20 @@ export function useCronOutput() {
   return { outputById, errorById, loadingId, load };
 }
 
+
+
+/** Cron-Outbox-Puls für den Start-Tab (Q12). Gleiches 30s-Intervall wie die
+ *  übrigen Cron-/Digest-Poller. Ein Endpoint-Fehler (503) oder ein Schema-Bruch
+ *  landet als error im LoadState — die Kachel zeigt "nicht lesbar", niemals
+ *  0-Zähler (Canon: unknown bleibt unknown). */
+export function useCronOutbox() {
+  return usePolling<CronOutboxResponse>(
+    "cron/outbox",
+    async () => parseOrThrow(
+      CronOutboxResponseSchema,
+      await fetchJSON<unknown>("/api/cron/outbox"),
+      "cron/outbox",
+    ),
+    30000,
+  );
+}

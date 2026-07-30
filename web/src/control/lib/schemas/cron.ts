@@ -61,3 +61,22 @@ export const CronOutputSchema = z.object({
   truncated: z.boolean().catch(false),
   mtime: z.coerce.number().nullable().catch(null),
 });
+
+// Canon 00-Canon/decisions/2026-07-27 (Kosten-SSOT im Lesepfad, Regel 3):
+// unknown bleibt unknown — die Zähler tragen absichtlich KEIN z.coerce.number()
+// und KEIN .catch(0). Ein fehlerhafter Read (503 vom Endpoint oder Schema-Bruch)
+// wirft und rendert im UI "nicht lesbar", nie "0 = keine Aktivität".
+export const CronOutboxLastErrorSchema = z.object({
+  error: z.string(),
+  at: z.string().nullable().catch(null),
+  job_id: z.string().nullable().catch(null),
+});
+
+export const CronOutboxResponseSchema = z.object({
+  schema: z.string().catch("hermes-cron-outbox-v1"),
+  checked_at: epochSeconds,
+  queued: z.number(),
+  dead: z.number(),
+  sending_expired: z.number(),
+  last_delivery_error: CronOutboxLastErrorSchema.nullable().catch(null),
+});

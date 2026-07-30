@@ -14074,6 +14074,60 @@ async def get_cron_delivery_targets():
     return {"targets": targets}
 
 
+def _cron_outbox_sync() -> Dict[str, Any]:
+    """Outbox counters for the /control Start tab (decision Q12).
+
+    Canon 00-Canon/decisions/2026-07-27-kosten-ssot-im-lesepfad.md: unknown
+    stays unknown — a read failure must surface as an error (503 raised by the
+    route below), never as a zero-filled payload the UI would render as
+    "no activity".
+    """
+    from cron import delivery_outbox
+
+    status = delivery_outbox.outbox_status()
+    counts = status.get("counts") or {}
+    # Newest non-null last_error across queued/dead entries (dead letters and
+    # still-pending sends are the operator-visible failure surface).
+    last_error: Optional[Dict[str, Any]] = None
+    last_error_ts = ""
+    for entry in delivery_outbox.list_entries():
+        if entry.get("status") not in ("queued", "dead"):
+            continue
+        err = entry.get("last_error")
+        if not err:
+            continue
+        ts = str(entry.get("last_attempt_at") or "")
+        if last_error is None or ts >= last_error_ts:
+            last_error = {
+                "error": str(err),
+                "at": entry.get("last_attempt_at"),
+                "job_id": entry.get("job_id"),
+            }
+            last_error_ts = ts
+    return {
+        "schema": "hermes-cron-outbox-v1",
+        "checked_at": int(time.time()),
+        "queued": int(counts.get("queued") or 0),
+        "dead": int(counts.get("dead") or 0),
+        "sending_expired": int(status.get("sending_expired") or 0),
+        "last_delivery_error": last_error,
+    }
+
+
+@app.get("/api/cron/outbox")
+async def get_cron_outbox():
+    try:
+        return await _run_cron_dashboard_io(_cron_outbox_sync)
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("GET /api/cron/outbox failed")
+        raise HTTPException(
+            status_code=503,
+            detail=safe_detail(e, "Cron outbox unavailable", log=_log),
+        )
+
+
 def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[str] = None):
     selected = profile or _find_cron_job_profile(job_id)
     if not selected:

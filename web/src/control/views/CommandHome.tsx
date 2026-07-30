@@ -27,6 +27,7 @@ import { ArrowRight, ChevronRight, HeartPulse, Inbox as InboxIcon } from "lucide
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAccountUsage } from "../hooks/costsUsage";
+import { useCronOutbox } from "../hooks/cron";
 import { useDecisionInbox } from "../hooks/decisionInbox";
 import { useHermesRunsDaily, useHermesTodayDigest } from "../hooks/runsDigestRollup";
 import { useStrategistCount } from "../hooks/strategist";
@@ -207,6 +208,9 @@ export function CommandHome({ density }: { density: Density }) {
       <StatsPulse onOpen={() => navigate("/control/statistik")} />
 
       <DictateStatusTile status={dictate.data} loading={dictate.loading && !dictate.data} error={dictate.error} />
+
+      {/* ── CRON-OUTBOX-PULS (Q12) ──────────────────────────────────────────── */}
+      <OutboxPulseTile />
 
       {/* ── STRATEGEN-VORSCHLÄGE ────────────────────────────────────────────── */}
       <StrategistSignalTile onOpen={() => navigate("/control/stratege")} />
@@ -668,6 +672,53 @@ function StrategistSignalTile({ onOpen }: { onOpen: () => void }) {
       <div className="ch-card p-3">
         <p className="text-sm text-ink-2">{count} {count === 1 ? "wartet" : "warten"} auf deine Entscheidung</p>
       </div>
+    </section>
+  );
+}
+
+/** Q12: Cron-Outbox-Sichtbarkeit — queued/dead/sending_expired plus der letzte
+ *  Zustellfehler (gekürzt). Canon "unknown bleibt unknown": bei Endpoint-Fehler
+ *  zeigt die Kachel "nicht lesbar" — niemals 0-Zähler für einen fehlerhaften
+ *  Read. Ruhiger Normalfall (alles 0, kein Fehler) = unsichtbar, wie der
+ *  Operator-Digest. Nur Fehlerzustand oder Rückstau bleibt stehen. */
+function OutboxPulseTile() {
+  const outbox = useCronOutbox();
+  const data = outbox.data;
+  const error = outbox.error;
+  const loading = outbox.loading && !data;
+  if (!error && (loading || !data)) return null;
+  const quiet = data != null
+    && data.queued === 0
+    && data.dead === 0
+    && data.sending_expired === 0
+    && data.last_delivery_error == null;
+  if (!error && quiet) return null;
+  const attention = data != null && (data.dead > 0 || data.sending_expired > 0);
+  const lastError = data?.last_delivery_error ?? null;
+  const lastErrorShort = lastError
+    ? (lastError.error.length > 140 ? `${lastError.error.slice(0, 137)}…` : lastError.error)
+    : null;
+  return (
+    <section aria-label="Cron-Outbox" className="ch-panel space-y-3 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Eyebrow>Cron-Outbox</Eyebrow>
+        <SignalChip
+          tone={error ? "alert" : attention ? "alert" : "warn"}
+          label={error ? "nicht lesbar" : attention ? "Achtung" : "Rückstau"}
+        />
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <KpiTile label="Wartend" value={data ? data.queued : "—"} dot={data != null && data.queued > 0 ? "warn" : "idle"} />
+        <KpiTile label="Dead Letters" value={data ? data.dead : "—"} dot={data != null && data.dead > 0 ? "error" : "idle"} />
+        <KpiTile label="Sende-Lease abgelaufen" value={data ? data.sending_expired : "—"} dot={data != null && data.sending_expired > 0 ? "error" : "idle"} />
+      </div>
+      <p className="line-clamp-2 text-xs text-ink-2">
+        {error
+          ? `Outbox nicht lesbar: ${error}`
+          : lastErrorShort
+            ? `Letzter Zustellfehler${lastError?.job_id ? ` (Job ${lastError.job_id})` : ""}: ${lastErrorShort}`
+            : "Kein letzter Zustellfehler."}
+      </p>
     </section>
   );
 }

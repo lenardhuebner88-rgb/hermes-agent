@@ -30,11 +30,15 @@ const hooks = vi.hoisted(() => {
     useRepairDeliverable: vi.fn(),
     useVetoEscalation: vi.fn(),
     useCaptureTask: vi.fn(),
+    useCronOutbox: vi.fn(),
   };
 });
 
 vi.mock("../hooks/costsUsage", () => ({
   useAccountUsage: hooks.useAccountUsage,
+}));
+vi.mock("../hooks/cron", () => ({
+  useCronOutbox: hooks.useCronOutbox,
 }));
 vi.mock("../hooks/decisionInbox", () => ({
   useDecisionInbox: hooks.useDecisionInbox,
@@ -162,6 +166,16 @@ function installCommandHomeFixtures() {
   hooks.useRepairDeliverable.mockReturnValue(noopMutation);
   hooks.useVetoEscalation.mockReturnValue(noopMutation);
   hooks.useCaptureTask.mockReturnValue({ create: async () => "t_new", loading: false, error: null });
+  // Default: ruhige Outbox (alles 0, kein Fehler) — die Kachel bleibt dann
+  // unsichtbar; die Outbox-Tests unten überschreiben gezielt.
+  hooks.useCronOutbox.mockReturnValue(hooks.poll({
+    schema: "hermes-cron-outbox-v1",
+    checked_at: 1,
+    queued: 0,
+    dead: 0,
+    sending_expired: 0,
+    last_delivery_error: null,
+  }));
 }
 
 describe("TopDecision", () => {
@@ -371,5 +385,71 @@ describe("CommandHome", () => {
     expect(html).not.toContain('aria-label="Operator-Digest"');
     expect(html).not.toContain("Offene Entscheidungen");
     expect(html).not.toContain("Erledigen: open-decision.py resolve");
+  });
+
+  it("renders the Cron-Outbox tile with counters and the truncated last delivery error when the outbox has dead letters (Q12)", () => {
+    installCommandHomeFixtures();
+    const longError = `smtp relay refused: ${"x".repeat(200)}`;
+    hooks.useCronOutbox.mockReturnValue(hooks.poll({
+      schema: "hermes-cron-outbox-v1",
+      checked_at: 1,
+      queued: 2,
+      dead: 1,
+      sending_expired: 0,
+      last_delivery_error: { error: longError, at: "2026-07-30T08:00:00+00:00", job_id: "job-42" },
+    }));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain('aria-label="Cron-Outbox"');
+    expect(html).toContain("Wartend");
+    expect(html).toContain("Dead Letters");
+    expect(html).toContain("Sende-Lease abgelaufen");
+    expect(html).toContain("Letzter Zustellfehler (Job job-42): smtp relay refused:");
+    // gekürzt auf 140 Zeichen — der volle 200-x-Fehler darf nicht stehen
+    expect(html).not.toContain(longError);
+    expect(html).toContain("…");
+    expect(html).not.toContain("nicht lesbar");
+  });
+
+  it("shows 'nicht lesbar' instead of zero counters when the outbox endpoint fails (Canon: unknown bleibt unknown)", () => {
+    installCommandHomeFixtures();
+    hooks.useCronOutbox.mockReturnValue({
+      data: null,
+      loading: false,
+      error: "HTTP 503",
+      isStale: false,
+      lastUpdated: null,
+    });
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain('aria-label="Cron-Outbox"');
+    expect(html).toContain("nicht lesbar");
+    expect(html).toContain("Outbox nicht lesbar: HTTP 503");
+    // kein erfundener Normalzustand: weder "kein Fehler"-Copy noch 0-Zähler-Text
+    expect(html).not.toContain("Kein letzter Zustellfehler");
+    expect(html).not.toContain("Letzter Zustellfehler (Job");
+  });
+
+  it("renders NOTHING for the Cron-Outbox when everything is quiet (calm = empty)", () => {
+    installCommandHomeFixtures();
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).not.toContain('aria-label="Cron-Outbox"');
+    expect(html).not.toContain("Letzter Zustellfehler");
   });
 });

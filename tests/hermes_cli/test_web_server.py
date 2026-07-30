@@ -4004,6 +4004,59 @@ class TestWebServerEndpoints:
         # No hardcoded telegram/discord/slack/email when they aren't configured.
         assert "telegram" not in targets
 
+    def test_cron_outbox_empty(self):
+        """Empty outbox reports real zeroes (the file simply has no entries)."""
+        resp = self.client.get("/api/cron/outbox")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["schema"] == "hermes-cron-outbox-v1"
+        assert data["queued"] == 0
+        assert data["dead"] == 0
+        assert data["sending_expired"] == 0
+        assert data["last_delivery_error"] is None
+
+    def test_cron_outbox_reports_dead_letter_and_last_error(self):
+        """A dead-on-arrival config error surfaces as dead + last_delivery_error."""
+        from cron import delivery_outbox
+
+        delivery_outbox.enqueue(
+            "job-42",
+            {"platform": "matrix", "chat_id": "!room:x"},
+            "payload",
+            error="unknown platform 'matrixx'",
+            execution_id="exec-1",
+            error_class=delivery_outbox.ERROR_CLASS_CONFIG,
+        )
+
+        resp = self.client.get("/api/cron/outbox")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dead"] == 1
+        assert data["queued"] == 0
+        last = data["last_delivery_error"]
+        assert last["error"] == "unknown platform 'matrixx'"
+        assert last["job_id"] == "job-42"
+        assert last["at"]
+
+    def test_cron_outbox_read_failure_is_503_not_zeroes(self, monkeypatch):
+        """Canon 'unknown stays unknown': a broken read must NOT render as 0."""
+        from cron import delivery_outbox
+
+        def _boom():
+            raise OSError("outbox store unreadable")
+
+        monkeypatch.setattr(delivery_outbox, "outbox_status", _boom)
+
+        resp = self.client.get("/api/cron/outbox")
+
+        assert resp.status_code == 503
+        body = resp.json()
+        # no zero-filled success payload leaks through on a broken read
+        assert "queued" not in body
+        assert isinstance(body.get("detail"), str)
+
     def test_get_config_schema(self):
         resp = self.client.get("/api/config/schema")
         assert resp.status_code == 200

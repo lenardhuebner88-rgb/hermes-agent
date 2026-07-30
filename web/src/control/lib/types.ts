@@ -894,6 +894,21 @@ export interface CronOutput {
   mtime: number | null;
 }
 
+export interface CronOutboxLastError {
+  error: string;
+  at: string | null;
+  job_id: string | null;
+}
+
+export interface CronOutboxResponse {
+  schema: string;
+  checked_at: number;
+  queued: number;
+  dead: number;
+  sending_expired: number;
+  last_delivery_error: CronOutboxLastError | null;
+}
+
 export interface MetricsGroup {
   count: number;
   error_count: number;
