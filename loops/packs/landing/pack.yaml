@@ -15,5 +15,8 @@ phases:
       --ledger-dir /home/piet/vault/03-Agents/Hermes/receipts
       --discord-channel 1486480074491559966
     timeout: 7200
+params:
+  collection_window_seconds: "600"
+  max_recovery_cycles: "1"
 notify: {}
 autoland: false
