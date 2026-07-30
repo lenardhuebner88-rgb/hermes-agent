@@ -534,6 +534,27 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
   });
 
+  // Unter lg ist das PlanSpec-Detail ein modaler Drawer (`fixed inset-0 z-50`).
+  // Live gemessen 2026-07-30 (Playwright, 900x900): mit offenem Drawer trifft
+  // JEDER Subtab-Chip per elementFromPoint den Drawer statt den Chip — ein
+  // echter Pointer-Klick auf „Ketten" ließ aria-pressed auf Plan=true stehen.
+  // jsdom kennt keinen Hit-Test; hier steht deshalb der Verhaltensvertrag:
+  // ein Subtab-Wechsel schließt das Detail, statt es über dem neuen Tab liegen
+  // zu lassen. Die Trefferbarkeit selbst deckt die Live-Abnahme ab.
+  it("schließt das modale PlanSpec-Detail beim Subtab-Wechsel unter lg", () => {
+    renderFleetView();
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
+    expect(screen.getByRole("dialog", { name: "PlanSpec Details" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
+
+    expect(screen.getByRole("button", { name: "Subtab Ketten" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
+  });
+
   it("öffnet ?plan=<Pfad> einmalig und entfernt den konsumierten Parameter", async () => {
     renderFleetView(`/control/fleet?plan=${encodeURIComponent(planSpec.path)}`, true);
 

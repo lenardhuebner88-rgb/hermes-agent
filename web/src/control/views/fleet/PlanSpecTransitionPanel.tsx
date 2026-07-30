@@ -174,6 +174,27 @@ export function PlanSpecTransitionPanel({
             <strong>{preview.root_cards_created} Root · {preview.child_tasks_created} Tasks auf {preview.target_board}</strong>
             <span>{preview.starts_worker ? "Worker startet unmittelbar." : "Kein Worker startet ohne separate Freigabe."}</span>
           </div>
+          {/* Die primäre Aktion steht direkt hinter der Wirkungszeile. Am Ende
+              der Vorschau lag sie nach „Übergabe prüfen" gemessen bei y=1021
+              (Viewport 1000) und war per Pointer nicht erreichbar — Klick ohne
+              Wirkung und ohne Rückmeldung. Details folgen darunter. */}
+          <button
+            type="button"
+            className="fleet-plan-ingest"
+            onClick={() => void ingest()}
+            disabled={!preview.can_ingest || busy !== "idle"}
+          >
+            {busy === "ingest" ? "Übergibt …" : "Als gehaltene Kette übergeben"}
+          </button>
+          {!preview.can_ingest ? (
+            <p className="fleet-plan-hint">
+              {preview.blocking_findings.length
+                ? `Übergabe gesperrt · ${preview.blocking_findings.length} Blocker unten.`
+                : preview.lanes_resolvable
+                  ? "Übergabe gesperrt · die Vorprüfung lässt diesen Plan nicht zu."
+                  : "Übergabe gesperrt · mindestens eine Lane ist nicht auflösbar."}
+            </p>
+          ) : null}
           {subtasks.length ? (
             <ul className="fleet-plan-preview-tasks">
               {subtasks.slice(0, 10).map((task, idx) => (
@@ -209,14 +230,6 @@ export function PlanSpecTransitionPanel({
               <div><dt>Auto-Scouts</dt><dd>{preview.auto_scout_tasks}</dd></div>
             </dl>
           </details>
-          <button
-            type="button"
-            className="fleet-plan-ingest"
-            onClick={() => void ingest()}
-            disabled={!preview.can_ingest || busy !== "idle"}
-          >
-            {busy === "ingest" ? "Übergibt …" : "Als gehaltene Kette übergeben"}
-          </button>
           <p className="fleet-plan-hint">Deterministische Vorprüfung. Live-Konflikte und kritische Prüfungen werden beim Übergang erneut validiert.</p>
         </div>
       ) : null}

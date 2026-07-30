@@ -340,3 +340,182 @@ def test_record_without_open_field_keeps_its_previous_classification():
     assert classify_plan_record(
         {**ready, "ingest_would_block": True, "ingest_findings": ["unknown lane: ghost"]}
     )[0] == "blocked"
+
+
+# --- Ein Root-Stempel im Frontmatter ist kein Board-Zustand (2026-07-30) ---
+#
+# Gemessen am echten Vault-/Board-Bestand: vier ausgelieferte PlanSpecs standen
+# im Plan-Register unter "Im Board / Uebergeben". Alle vier tragen
+# ``open=False`` + ``closed_reason``, aber ``kanban_state == "not_ingested"``:
+# ihre ``kanban_root_task_id`` stammt aus dem PlanSpec-Frontmatter, nicht aus
+# einer lebenden Kette. Drei der vier Root-IDs existieren auf KEINEM Board mehr,
+# die vierte (t_c8ed75bc) ist auf default UND health-track ``done``.
+#
+# Die Endzustands-Pruefung stand unterhalb des ``root_id``-Kurzschlusses und
+# konnte deshalb nie greifen. Live-Kettenzustaende (blocked/running) behalten
+# ihren Vorrang -- das deckt test_live_blocked_chain_outranks_a_closed_spec ab.
+
+
+def test_shipped_spec_with_frontmatter_root_is_completed_not_handed_off():
+    record = {**_CLOSED_BASE, "open": False, "status": "shipped",
+              "closed_reason": "closed status: shipped",
+              "kanban_root_task_id": "t_11cd1b24", "kanban_root_status": None}
+    state, _reason, action = classify_plan_record(record)
+    assert state == "completed", state
+    assert action == "open_result"
+
+
+def test_obsolete_spec_with_frontmatter_root_is_archived_not_handed_off():
+    record = {**_CLOSED_BASE, "open": False, "status": "obsolete",
+              "closed_reason": "closed status: obsolete",
+              "kanban_root_task_id": "t_dead", "kanban_root_status": None}
+    assert classify_plan_record(record)[0] == "archived"
+
+
+def test_open_held_chain_still_wins_over_the_terminal_check():
+    """Der Freigabe-Halt bleibt erreichbar -- er ist kein Endzustand."""
+    record = {**_CLOSED_BASE, "open": True, "status": "approved", "closed_reason": None,
+              "freigabe": "operator", "kanban_state": "queued",
+              "kanban_root_task_id": "t_root", "kanban_root_status": "scheduled"}
+    state, _reason, action = classify_plan_record(record)
+    assert state == "held"
+    assert action == "release"
+
+
+# --- Kriterien stehen je Slice, nicht plan-weit (2026-07-30) ---
+#
+# Canon planspec-taskgraph.md: ``acceptance_criteria`` ist per Subtask
+# vorgesehen; plan-weite Eintraege sind der Fallback und werden per
+# ``applies_to`` gefaedelt. Die beiden real offenen Specs (Landing-Loop 12+11 AC,
+# Burn-Hotspots 5 AC) tragen ausschliesslich Slice-AC -- das Detail meldete
+# trotzdem "Keine Kriterien im Plan", weil nur das Frontmatter projiziert wurde.
+
+
+def _detail_planspecs_ns(root: Path):
+    from hermes_cli import planspecs as real_planspecs
+
+    return SimpleNamespace(
+        resolve_planspec_path=lambda candidate: real_planspecs.resolve_planspec_path(
+            candidate, plans_root=root
+        ),
+        _extract_frontmatter=real_planspecs._extract_frontmatter,
+        _closed_reason=real_planspecs._closed_reason,
+        _first_heading=real_planspecs._first_heading,
+        LIVE_TEST_DEPTHS=real_planspecs.LIVE_TEST_DEPTHS,
+        PlanSpecBlocked=real_planspecs.PlanSpecBlocked,
+    )
+
+
+def _write_spec(root: Path, name: str, text: str) -> Path:
+    path = root / "Claude-Code" / "plans" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_detail_reports_slice_criteria_when_the_plan_carries_none(tmp_path: Path):
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "slice-ac.md",
+        """---
+topic: Landing-Loop
+freigabe: operator
+live_test_depth: contract
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: LL-1
+      title: Deterministischer Kern
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Die Entscheidungslogik liegt vollstaendig in hermes_cli/landing_loop.py."
+        - "Trockenlauf --dry-run fasst keinen Ref an."
+    - id: LL-2
+      title: Reparatur
+      lane: coder
+      deps: [LL-1]
+      acceptance_criteria:
+        - "Ein rotes Gate rollt den Merge zurueck."
+---
+
+# Landing-Loop
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert [item["id"] for item in detail["subtasks"]] == ["LL-1", "LL-2"]
+    assert detail["subtasks"][0]["acceptance_criteria"] == [
+        "Die Entscheidungslogik liegt vollstaendig in hermes_cli/landing_loop.py.",
+        "Trockenlauf --dry-run fasst keinen Ref an.",
+    ]
+    # Der entscheidende Vertrag: das Detail sagt, dass Kriterien EXISTIEREN,
+    # auch wenn plan-weit keine stehen. Ohne diese Zahl rendert die UI
+    # "Keine Kriterien im Plan" auf einem Plan mit drei testbaren Kriterien.
+    assert detail["acceptance_criteria"] == []
+    assert detail["acceptance_criteria_total"] == 3
+
+
+def test_detail_counts_plan_level_and_slice_criteria_together(tmp_path: Path):
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "mixed-ac.md",
+        """---
+topic: Gemischt
+freigabe: operator
+live_test_depth: smoke
+acceptance_criteria:
+  - id: AC-1
+    statement: Plan-weite Regel.
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: Schritt
+      lane: coder
+      deps: []
+      acceptance_criteria:
+        - "Slice-eigene Regel."
+---
+
+# Gemischt
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert detail["acceptance_criteria"] == [{"id": "AC-1", "statement": "Plan-weite Regel."}]
+    assert detail["acceptance_criteria_total"] == 2
+
+
+def test_detail_reports_zero_criteria_when_the_plan_really_has_none(tmp_path: Path):
+    """Kontrollprobe: die Zahl darf nicht einfach immer > 0 sein."""
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "no-ac.md",
+        """---
+topic: Ohne Kriterien
+freigabe: operator
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: Schritt
+      lane: coder
+      deps: []
+---
+
+# Ohne Kriterien
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert detail["acceptance_criteria"] == []
+    assert detail["subtasks"][0]["acceptance_criteria"] == []
+    assert detail["acceptance_criteria_total"] == 0

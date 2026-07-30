@@ -189,6 +189,94 @@ describe("PlanSpecDetailDrawer", () => {
     expect(screen.queryByRole("button", { name: "In Ketten anzeigen" })).toBeNull();
   });
 
+  // --- Kriterien stehen je Slice (Canon planspec-taskgraph.md) ---------------
+  // Gemessen 2026-07-30 an den beiden real offenen Plänen: Landing-Loop trägt
+  // 23 Kriterien (12+11) und Burn-Hotspots 5 — alle ausschließlich pro Subtask.
+  // Das Detail rendert bisher NUR die plan-weite Liste, also „Keine Kriterien
+  // im Plan" auf einem Plan mit 23 testbaren Kriterien.
+  const sliceDetail: PlanSpecDetailResponse = {
+    ...baseDetail,
+    acceptance_criteria: [],
+    acceptance_criteria_total: 3,
+    subtasks: [
+      {
+        id: "LL-1",
+        title: "Deterministischer Kern",
+        lane: "coder",
+        deps: [],
+        scope_files: ["hermes_cli/landing_loop.py", "tests/hermes_cli/test_landing_loop.py"],
+        acceptance_criteria: [
+          "Die Entscheidungslogik liegt vollständig in hermes_cli/landing_loop.py.",
+          "Trockenlauf --dry-run fasst keinen Ref an.",
+        ],
+      },
+      {
+        id: "LL-2",
+        title: "Reparatur",
+        lane: "coder",
+        deps: ["LL-1"],
+        acceptance_criteria: ["Ein rotes Gate rollt den Merge zurück."],
+      },
+    ],
+  };
+
+  it("zeigt Slice-Kriterien im Überblick, wenn der Plan keine plan-weiten trägt", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={sliceDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    expect(screen.queryByText("Keine Kriterien im Plan.")).toBeNull();
+    expect(
+      screen.getByText("Die Entscheidungslogik liegt vollständig in hermes_cli/landing_loop.py."),
+    ).toBeTruthy();
+    expect(screen.getByText("Ein rotes Gate rollt den Merge zurück.")).toBeTruthy();
+    // Die Kriterien bleiben ihrem Schritt zugeordnet — sonst ist unklar,
+    // wogegen abgenommen wird.
+    expect(screen.getAllByText(/LL-1/).length).toBeGreaterThan(0);
+  });
+
+  it("Kontrollprobe: ohne jedes Kriterium bleibt die Leermeldung stehen", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={{
+          ...sliceDetail,
+          acceptance_criteria_total: 0,
+          subtasks: sliceDetail.subtasks.map((task) => ({ ...task, acceptance_criteria: [] })),
+        }}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    expect(screen.getByText("Keine Kriterien im Plan.")).toBeTruthy();
+  });
+
+  it("Ablauf: Arbeitsvertrag zeigt Kriterien und Scope-Pfade des Schritts", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={sliceDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "Ablauf 2" }));
+    expect(screen.getByText("Trockenlauf --dry-run fasst keinen Ref an.")).toBeTruthy();
+    expect(
+      screen.getByText("hermes_cli/landing_loop.py · tests/hermes_cli/test_landing_loop.py"),
+    ).toBeTruthy();
+  });
+
   it("Klick auf Schließen-Button ruft onClose", () => {
     const onClose = vi.fn();
     // renderToStaticMarkup rendert kein interaktives DOM —

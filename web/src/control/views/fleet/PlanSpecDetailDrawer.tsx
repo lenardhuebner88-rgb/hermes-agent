@@ -64,6 +64,11 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, stale = fal
             <span className="font-display text-micro uppercase tracking-[0.08em] text-ink-2">
               {detail?.freigabe || item.freigabe || "ohne Freigabe"}
             </span>
+            {/* Die Live-Test-Tiefe stand nur in der Desktop-Variante; unter lg
+                fehlte damit ein entscheidungsrelevanter Wert im Kopf. */}
+            <span className="font-display text-micro uppercase tracking-[0.08em] text-ink-2">
+              {detail?.live_test_depth || item.live_test_depth || "smoke"}
+            </span>
             {item.kanban_root_task_id ? (
               <span className="font-data text-micro text-ink-3">Root {middleEllipsis(item.kanban_root_task_id, 10)}</span>
             ) : null}
@@ -108,6 +113,19 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
 }) {
   const [tab, setTab] = useState<"target" | "steps" | "check">("target");
   const displayPath = middleEllipsis(item.path);
+  // Kriterien pro Schritt, flach für den Überblick — mit Schritt-ID, damit
+  // sichtbar bleibt, wogegen abgenommen wird.
+  const sliceCriteria = (detail?.subtasks ?? []).flatMap((task) =>
+    (task.acceptance_criteria ?? []).map((statement) => ({
+      stepId: task.id || task.title,
+      statement: String(statement),
+    })),
+  );
+  // `acceptance_criteria_total` fehlt bei einem älteren Server (Deploy-Skew).
+  // Dann zählen wir, was tatsächlich ankam, statt eine 0 zu behaupten.
+  const criteriaCount = detail
+    ? detail.acceptance_criteria_total ?? detail.acceptance_criteria.length + sliceCriteria.length
+    : 0;
   const tabs = [
     ["target", "Überblick"],
     ["steps", `Ablauf ${detail?.subtasks.length ?? 0}`],
@@ -224,12 +242,25 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
             <section className="fleet-detail-instrument">
               <Eyebrow>Acceptance Criteria</Eyebrow>
               <ol className="fleet-plan-criteria">
-                {detail.acceptance_criteria.length ? detail.acceptance_criteria.map((ac, idx) => (
-                  <li key={`${ac.id ?? idx}`} className="text-sec text-ink-2">
+                {detail.acceptance_criteria.map((ac, idx) => (
+                  <li key={`plan:${ac.id ?? idx}`} className="text-sec text-ink-2">
                     <span>{ac.id ? String(ac.id) : String(idx + 1).padStart(2, "0")}</span>
                     <p className="whitespace-pre-wrap break-words leading-relaxed">{String(ac.statement ?? "")}</p>
                   </li>
-                )) : <li className="text-sec text-ink-2">Keine Kriterien im Plan.</li>}
+                ))}
+                {/* Canon planspec-taskgraph.md stellt Kriterien PRO SLICE; plan-weite
+                    Einträge sind der Fallback. Nur die plan-weite Liste zu rendern
+                    meldete „Keine Kriterien im Plan" auf Plänen mit 23 bzw. 5
+                    authored Kriterien (gemessen 2026-07-30). */}
+                {sliceCriteria.map(({ stepId, statement }, idx) => (
+                  <li key={`slice:${stepId}:${idx}`} className="text-sec text-ink-2">
+                    <span>{stepId}</span>
+                    <p className="whitespace-pre-wrap break-words leading-relaxed">{statement}</p>
+                  </li>
+                ))}
+                {criteriaCount === 0 ? (
+                  <li className="text-sec text-ink-2">Keine Kriterien im Plan.</li>
+                ) : null}
               </ol>
             </section>
             {detail.anti_scope.length ? (
@@ -273,6 +304,16 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
                     {(task.body || task.instructions || task.scope_files?.length || task.acceptance_criteria?.length) ? (
                       <details className="fleet-plan-step-detail">
                         <summary>Arbeitsvertrag</summary>
+                        {/* Die Kriterien öffneten diesen Block schon, wurden aber nie
+                            gerendert — der Arbeitsvertrag zeigte Prosa und Pfade und
+                            verschwieg genau das, wogegen abgenommen wird. */}
+                        {task.acceptance_criteria?.length ? (
+                          <ol className="fleet-plan-step-criteria">
+                            {task.acceptance_criteria.map((statement, acIdx) => (
+                              <li key={`${task.id}:ac:${acIdx}`} className="whitespace-pre-wrap">{String(statement)}</li>
+                            ))}
+                          </ol>
+                        ) : null}
                         {task.body ? <p className="whitespace-pre-wrap">{task.body}</p> : null}
                         {task.instructions ? <p className="whitespace-pre-wrap">{task.instructions}</p> : null}
                         {task.scope_files?.length ? <p className="font-data text-micro">{task.scope_files.join(" · ")}</p> : null}
