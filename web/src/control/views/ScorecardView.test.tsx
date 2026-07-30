@@ -86,6 +86,22 @@ describe("ScorecardView", () => {
     expect(markup).toContain("Verdicts je Tag");
   });
 
+  it("benennt partielle Langfuse-Coverage als partial statt absent", () => {
+    const data = baseData();
+    data.observability = {
+      available: true,
+      state: "partial",
+      reason: "window_truncated",
+      captured_at: "2026-07-30T12:00:00Z",
+      cache: { ttl_seconds: 45, age_seconds: 7 },
+    };
+    mockState.data = data;
+
+    const markup = renderToStaticMarkup(<ScorecardView />);
+    expect(markup).toContain("Langfuse partial · Cache 7 s");
+    expect(markup).not.toContain("Langfuse absent");
+  });
+
   it("zeigt vollständige Outcomes und Review-Iterationen", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
     expect(markup).toContain("Iteration budget exhausted");

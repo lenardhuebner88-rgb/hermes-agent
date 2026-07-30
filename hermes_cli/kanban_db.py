@@ -35689,9 +35689,18 @@ def _empty_token_burn_bucket() -> dict:
         "completed_runs": 0,
         "failed_runs": 0,
         "blocked_runs": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "input_token_known_runs": 0,
+        "output_token_known_runs": 0,
+        "token_known_runs": 0,
+        "token_total_runs": 0,
+        "input_token_coverage": None,
+        "output_token_coverage": None,
+        "token_coverage": None,
+        "token_state": "unknown",
+        "token_semantics": "unknown",
     }
 
 
@@ -35699,23 +35708,54 @@ def _token_burn_add(
     bucket: dict,
     *,
     runs: int,
-    input_tokens: int,
-    output_tokens: int,
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
     outcome: Optional[str] = None,
 ) -> None:
-    in_tok = int(input_tokens or 0)
-    out_tok = int(output_tokens or 0)
-    bucket["runs"] += int(runs or 0)
-    bucket["input_tokens"] += in_tok
-    bucket["output_tokens"] += out_tok
-    bucket["total_tokens"] += in_tok + out_tok
+    run_count = int(runs or 0)
+    bucket["runs"] += run_count
+    bucket["token_total_runs"] += run_count
+    if input_tokens is not None:
+        in_tok = int(input_tokens)
+        bucket["input_token_known_runs"] += run_count
+        bucket["input_tokens"] = int(bucket["input_tokens"] or 0) + in_tok
+    if output_tokens is not None:
+        out_tok = int(output_tokens)
+        bucket["output_token_known_runs"] += run_count
+        bucket["output_tokens"] = int(bucket["output_tokens"] or 0) + out_tok
+    if input_tokens is not None and output_tokens is not None:
+        bucket["token_known_runs"] += run_count
+    if input_tokens is not None or output_tokens is not None:
+        bucket["total_tokens"] = int(bucket["total_tokens"] or 0) + int(
+            input_tokens or 0
+        ) + int(output_tokens or 0)
     normalized_outcome = (outcome or "").strip()
     if normalized_outcome == "completed":
-        bucket["completed_runs"] += int(runs or 0)
+        bucket["completed_runs"] += run_count
     elif normalized_outcome == "blocked":
-        bucket["blocked_runs"] += int(runs or 0)
+        bucket["blocked_runs"] += run_count
     elif normalized_outcome in _RELIABILITY_FAIL_OUTCOMES:
-        bucket["failed_runs"] += int(runs or 0)
+        bucket["failed_runs"] += run_count
+
+
+def _finalize_token_burn_bucket(bucket: dict) -> dict:
+    total = int(bucket["token_total_runs"] or 0)
+    input_known = int(bucket["input_token_known_runs"] or 0)
+    output_known = int(bucket["output_token_known_runs"] or 0)
+    fully_known = int(bucket["token_known_runs"] or 0)
+    bucket["input_token_coverage"] = input_known / total if total else None
+    bucket["output_token_coverage"] = output_known / total if total else None
+    bucket["token_coverage"] = fully_known / total if total else None
+    if not total or (input_known == 0 and output_known == 0):
+        bucket["token_state"] = "unknown"
+        bucket["token_semantics"] = "unknown"
+    elif fully_known == total:
+        bucket["token_state"] = "complete"
+        bucket["token_semantics"] = "exact"
+    else:
+        bucket["token_state"] = "partial"
+        bucket["token_semantics"] = "lower_bound"
+    return bucket
 
 
 def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
@@ -35749,8 +35789,8 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             COALESCE(t.epic_id, '') AS epic_id,
             DATE(tr.ended_at, 'unixepoch', 'localtime') AS day,
             tr.outcome AS outcome,
-            COALESCE(tr.input_tokens, 0) AS input_tokens,
-            COALESCE(tr.output_tokens, 0) AS output_tokens
+            tr.input_tokens AS input_tokens,
+            tr.output_tokens AS output_tokens
         FROM task_runs tr
         LEFT JOIN tasks t ON t.id = tr.task_id
         WHERE tr.ended_at IS NOT NULL
@@ -35776,8 +35816,12 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         )
         day = row["day"] or ""
         runs = 1
-        input_tokens = int(row["input_tokens"] or 0)
-        output_tokens = int(row["output_tokens"] or 0)
+        input_tokens = (
+            int(row["input_tokens"]) if row["input_tokens"] is not None else None
+        )
+        output_tokens = (
+            int(row["output_tokens"]) if row["output_tokens"] is not None else None
+        )
         outcome = (row["outcome"] or "").strip()
 
         _token_burn_add(
@@ -35825,6 +35869,15 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
                 output_tokens=output_tokens,
                 outcome=outcome,
             )
+
+    for bucket in (
+        totals,
+        *by_lane.values(),
+        *by_class.values(),
+        *daily.values(),
+        *buckets.values(),
+    ):
+        _finalize_token_burn_bucket(bucket)
 
     def _token_sort(row: dict) -> tuple:
         return (-int(row.get("total_tokens") or 0), str(row.get("subscription") or ""))

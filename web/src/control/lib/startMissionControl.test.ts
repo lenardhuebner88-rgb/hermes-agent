@@ -86,11 +86,11 @@ const burn = {
   days: 2,
   now: 1_784_642_400,
   window_start: 1,
-  totals: { runs: 5, completed_runs: 4, failed_runs: 1, blocked_runs: 0, input_tokens: 4_050_000, output_tokens: 450_000, total_tokens: 4_500_000 },
+  totals: { runs: 5, completed_runs: 4, failed_runs: 1, blocked_runs: 0, input_tokens: 4_050_000, output_tokens: 450_000, total_tokens: 4_500_000, token_state: "complete", token_semantics: "exact" },
   by_lane: [
-    { subscription: "claude", profile: "premium", runs: 2, input_tokens: 1_800_000, output_tokens: 200_000, total_tokens: 2_000_000, completed_runs: 1, failed_runs: 1, blocked_runs: 0 },
-    { subscription: "chatgpt", profile: "coder", runs: 2, input_tokens: 1_800_000, output_tokens: 200_000, total_tokens: 2_000_000, completed_runs: 2, failed_runs: 0, blocked_runs: 0 },
-    { subscription: "grok", profile: "research", runs: 1, input_tokens: 450_000, output_tokens: 50_000, total_tokens: 500_000, completed_runs: 1, failed_runs: 0, blocked_runs: 0 },
+    { subscription: "claude", profile: "premium", runs: 2, input_tokens: 1_800_000, output_tokens: 200_000, total_tokens: 2_000_000, completed_runs: 1, failed_runs: 1, blocked_runs: 0, token_state: "complete", token_semantics: "exact" },
+    { subscription: "chatgpt", profile: "coder", runs: 2, input_tokens: 1_800_000, output_tokens: 200_000, total_tokens: 2_000_000, completed_runs: 2, failed_runs: 0, blocked_runs: 0, token_state: "complete", token_semantics: "exact" },
+    { subscription: "grok", profile: "research", runs: 1, input_tokens: 450_000, output_tokens: 50_000, total_tokens: 500_000, completed_runs: 1, failed_runs: 0, blocked_runs: 0, token_state: "complete", token_semantics: "exact" },
   ],
   by_class: [],
   daily: [
@@ -138,6 +138,30 @@ describe("start mission-control derivations", () => {
     expect(rows[2]).toMatchObject({ label: "Kimi", tokenTelemetry: true, totalTokens: 250_000, capacityPercent: 79, totalSessions: 2 });
     expect(rows[3]).toMatchObject({ label: "Grok", plan: "SuperGrok", tokenTelemetry: true, totalTokens: 500_000, capacityPercent: 25 });
     expect(rows[1].days[1].intensity).toBe(1);
+  });
+
+  it("does not derive success per million from a partial token denominator", () => {
+    const partialBurn = {
+      ...burn,
+      by_lane: burn.by_lane.map((row) => row.subscription === "chatgpt"
+        ? {
+            ...row,
+            output_tokens: null,
+            total_tokens: 1_800_000,
+            token_state: "partial" as const,
+            token_semantics: "lower_bound" as const,
+          }
+        : row),
+    };
+    const rows = buildStartProviderRows({
+      providers,
+      burn: partialBurn,
+      hostUsage,
+      config: DEFAULT_STATS_CONFIG,
+      nowMs: burn.now * 1000,
+    });
+
+    expect(rows.find((row) => row.key === "chatgpt")?.successPerMillion).toBeNull();
   });
 
   it("uses the tightest live window and excludes spend-only providers", () => {

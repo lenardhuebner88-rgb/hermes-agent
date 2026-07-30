@@ -272,7 +272,10 @@ export function buildStartProviderRows({
     const weekly = account?.windows.find((window) => classifyWindow(window, config) === "weekly");
     const session = account?.windows.find((window) => classifyWindow(window, config) === "session");
     const capacity = capacityWindow(account, config, nowMs);
-    const outcomeTokens = laneRows.reduce((sum, row) => sum + row.total_tokens, 0);
+    const outcomeTokens = laneRows.length > 0
+      && laneRows.every((row) => row.token_state === "complete" && row.total_tokens != null)
+      ? laneRows.reduce((sum, row) => sum + (row.total_tokens ?? 0), 0)
+      : null;
     const totalTokens = host?.total_tokens ?? 0;
     const totalSessions = host?.sessions ?? 0;
     const completedRuns = sumOutcome(laneRows, "completed_runs");
@@ -306,7 +309,9 @@ export function buildStartProviderRows({
       failedRuns,
       blockedRuns,
       successPerMillion:
-        completedRuns != null && outcomeTokens > 0 ? completedRuns / (outcomeTokens / 1_000_000) : null,
+        completedRuns != null && outcomeTokens != null && outcomeTokens > 0
+          ? completedRuns / (outcomeTokens / 1_000_000)
+          : null,
       weeklyPercent: clampPercent(finite(weekly?.used_percent)),
       sessionPercent: clampPercent(finite(session?.used_percent)),
       weeklyReset: formatReset(weekly?.reset_at ?? null, nowMs),

@@ -634,6 +634,8 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("$0.42");
     expect(html).toContain("gesch.");
     expect(html).toContain("echt $0.00");
+    expect(html).toContain("Stand ");
+    expect(html).toContain(" · Alter ");
     expect(html).toContain("Cache/Backend gerade nicht frisch; zeige letzten erfolgreichen Stand.");
     expect(html).not.toContain("Kosten konnten nicht geladen werden");
   });
@@ -1010,14 +1012,24 @@ describe("SubscriptionBurnSection (S3)", () => {
           days: 7,
           now: 100,
           window_start: 0,
-          totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          totals: {
+            runs: 6,
+            input_tokens: 900,
+            output_tokens: 100,
+            total_tokens: 1000,
+            token_known_runs: 6,
+            token_total_runs: 6,
+            token_coverage: 1,
+            token_state: "complete",
+            token_semantics: "exact",
+          },
           by_lane: [
-            { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200 },
-            { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800 },
+            { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200, token_state: "complete", token_semantics: "exact" },
+            { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800, token_state: "complete", token_semantics: "exact" },
           ],
           by_class: [
-            { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700 },
-            { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+            { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700, token_state: "complete", token_semantics: "exact" },
+            { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300, token_state: "complete", token_semantics: "exact" },
           ],
           daily: [],
           buckets: [],
@@ -1032,6 +1044,7 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("coder · codex");
     expect(html).toContain("meta · codex");
     expect(html).toContain("1 k");
+    expect(html).toContain("Token-Coverage 6/6 Runs · vollständig");
     expect(html).toContain("st-subburn-grid");
     // No trend block when daily is empty.
     expect(html).not.toContain("data-testid=\"subscription-burn-trend\"");
@@ -1044,14 +1057,14 @@ describe("SubscriptionBurnSection (S3)", () => {
           days: 7,
           now: 100,
           window_start: 0,
-          totals: { runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+          totals: { runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000, token_known_runs: 8, token_total_runs: 8, token_coverage: 1, token_state: "complete", token_semantics: "exact" },
           by_lane: [
-            { subscription: "codex", profile: "coder", runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+            { subscription: "codex", profile: "coder", runs: 8, input_tokens: 900, output_tokens: 100, total_tokens: 1000, token_state: "complete", token_semantics: "exact" },
           ],
           by_class: [],
           daily: [
-            { subscription: "codex", date: "2026-06-17", runs: 3, input_tokens: 300, output_tokens: 100, total_tokens: 400 },
-            { subscription: "codex", date: "2026-06-18", runs: 5, input_tokens: 500, output_tokens: 100, total_tokens: 600 },
+            { subscription: "codex", date: "2026-06-17", runs: 3, input_tokens: 300, output_tokens: 100, total_tokens: 400, token_state: "complete", token_semantics: "exact" },
+            { subscription: "codex", date: "2026-06-18", runs: 5, input_tokens: 500, output_tokens: 100, total_tokens: 600, token_state: "complete", token_semantics: "exact" },
           ],
           buckets: [],
         }}
@@ -1067,6 +1080,47 @@ describe("SubscriptionBurnSection (S3)", () => {
     expect(html).toContain("600");
     // i18n kicker.
     expect(html).toContain("Zeit-Trend");
+  });
+
+  it("shows partial token evidence as a lower bound with an explicit denominator", () => {
+    const html = renderToStaticMarkup(
+      <SubscriptionBurnSection
+        burn={{
+          days: 7,
+          now: 100,
+          window_start: 0,
+          totals: {
+            runs: 2,
+            input_tokens: 100,
+            output_tokens: null,
+            total_tokens: 100,
+            token_known_runs: 0,
+            token_total_runs: 2,
+            token_coverage: 0,
+            token_state: "partial",
+            token_semantics: "lower_bound",
+          },
+          by_lane: [{
+            subscription: "codex",
+            profile: "coder",
+            runs: 2,
+            input_tokens: 100,
+            output_tokens: null,
+            total_tokens: 100,
+            token_state: "partial",
+            token_semantics: "lower_bound",
+          }],
+          by_class: [],
+          daily: [],
+          buckets: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("≥100");
+    expect(html).toContain("Token-Coverage 0/2 Runs · teilweise");
+    expect(html).toContain("Anteil unbekannt");
+    expect(html).not.toContain(">0%<");
   });
 });
 

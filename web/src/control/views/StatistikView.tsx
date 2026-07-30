@@ -934,7 +934,7 @@ function CostTrendSection({
                 {laneRows.map((row) => (
                   <div key={`${row.subscription}:${row.profile}`} className="st-drilldown-row">
                     <span>{row.subscription} · {profileLabel[row.profile] ?? row.profile}</span>
-                    <b>{fmtTokens(row.total_tokens)}</b>
+                    <b>{fmtSubscriptionTokens(row.total_tokens, row.token_semantics)}</b>
                     <span>{row.runs} Runs</span>
                   </div>
                 ))}
@@ -965,6 +965,22 @@ export function ProfileCostValue({ row }: { row: CostProfileRow }) {
 }
 
 // ── Subscription-Burn (Abo-Token-Realität) ─────────────────────────────────
+function fmtSubscriptionTokens(
+  value: number | null,
+  semantics: "exact" | "lower_bound" | "unknown" | undefined,
+): string {
+  if (value == null || semantics == null || semantics === "unknown") return "—";
+  return `${semantics === "lower_bound" ? "≥" : ""}${fmtTokens(value)}`;
+}
+
+function subscriptionTokenStateLabel(
+  state: "complete" | "partial" | "unknown" | undefined,
+): string {
+  if (state === "complete") return "vollständig";
+  if (state === "partial") return "teilweise";
+  return "unbekannt";
+}
+
 export function SubscriptionBurnSection({
   burn,
   loading = false,
@@ -975,7 +991,10 @@ export function SubscriptionBurnSection({
   error?: string | null;
 }) {
   const detail = useMemo(() => subscriptionBurnBreakdown(burn), [burn]);
-  const hasBurn = detail.totals.total_tokens > 0;
+  const hasRuns = detail.totals.runs > 0;
+  const tokenState = detail.totals.token_state;
+  const knownRuns = detail.totals.token_known_runs ?? 0;
+  const totalRuns = detail.totals.token_total_runs ?? detail.totals.runs;
   return (
     <section className="space-y-2">
       <SectionHeader label={de.stats.secSubscriptionBurn} meta={de.stats.secSubscriptionBurnMeta} />
@@ -983,14 +1002,20 @@ export function SubscriptionBurnSection({
         <SkeletonCard rows={4} />
       ) : error ? (
         <StNote tone="warn">{error}</StNote>
-      ) : !hasBurn ? (
+      ) : !hasRuns ? (
         <FleetEmptyState title={de.stats.subscriptionBurnEmpty} desc={de.stats.subscriptionBurnEmptyDesc} />
       ) : (
         <div className="st-panel st-subburn space-y-3 p-3" data-testid="subscription-burn-breakdown">
           <div className="st-subburn-hero">
             <Eyebrow>{de.stats.subscriptionBurnWindow(burn?.days ?? 7)}</Eyebrow>
-            <strong className="st-subburn-disp">{fmtTokens(detail.totals.total_tokens)}</strong>
+            <strong className="st-subburn-disp">
+              {fmtSubscriptionTokens(detail.totals.total_tokens, detail.totals.token_semantics)}
+            </strong>
             <span className="st-note">{de.stats.subscriptionBurnHero(detail.totals.runs, detail.subscriptionCount)}</span>
+            <span className="st-note">
+              Token-Coverage {knownRuns}/{totalRuns} Runs · {subscriptionTokenStateLabel(tokenState)}
+              {burn?.now ? ` · Stand ${fmtClock(burn.now)}` : " · Stand unbekannt"}
+            </span>
           </div>
           <div className="st-subburn-grid">
             <div>
@@ -998,9 +1023,9 @@ export function SubscriptionBurnSection({
               {detail.topLanes.map((row) => (
                 <div key={`${row.subscription}:${row.profile}`} className="st-subburn-row" style={laneStyle(row.profile)}>
                   <span aria-label={`${row.profile} · ${row.subscription}`}><LaneLabel profile={row.profile} /> · {row.subscription}</span>
-                  <i style={{ "--st-share": `${Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
-                  <b className="st-mono">{fmtTokens(row.total_tokens)}</b>
-                  <small>{Math.round(row.share * 100)}%</small>
+                  <i style={{ "--st-share": `${row.share == null ? 0 : Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
+                  <b className="st-mono">{fmtSubscriptionTokens(row.total_tokens, row.token_semantics)}</b>
+                  <small>{row.share == null ? "Anteil unbekannt" : `${Math.round(row.share * 100)}%`}</small>
                 </div>
               ))}
             </div>
@@ -1009,9 +1034,9 @@ export function SubscriptionBurnSection({
               {detail.classes.map((row) => (
                 <div key={`${row.subscription}:${row.value_class}`} className="st-subburn-row">
                   <span>{row.value_class} · {row.subscription}</span>
-                  <i />
-                  <b className="st-mono">{fmtTokens(row.total_tokens)}</b>
-                  <small className="st-mono">{Math.round(row.share * 100)} %</small>
+                  <i style={{ "--st-share": `${row.share == null ? 0 : Math.max(2, Math.round(row.share * 100))}%` } as CSSProperties} />
+                  <b className="st-mono">{fmtSubscriptionTokens(row.total_tokens, row.token_semantics)}</b>
+                  <small className="st-mono">{row.share == null ? "Anteil unbekannt" : `${Math.round(row.share * 100)} %`}</small>
                 </div>
               ))}
             </div>
@@ -1031,10 +1056,14 @@ export function SubscriptionBurnSection({
                 <div key={row.date} className="st-subburn-trend-row">
                   <span className="st-mono text-ink-3" style={{ fontSize: "11px" }}>{row.date}</span>
                   <div className="st-subburn-trend-bar">
-                    <i style={{ width: `${Math.round(row.share * 100)}%` }} />
+                    <i style={{ width: `${row.share == null ? 0 : Math.round(row.share * 100)}%` }} />
                   </div>
-                  <b className="st-mono" style={{ fontSize: "12px" }}>{fmtTokens(row.total_tokens)}</b>
-                  <small className="st-mono text-ink-3">{Math.round(row.share * 100)} %</small>
+                  <b className="st-mono" style={{ fontSize: "12px" }}>
+                    {fmtSubscriptionTokens(row.total_tokens, row.token_semantics)}
+                  </b>
+                  <small className="st-mono text-ink-3">
+                    {row.share == null ? "Anteil unbekannt" : `${Math.round(row.share * 100)} %`}
+                  </small>
                 </div>
               ))}
             </div>
@@ -1191,7 +1220,11 @@ export function MotherLedgerSection() {
       ? de.stats.motherLedgerHeroRatioNoReal.replace("{abo}", fmtUsd(windowCost.aboUsd))
       : `Kosten-Untergrenzen · Abo ${windowMoney(windowCost.aboUsd, knownAboRoots, applicableAboRoots)} (${knownAboRoots}/${applicableAboRoots} anwendbar) · Echt ${windowMoney(windowCost.echtUsd, knownRealRoots, totalRoots)} (${knownRealRoots}/${totalRoots})`;
   const sampleText = roots.length < totalRoots ? ` · Auswahl ${roots.length}/${totalRoots} Ketten` : "";
-  const metaText = `${windowLabel}${sampleText}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
+  const capturedAt = rollup.data?.now ?? null;
+  const freshnessText = capturedAt == null
+    ? "Stand unbekannt"
+    : `Stand ${fmtClock(capturedAt)} · Alter ${Math.max(0, nowSec() - capturedAt)} s`;
+  const metaText = `${windowLabel}${sampleText} · ${freshnessText}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
   const toggleRoot = (rootId: string) => {
     setOpenRootId((prev) => (prev === rootId ? null : rootId));
     setOpenWorkerKey(null);

@@ -680,6 +680,15 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
         "input_tokens": 600,
         "output_tokens": 60,
         "total_tokens": 660,
+        "input_token_known_runs": 3,
+        "output_token_known_runs": 3,
+        "token_known_runs": 3,
+        "token_total_runs": 3,
+        "input_token_coverage": 1.0,
+        "output_token_coverage": 1.0,
+        "token_coverage": 1.0,
+        "token_state": "complete",
+        "token_semantics": "exact",
     }
     assert burn["by_lane"] == [
         {
@@ -692,6 +701,15 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
+            "input_token_known_runs": 1,
+            "output_token_known_runs": 1,
+            "token_known_runs": 1,
+            "token_total_runs": 1,
+            "input_token_coverage": 1.0,
+            "output_token_coverage": 1.0,
+            "token_coverage": 1.0,
+            "token_state": "complete",
+            "token_semantics": "exact",
         },
         {
             "subscription": "claude",
@@ -703,6 +721,15 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
+            "input_token_known_runs": 2,
+            "output_token_known_runs": 2,
+            "token_known_runs": 2,
+            "token_total_runs": 2,
+            "input_token_coverage": 1.0,
+            "output_token_coverage": 1.0,
+            "token_coverage": 1.0,
+            "token_state": "complete",
+            "token_semantics": "exact",
         },
     ]
     assert {row["value_class"]: row["total_tokens"] for row in burn["by_class"]} == {
@@ -722,6 +749,15 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
+            "input_token_known_runs": 1,
+            "output_token_known_runs": 1,
+            "token_known_runs": 1,
+            "token_total_runs": 1,
+            "input_token_coverage": 1.0,
+            "output_token_coverage": 1.0,
+            "token_coverage": 1.0,
+            "token_state": "complete",
+            "token_semantics": "exact",
         },
         {
             "subscription": "claude",
@@ -735,6 +771,15 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
+            "input_token_known_runs": 2,
+            "output_token_known_runs": 2,
+            "token_known_runs": 2,
+            "token_total_runs": 2,
+            "input_token_coverage": 1.0,
+            "output_token_coverage": 1.0,
+            "token_coverage": 1.0,
+            "token_state": "complete",
+            "token_semantics": "exact",
         },
     ]
 
@@ -769,9 +814,64 @@ def test_subscription_token_burn_prefers_run_metadata_after_lane_flip(
         "input_tokens": 123,
         "output_tokens": 45,
         "total_tokens": 168,
+        "input_token_known_runs": 1,
+        "output_token_known_runs": 1,
+        "token_known_runs": 1,
+        "token_total_runs": 1,
+        "input_token_coverage": 1.0,
+        "output_token_coverage": 1.0,
+        "token_coverage": 1.0,
+        "token_state": "complete",
+        "token_semantics": "exact",
     }
     assert burn["by_class"][0]["subscription"] == "chatgpt"
     assert burn["by_lane"][0]["subscription"] == "chatgpt"
+
+
+def test_subscription_token_burn_preserves_unknown_tokens_and_real_denominator(
+    kanban_home, monkeypatch,
+):
+    now = 1_700_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "chatgpt")
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="partial token evidence", assignee="coder")
+        with kb.write_txn(conn):
+            _insert_token_run(
+                conn,
+                task_id=task_id,
+                profile="premium",
+                started_at=now - 60,
+                ended_at=now - 30,
+                input_tokens=100,
+                output_tokens=None,
+            )
+            _insert_token_run(
+                conn,
+                task_id=task_id,
+                profile="premium",
+                started_at=now - 50,
+                ended_at=now - 20,
+                input_tokens=None,
+                output_tokens=None,
+            )
+
+        burn = kb.subscription_token_burn(conn, days=7)
+
+    totals = burn["totals"]
+    assert totals["runs"] == 2
+    assert totals["input_tokens"] == 100
+    assert totals["output_tokens"] is None
+    assert totals["total_tokens"] == 100
+    assert totals["input_token_known_runs"] == 1
+    assert totals["output_token_known_runs"] == 0
+    assert totals["token_known_runs"] == 0
+    assert totals["token_total_runs"] == 2
+    assert totals["input_token_coverage"] == pytest.approx(0.5)
+    assert totals["output_token_coverage"] == pytest.approx(0.0)
+    assert totals["token_coverage"] == pytest.approx(0.0)
+    assert totals["token_state"] == "partial"
+    assert totals["token_semantics"] == "lower_bound"
 
 
 def test_subscription_token_burn_exposes_outcomes_per_provider(
@@ -805,6 +905,15 @@ def test_subscription_token_burn_exposes_outcomes_per_provider(
         "input_tokens": 300,
         "output_tokens": 30,
         "total_tokens": 330,
+        "input_token_known_runs": 3,
+        "output_token_known_runs": 3,
+        "token_known_runs": 3,
+        "token_total_runs": 3,
+        "input_token_coverage": 1.0,
+        "output_token_coverage": 1.0,
+        "token_coverage": 1.0,
+        "token_state": "complete",
+        "token_semantics": "exact",
     }
     assert burn["by_lane"][0]["completed_runs"] == 1
     assert burn["by_lane"][0]["failed_runs"] == 1

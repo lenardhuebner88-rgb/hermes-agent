@@ -467,16 +467,18 @@ export interface SubscriptionBurnFlag {
 
 export interface SubscriptionBurnTrendPoint {
   date: string;
-  total_tokens: number;
+  total_tokens: number | null;
   runs: number;
-  /** Share of the window total (0..1). */
-  share: number;
+  /** Share of the window total (0..1), only when numerator and denominator are exact. */
+  share: number | null;
+  token_state: "complete" | "partial" | "unknown";
+  token_semantics: "exact" | "lower_bound" | "unknown";
 }
 
 export interface SubscriptionBurnBreakdown {
   totals: SubscriptionTokenBurnResponse["totals"];
-  topLanes: Array<SubscriptionBurnLane & { share: number }>;
-  classes: Array<SubscriptionBurnClass & { share: number }>;
+  topLanes: Array<SubscriptionBurnLane & { share: number | null }>;
+  classes: Array<SubscriptionBurnClass & { share: number | null }>;
   flags: SubscriptionBurnFlag[];
   subscriptionCount: number;
   /** Daily aggregated burn (all subscriptions summed), ascending by date. */
@@ -513,66 +515,98 @@ export function subscriptionBurnBreakdown(
   burn: SubscriptionTokenBurnResponse | null | undefined,
   limit = 5,
 ): SubscriptionBurnBreakdown {
-  const totals = burn?.totals ?? { runs: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 };
-  const totalTokens = Math.max(0, totals.total_tokens || 0);
+  const totals = burn?.totals ?? {
+    runs: 0,
+    input_tokens: null,
+    output_tokens: null,
+    total_tokens: null,
+    token_known_runs: 0,
+    token_total_runs: 0,
+    token_coverage: null,
+    token_state: "unknown" as const,
+    token_semantics: "unknown" as const,
+  };
+  const totalTokens = totals.total_tokens == null ? null : Math.max(0, totals.total_tokens);
+  const sharesExact = totals.token_state === "complete" && totalTokens != null && totalTokens > 0;
   const pct = (share: number) => `${Math.round(share * 100)} %`;
-  const withShare = <T extends { total_tokens: number }>(row: T): T & { share: number } => ({
+  const withShare = <T extends { total_tokens: number | null }>(row: T): T & { share: number | null } => ({
     ...row,
-    share: totalTokens > 0 ? row.total_tokens / totalTokens : 0,
+    share: sharesExact && row.total_tokens != null ? row.total_tokens / totalTokens : null,
   });
   const topLanes = [...(burn?.by_lane ?? [])]
-    .filter((row) => row.total_tokens > 0)
-    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .filter((row) => (row.total_tokens ?? 0) > 0)
+    .sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
     .slice(0, limit)
     .map(withShare);
   const classes = [...(burn?.by_class ?? [])]
-    .filter((row) => row.total_tokens > 0)
-    .sort((a, b) => b.total_tokens - a.total_tokens)
+    .filter((row) => (row.total_tokens ?? 0) > 0)
+    .sort((a, b) => (b.total_tokens ?? 0) - (a.total_tokens ?? 0))
     .slice(0, limit)
     .map(withShare);
   const subscriptionCount = new Set(
-    (burn?.by_lane ?? []).filter((row) => row.total_tokens > 0).map((row) => row.subscription),
+    (burn?.by_lane ?? []).filter((row) => row.runs > 0).map((row) => row.subscription),
   ).size;
   const flags = [
     ...topLanes.slice(0, 3).map((row): SubscriptionBurnFlag => ({
       kind: "top",
       title: `${profileLabel[row.profile] ?? row.profile} · ${row.subscription}`,
-      detail: `${pct(row.share)} des Fenster-Burns`,
-      tokens: row.total_tokens,
+      detail: row.share == null
+        ? `${row.token_semantics === "lower_bound" ? "≥" : ""}${row.total_tokens ?? "—"} beobachtete Tokens`
+        : `${pct(row.share)} des Fenster-Burns`,
+      tokens: row.total_tokens ?? 0,
     })),
     ...classes
-      .filter((row) => row.value_class !== "nutzer" && row.share >= 0.2)
+      .filter((row) => row.value_class !== "nutzer" && row.share != null && row.share >= 0.2)
       .slice(0, 3)
       .map((row): SubscriptionBurnFlag => ({
         kind: "anti",
         title: `${row.value_class} · ${row.subscription}`,
-        detail: `${pct(row.share)} nicht-nutzernaher Burn`,
-        tokens: row.total_tokens,
+        detail: `${pct(row.share!)} nicht-nutzernaher Burn`,
+        tokens: row.total_tokens ?? 0,
       })),
   ]
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, limit);
 
   // Aggregate daily rows by date (sum across all subscriptions), then sort asc.
-  const dailyByDate = new Map<string, { total_tokens: number; runs: number }>();
+  const dailyByDate = new Map<string, {
+    total_tokens: number | null;
+    runs: number;
+    exact: boolean;
+    observed: boolean;
+  }>();
   for (const row of burn?.daily ?? []) {
     if (!row.date) continue;
     const existing = dailyByDate.get(row.date);
     if (existing) {
-      existing.total_tokens += row.total_tokens;
+      if (row.total_tokens != null) {
+        existing.total_tokens = (existing.total_tokens ?? 0) + row.total_tokens;
+        existing.observed = true;
+      }
       existing.runs += row.runs;
+      existing.exact = existing.exact && row.token_state === "complete";
     } else {
-      dailyByDate.set(row.date, { total_tokens: row.total_tokens, runs: row.runs });
+      dailyByDate.set(row.date, {
+        total_tokens: row.total_tokens,
+        runs: row.runs,
+        exact: row.token_state === "complete",
+        observed: row.total_tokens != null,
+      });
     }
   }
   const trend: SubscriptionBurnTrendPoint[] = [...dailyByDate.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, { total_tokens, runs }]) => ({
-      date,
-      total_tokens,
-      runs,
-      share: totalTokens > 0 ? total_tokens / totalTokens : 0,
-    }));
+    .map(([date, { total_tokens, runs, exact, observed }]) => {
+      const token_state = !observed ? "unknown" : exact ? "complete" : "partial";
+      return {
+        date,
+        total_tokens,
+        runs,
+        share: sharesExact && exact && total_tokens != null ? total_tokens / totalTokens : null,
+        token_state,
+        token_semantics: !observed ? "unknown" : exact ? "exact" : "lower_bound",
+      };
+    });
 
   return { totals, topLanes, classes, flags, subscriptionCount, trend };
 }

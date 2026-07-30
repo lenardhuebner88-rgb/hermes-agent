@@ -11,7 +11,8 @@ import {
   PlanSpecsResponseSchema, PressureStatusResponseSchema, ProposalsResponseSchema,
   RecentResultsResponseSchema, ReliabilityResponseSchema, ReleaseModeResponseSchema,
   ReleaseStatusResponseSchema, ReviewVerdictsResponseSchema, RunsCostsResponseSchema,
-  RunsDailyResponseSchema, StrategistOutcomesResponseSchema, SystemHealthResponseSchema,
+  RunsDailyResponseSchema, StrategistOutcomesResponseSchema, SubscriptionTokenBurnResponseSchema,
+  SystemHealthResponseSchema,
   TaskBodySchema, TaskDeliverablesResponseSchema, TaskDetailResponseSchema,
   TodayDigestResponseSchema, WindowedRollupResponseSchema, WorkersResponseSchema,
   parseOrThrow,
@@ -40,6 +41,41 @@ describe("Fleet source response contracts", () => {
     ["review verdicts", ReviewVerdictsResponseSchema],
   ])("rejects an empty-object response from %s", (_name, schema) => {
     expect(schema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("SubscriptionTokenBurnResponseSchema", () => {
+  it("preserves unknown token sums and their real denominator", () => {
+    const parsed = SubscriptionTokenBurnResponseSchema.parse({
+      days: 7,
+      now: 1_785_300_000,
+      window_start: 1_784_695_200,
+      totals: {
+        runs: 2,
+        input_tokens: 100,
+        output_tokens: null,
+        total_tokens: 100,
+        input_token_known_runs: 1,
+        output_token_known_runs: 0,
+        token_known_runs: 0,
+        token_total_runs: 2,
+        input_token_coverage: 0.5,
+        output_token_coverage: 0,
+        token_coverage: 0,
+        token_state: "partial",
+        token_semantics: "lower_bound",
+      },
+      by_lane: [],
+      by_class: [],
+      daily: [],
+      buckets: [],
+    });
+
+    expect(parsed.totals.output_tokens).toBeNull();
+    expect(parsed.totals.token_total_runs).toBe(2);
+    expect(parsed.totals.token_coverage).toBe(0);
+    expect(parsed.totals.token_state).toBe("partial");
+    expect(parsed.totals.token_semantics).toBe("lower_bound");
   });
 });
 

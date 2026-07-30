@@ -642,14 +642,14 @@ describe("subscriptionBurnBreakdown", () => {
       days: 7,
       now: 100,
       window_start: 0,
-      totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000 },
+      totals: { runs: 6, input_tokens: 900, output_tokens: 100, total_tokens: 1000, token_state: "complete", token_semantics: "exact" },
       by_lane: [
-        { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200 },
-        { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800 },
+        { subscription: "claude-max", profile: "verifier", runs: 2, input_tokens: 150, output_tokens: 50, total_tokens: 200, token_state: "complete", token_semantics: "exact" },
+        { subscription: "codex", profile: "coder", runs: 4, input_tokens: 750, output_tokens: 50, total_tokens: 800, token_state: "complete", token_semantics: "exact" },
       ],
       by_class: [
-        { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700 },
-        { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
+        { subscription: "codex", value_class: "meta", runs: 3, input_tokens: 650, output_tokens: 50, total_tokens: 700, token_state: "complete", token_semantics: "exact" },
+        { subscription: "claude-max", value_class: "nutzer", runs: 3, input_tokens: 250, output_tokens: 50, total_tokens: 300, token_state: "complete", token_semantics: "exact" },
       ],
       daily: [],
       buckets: [],
@@ -669,7 +669,7 @@ describe("subscriptionBurnBreakdown", () => {
       days: 7,
       now: 100,
       window_start: 0,
-      totals: { runs: 2, input_tokens: 100, output_tokens: 100, total_tokens: 200 },
+      totals: { runs: 2, input_tokens: 100, output_tokens: 100, total_tokens: 200, token_state: "complete", token_semantics: "exact" },
       by_lane: [],
       by_class: [],
       daily: [],
@@ -683,15 +683,15 @@ describe("subscriptionBurnBreakdown", () => {
       days: 7,
       now: 100,
       window_start: 0,
-      totals: { runs: 10, input_tokens: 800, output_tokens: 200, total_tokens: 1000 },
+      totals: { runs: 10, input_tokens: 800, output_tokens: 200, total_tokens: 1000, token_state: "complete", token_semantics: "exact" },
       by_lane: [],
       by_class: [],
       daily: [
         // Two subscriptions on 2026-06-18 → should be summed (300 + 100 = 400)
-        { subscription: "claude-max", date: "2026-06-18", runs: 4, input_tokens: 250, output_tokens: 50, total_tokens: 300 },
-        { subscription: "codex",      date: "2026-06-18", runs: 2, input_tokens:  80, output_tokens: 20, total_tokens: 100 },
+        { subscription: "claude-max", date: "2026-06-18", runs: 4, input_tokens: 250, output_tokens: 50, total_tokens: 300, token_state: "complete", token_semantics: "exact" },
+        { subscription: "codex",      date: "2026-06-18", runs: 2, input_tokens:  80, output_tokens: 20, total_tokens: 100, token_state: "complete", token_semantics: "exact" },
         // Earlier day (should appear first after sort)
-        { subscription: "claude-max", date: "2026-06-17", runs: 4, input_tokens: 500, output_tokens: 100, total_tokens: 600 },
+        { subscription: "claude-max", date: "2026-06-17", runs: 4, input_tokens: 500, output_tokens: 100, total_tokens: 600, token_state: "complete", token_semantics: "exact" },
       ],
       buckets: [],
     });
@@ -709,20 +709,56 @@ describe("subscriptionBurnBreakdown", () => {
     expect(breakdown.trend[1].share).toBeCloseTo(0.4, 5);
   });
 
-  it("returns trend with zero share when window total_tokens is 0", () => {
+  it("returns no share when the exact window denominator is 0", () => {
     const breakdown = subscriptionBurnBreakdown({
       days: 7,
       now: 100,
       window_start: 0,
-      totals: { runs: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      totals: { runs: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, token_state: "complete", token_semantics: "exact" },
       by_lane: [],
       by_class: [],
       daily: [
-        { subscription: "claude-max", date: "2026-06-18", runs: 1, input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+        { subscription: "claude-max", date: "2026-06-18", runs: 1, input_tokens: 0, output_tokens: 0, total_tokens: 0, token_state: "complete", token_semantics: "exact" },
       ],
       buckets: [],
     });
-    expect(breakdown.trend[0].share).toBe(0);
+    expect(breakdown.trend[0].share).toBeNull();
+  });
+
+  it("keeps partial token sums as lower bounds and suppresses false shares", () => {
+    const breakdown = subscriptionBurnBreakdown({
+      days: 7,
+      now: 100,
+      window_start: 0,
+      totals: {
+        runs: 2,
+        input_tokens: 100,
+        output_tokens: null,
+        total_tokens: 100,
+        token_known_runs: 0,
+        token_total_runs: 2,
+        token_coverage: 0,
+        token_state: "partial",
+        token_semantics: "lower_bound",
+      },
+      by_lane: [{
+        subscription: "codex",
+        profile: "coder",
+        runs: 2,
+        input_tokens: 100,
+        output_tokens: null,
+        total_tokens: 100,
+        token_state: "partial",
+        token_semantics: "lower_bound",
+      }],
+      by_class: [],
+      daily: [],
+      buckets: [],
+    });
+
+    expect(breakdown.totals.output_tokens).toBeNull();
+    expect(breakdown.topLanes[0].share).toBeNull();
+    expect(breakdown.flags[0].detail).toContain("≥100 beobachtete Tokens");
   });
 });
 

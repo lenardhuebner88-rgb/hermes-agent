@@ -80,7 +80,11 @@ export function ScorecardView() {
     ? "Langfuse fresh"
     : sourceState === "stale"
       ? `Langfuse stale · ${data.observability?.cache.age_seconds ?? "?"} s`
-      : "Langfuse absent · lokale Scores";
+      : sourceState === "partial"
+        ? `Langfuse partial · Cache ${data.observability?.cache.age_seconds ?? "?"} s`
+        : sourceState === "unknown"
+          ? "Langfuse unknown · lokale Scores"
+          : "Langfuse absent · lokale Scores";
 
   return (
     <main data-scorecard className="mx-auto flex w-full max-w-[2100px] flex-col gap-4 p-4 pb-20 md:p-6">
