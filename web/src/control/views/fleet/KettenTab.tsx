@@ -595,9 +595,35 @@ function KettenGraphV4({
   // === Chain costs (server-side rollup) ===
   const costTotals = chainCosts?.totals;
   const costTokens = costTotals ? costTotals.input_tokens + costTotals.output_tokens : 0;
-  const costText = costTotals
-    ? formatEffectiveCost({ cost_usd: costTotals.cost_usd, cost_effective_usd: costTotals.cost_effective_usd, tokens: costTokens }).text
+  const rawCostText = costTotals
+    ? formatEffectiveCost({ cost_usd: costTotals.cost_usd ?? 0, cost_effective_usd: costTotals.cost_effective_usd ?? 0, tokens: costTokens }).text
     : chainCostsLoading ? "…" : "—";
+  const realCostPartial = Boolean(
+    costTotals
+    && costTotals.run_count > 0
+    && (
+      costTotals.cost_usd_state !== "complete"
+      || costTotals.cost_usd_total_runs == null
+      || costTotals.cost_usd_known_runs == null
+      || costTotals.cost_usd_known_runs !== costTotals.cost_usd_total_runs
+    ),
+  );
+  const equivalentCostPartial = Boolean(
+    costTotals
+    && (
+      (costTotals.cost_usd_equivalent_candidate_runs ?? 0) > 0
+      || costTotals.cost_usd_equivalent != null
+    )
+    && (
+      costTotals.cost_usd_equivalent_state !== "complete"
+      || costTotals.cost_usd_equivalent_candidate_runs == null
+      || costTotals.cost_usd_equivalent_known_runs == null
+      || costTotals.cost_usd_equivalent_known_runs !== costTotals.cost_usd_equivalent_candidate_runs
+    ),
+  );
+  const costText = (realCostPartial || equivalentCostPartial) && rawCostText !== "—"
+    ? `≥${rawCostText}`
+    : rawCostText;
 
   const chainInputTokens = costTotals?.input_tokens ?? 0;
   const chainOutputTokens = costTotals?.output_tokens ?? 0;

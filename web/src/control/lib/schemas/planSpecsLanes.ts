@@ -88,7 +88,11 @@ const PlanSpecDetailSubtaskSchema = z.object({
   instructions: z.string().optional().catch(undefined),
   kind: z.string().nullable().optional().catch(undefined),
   max_iterations: z.coerce.number().int().positive().nullable().optional().catch(undefined),
-  acceptance_criteria: z.array(z.unknown()).optional().catch(undefined),
+  // Canon planspec-taskgraph.md: acceptance criteria live PER SUBTASK; the
+  // plan-level list is only the fallback threaded down via `applies_to`. The
+  // backend normalises both authored forms (string / {id,statement}) to display
+  // strings, so this is string[] rather than unknown[].
+  acceptance_criteria: z.array(z.string()).optional().catch(undefined),
 }).passthrough();
 
 export const PlanSpecDetailResponseSchema = z.object({
@@ -98,6 +102,10 @@ export const PlanSpecDetailResponseSchema = z.object({
       .passthrough()
       .catch({}),
   ).catch([]),
+  // Plan-level + every slice, counted by the backend. Optional so an older
+  // server (deploy-skew window) simply reports "unknown" instead of a
+  // fabricated 0 — the UI then falls back to counting what it actually got.
+  acceptance_criteria_total: z.coerce.number().int().nonnegative().optional(),
   anti_scope: z.array(z.string()).catch([]),
   evidence_required: z.array(z.string()).catch([]),
   freigabe: z.string().catch(""),

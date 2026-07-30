@@ -389,18 +389,25 @@ export interface ChainCostsLane {
   profile: string;
   input_tokens: number;
   output_tokens: number;
-  cost_usd: number;
+  cost_usd: number | null;
   /** Tatsächliche Kosten inkl. kWh-basierter Neuralwatt-Abrechnung. */
-  actual_cost_usd: number;
+  actual_cost_usd: number | null;
   run_count: number;
-  /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
-  cost_usd_equivalent: number;
+  /** Geschätzter API-Gegenwert für Abo-Runs; null wenn nicht gestempelt. */
+  cost_usd_equivalent: number | null;
   /** Alias für cost_usd_equivalent, damit echte Kosten und API-Wert klar getrennt bleiben. */
-  api_equivalent_usd: number;
-  /** Effektive Kosten; 0 wenn nicht gestempelt. */
-  cost_effective_usd: number;
+  api_equivalent_usd: number | null;
+  /** Beobachtete effektive Untergrenze; null ohne Kostenfakt. */
+  cost_effective_usd: number | null;
   billing_neuralwatt_kwh: number;
   billing_neuralwatt_cost_usd: number;
+  cost_usd_known_runs?: number;
+  cost_usd_total_runs?: number;
+  cost_usd_coverage?: number | null;
+  cost_usd_state?: "empty" | "complete" | "partial" | "unknown";
+  cost_usd_equivalent_candidate_runs?: number;
+  cost_usd_equivalent_known_runs?: number;
+  cost_usd_equivalent_state?: "not_applicable" | "complete" | "partial" | "unknown";
 }
 
 export interface ChainCostsResponse {
@@ -409,16 +416,23 @@ export interface ChainCostsResponse {
   totals: {
     input_tokens: number;
     output_tokens: number;
-    cost_usd: number;
-    actual_cost_usd: number;
+    cost_usd: number | null;
+    actual_cost_usd: number | null;
     run_count: number;
-    /** Geschätzter API-Gegenwert für Abo-Runs; 0 wenn nicht gestempelt. */
-    cost_usd_equivalent: number;
-    api_equivalent_usd: number;
-    /** Effektive Kosten; 0 wenn nicht gestempelt. */
-    cost_effective_usd: number;
+    /** Geschätzter API-Gegenwert für Abo-Runs; null wenn nicht gestempelt. */
+    cost_usd_equivalent: number | null;
+    api_equivalent_usd: number | null;
+    /** Beobachtete effektive Untergrenze; null ohne Kostenfakt. */
+    cost_effective_usd: number | null;
     billing_neuralwatt_kwh: number;
     billing_neuralwatt_cost_usd: number;
+    cost_usd_known_runs?: number;
+    cost_usd_total_runs?: number;
+    cost_usd_coverage?: number | null;
+    cost_usd_state?: "empty" | "complete" | "partial" | "unknown";
+    cost_usd_equivalent_candidate_runs?: number;
+    cost_usd_equivalent_known_runs?: number;
+    cost_usd_equivalent_state?: "not_applicable" | "complete" | "partial" | "unknown";
   };
   by_lane: ChainCostsLane[];
 }

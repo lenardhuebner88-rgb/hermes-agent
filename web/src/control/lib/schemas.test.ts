@@ -317,12 +317,16 @@ describe("Cost schemas", () => {
         billing_neuralwatt_cost_usd: 0.1,
         input_tokens: 1600,
         output_tokens: 320,
+        cost_usd_known_runs: 1,
+        cost_usd_total_runs: 2,
+        cost_usd_coverage: 0.5,
+        cost_usd_state: "partial",
       },
       window: { runs: 0 },
       profiles: [{
         profile: "neuralwatt",
         runs: 1,
-        cost_usd: 0,
+        cost_usd: null,
         actual_cost_usd: 0.1,
         cost_usd_equivalent: 0,
         api_equivalent_usd: 0,
@@ -337,6 +341,10 @@ describe("Cost schemas", () => {
     expect(parsed.today.api_equivalent_usd).toBeCloseTo(1.5);
     expect(parsed.today.billing_neuralwatt_kwh).toBeCloseTo(0.02);
     expect(parsed.today.billing_neuralwatt_cost_usd).toBeCloseTo(0.1);
+    expect(parsed.today.cost_usd_known_runs).toBe(1);
+    expect(parsed.today.cost_usd_total_runs).toBe(2);
+    expect(parsed.today.cost_usd_coverage).toBeCloseTo(0.5);
+    expect(parsed.today.cost_usd_state).toBe("partial");
     expect(parsed.profiles[0].actual_cost_usd).toBeCloseTo(0.1);
     // review_value is optional on the wire (Altbestand backends) → []
     expect(parsed.review_value).toEqual([]);
@@ -410,7 +418,7 @@ describe("Cost schemas", () => {
       totals: {
         input_tokens: 100,
         output_tokens: 20,
-        cost_usd: 0,
+        cost_usd: null,
         actual_cost_usd: 0.15,
         cost_usd_equivalent: 0.9,
         api_equivalent_usd: 0.9,
@@ -418,12 +426,19 @@ describe("Cost schemas", () => {
         billing_neuralwatt_kwh: 0.04,
         billing_neuralwatt_cost_usd: 0.15,
         run_count: 1,
+        cost_usd_known_runs: 0,
+        cost_usd_total_runs: 1,
+        cost_usd_coverage: 0,
+        cost_usd_state: "unknown",
+        cost_usd_equivalent_candidate_runs: 2,
+        cost_usd_equivalent_known_runs: 1,
+        cost_usd_equivalent_state: "partial",
       },
       by_lane: [{
         profile: "neuralwatt",
         input_tokens: 100,
         output_tokens: 20,
-        cost_usd: 0,
+        cost_usd: null,
         actual_cost_usd: 0.15,
         cost_usd_equivalent: 0.9,
         api_equivalent_usd: 0.9,
@@ -431,13 +446,25 @@ describe("Cost schemas", () => {
         billing_neuralwatt_kwh: 0.04,
         billing_neuralwatt_cost_usd: 0.15,
         run_count: 1,
+        cost_usd_known_runs: 0,
+        cost_usd_total_runs: 1,
+        cost_usd_coverage: 0,
+        cost_usd_state: "unknown",
+        cost_usd_equivalent_candidate_runs: 2,
+        cost_usd_equivalent_known_runs: 1,
+        cost_usd_equivalent_state: "partial",
       }],
     }, "chain-costs");
 
     expect(parsed.totals.actual_cost_usd).toBeCloseTo(0.15);
     expect(parsed.totals.api_equivalent_usd).toBeCloseTo(0.9);
+    expect(parsed.totals.cost_usd_equivalent_candidate_runs).toBe(2);
+    expect(parsed.totals.cost_usd_equivalent_known_runs).toBe(1);
+    expect(parsed.totals.cost_usd_equivalent_state).toBe("partial");
+    expect(parsed.totals.cost_usd_state).toBe("unknown");
     expect(parsed.by_lane[0].billing_neuralwatt_kwh).toBeCloseTo(0.04);
     expect(parsed.by_lane[0].billing_neuralwatt_cost_usd).toBeCloseTo(0.15);
+    expect(parsed.by_lane[0].cost_usd_equivalent_state).toBe("partial");
   });
 
   it("preserves windowed rollup detail fields for S3 tooltips", () => {
@@ -446,6 +473,16 @@ describe("Cost schemas", () => {
       since_hours: 24,
       now: 1000,
       completed_roots: 1,
+      totals: {
+        root_count: 1,
+        cost_usd: 0.12,
+        cost_usd_equivalent: 0.75,
+        cost_usd_known_roots: 1,
+        cost_usd_equivalent_known_roots: 1,
+        cost_usd_equivalent_applicable_roots: 1,
+        cost_usd_equivalent_state: "complete",
+        unknown_run_count: 0,
+      },
       roots: [{
         id: "t_root",
         title: "Mother",
@@ -458,6 +495,8 @@ describe("Cost schemas", () => {
         providers: ["openrouter"],
         cost_usd: 0.12,
         cost_usd_equivalent: 0.75,
+        cost_usd_equivalent_applicable: true,
+        cost_usd_equivalent_state: "complete",
         cost_effective_usd: 0.87,
         unknown_run_count: 0,
         billing_mode: "metered",
@@ -475,6 +514,8 @@ describe("Cost schemas", () => {
           output_tokens: 2,
           cost_usd: 0.12,
           cost_usd_equivalent: 0.75,
+          cost_usd_coverage: 1,
+          cost_usd_equivalent_coverage: 0.5,
           cost_effective_usd: 0.87,
           billing_mode: "metered",
           neuralwatt: null,
@@ -488,9 +529,14 @@ describe("Cost schemas", () => {
     expect(parsed.roots[0].billing_mode).toBe("metered");
     expect(parsed.roots[0].runtime_seconds).toBe(60);
     expect(parsed.roots[0].unknown_run_count).toBe(0);
+    expect(parsed.roots[0].cost_usd_equivalent_applicable).toBe(true);
+    expect(parsed.totals?.cost_usd_equivalent_applicable_roots).toBe(1);
+    expect(parsed.totals?.cost_usd_equivalent_state).toBe("complete");
     expect(parsed.roots[0].runners[0].provider_model_source).toBe("run_metadata");
     expect(parsed.roots[0].runners[0].billing_mode).toBe("metered");
     expect(parsed.roots[0].runners[0].runtime_seconds).toBe(60);
+    expect(parsed.roots[0].runners[0].cost_usd_coverage).toBe(1);
+    expect(parsed.roots[0].runners[0].cost_usd_equivalent_coverage).toBe(0.5);
   });
 });
 

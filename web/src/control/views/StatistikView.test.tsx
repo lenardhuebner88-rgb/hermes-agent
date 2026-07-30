@@ -8,13 +8,14 @@ import {
   LedgerWorkerRunners,
   LatencySection,
   MotherLedgerSection,
+  ProfileCostValue,
   ReliabilitySection,
   StatsMasthead,
   StatistikView,
   SubscriptionBurnSection,
   WorkerEfficiencySection,
 } from "./StatistikView";
-import { ERROR_SERIES } from "../lib/statsBroadsheet";
+import { ERROR_SERIES, workerTokenDisplay } from "../lib/statsBroadsheet";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
@@ -261,6 +262,14 @@ function costSeriesPoint() {
     output_tokens: 400,
     cached_tokens: 100,
     total_tokens: 1500,
+    token_known_runs: 2,
+    token_total_runs: 2,
+    token_coverage: 1,
+    token_state: "complete" as const,
+    equivalent_cost_known_runs: 2,
+    equivalent_cost_total_runs: 2,
+    equivalent_cost_coverage: 1,
+    equivalent_cost_state: "complete" as const,
   };
 }
 
@@ -381,6 +390,16 @@ function rollupWorker(over: Partial<WindowedRollupWorker> = {}): WindowedRollupW
     billing_neuralwatt_kwh: 0,
     billing_neuralwatt_cost_usd: 0,
     run_count: 1,
+    token_known_runs: 1,
+    token_total_runs: 1,
+    token_coverage: 1,
+    cost_usd_known_runs: 1,
+    cost_usd_total_runs: 1,
+    cost_usd_coverage: 1,
+    cost_usd_equivalent_confidence: "derived",
+    cost_usd_equivalent_coverage: 1,
+    cost_usd_equivalent_applicable: true,
+    cost_usd_equivalent_state: "complete",
     provider: "anthropic",
     model: "claude-opus-4-8",
     ...over,
@@ -405,6 +424,11 @@ function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot 
     cost_usd_equivalent: 0.42,
     cost_effective_usd: 0.42,
     unknown_run_count: 0,
+    cost_usd_known_runs: 1,
+    cost_usd_total_runs: 1,
+    cost_usd_coverage: 1,
+    cost_usd_equivalent_confidence: "derived",
+    cost_usd_equivalent_coverage: 1,
     billing_mode: "subscription_included",
     neuralwatt: null,
     runtime_seconds: 90,
@@ -419,7 +443,10 @@ function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot 
       input_tokens: 1000,
       output_tokens: 200,
       cost_usd: 0,
+      cost_usd_coverage: 1,
       cost_usd_equivalent: 0.42,
+      cost_usd_equivalent_confidence: "derived",
+      cost_usd_equivalent_coverage: 1,
       cost_effective_usd: 0.42,
       billing_mode: "subscription_included",
       neuralwatt: null,
@@ -431,13 +458,32 @@ function rollupRoot(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot 
   };
 }
 
-function rollupResponse(root: WindowedRollupRoot = rollupRoot()): WindowedRollupResponse {
+function rollupResponse(
+  root: WindowedRollupRoot = rollupRoot(),
+  over: Partial<WindowedRollupResponse> = {},
+): WindowedRollupResponse {
+  const realKnown = root.cost_usd != null && (root.cost_usd_coverage ?? 1) >= 1 ? 1 : 0;
+  const aboKnown = root.cost_usd_equivalent != null
+    && (root.cost_usd_equivalent_coverage ?? 1) >= 1 ? 1 : 0;
   return {
     schema: "kanban-windowed-rollup-v1",
     since_hours: 168,
     now: 200,
     completed_roots: 1,
+    returned_roots: 1,
+    truncated: false,
+    totals: {
+      root_count: 1,
+      cost_usd: root.cost_usd ?? 0,
+      cost_usd_equivalent: root.cost_usd_equivalent ?? 0,
+      cost_usd_known_roots: realKnown,
+      cost_usd_equivalent_known_roots: aboKnown,
+      cost_usd_equivalent_applicable_roots: 1,
+      cost_usd_equivalent_state: aboKnown ? "complete" : "unknown",
+      unknown_run_count: root.unknown_run_count,
+    },
     roots: [root],
+    ...over,
   };
 }
 
@@ -587,7 +633,7 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("Echt ausgegeben · 7T");
     expect(html).toContain("$0.42");
     expect(html).toContain("gesch.");
-    expect(html).toContain("echt —");
+    expect(html).toContain("echt $0.00");
     expect(html).toContain("Cache/Backend gerade nicht frisch; zeige letzten erfolgreichen Stand.");
     expect(html).not.toContain("Kosten konnten nicht geladen werden");
   });
@@ -601,7 +647,7 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("#501");
     expect(html).toContain("$0.42");
     expect(html).toContain("Abo-Wert (gesch.): $0.42 gesch.");
-    expect(html).toContain("Echt $: —");
+    expect(html).toContain("Echt $: $0.00");
     expect(html).toContain("st-ledger-abo");
     expect(html).toContain("st-ledger-real");
     expect(html).toContain("<small>gesch.</small>");
@@ -616,7 +662,7 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("Echt ausgegeben · 7T");
     expect(html).toContain("st-ledger-meter");
     expect(html).toContain("Mother A");
-    expect(html).toContain("echt —");
+    expect(html).toContain("echt $0.00");
   });
 
   it("marks the unified MotherLedger responsive layout as desktop at the 1440px Statistik viewport", () => {
@@ -628,7 +674,7 @@ describe("MotherLedgerSection", () => {
     expect(html).toContain("Echt ausgegeben · 7T");
     expect(html).toContain("st-ledger-meter");
     expect(html).toContain("Mother A");
-    expect(html).toContain("echt —");
+    expect(html).toContain("echt $0.00");
   });
 });
 
@@ -781,6 +827,131 @@ describe("ErrorTaxonomySection (ST4)", () => {
     expect(html).toContain("$ 0.42");
     expect(html).toContain("task_runs");
   });
+
+  it("keeps unknown daily cost and token facts unknown instead of rendering zero", () => {
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [{
+        ...costSeriesPoint(),
+        api_equivalent_usd: null,
+        cost_usd_equivalent: null,
+        input_tokens: null,
+        output_tokens: null,
+        cached_tokens: null,
+        total_tokens: null,
+        token_known_runs: 0,
+        token_total_runs: 2,
+        token_coverage: 0,
+        token_state: "unknown",
+        equivalent_cost_known_runs: 0,
+        equivalent_cost_total_runs: 2,
+        equivalent_cost_coverage: 0,
+        equivalent_cost_state: "unknown",
+      }],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("Tokens unbekannt, Kosten unbekannt, Kosten-Coverage 0/2 Runs, 2 runs");
+    expect(html).not.toContain("2026-07-05: 0 tokens, $ 0.00");
+  });
+
+  it("marks partial daily token aggregates as a covered lower bound", () => {
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [{
+        ...costSeriesPoint(),
+        token_known_runs: 1,
+        token_total_runs: 2,
+        token_coverage: 0.5,
+        token_state: "partial",
+      }],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("mindestens 2 k tokens, Coverage 1/2 Runs");
+    expect(html).toContain(">≥2 k<");
+  });
+
+  it("marks mixed known and unknown daily API-equivalent costs as a lower bound", () => {
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [{
+        ...costSeriesPoint(),
+        equivalent_cost_known_runs: 1,
+        equivalent_cost_total_runs: 2,
+        equivalent_cost_coverage: 0.5,
+        equivalent_cost_state: "partial",
+      }],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("mindestens $ 0.42, Kosten-Coverage 1/2 Runs");
+    expect(html).toContain(">≥$ 0.42<");
+  });
+
+  it("treats legacy numeric daily aggregates without coverage as lower bounds", () => {
+    const legacy = {
+      ...costSeriesPoint(),
+      token_known_runs: undefined,
+      token_total_runs: undefined,
+      token_coverage: undefined,
+      token_state: undefined,
+      equivalent_cost_known_runs: undefined,
+      equivalent_cost_total_runs: undefined,
+      equivalent_cost_coverage: undefined,
+      equivalent_cost_state: undefined,
+    };
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [legacy],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain(">≥2 k<");
+    expect(html).toContain(">≥$ 0.42<");
+  });
+
+  it("keeps an explicit empty day at genuine zero inside a mixed series", () => {
+    controlDataMock.costSeries = controlState({
+      days: 7,
+      now: 1_800_000_000,
+      series: [
+        {
+          ...costSeriesPoint(),
+          day: "2026-07-04",
+          runs: 0,
+          api_equivalent_usd: null,
+          cost_usd_equivalent: null,
+          input_tokens: null,
+          output_tokens: null,
+          cached_tokens: 0,
+          total_tokens: 0,
+          token_known_runs: 0,
+          token_total_runs: 0,
+          token_coverage: null,
+          token_state: "empty",
+          equivalent_cost_known_runs: 0,
+          equivalent_cost_total_runs: 0,
+          equivalent_cost_coverage: null,
+          equivalent_cost_state: "not_applicable",
+        },
+        costSeriesPoint(),
+      ],
+    });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain("2026-07-04: 0 tokens, Kosten unbekannt, 0 runs");
+    expect(html).not.toContain("2026-07-04: mindestens 0 tokens");
+  });
 });
 
 describe("BudgetLedgerSection", () => {
@@ -908,9 +1079,25 @@ describe("A3: MotherLedger Summen-Ehrlichkeit", () => {
       cost_effective_usd: null,
       cost_usd_equivalent: null,
       cost_usd: null,
+      cost_usd_coverage: 0,
+      cost_usd_equivalent_coverage: 0,
     });
     windowedRollupMock.state = rollupState({
-      data: { ...rollupResponse(knownRoot), roots: [knownRoot, unknownRoot], completed_roots: 2 },
+      data: rollupResponse(knownRoot, {
+        roots: [knownRoot, unknownRoot],
+        completed_roots: 2,
+        returned_roots: 2,
+        totals: {
+          root_count: 2,
+          cost_usd: 0,
+          cost_usd_equivalent: 1.5,
+          cost_usd_known_roots: 1,
+          cost_usd_equivalent_known_roots: 1,
+          cost_usd_equivalent_applicable_roots: 2,
+          cost_usd_equivalent_state: "partial",
+          unknown_run_count: 1,
+        },
+      }),
     });
 
     const html = renderToStaticMarkup(<MotherLedgerSection />);
@@ -919,8 +1106,204 @@ describe("A3: MotherLedger Summen-Ehrlichkeit", () => {
     expect(html).toContain("$1.50");
     expect(html).toContain("Unknown A");
     expect(html).toContain("Abo-Wert verbraucht · 7T");
+    expect(html).toContain("Kosten-Untergrenzen");
+    expect(html).toContain("≥$1.50");
     expect(html).toContain("Abo-Wert (gesch.): — gesch.");
     expect(html).toContain("<b class=\"st-mono\">—</b><small>gesch.</small>");
+  });
+
+  it("uses full-window totals and labels a root sample truncated by the API limit", () => {
+    const visibleRoot = rollupRoot({ cost_usd: 0.1, cost_usd_equivalent: 0.42 });
+    windowedRollupMock.state = rollupState({
+      data: rollupResponse(visibleRoot, {
+        completed_roots: 2,
+        returned_roots: 1,
+        truncated: true,
+        totals: {
+          root_count: 2,
+          cost_usd: 0.3,
+          cost_usd_equivalent: 0.62,
+          cost_usd_known_roots: 2,
+          cost_usd_equivalent_known_roots: 2,
+          cost_usd_equivalent_applicable_roots: 2,
+          cost_usd_equivalent_state: "complete",
+          unknown_run_count: 0,
+        },
+      }),
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).toContain("Auswahl 1/2 Ketten");
+    expect(html).toContain("$0.62");
+    expect(html).toContain("$0.30");
+    expect(html).not.toContain("≥$0.62");
+  });
+
+  it("uses only subscription-applicable roots for Abo coverage", () => {
+    const subscriptionRoot = rollupRoot({
+      id: "t_subscription",
+      cost_usd: 0,
+      cost_usd_equivalent: 0.42,
+      cost_usd_equivalent_applicable: true,
+      cost_usd_equivalent_state: "complete",
+    });
+    const meteredRoot = rollupRoot({
+      id: "t_metered",
+      billing_mode: "metered",
+      cost_usd: 0.2,
+      cost_usd_equivalent: null,
+      cost_effective_usd: 0.2,
+      cost_usd_equivalent_applicable: false,
+      cost_usd_equivalent_state: "not_applicable",
+    });
+    windowedRollupMock.state = rollupState({
+      data: rollupResponse(subscriptionRoot, {
+        roots: [subscriptionRoot, meteredRoot],
+        completed_roots: 2,
+        returned_roots: 2,
+        totals: {
+          root_count: 2,
+          cost_usd: 0.2,
+          cost_usd_equivalent: 0.42,
+          cost_usd_known_roots: 2,
+          cost_usd_equivalent_known_roots: 1,
+          cost_usd_equivalent_applicable_roots: 1,
+          cost_usd_equivalent_state: "complete",
+          unknown_run_count: 0,
+        },
+      }),
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).not.toContain("Kosten-Untergrenzen");
+    expect(html).not.toContain("1/2 anwendbar");
+    expect(html).toContain("$0.42");
+    expect(html).toContain("$0.20");
+  });
+
+  it("labels an all-metered window as Abo not applicable", () => {
+    const meteredRoot = rollupRoot({
+      billing_mode: "metered",
+      cost_usd: 0.2,
+      cost_usd_equivalent: null,
+      cost_effective_usd: 0.2,
+      cost_usd_equivalent_applicable: false,
+      cost_usd_equivalent_state: "not_applicable",
+    });
+    windowedRollupMock.state = rollupState({
+      data: rollupResponse(meteredRoot, {
+        totals: {
+          root_count: 1,
+          cost_usd: 0.2,
+          cost_usd_equivalent: 0,
+          cost_usd_known_roots: 1,
+          cost_usd_equivalent_known_roots: 0,
+          cost_usd_equivalent_applicable_roots: 0,
+          cost_usd_equivalent_state: "not_applicable",
+          unknown_run_count: 0,
+        },
+      }),
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).toContain("Abo-Gegenwert nicht anwendbar");
+    expect(html).not.toContain("Kosten-Untergrenzen");
+  });
+
+  it("keeps partial root coverage in visible text and tooltips", () => {
+    const root = rollupRoot({
+      cost_usd: 0.1,
+      cost_usd_coverage: 0.5,
+      cost_usd_equivalent: 0.42,
+      cost_usd_equivalent_coverage: 0.5,
+    });
+    windowedRollupMock.state = rollupState({
+      data: rollupResponse(root, {
+        totals: {
+          root_count: 1,
+          cost_usd: 0.1,
+          cost_usd_equivalent: 0.42,
+          cost_usd_known_roots: 0,
+          cost_usd_equivalent_known_roots: 0,
+          cost_usd_equivalent_applicable_roots: 1,
+          cost_usd_equivalent_state: "unknown",
+          unknown_run_count: 1,
+        },
+      }),
+    });
+
+    const html = renderToStaticMarkup(<MotherLedgerSection />);
+
+    expect(html).toContain("echt ≥$0.10");
+    expect(html).toMatch(/title="[^"]*≥\$0\.42[^"]*≥\$0\.10/);
+  });
+
+  it("unterscheidet bestaetigte Nullkosten und unbekannte Runner-Tokens", () => {
+    const root = rollupRoot({
+      cost_usd: 0,
+      runners: [{
+        ...rollupRoot().runners[0],
+        input_tokens: null,
+        output_tokens: null,
+        cost_usd: 0,
+      }],
+    });
+    windowedRollupMock.state = rollupState({ data: rollupResponse(root) });
+
+    const ledgerHtml = renderToStaticMarkup(<MotherLedgerSection />);
+    const runnerHtml = renderToStaticMarkup(
+      <LedgerWorkerRunners root={root} worker={root.workers[0]} />,
+    );
+
+    expect(ledgerHtml).toContain("$0.00");
+    expect(runnerHtml).toMatch(/#\d+[\s\S]*?<b class="st-mono">—<\/b>/);
+    expect(runnerHtml).toContain(">$0.00</b>");
+    expect(runnerHtml).not.toContain(">≥$0.00</b>");
+  });
+
+  it("marks legacy runner token and cost values without coverage as lower bounds", () => {
+    const root = rollupRoot({
+      runners: [{
+        ...rollupRoot().runners[0],
+        cost_usd: 0.1,
+        cost_usd_coverage: undefined,
+        cost_usd_equivalent: 0.42,
+        cost_usd_equivalent_coverage: undefined,
+      }],
+    });
+
+    const html = renderToStaticMarkup(
+      <LedgerWorkerRunners root={root} worker={root.workers[0]} />,
+    );
+
+    expect(html).toContain(">≥1 k</b>");
+    expect(html).toContain(">≥$0.42 <small>");
+    expect(html).toContain(">≥$0.10</b>");
+  });
+
+  it("keeps worker input/output as a lower bound without complete cache facts", () => {
+    const worker = rollupWorker({
+      token_known_runs: 0,
+      token_total_runs: 1,
+      token_coverage: 0,
+    });
+
+    expect(workerTokenDisplay(worker)).toEqual({ tokens: 1200, partial: true });
+  });
+
+  it("shows no number when a worker has no token evidence at all", () => {
+    const worker = rollupWorker({
+      input_tokens: 0,
+      output_tokens: 0,
+      token_known_runs: 0,
+      token_total_runs: 1,
+      token_coverage: 0,
+    });
+
+    expect(workerTokenDisplay(worker)).toEqual({ tokens: null, partial: true });
   });
 
   it("zeigt keine unbekannt-Meldung wenn alle Roots Kostenwerte haben", () => {
@@ -1107,6 +1490,83 @@ describe("LaneBurnSection", () => {
     expect(html).toContain("7 Läufe");
     expect(html).toContain("$1.25");
   });
+
+  it("keeps wholly unknown cost at an em dash instead of rendering a bogus lower-bound dash", () => {
+    const html = renderToStaticMarkup(
+      <LaneBurnSection
+        costs={[
+          costRow({
+            profile: "coder",
+            runs: 1,
+            input_tokens: 100,
+            output_tokens: 20,
+            cost_usd: null,
+            cost_usd_known_runs: 0,
+            cost_usd_total_runs: 1,
+            cost_usd_coverage: 0,
+            cost_usd_state: "unknown",
+            equivalent_cost_known_runs: 0,
+            equivalent_cost_total_runs: 0,
+            equivalent_cost_state: "not_applicable",
+          }),
+        ]}
+      />,
+    );
+
+    expect(html).toContain("— · 1 Läufe");
+    expect(html).not.toContain("≥—");
+  });
+});
+
+describe("ProfileCostValue", () => {
+  it("sums real and equivalent facts and marks a partial real component", () => {
+    const html = renderToStaticMarkup(
+      <ProfileCostValue
+        row={costRow({
+          runs: 2,
+          input_tokens: 100,
+          output_tokens: 20,
+          cost_usd: 0.2,
+          cost_usd_known_runs: 1,
+          cost_usd_total_runs: 2,
+          cost_usd_coverage: 0.5,
+          cost_usd_state: "partial",
+          api_equivalent_usd: 0.5,
+          equivalent_cost_known_runs: 1,
+          equivalent_cost_total_runs: 1,
+          equivalent_cost_coverage: 1,
+          equivalent_cost_state: "complete",
+        })}
+      />,
+    );
+
+    expect(html).toContain("≥$0.70");
+    expect(html).not.toContain("$0.50");
+  });
+
+  it("marks a complete equivalent amount when real cost is wholly unknown", () => {
+    const html = renderToStaticMarkup(
+      <ProfileCostValue
+        row={costRow({
+          runs: 1,
+          input_tokens: 100,
+          output_tokens: 20,
+          cost_usd: null,
+          cost_usd_known_runs: 0,
+          cost_usd_total_runs: 1,
+          cost_usd_coverage: 0,
+          cost_usd_state: "unknown",
+          api_equivalent_usd: 1.5,
+          equivalent_cost_known_runs: 1,
+          equivalent_cost_total_runs: 1,
+          equivalent_cost_coverage: 1,
+          equivalent_cost_state: "complete",
+        })}
+      />,
+    );
+
+    expect(html).toContain("≥$1.50 gesch.");
+  });
 });
 
 describe("StatistikView (Hermes Observability)", () => {
@@ -1198,6 +1658,23 @@ describe("StatistikView (Hermes Observability)", () => {
     expect(html).toContain("250 ms");
     expect(html).toContain("1,5 s");
     expect(html).not.toContain(">0s<");
+  });
+
+  it("zeigt unbekannte Langfuse-Generationen als unbekannt und nie als Null", () => {
+    const data = observabilityData();
+    data.langfuse = {
+      ...data.langfuse,
+      available: true,
+      state: "fresh",
+      metrics: {},
+      models: [],
+    };
+    controlDataMock.observability = controlState(data);
+    windowedRollupMock.state = rollupState({ data: rollupResponse() });
+
+    const html = renderToStaticMarkup(<StatistikView />);
+
+    expect(html).toContain('Generationen <b class="float-right font-data">—</b>');
   });
 
   it("zeigt Token-Kennzahlen als unbekannt statt als 0, wenn das Usage-Ledger nicht lesbar ist", () => {

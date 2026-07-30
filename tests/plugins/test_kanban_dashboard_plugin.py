@@ -2237,6 +2237,7 @@ def test_runs_summary_includes_effective_cost_for_subscription(client, kanban_ho
                     "billing_mode": "subscription_included",
                     "provider": "kimi-code",
                     "model": "kimi-code/k3",
+                    "cached_tokens": 0,
                 },
             )
         kb.complete_task(conn, child, summary="built")
@@ -2295,6 +2296,7 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(
                     "billing_mode": "subscription_included",
                     "provider": "kimi-code",
                     "model": "kimi-code/k3",
+                    "cached_tokens": 0,
                 },
             )
             _insert_cost_run_with_meta(
@@ -2329,6 +2331,10 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(
     workers = {w["profile"]: w for w in top["workers"]}
     assert workers["coder"]["provider"] == "openrouter"
     assert workers["coder"]["model"] == "qwen/qwen3-coder"
+    # input+output without explicit zero cache facts is only a lower bound.
+    assert workers["coder"]["token_known_runs"] == 0
+    assert workers["coder"]["token_total_runs"] >= 1
+    assert workers["coder"]["token_coverage"] == pytest.approx(0.0)
     assert workers["claude-cli"]["provider"] == "kimi-code"
     assert workers["claude-cli"]["model"] == "kimi-code/k3"
 
@@ -2337,6 +2343,11 @@ def test_runs_windowed_rollup_expands_workers_and_runners_by_effective_cost(
     assert any(r["cost_effective_usd"] == pytest.approx(0.20) for r in worker_a_runs)
     assert any(r["cost_usd_equivalent"] == pytest.approx(0.0054) for r in worker_b_runs)
     assert any(r["cost_effective_usd"] == pytest.approx(0.0054) for r in worker_b_runs)
+    # The API-only low root is not part of the subscription-equivalent denominator.
+    assert data["totals"]["root_count"] == 2
+    assert data["totals"]["cost_usd_equivalent_applicable_roots"] == 1
+    assert data["totals"]["cost_usd_equivalent_known_roots"] == 1
+    assert data["totals"]["cost_usd_equivalent_state"] == "complete"
 
 
 def test_runs_windowed_rollup_response_matches_frontend_zod_schema(client, kanban_home):
@@ -2437,6 +2448,148 @@ def test_runs_windowed_rollup_keeps_unknown_costs_null(client, kanban_home):
     assert only["cost_usd_equivalent"] is None
     assert only["cost_effective_usd"] is None
     assert only["runners"][0]["cost_effective_usd"] is None
+    assert only["cost_usd_known_runs"] == 0
+    assert only["cost_usd_total_runs"] == len(only["runners"])
+    assert only["cost_usd_coverage"] == pytest.approx(0.0)
+    assert data["totals"]["cost_usd_known_roots"] == 0
+    assert data["totals"]["root_count"] == data["completed_roots"]
+
+
+def test_runs_windowed_rollup_totals_cover_roots_omitted_by_limit(client, kanban_home):
+    """The root list is a sample; hero totals and coverage span the full window."""
+    with kb.connect() as conn:
+        roots = [
+            kb.create_task(conn, title="truncation root a"),
+            kb.create_task(conn, title="truncation root b"),
+        ]
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                roots[0],
+                profile="coder",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.10,
+                metadata={"provider": "openrouter", "model": "known-a"},
+            )
+            _insert_cost_run_with_meta(
+                conn,
+                roots[1],
+                profile="coder",
+                input_tokens=200,
+                output_tokens=40,
+                cost_usd=0.20,
+                metadata={"provider": "openrouter", "model": "known-b"},
+            )
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id IN (?, ?)",
+                (int(time.time()), roots[0], roots[1]),
+            )
+
+    data = client.get(
+        "/api/plugins/kanban/runs/windowed-rollup?hours=24&limit=1"
+    ).json()
+
+    assert data["completed_roots"] == 2
+    assert data["returned_roots"] == 1
+    assert data["truncated"] is True
+    assert len(data["roots"]) == 1
+    assert data["totals"]["root_count"] == 2
+    assert data["totals"]["cost_usd"] == pytest.approx(0.30)
+    assert data["totals"]["cost_usd_known_roots"] == 2
+    assert data["totals"]["cost_usd_equivalent_applicable_roots"] == 0
+    assert data["totals"]["cost_usd_equivalent_known_roots"] == 0
+    assert data["totals"]["cost_usd_equivalent_state"] == "not_applicable"
+
+
+def test_runs_windowed_rollup_preserves_partial_equivalent_window_state(
+    client, kanban_home
+):
+    """A partially priced applicable root makes the window partial, not unknown."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="partial equivalent root")
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                root,
+                profile="claude-cli",
+                input_tokens=900,
+                output_tokens=180,
+                cost_usd=0.0,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "provider": "kimi-code",
+                    "model": "kimi-code/k3",
+                    "cached_tokens": 0,
+                },
+            )
+            _insert_cost_run_with_meta(
+                conn,
+                root,
+                profile="claude-cli",
+                input_tokens=10,
+                output_tokens=2,
+                cost_usd=0.0,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "provider": "unknown-provider",
+                    "model": "unknown-model",
+                },
+            )
+        kb.complete_task(conn, root, summary="done")
+
+    data = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24").json()
+    root_row = next(row for row in data["roots"] if row["id"] == root)
+
+    assert root_row["cost_usd_equivalent"] is not None
+    assert root_row["cost_usd_equivalent_coverage"] == pytest.approx(0.5)
+    assert root_row["cost_usd_equivalent_state"] == "partial"
+    assert data["totals"]["cost_usd_equivalent_applicable_roots"] == 1
+    assert data["totals"]["cost_usd_equivalent_known_roots"] == 0
+    assert data["totals"]["cost_usd_equivalent_state"] == "partial"
+
+
+def test_runs_windowed_rollup_prefers_audited_equivalent_route(
+    client, kanban_home
+):
+    """Generic display metadata must not override the audited pricing route."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="audited pricing route")
+        with kb.write_txn(conn):
+            _insert_cost_run_with_meta(
+                conn,
+                root,
+                profile="claude-cli",
+                input_tokens=900,
+                output_tokens=180,
+                cost_usd=0.0,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "provider": "unknown-provider",
+                    "model": "unknown-model",
+                    "cost_equivalent_provider": "kimi-code",
+                    "cost_equivalent_model": "kimi-code/k3",
+                    "cost_equivalent_input_tokens": 900,
+                    "cost_equivalent_output_tokens": 180,
+                    "cost_equivalent_cache_read_tokens": 0,
+                    "cost_equivalent_cache_write_tokens": 0,
+                },
+            )
+        kb.complete_task(conn, root, summary="done")
+        chain = kb.chain_cost_breakdown(conn, root)
+
+    data = client.get("/api/plugins/kanban/runs/windowed-rollup?hours=24").json()
+    root_row = next(row for row in data["roots"] if row["id"] == root)
+    runner = next(row for row in root_row["runners"] if row["task_id"] == root)
+
+    assert chain["totals"]["cost_usd_equivalent"] == pytest.approx(0.0054)
+    assert root_row["cost_usd_equivalent"] == pytest.approx(
+        chain["totals"]["cost_usd_equivalent"]
+    )
+    assert runner["cost_usd_equivalent"] == pytest.approx(
+        chain["totals"]["cost_usd_equivalent"]
+    )
+    assert runner["cost_usd_equivalent_state"] == "complete"
 
 
 def test_runs_windowed_rollup_exposes_runner_detail_metadata(client, kanban_home):
@@ -2492,6 +2645,12 @@ def test_runs_windowed_rollup_exposes_runner_detail_metadata(client, kanban_home
     assert root_row["ended_at"] == now - 15
     assert root_row["runtime_seconds"] == 30
     assert root_row["neuralwatt"] is None
+    worker = root_row["workers"][0]
+    assert worker["input_tokens"] == 0
+    assert worker["output_tokens"] == 0
+    assert worker["token_known_runs"] == 0
+    assert worker["token_total_runs"] == 1
+    assert worker["token_coverage"] == pytest.approx(0.0)
 
 
 def test_runs_summary_empty_window(client):
@@ -2734,6 +2893,7 @@ def test_runs_costs_today_window_and_profiles(client):
                 cost=0.25,
                 tokens_in=1000,
                 tokens_out=200,
+                metadata={"cached_tokens": 0},
             )
             # Subscription-Lane heute: ehrliche $0 + ableitbare Rohfakten.
             _insert_run(
@@ -2750,6 +2910,7 @@ def test_runs_costs_today_window_and_profiles(client):
                     "billing_mode": "subscription_included",
                     "provider": "kimi-code",
                     "model": "kimi-code/k3",
+                    "cached_tokens": 0,
                 },
             )
             # Neuralwatt-Lane: echte USD kommen direkt aus cost.request_cost_usd
@@ -2769,6 +2930,7 @@ def test_runs_costs_today_window_and_profiles(client):
                     "provider": "neuralwatt",
                     "energy": {"energy_kwh": 0.02},
                     "cost": {"request_cost_usd": 0.10},
+                    "cached_tokens": 0,
                 },
             )
             # Verifier ohne Stamps: zählt als Run, kostet nichts.
@@ -2804,13 +2966,23 @@ def test_runs_costs_today_window_and_profiles(client):
     assert data["today"]["billing_neuralwatt_kwh"] == pytest.approx(0.02)
     assert data["today"]["billing_neuralwatt_cost_usd"] == pytest.approx(0.10)
     assert data["today"]["runs"] == 4
+    assert data["today"]["cost_usd_known_runs"] == 3
+    assert data["today"]["cost_usd_total_runs"] == 4
+    assert data["today"]["cost_usd_coverage"] == pytest.approx(0.75)
+    assert data["today"]["cost_usd_state"] == "partial"
     assert data["window"]["cost_usd"] == 0.3
     assert data["window"]["actual_cost_usd"] == pytest.approx(0.4)
+    assert data["window"]["cost_usd_known_runs"] == 4
+    assert data["window"]["cost_usd_total_runs"] == 5
+    assert data["window"]["cost_usd_coverage"] == pytest.approx(0.8)
+    assert data["window"]["cost_usd_state"] == "partial"
     assert data["window"]["input_tokens"] == 7000
     by_profile = {p["profile"]: p for p in data["profiles"]}
     assert by_profile["coder"]["cost_usd"] == 0.3
     assert by_profile["coder"]["actual_cost_usd"] == pytest.approx(0.3)
     assert by_profile["coder"]["runs"] == 2
+    assert by_profile["coder"]["cost_usd_coverage"] == pytest.approx(1.0)
+    assert by_profile["coder"]["cost_usd_state"] == "complete"
     assert by_profile["premium"]["cost_usd"] == 0.0
     assert by_profile["premium"]["cost_usd_equivalent"] == pytest.approx(0.0285)
     assert by_profile["premium"]["actual_cost_usd"] == pytest.approx(0.0)
@@ -2821,6 +2993,8 @@ def test_runs_costs_today_window_and_profiles(client):
     assert by_profile["verifier"]["cost_usd"] is None
     assert by_profile["verifier"]["actual_cost_usd"] is None
     assert by_profile["verifier"]["runs"] == 1
+    assert by_profile["verifier"]["cost_usd_coverage"] == pytest.approx(0.0)
+    assert by_profile["verifier"]["cost_usd_state"] == "unknown"
     # Sortierung: tatsächliche Kosten zuerst; Abo/API-Äquivalent sortiert nicht
     # vor echte Rechnungswerte.
     assert data["profiles"][0]["profile"] == "coder"
@@ -2841,7 +3015,127 @@ def test_runs_costs_today_window_and_profiles(client):
     assert today_point["input_tokens"] == 6600
     assert today_point["output_tokens"] == 1220
     assert today_point["total_tokens"] == 7820
+    assert today_point["token_known_runs"] == 3
+    assert today_point["token_total_runs"] == 4
+    assert today_point["token_coverage"] == pytest.approx(0.75)
+    assert today_point["token_state"] == "partial"
     assert today_point["api_equivalent_usd"] == pytest.approx(0.0285)
+    assert today_point["equivalent_cost_known_runs"] == 1
+    assert today_point["equivalent_cost_total_runs"] == 1
+    assert today_point["equivalent_cost_coverage"] == pytest.approx(1.0)
+    assert today_point["equivalent_cost_state"] == "complete"
+    assert today_point["cost_usd_known_runs"] == 3
+    assert today_point["cost_usd_total_runs"] == 4
+    assert today_point["cost_usd_coverage"] == pytest.approx(0.75)
+    assert today_point["cost_usd_state"] == "partial"
+
+
+def test_runs_costs_series_real_cache_fields_and_mixed_equivalent_coverage(client):
+    """Real worker cache aliases remain facts; mixed pricing stays a lower bound."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="cost-series coverage")
+        with kb.write_txn(conn):
+            _insert_run(
+                conn,
+                task_id,
+                profile="premium",
+                outcome="completed",
+                started_at=now - 300,
+                ended_at=now - 250,
+                cost=0.0,
+                tokens_in=125,
+                tokens_out=20,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "provider": "kimi-code",
+                    "model": "kimi-code/k3",
+                    "usage": {
+                        "input_tokens": 100,
+                        "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 25,
+                    },
+                },
+            )
+            _insert_run(
+                conn,
+                task_id,
+                profile="premium",
+                outcome="completed",
+                started_at=now - 200,
+                ended_at=now - 150,
+                cost=0.0,
+                tokens_in=203,
+                tokens_out=40,
+                metadata={
+                    "billing_mode": "subscription_included",
+                    "provider": "unknown",
+                    "model": "unpriced-model",
+                    "usage": {
+                        "input_tokens": 200,
+                        "cache_read_input_tokens": 7,
+                        "cache_creation_input_tokens": 3,
+                    },
+                },
+            )
+            _insert_run(
+                conn,
+                task_id,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 100,
+                ended_at=now - 50,
+                cost=0.01,
+                tokens_in=30,
+                tokens_out=5,
+                metadata={
+                    "cost_equivalent_cache_read_tokens": 4,
+                    "cost_equivalent_cache_write_tokens": 1,
+                },
+            )
+            _insert_run(
+                conn,
+                task_id,
+                profile="coder",
+                outcome="completed",
+                started_at=now - 40,
+                ended_at=now - 20,
+                cost=0.01,
+                tokens_in=112,
+                tokens_out=10,
+                metadata={
+                    "usage": {
+                        "input_tokens": 100,
+                        "cache_creation_input_tokens": 12,
+                    },
+                },
+            )
+
+    series = client.get("/api/plugins/kanban/runs/costs-series?days=1").json()
+    point = series["series"][-1]
+
+    assert point["cached_tokens"] == 102
+    # Persisted input already contains cache creation for the first, second,
+    # and fourth runs. Cache read is added once; the ambiguous legacy write is
+    # not double-counted. The one-sided fourth cache fact stays partial.
+    assert point["total_tokens"] == 606
+    assert point["token_known_runs"] == 2
+    assert point["token_total_runs"] == 4
+    assert point["token_coverage"] == pytest.approx(0.5)
+    assert point["token_state"] == "partial"
+    assert point["api_equivalent_usd"] > 0
+    assert point["equivalent_cost_known_runs"] == 0
+    assert point["equivalent_cost_total_runs"] == 2
+    assert point["equivalent_cost_coverage"] == pytest.approx(0.0)
+    assert point["equivalent_cost_state"] == "partial"
+
+    costs = client.get("/api/plugins/kanban/runs/costs?days=1").json()
+    premium = next(row for row in costs["profiles"] if row["profile"] == "premium")
+    assert premium["api_equivalent_usd"] > 0
+    assert premium["equivalent_cost_known_runs"] == 0
+    assert premium["equivalent_cost_total_runs"] == 2
+    assert premium["equivalent_cost_coverage"] == pytest.approx(0.0)
+    assert premium["equivalent_cost_state"] == "partial"
 
 
 def test_runs_costs_review_value_real_metadata(client):
@@ -8125,8 +8419,8 @@ def test_chain_graph_nodes_include_cost_equivalent_fields(client, kanban_home):
     n0 = by_id[child_ids[0]]
     assert n0["cost_usd"] == pytest.approx(0.0)
     assert n0["cost_usd_equivalent"] == pytest.approx(0.0081)
-    assert n0["cost_usd_equivalent_confidence"] == "derived"
-    assert n0["cost_usd_equivalent_coverage"] == pytest.approx(1.0)
+    assert n0["cost_usd_equivalent_confidence"] == "lower_bound"
+    assert n0["cost_usd_equivalent_coverage"] == pytest.approx(0.0)
     assert n0["cost_effective_usd"] == pytest.approx(0.0081)
 
     # Nodes without usage facts: value stays unknown/null, never fake zero.
@@ -8181,16 +8475,22 @@ def test_chain_costs_endpoint_includes_equivalent_fields(client, kanban_home):
     totals = body["totals"]
     assert totals["cost_usd"] == pytest.approx(0.0)
     assert totals["cost_usd_equivalent"] == pytest.approx(0.0054)
-    assert totals["cost_usd_equivalent_confidence"] == "derived"
-    assert totals["cost_usd_equivalent_coverage"] == pytest.approx(1.0)
+    assert totals["cost_usd_equivalent_confidence"] == "lower_bound"
+    assert totals["cost_usd_equivalent_coverage"] == pytest.approx(0.0)
+    assert totals["cost_usd_equivalent_candidate_runs"] == 1
+    assert totals["cost_usd_equivalent_known_runs"] == 0
+    assert totals["cost_usd_equivalent_state"] == "partial"
     assert totals["cost_effective_usd"] == pytest.approx(0.0054)
 
     by_lane = body["by_lane"]
     lane = next(l for l in by_lane if l["profile"] == "claude-cli")
     assert lane["cost_usd"] == pytest.approx(0.0)
     assert lane["cost_usd_equivalent"] == pytest.approx(0.0054)
-    assert lane["cost_usd_equivalent_confidence"] == "derived"
-    assert lane["cost_usd_equivalent_coverage"] == pytest.approx(1.0)
+    assert lane["cost_usd_equivalent_confidence"] == "lower_bound"
+    assert lane["cost_usd_equivalent_coverage"] == pytest.approx(0.0)
+    assert lane["cost_usd_equivalent_candidate_runs"] == 1
+    assert lane["cost_usd_equivalent_known_runs"] == 0
+    assert lane["cost_usd_equivalent_state"] == "partial"
     assert lane["cost_effective_usd"] == pytest.approx(0.0054)
 
 

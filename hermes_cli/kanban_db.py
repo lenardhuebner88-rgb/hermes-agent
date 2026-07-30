@@ -35350,6 +35350,14 @@ def _empty_cost_bucket() -> dict:
         "cost_status": None,
         "estimated_cost_runs": 0,
         "actual_cost_runs": 0,
+        "cost_usd_known_runs": 0,
+        "cost_usd_total_runs": 0,
+        "cost_usd_coverage": None,
+        "cost_usd_state": "empty",
+        "equivalent_cost_known_runs": 0,
+        "equivalent_cost_total_runs": 0,
+        "equivalent_cost_coverage": None,
+        "equivalent_cost_state": "not_applicable",
     }
 
 
@@ -35365,7 +35373,9 @@ def _cost_bucket_add(
     neuralwatt_cost=None,
 ) -> None:
     bucket["runs"] += 1
+    bucket["cost_usd_total_runs"] += 1
     if cost is not None:
+        bucket["cost_usd_known_runs"] += 1
         raw = float(cost)
         bucket["cost_usd"] = round((bucket["cost_usd"] or 0.0) + raw, 6)
         bucket["actual_cost_usd"] = round((bucket["actual_cost_usd"] or 0.0) + raw, 6)
@@ -35406,6 +35416,54 @@ def _cost_bucket_add(
         bucket["output_tokens"] = (bucket["output_tokens"] or 0) + int(tokens_out)
 
 
+def _finalize_cost_coverage(bucket: dict[str, Any]) -> None:
+    total = int(bucket["cost_usd_total_runs"])
+    known = int(bucket["cost_usd_known_runs"])
+    if total == 0:
+        bucket["cost_usd_coverage"] = None
+        bucket["cost_usd_state"] = "empty"
+        return
+    bucket["cost_usd_coverage"] = known / total
+    if known == total:
+        bucket["cost_usd_state"] = "complete"
+    elif (
+        bucket.get("cost_usd") is not None
+        or bucket.get("actual_cost_usd") is not None
+    ):
+        bucket["cost_usd_state"] = "partial"
+    else:
+        bucket["cost_usd_state"] = "unknown"
+
+
+def _equivalent_coverage_add(
+    bucket: dict[str, Any],
+    *,
+    meta: Mapping[str, Any],
+    fact: Mapping[str, Any],
+) -> None:
+    if not _is_equivalent_cost_candidate(meta):
+        return
+    bucket["equivalent_cost_total_runs"] += 1
+    if fact.get("state") == "complete":
+        bucket["equivalent_cost_known_runs"] += 1
+
+
+def _finalize_equivalent_coverage(bucket: dict[str, Any]) -> None:
+    total = int(bucket["equivalent_cost_total_runs"])
+    known = int(bucket["equivalent_cost_known_runs"])
+    if total == 0:
+        bucket["equivalent_cost_coverage"] = None
+        bucket["equivalent_cost_state"] = "not_applicable"
+        return
+    bucket["equivalent_cost_coverage"] = known / total
+    if known == total:
+        bucket["equivalent_cost_state"] = "complete"
+    elif bucket.get("api_equivalent_usd") is not None:
+        bucket["equivalent_cost_state"] = "partial"
+    else:
+        bucket["equivalent_cost_state"] = "unknown"
+
+
 def _numeric_metadata_value(container: dict, *path: str) -> float | None:
     current = container
     for key in path:
@@ -35415,6 +35473,58 @@ def _numeric_metadata_value(container: dict, *path: str) -> float | None:
     if isinstance(current, (int, float)) and not isinstance(current, bool):
         return float(current)
     return None
+
+
+def _cache_token_facts(
+    meta: dict[str, Any],
+) -> tuple[float | None, float | None, float | None]:
+    """Return separate read/write facts plus an optional aggregate alias."""
+
+    def first(paths: tuple[tuple[str, ...], ...]) -> float | None:
+        for path in paths:
+            value = _numeric_metadata_value(meta, *path)
+            if value is not None:
+                return value
+        return None
+
+    aggregate = first((
+        ("cached_tokens",),
+        ("usage", "cached_tokens"),
+    ))
+    if aggregate is not None:
+        return None, None, aggregate
+
+    cache_read = first((
+        ("usage", "cache_read_input_tokens"),
+        ("usage", "cache_read_tokens"),
+        ("usage", "cache_read"),
+        ("cache_read_tokens",),
+        ("cost_equivalent_cache_read_tokens",),
+    ))
+    cache_write = first((
+        ("usage", "cache_creation_input_tokens"),
+        ("usage", "cache_write_tokens"),
+        ("usage", "cache_write"),
+        ("cache_write_tokens",),
+        ("cost_equivalent_cache_write_tokens",),
+    ))
+    return cache_read, cache_write, None
+
+
+def _base_token_sum_is_exact(
+    *,
+    input_tokens: Any,
+    output_tokens: Any,
+    meta: dict[str, Any],
+) -> bool:
+    """Whether input+output alone is a complete token total for one run."""
+
+    if input_tokens is None or output_tokens is None:
+        return False
+    cache_read, cache_write, cache_aggregate = _cache_token_facts(meta)
+    if cache_aggregate is not None:
+        return cache_aggregate == 0
+    return cache_read == 0 and cache_write == 0
 
 
 def _neuralwatt_detail(
@@ -35758,10 +35868,12 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         "FROM task_runs WHERE ended_at IS NOT NULL AND ended_at >= ?",
         (window_start,),
     ).fetchall()
-    equivalent_values = _equivalent_cost_values_from_rows(rows)
-    for row, equiv in zip(rows, equivalent_values, strict=True):
+    equivalent_facts = _equivalent_cost_facts_from_rows(rows)
+    for row, equiv_fact in zip(rows, equivalent_facts, strict=True):
+        equiv = equiv_fact["value"]
         neuralwatt_kwh = None
         neuralwatt_cost = None
+        meta: dict[str, Any] = {}
         if row["metadata"]:
             try:
                 meta = json.loads(row["metadata"])
@@ -35774,6 +35886,8 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
                     )
             except (ValueError, TypeError):
                 pass
+        if not isinstance(meta, dict):
+            meta = {}
         kwargs = {
             "cost": row["cost_usd"],
             "equiv": equiv,
@@ -35784,11 +35898,22 @@ def runs_costs(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             "neuralwatt_cost": neuralwatt_cost,
         }
         _cost_bucket_add(totals_window, **kwargs)
+        _equivalent_coverage_add(totals_window, meta=meta, fact=equiv_fact)
         if int(row["ended_at"]) >= today_start:
             _cost_bucket_add(totals_today, **kwargs)
+            _equivalent_coverage_add(totals_today, meta=meta, fact=equiv_fact)
         profile = (row["profile"] or "").strip() or "(ohne profil)"
         bucket = profiles.setdefault(profile, _empty_cost_bucket())
         _cost_bucket_add(bucket, **kwargs)
+        _equivalent_coverage_add(bucket, meta=meta, fact=equiv_fact)
+
+    _finalize_cost_coverage(totals_today)
+    _finalize_equivalent_coverage(totals_today)
+    _finalize_cost_coverage(totals_window)
+    _finalize_equivalent_coverage(totals_window)
+    for bucket in profiles.values():
+        _finalize_cost_coverage(bucket)
+        _finalize_equivalent_coverage(bucket)
 
     def _burn(b: dict) -> float:
         return b["actual_cost_usd"] or 0.0
@@ -35838,7 +35963,20 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
     buckets: dict[str, dict[str, Any]] = {}
     for offset in range(days - 1, -1, -1):
         day = time.strftime("%Y-%m-%d", time.localtime(now - offset * 86400))
-        buckets[day] = {"day": day, **_empty_cost_bucket()}
+        buckets[day] = {
+            "day": day,
+            **_empty_cost_bucket(),
+            "cached_tokens": None,
+            "total_tokens": None,
+            "token_known_runs": 0,
+            "token_total_runs": 0,
+            "token_coverage": None,
+            "token_state": "empty",
+            "equivalent_cost_known_runs": 0,
+            "equivalent_cost_total_runs": 0,
+            "equivalent_cost_coverage": None,
+            "equivalent_cost_state": "not_applicable",
+        }
 
     for row in rows:
         ended_at = int(row["ended_at"] or row["started_at"] or 0)
@@ -35847,11 +35985,16 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             continue
         bucket = buckets[day]
         meta = _run_meta_dict(row["metadata"])
-        equiv, _confidence = _run_cost_equivalent_from_facts(
+        equiv_fact = _run_cost_equivalent_fact_from_facts(
             meta,
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
         )
+        equiv = equiv_fact["value"]
+        if _is_equivalent_cost_candidate(meta):
+            bucket["equivalent_cost_total_runs"] += 1
+            if equiv_fact["state"] == "complete":
+                bucket["equivalent_cost_known_runs"] += 1
         neuralwatt_kwh = _numeric_metadata_value(meta, "energy", "energy_kwh")
         neuralwatt_cost = _numeric_metadata_value(meta, "cost", "request_cost_usd")
         _cost_bucket_add(
@@ -35864,18 +36007,94 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             neuralwatt_kwh=neuralwatt_kwh,
             neuralwatt_cost=neuralwatt_cost,
         )
-        cached = (
-            _numeric_metadata_value(meta, "cached_tokens")
-            or _numeric_metadata_value(meta, "usage", "cached_tokens")
-            or _numeric_metadata_value(meta, "usage", "cache_read")
-            or 0
+        cache_read, cache_write, cache_aggregate = _cache_token_facts(meta)
+        bucket["token_total_runs"] += 1
+
+        cache_complete = False
+        cache_input_semantics_complete = True
+        additional_cache_tokens = 0.0
+        cached_floor: float | None = None
+        if cache_aggregate is not None:
+            cached_floor = cache_aggregate
+            # A positive aggregate alias does not say whether task_runs.input_tokens
+            # already contains it. Keep the run partial and never double-count it.
+            cache_complete = cache_aggregate == 0
+        elif cache_read is not None or cache_write is not None:
+            cached_floor = (cache_read or 0.0) + (cache_write or 0.0)
+            cache_complete = cache_read is not None and cache_write is not None
+            additional_cache_tokens = cache_read or 0.0
+            if cache_write:
+                raw_usage_input = _numeric_metadata_value(
+                    meta, "usage", "input_tokens"
+                )
+                persisted_input = row["input_tokens"]
+                if raw_usage_input is None or persisted_input is None:
+                    cache_input_semantics_complete = False
+                elif float(persisted_input) == raw_usage_input + cache_write:
+                    # Claude CLI persists new-input + cache-creation in the
+                    # input_tokens column. The write bucket is already counted.
+                    pass
+                elif float(persisted_input) == raw_usage_input:
+                    # Producers that persist only new input need cache creation
+                    # added once.
+                    additional_cache_tokens += cache_write
+                else:
+                    cache_input_semantics_complete = False
+
+        if (
+            row["input_tokens"] is not None
+            and row["output_tokens"] is not None
+            and cache_complete
+            and cache_input_semantics_complete
+        ):
+            bucket["token_known_runs"] += 1
+        if cached_floor is not None:
+            bucket["cached_tokens"] = int(
+                (bucket.get("cached_tokens") or 0) + cached_floor
+            )
+        if (
+            row["input_tokens"] is not None
+            or row["output_tokens"] is not None
+            or additional_cache_tokens > 0
+        ):
+            row_token_floor = (
+                int(row["input_tokens"] or 0)
+                + int(row["output_tokens"] or 0)
+                + int(additional_cache_tokens)
+            )
+            bucket["total_tokens"] = int(
+                (bucket.get("total_tokens") or 0) + row_token_floor
+            )
+
+    for bucket in buckets.values():
+        _finalize_cost_coverage(bucket)
+        total_runs = int(bucket["token_total_runs"])
+        known_runs = int(bucket["token_known_runs"])
+        if total_runs == 0:
+            bucket["cached_tokens"] = 0
+            bucket["total_tokens"] = 0
+            continue
+        bucket["token_coverage"] = known_runs / total_runs
+        bucket["token_state"] = (
+            "complete"
+            if known_runs == total_runs
+            else ("partial" if bucket["total_tokens"] is not None else "unknown")
         )
-        bucket["cached_tokens"] = int((bucket.get("cached_tokens") or 0) + cached)
-        bucket["total_tokens"] = int(
-            (bucket.get("input_tokens") or 0)
-            + (bucket.get("output_tokens") or 0)
-            + (bucket.get("cached_tokens") or 0)
-        )
+        equivalent_total = int(bucket["equivalent_cost_total_runs"])
+        equivalent_known = int(bucket["equivalent_cost_known_runs"])
+        if equivalent_total:
+            bucket["equivalent_cost_coverage"] = (
+                equivalent_known / equivalent_total
+            )
+            bucket["equivalent_cost_state"] = (
+                "complete"
+                if equivalent_known == equivalent_total
+                else (
+                    "partial"
+                    if bucket.get("api_equivalent_usd") is not None
+                    else "unknown"
+                )
+            )
 
     return {
         "days": days,
@@ -35883,8 +36102,10 @@ def runs_costs_series(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         "series": [buckets[day] for day in sorted(buckets)],
         "field_sources": {
             "runs": "task_runs.ended_at rows per local calendar day",
-            "tokens": "task_runs.input_tokens/output_tokens/cached_tokens plus metadata fallbacks",
+            "tokens": "task_runs.input_tokens/output_tokens per run plus cache read and cache creation only when input semantics prove it is not already persisted; partial sums are lower bounds",
+            "token_coverage": "token_known_runs / token_total_runs; known requires input, output, both cache buckets, and unambiguous cache-write persistence",
             "api_equivalent_usd": "current pricing over task_runs raw usage facts",
+            "equivalent_cost_coverage": "equivalent_cost_known_runs / equivalent_cost_total_runs over subscription candidates",
         },
     }
 
@@ -40003,11 +40224,11 @@ def batch_task_costs(
     rows_by_task: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         rows_by_task.setdefault(str(row["task_id"]), []).append(row)
-    equivalents_by_row = {
-        id(row): value
-        for row, value in zip(
+    equivalent_facts_by_row = {
+        id(row): fact
+        for row, fact in zip(
             rows,
-            _equivalent_cost_values_from_rows(rows),
+            _equivalent_cost_facts_from_rows(rows),
             strict=True,
         )
     }
@@ -40015,7 +40236,7 @@ def batch_task_costs(
     for task_id, task_rows in rows_by_task.items():
         equivalent = _cost_equivalent_rollup(
             task_rows,
-            values=[equivalents_by_row[id(row)] for row in task_rows],
+            facts=[equivalent_facts_by_row[id(row)] for row in task_rows],
         )
         c_usd = sum(float(row["cost_usd"] or 0.0) for row in task_rows)
         estimated_runs = sum(1 for row in task_rows if row["cost_status"] == "estimated")
@@ -40111,9 +40332,11 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
 
     ``cost_usd_equivalent`` is derived at read time from subscription-run facts
     (which carry ``cost_usd=0``) and the current canonical price table.
-    ``cost_effective_usd`` is ``cost_usd + cost_usd_equivalent`` — the
-    real-or-estimated burn. NULL ``cost_usd`` rows are treated as 0 in sums.
-    NULL ``input_tokens`` / ``output_tokens`` rows are also coalesced to 0.
+    ``cost_effective_usd`` is the observed lower-bound sum of ``cost_usd`` and
+    ``cost_usd_equivalent``. NULL ``cost_usd`` rows stay unknown; each lane and
+    the totals expose known/total/coverage/state fields so a numeric mixed sum
+    cannot be mistaken for exact. NULL token rows remain coalesced to 0 for the
+    legacy token totals and are qualified by their separate token coverage.
     ``actual_cost_usd`` is metered API cost plus NeuralWatt request billing
     from numeric ``metadata.cost.request_cost_usd``. kWh is an energy detail;
     this aggregate never reconstructs NeuralWatt USD from energy.
@@ -40136,53 +40359,127 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
         # Pre-K5a DB without cost_usd / token columns — return empty breakdown.
         rows = []
 
-    equivalent_values = _equivalent_cost_values_from_rows(rows)
-    equivalents_by_row = {
-        id(row): value
-        for row, value in zip(rows, equivalent_values, strict=True)
+    equivalent_facts = _equivalent_cost_facts_from_rows(rows)
+    equivalent_facts_by_row = {
+        id(row): fact
+        for row, fact in zip(rows, equivalent_facts, strict=True)
     }
     rows_by_lane: dict[Optional[str], list[sqlite3.Row]] = {}
     for row in rows:
         rows_by_lane.setdefault(row["profile"], []).append(row)
     by_lane = []
     for profile, lane_rows in rows_by_lane.items():
-        cost = sum(float(row["cost_usd"] or 0.0) for row in lane_rows)
+        cost_known_runs = sum(1 for row in lane_rows if row["cost_usd"] is not None)
+        cost_total_runs = len(lane_rows)
+        cost = (
+            sum(float(row["cost_usd"]) for row in lane_rows if row["cost_usd"] is not None)
+            if cost_known_runs
+            else None
+        )
+        cost_coverage = (
+            cost_known_runs / cost_total_runs if cost_total_runs else None
+        )
+        cost_state = (
+            "empty"
+            if cost_total_runs == 0
+            else (
+                "complete"
+                if cost_known_runs == cost_total_runs
+                else ("partial" if cost_known_runs else "unknown")
+            )
+        )
         equivalent = _cost_equivalent_rollup(
             lane_rows,
-            values=[equivalents_by_row[id(row)] for row in lane_rows],
+            facts=[equivalent_facts_by_row[id(row)] for row in lane_rows],
         )
         equiv = equivalent["cost_usd_equivalent"]
         nw_kwh = sum(_metadata_number(_run_meta_dict(row["metadata"]), "energy", "energy_kwh") for row in lane_rows)
         nw_cost = sum(_metadata_number(_run_meta_dict(row["metadata"]), "cost", "request_cost_usd") for row in lane_rows)
+        actual_cost = (
+            round((cost or 0.0) + nw_cost, 6)
+            if cost_known_runs or nw_cost
+            else None
+        )
+        token_known_runs = sum(
+            1
+            for row in lane_rows
+            if _base_token_sum_is_exact(
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                meta=_run_meta_dict(row["metadata"]),
+            )
+        )
         by_lane.append({
             "profile": profile,
             "input_tokens": sum(int(row["input_tokens"] or 0) for row in lane_rows),
             "output_tokens": sum(int(row["output_tokens"] or 0) for row in lane_rows),
             "cost_usd": cost,
+            "cost_usd_known_runs": cost_known_runs,
+            "cost_usd_total_runs": cost_total_runs,
+            "cost_usd_coverage": cost_coverage,
+            "cost_usd_state": cost_state,
             "cost_usd_equivalent": equiv,
             "cost_usd_equivalent_confidence": equivalent["confidence"],
             "cost_usd_equivalent_coverage": equivalent["coverage"],
-            "cost_effective_usd": None if equiv is None else cost + equiv,
-            "actual_cost_usd": round(cost + nw_cost, 6),
+            "cost_usd_equivalent_candidate_runs": equivalent["candidate_runs"],
+            "cost_usd_equivalent_known_runs": equivalent["known_runs"],
+            "cost_usd_equivalent_state": equivalent["state"],
+            "cost_effective_usd": (
+                None if cost is None and equiv is None else (cost or 0.0) + (equiv or 0.0)
+            ),
+            "actual_cost_usd": actual_cost,
             "api_equivalent_usd": equiv,
             "billing_neuralwatt_kwh": round(nw_kwh, 6),
             "billing_neuralwatt_cost_usd": round(nw_cost, 6),
             "run_count": len(lane_rows),
+            "token_known_runs": token_known_runs,
+            "token_total_runs": len(lane_rows),
+            "token_coverage": (
+                token_known_runs / len(lane_rows) if lane_rows else None
+            ),
         })
 
     # Sort descending by cost_effective_usd so subscription lanes (cost_usd=0
     # but positive equivalent) rank ahead of zero-cost API runs.
-    by_lane.sort(key=lambda lane: -(lane["cost_effective_usd"] or lane["cost_usd"]))
+    by_lane.sort(
+        key=lambda lane: -(lane["cost_effective_usd"] or lane["cost_usd"] or 0.0)
+    )
 
+    total_cost_known_runs = sum(l["cost_usd_known_runs"] for l in by_lane)
+    total_cost_runs = sum(l["cost_usd_total_runs"] for l in by_lane)
+    total_cost = (
+        sum(float(l["cost_usd"] or 0.0) for l in by_lane)
+        if total_cost_known_runs
+        else None
+    )
+    total_actual_cost = (
+        round(sum(float(l["actual_cost_usd"] or 0.0) for l in by_lane), 6)
+        if any(l["actual_cost_usd"] is not None for l in by_lane)
+        else None
+    )
     totals: dict[str, Any] = {
         "input_tokens": sum(l["input_tokens"] for l in by_lane),
         "output_tokens": sum(l["output_tokens"] for l in by_lane),
-        "cost_usd": sum(l["cost_usd"] for l in by_lane),
+        "cost_usd": total_cost,
+        "cost_usd_known_runs": total_cost_known_runs,
+        "cost_usd_total_runs": total_cost_runs,
+        "cost_usd_coverage": (
+            total_cost_known_runs / total_cost_runs if total_cost_runs else None
+        ),
+        "cost_usd_state": (
+            "empty"
+            if total_cost_runs == 0
+            else (
+                "complete"
+                if total_cost_known_runs == total_cost_runs
+                else ("partial" if total_cost_known_runs else "unknown")
+            )
+        ),
         "cost_usd_equivalent": None,
         "cost_usd_equivalent_confidence": "unknown",
         "cost_usd_equivalent_coverage": 0.0,
         "cost_effective_usd": None,
-        "actual_cost_usd": round(sum(l["actual_cost_usd"] for l in by_lane), 6),
+        "actual_cost_usd": total_actual_cost,
         "api_equivalent_usd": None,
         "billing_neuralwatt_kwh": round(
             sum(l["billing_neuralwatt_kwh"] for l in by_lane), 6
@@ -40191,14 +40488,27 @@ def chain_cost_breakdown(conn: sqlite3.Connection, root_id: str) -> dict:
             sum(l["billing_neuralwatt_cost_usd"] for l in by_lane), 6
         ),
         "run_count": sum(l["run_count"] for l in by_lane),
+        "token_known_runs": sum(l["token_known_runs"] for l in by_lane),
+        "token_total_runs": sum(l["token_total_runs"] for l in by_lane),
+        "token_coverage": None,
     }
-    total_equivalent = _cost_equivalent_rollup(rows, values=equivalent_values)
+    if totals["token_total_runs"]:
+        totals["token_coverage"] = (
+            totals["token_known_runs"] / totals["token_total_runs"]
+        )
+    total_equivalent = _cost_equivalent_rollup(rows, facts=equivalent_facts)
     totals["cost_usd_equivalent"] = total_equivalent["cost_usd_equivalent"]
     totals["api_equivalent_usd"] = total_equivalent["cost_usd_equivalent"]
     totals["cost_usd_equivalent_confidence"] = total_equivalent["confidence"]
     totals["cost_usd_equivalent_coverage"] = total_equivalent["coverage"]
-    if total_equivalent["cost_usd_equivalent"] is not None:
-        totals["cost_effective_usd"] = totals["cost_usd"] + total_equivalent["cost_usd_equivalent"]
+    totals["cost_usd_equivalent_candidate_runs"] = total_equivalent["candidate_runs"]
+    totals["cost_usd_equivalent_known_runs"] = total_equivalent["known_runs"]
+    totals["cost_usd_equivalent_state"] = total_equivalent["state"]
+    if total_cost is not None or total_equivalent["cost_usd_equivalent"] is not None:
+        totals["cost_effective_usd"] = (
+            (total_cost or 0.0)
+            + (total_equivalent["cost_usd_equivalent"] or 0.0)
+        )
 
     return {
         "schema": "kanban-chain-costs-v1",
@@ -40319,43 +40629,76 @@ def _cost_equivalent_rollup(
     rows: Iterable[Mapping[str, Any]],
     *,
     values: Optional[Sequence[Optional[float]]] = None,
+    facts: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Derive an all-or-unknown equivalent total from raw run facts.
-
-    A partial total would silently understate cost.  Preserve that distinction by
-    returning ``None`` plus ``unknown`` whenever any equivalent-cost candidate
-    cannot be priced, while still exposing the fraction covered by the canonical
-    pricing feed. Metered and synthetic completion rows are not candidates: they
-    carry real cost or lifecycle evidence, not a subscription equivalent.
-    """
+    """Derive an equivalent total with explicit complete/partial state."""
     row_list = list(rows)
-    if values is None:
-        value_list = _equivalent_cost_values_from_rows(row_list)
+    if facts is not None and values is not None:
+        raise ValueError("pass equivalent values or facts, not both")
+    if facts is not None:
+        fact_list = [dict(fact) for fact in facts]
+    elif values is None:
+        fact_list = _equivalent_cost_facts_from_rows(row_list)
     else:
         value_list = list(values)
         if len(value_list) != len(row_list):
             raise ValueError("equivalent values must align with rows")
+        fact_list = [
+            {
+                "value": value,
+                "confidence": "derived" if value is not None else "unknown",
+                "state": "complete" if value is not None else "unknown",
+            }
+            for value in value_list
+        ]
+    if len(fact_list) != len(row_list):
+        raise ValueError("equivalent facts must align with rows")
     known_total = 0.0
     known_runs = 0
+    numeric_runs = 0
+    partial_runs = 0
     total_runs = 0
-    for row, value in zip(row_list, value_list, strict=True):
+    for row, fact in zip(row_list, fact_list, strict=True):
         meta = _run_meta_dict(row["metadata"])
         if not _is_equivalent_cost_candidate(meta):
             continue
         total_runs += 1
+        value = fact.get("value")
         if value is not None:
+            numeric_runs += 1
+            known_total += float(value)
+        if fact.get("state") == "complete":
             known_runs += 1
-            known_total += value
+        elif fact.get("state") == "partial":
+            partial_runs += 1
     if total_runs == 0:
         return {
             "cost_usd_equivalent": None,
             "confidence": "unknown",
             "coverage": 0.0,
+            "candidate_runs": 0,
+            "known_runs": 0,
+            "state": "not_applicable",
         }
     coverage = known_runs / total_runs if total_runs else 0.0
     if known_runs != total_runs:
-        return {"cost_usd_equivalent": None, "confidence": "unknown", "coverage": coverage}
-    return {"cost_usd_equivalent": round(known_total, 6), "confidence": "derived", "coverage": coverage}
+        has_partial = numeric_runs > 0 or partial_runs > 0
+        return {
+            "cost_usd_equivalent": round(known_total, 6) if numeric_runs else None,
+            "confidence": "lower_bound" if numeric_runs else "unknown",
+            "coverage": coverage,
+            "candidate_runs": total_runs,
+            "known_runs": known_runs,
+            "state": "partial" if has_partial else "unknown",
+        }
+    return {
+        "cost_usd_equivalent": round(known_total, 6),
+        "confidence": "derived",
+        "coverage": coverage,
+        "candidate_runs": total_runs,
+        "known_runs": known_runs,
+        "state": "complete",
+    }
 
 
 def _is_equivalent_cost_candidate(meta: Mapping[str, Any]) -> bool:
@@ -40371,45 +40714,259 @@ def _is_equivalent_cost_candidate(meta: Mapping[str, Any]) -> bool:
 def _equivalent_cost_values_from_rows(
     rows: Iterable[Mapping[str, Any]],
 ) -> list[Optional[float]]:
-    """Derive aligned values with one transient route-resolution pass."""
+    """Compatibility value view over the stateful pricing facts."""
+    return [
+        fact["value"] for fact in _equivalent_cost_facts_from_rows(rows)
+    ]
+
+
+def _metadata_int_fact(
+    container: Mapping[str, Any],
+    keys: Sequence[str],
+) -> tuple[Optional[int], bool]:
+    for key in keys:
+        if key in container:
+            return _coerce_int(container.get(key)), True
+    return None, False
+
+
+def _equivalent_cost_pricing_inputs(
+    meta: Mapping[str, Any],
+    *,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> dict[str, Any]:
+    """Resolve one non-double-counting pricing fact set and its completeness."""
+
+    provider = (
+        meta.get("cost_equivalent_provider")
+        or provider
+        or meta.get("provider")
+        or meta.get("billing_provider")
+        or meta.get("api_provider")
+    )
+    model = (
+        meta.get("cost_equivalent_model")
+        or model
+        or meta.get("model")
+        or meta.get("billing_model")
+        or meta.get("api_model")
+    )
+    equivalent_keys = (
+        "cost_equivalent_input_tokens",
+        "cost_equivalent_output_tokens",
+        "cost_equivalent_cache_read_tokens",
+        "cost_equivalent_cache_write_tokens",
+    )
+    equivalent_set = any(key in meta for key in equivalent_keys)
+    usage_obj = meta.get("usage")
+    usage = usage_obj if isinstance(usage_obj, Mapping) else {}
+    usage_keys = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_read_tokens",
+        "cache_creation_input_tokens",
+        "cache_write_tokens",
+    )
+    usage_set = any(key in usage for key in usage_keys)
+
+    if equivalent_set:
+        priced_input, input_present = _metadata_int_fact(
+            meta, ("cost_equivalent_input_tokens",)
+        )
+        priced_output, output_present = _metadata_int_fact(
+            meta, ("cost_equivalent_output_tokens",)
+        )
+        cache_read, read_present = _metadata_int_fact(
+            meta, ("cost_equivalent_cache_read_tokens",)
+        )
+        cache_write, write_present = _metadata_int_fact(
+            meta, ("cost_equivalent_cache_write_tokens",)
+        )
+        # Keep an incomplete audited set coherent for exactness, while still
+        # using row columns as a conservative lower-bound amount.
+        if priced_input is None:
+            priced_input = _coerce_int(input_tokens)
+        if priced_output is None:
+            priced_output = _coerce_int(output_tokens)
+        complete = (
+            input_present
+            and output_present
+            and read_present
+            and write_present
+            and priced_input is not None
+            and priced_output is not None
+            and cache_read is not None
+            and cache_write is not None
+        )
+        source = "cost_equivalent"
+    elif usage_set:
+        priced_input, input_present = _metadata_int_fact(
+            usage, ("input_tokens",)
+        )
+        priced_output, _output_present = _metadata_int_fact(
+            usage, ("output_tokens",)
+        )
+        cache_read, read_present = _metadata_int_fact(
+            usage, ("cache_read_input_tokens", "cache_read_tokens")
+        )
+        cache_write, write_present = _metadata_int_fact(
+            usage, ("cache_creation_input_tokens", "cache_write_tokens")
+        )
+        raw_usage_input = priced_input
+        if priced_input is None:
+            priced_input = _coerce_int(input_tokens)
+        if priced_output is None:
+            priced_output = _coerce_int(output_tokens)
+        # Claude persists input+cache-creation in task_runs.input_tokens. Only
+        # a raw usage input proves that cache creation can be priced separately.
+        if raw_usage_input is None and cache_write:
+            cache_write = None
+        complete = (
+            input_present
+            and read_present
+            and write_present
+            and raw_usage_input is not None
+            and priced_output is not None
+            and cache_read is not None
+            and cache_write is not None
+        )
+        source = "usage"
+    else:
+        priced_input = _coerce_int(input_tokens)
+        if priced_input is None:
+            priced_input = _coerce_int(meta.get("input_tokens"))
+        priced_output = _coerce_int(output_tokens)
+        if priced_output is None:
+            priced_output = _coerce_int(meta.get("output_tokens"))
+        cache_read, read_present = _metadata_int_fact(
+            meta, ("cache_read_tokens",)
+        )
+        cache_write, write_present = _metadata_int_fact(
+            meta, ("cache_write_tokens",)
+        )
+        cache_aggregate, aggregate_present = _metadata_int_fact(
+            meta, ("cached_tokens",)
+        )
+        if aggregate_present and cache_aggregate == 0:
+            cache_read = 0
+            cache_write = 0
+            read_present = True
+            write_present = True
+        elif cache_write:
+            # Positive legacy write facts do not prove whether persisted input
+            # already contains them. Exclude the write from the lower bound.
+            cache_write = None
+        complete = (
+            priced_input is not None
+            and priced_output is not None
+            and read_present
+            and write_present
+            and cache_read is not None
+            and cache_write is not None
+        )
+        source = "legacy"
+
+    observed = any(
+        value is not None
+        for value in (priced_input, priced_output, cache_read, cache_write)
+    )
+    return {
+        "provider": provider,
+        "model": model,
+        "input_tokens": priced_input,
+        "output_tokens": priced_output,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "complete": complete,
+        "observed": observed,
+        "source": source,
+    }
+
+
+def _equivalent_cost_facts_from_rows(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Derive aligned amount+state facts with one route-resolution pass."""
     row_list = list(rows)
     candidate_indexes: list[int] = []
-    facts: list[dict[str, Any]] = []
+    pricing_inputs: list[dict[str, Any]] = []
     for index, row in enumerate(row_list):
         meta = _run_meta_dict(row["metadata"])
         if not _is_equivalent_cost_candidate(meta):
             continue
-        provider = (
-            meta.get("cost_equivalent_provider")
-            or meta.get("provider")
-            or meta.get("billing_provider")
-            or meta.get("api_provider")
-        )
-        model = (
-            meta.get("cost_equivalent_model")
-            or meta.get("model")
-            or meta.get("billing_model")
-            or meta.get("api_model")
-        )
         candidate_indexes.append(index)
-        facts.append(
-            {
-                "provider": provider,
-                "model": model,
-                "input_tokens": row["input_tokens"],
-                "output_tokens": row["output_tokens"],
-                "cache_read_tokens": meta.get("cache_read_tokens"),
-                "cache_write_tokens": meta.get("cache_write_tokens"),
-            }
+        pricing_inputs.append(
+            _equivalent_cost_pricing_inputs(
+                meta,
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+            )
         )
-    values: list[Optional[float]] = [None] * len(row_list)
-    for index, value in zip(
-        candidate_indexes,
-        estimate_equivalent_cost_amounts(facts),
-        strict=True,
+    facts: list[dict[str, Any]] = [
+        {"value": None, "confidence": "unknown", "state": "not_applicable"}
+        for _ in row_list
+    ]
+    priced_values = estimate_equivalent_cost_amounts(pricing_inputs)
+    fallback_positions = [
+        position
+        for position, (pricing, value) in enumerate(
+            zip(pricing_inputs, priced_values, strict=True)
+        )
+        if value is None
+        and pricing["observed"]
+        and (pricing["cache_read_tokens"] or pricing["cache_write_tokens"])
+    ]
+    fallback_values = estimate_equivalent_cost_amounts([
+        {
+            **pricing_inputs[position],
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+        for position in fallback_positions
+    ])
+    fallback_by_position = dict(
+        zip(fallback_positions, fallback_values, strict=True)
+    )
+    for position, (index, pricing, value) in enumerate(
+        zip(candidate_indexes, pricing_inputs, priced_values, strict=True)
     ):
-        values[index] = value
-    return values
+        full_price = value is not None
+        if value is None:
+            value = fallback_by_position.get(position)
+        if (
+            value is None
+            and pricing["complete"]
+            and pricing["observed"]
+            and not any(
+                pricing[key]
+                for key in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_write_tokens",
+                )
+            )
+        ):
+            value = 0.0
+            full_price = True
+        if value is None or not pricing["observed"]:
+            facts[index] = {
+                "value": None,
+                "confidence": "unknown",
+                "state": "unknown",
+            }
+        else:
+            complete = bool(pricing["complete"] and full_price)
+            facts[index] = {
+                "value": max(0.0, float(value)),
+                "confidence": "derived" if complete else "lower_bound",
+                "state": "complete" if complete else "partial",
+            }
+    return facts
 
 
 def _run_cost_equivalent_from_facts(
@@ -40425,33 +40982,79 @@ def _run_cost_equivalent_from_facts(
     ``cost_usd_equivalent`` deliberately is *not* consulted.  A missing pricing
     entry is represented as ``(None, "unknown")`` rather than a misleading $0.
     """
+    fact = _run_cost_equivalent_fact_from_facts(
+        meta,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        provider=provider,
+        model=model,
+    )
+    return fact["value"], fact["confidence"]
+
+
+def _run_cost_equivalent_fact_from_facts(
+    meta: Mapping[str, Any],
+    *,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+) -> dict[str, Any]:
     if not _is_equivalent_cost_candidate(meta):
-        return None, "unknown"
-    provider = provider or (
-        meta.get("cost_equivalent_provider")
-        or meta.get("provider")
-        or meta.get("billing_provider")
-        or meta.get("api_provider")
+        return {"value": None, "confidence": "unknown", "state": "not_applicable"}
+    pricing = _equivalent_cost_pricing_inputs(
+        meta,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        provider=provider,
+        model=model,
     )
-    model = model or (
-        meta.get("cost_equivalent_model")
-        or meta.get("model")
-        or meta.get("billing_model")
-        or meta.get("api_model")
-    )
-    raw_input = input_tokens if input_tokens is not None else meta.get("input_tokens")
-    raw_output = output_tokens if output_tokens is not None else meta.get("output_tokens")
     value = estimate_equivalent_cost_amount(
-        str(model) if model else None,
-        provider=str(provider) if provider else None,
-        input_tokens=_coerce_int(raw_input),
-        output_tokens=_coerce_int(raw_output),
-        cache_read_tokens=_coerce_int(meta.get("cache_read_tokens")),
-        cache_write_tokens=_coerce_int(meta.get("cache_write_tokens")),
+        str(pricing["model"]) if pricing["model"] else None,
+        provider=str(pricing["provider"]) if pricing["provider"] else None,
+        input_tokens=pricing["input_tokens"],
+        output_tokens=pricing["output_tokens"],
+        cache_read_tokens=pricing["cache_read_tokens"],
+        cache_write_tokens=pricing["cache_write_tokens"],
     )
-    if value is None:
-        return None, "unknown"
-    return max(0.0, float(value)), "derived"
+    full_price = value is not None
+    if (
+        value is None
+        and pricing["observed"]
+        and (pricing["cache_read_tokens"] or pricing["cache_write_tokens"])
+    ):
+        value = estimate_equivalent_cost_amount(
+            str(pricing["model"]) if pricing["model"] else None,
+            provider=str(pricing["provider"]) if pricing["provider"] else None,
+            input_tokens=pricing["input_tokens"],
+            output_tokens=pricing["output_tokens"],
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+        )
+    if (
+        value is None
+        and pricing["complete"]
+        and pricing["observed"]
+        and not any(
+            pricing[key]
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            )
+        )
+    ):
+        value = 0.0
+        full_price = True
+    if value is None or not pricing["observed"]:
+        return {"value": None, "confidence": "unknown", "state": "unknown"}
+    complete = bool(pricing["complete"] and full_price)
+    return {
+        "value": max(0.0, float(value)),
+        "confidence": "derived" if complete else "lower_bound",
+        "state": "complete" if complete else "partial",
+    }
 
 
 def runs_windowed_rollup(
@@ -40508,6 +41111,8 @@ def runs_windowed_rollup(
         cost: Optional[float] = None
         equiv: Optional[float] = None
         unknown_run_count = 0
+        cost_known_run_count = 0
+        total_run_count = 0
         worker_costs: dict[Optional[str], dict[str, Any]] = {}
         providers: set[str] = set()
         billing_modes: set[str] = set()
@@ -40528,6 +41133,7 @@ def runs_windowed_rollup(
             except sqlite3.OperationalError:
                 run_rows = []
             for run in run_rows:
+                total_run_count += 1
                 meta = _run_meta_dict(run["metadata"])
                 fallback_provider, fallback_model = cached_lane_provider_model(
                     run["profile"]
@@ -40563,13 +41169,16 @@ def runs_windowed_rollup(
                     run_cost = _coerce_float(meta.get("actual_cost_usd"))
                 if run_cost is not None:
                     cost = (cost or 0.0) + run_cost
-                run_equiv, run_equiv_confidence = _run_cost_equivalent_from_facts(
+                    cost_known_run_count += 1
+                run_equiv_fact = _run_cost_equivalent_fact_from_facts(
                     meta,
                     input_tokens=run["input_tokens"],
                     output_tokens=run["output_tokens"],
                     provider=provider,
                     model=model,
                 )
+                run_equiv = run_equiv_fact["value"]
+                run_equiv_confidence = run_equiv_fact["confidence"]
                 if run_equiv is not None:
                     equiv = (equiv or 0.0) + run_equiv
                 worker_stats = worker_costs.setdefault(
@@ -40579,12 +41188,16 @@ def runs_windowed_rollup(
                         "cost_usd_equivalent": None,
                         "unknown_run_count": 0,
                         "evidence_count": 0,
+                        "cost_known_run_count": 0,
+                        "run_count": 0,
                     },
                 )
+                worker_stats["run_count"] += 1
                 if run_cost is not None:
                     worker_stats["cost_usd"] = (
                         worker_stats["cost_usd"] or 0.0
                     ) + run_cost
+                    worker_stats["cost_known_run_count"] += 1
                 if run_equiv is not None:
                     worker_stats["cost_usd_equivalent"] = (
                         worker_stats["cost_usd_equivalent"] or 0.0
@@ -40619,9 +41232,13 @@ def runs_windowed_rollup(
                     "input_tokens": run["input_tokens"],
                     "output_tokens": run["output_tokens"],
                     "cost_usd": run_cost,
+                    "cost_usd_coverage": 1.0 if run_cost is not None else 0.0,
                     "cost_usd_equivalent": run_equiv,
                     "cost_usd_equivalent_confidence": run_equiv_confidence,
-                    "cost_usd_equivalent_coverage": 1.0 if run_equiv is not None else 0.0,
+                    "cost_usd_equivalent_coverage": (
+                        1.0 if run_equiv_fact["state"] == "complete" else 0.0
+                    ),
+                    "cost_usd_equivalent_state": run_equiv_fact["state"],
                     "cost_effective_usd": (
                         (run_cost or 0.0) + (run_equiv or 0.0)
                         if run_cost is not None or run_equiv is not None
@@ -40654,8 +41271,20 @@ def runs_windowed_rollup(
             stats = worker_costs.get(worker.get("profile"))
             if stats is not None:
                 worker["unknown_run_count"] = stats["unknown_run_count"]
+                worker["cost_usd"] = stats["cost_usd"]
+                worker["cost_usd_known_runs"] = stats["cost_known_run_count"]
+                worker["cost_usd_total_runs"] = stats["run_count"]
+                worker["cost_usd_coverage"] = (
+                    stats["cost_known_run_count"] / stats["run_count"]
+                    if stats["run_count"]
+                    else None
+                )
             else:
                 worker["unknown_run_count"] = 0
+                worker["cost_usd"] = None
+                worker["cost_usd_known_runs"] = 0
+                worker["cost_usd_total_runs"] = 0
+                worker["cost_usd_coverage"] = None
             worker["neuralwatt"] = _neuralwatt_detail(
                 kwh=worker.get("billing_neuralwatt_kwh"),
                 cost=worker.get("billing_neuralwatt_cost_usd"),
@@ -40689,8 +41318,19 @@ def runs_windowed_rollup(
             "cost_usd_equivalent_coverage": totals.get(
                 "cost_usd_equivalent_coverage", 0.0
             ),
+            "cost_usd_equivalent_applicable": bool(
+                totals.get("cost_usd_equivalent_candidate_runs", 0)
+            ),
+            "cost_usd_equivalent_state": totals.get(
+                "cost_usd_equivalent_state", "not_applicable"
+            ),
             "cost_effective_usd": cost_effective,
             "unknown_run_count": unknown_run_count,
+            "cost_usd_known_runs": cost_known_run_count,
+            "cost_usd_total_runs": total_run_count,
+            "cost_usd_coverage": (
+                cost_known_run_count / total_run_count if total_run_count else None
+            ),
             "billing_mode": (
                 next(iter(billing_modes))
                 if len(billing_modes) == 1
@@ -40722,10 +41362,63 @@ def runs_windowed_rollup(
         ),
         reverse=True,
     )
+    visible_roots = roots[:max_roots]
+    known_real_roots = sum(
+        1
+        for root in roots
+        if root["cost_usd"] is not None and root["cost_usd_coverage"] == 1.0
+    )
+    known_equiv_roots = sum(
+        1
+        for root in roots
+        if root["cost_usd_equivalent_applicable"]
+        and root["cost_usd_equivalent"] is not None
+        and root["cost_usd_equivalent_coverage"] == 1.0
+    )
+    applicable_equiv_roots = sum(
+        1 for root in roots if root["cost_usd_equivalent_applicable"]
+    )
+    partial_equiv_roots = sum(
+        1
+        for root in roots
+        if root["cost_usd_equivalent_applicable"]
+        and root["cost_usd_equivalent_state"] == "partial"
+    )
     return {
         "schema": "kanban-windowed-rollup-v1",
         "since_hours": since_hours,
         "now": now,
         "completed_roots": len(roots),
-        "roots": roots[:max_roots],
+        "returned_roots": len(visible_roots),
+        "truncated": len(visible_roots) < len(roots),
+        "totals": {
+            "root_count": len(roots),
+            "cost_usd": round(
+                sum(float(root["cost_usd"] or 0.0) for root in roots), 6
+            ),
+            "cost_usd_equivalent": round(
+                sum(float(root["cost_usd_equivalent"] or 0.0) for root in roots),
+                6,
+            ),
+            "cost_usd_known_roots": known_real_roots,
+            "cost_usd_equivalent_known_roots": known_equiv_roots,
+            "cost_usd_equivalent_applicable_roots": applicable_equiv_roots,
+            "cost_usd_equivalent_state": (
+                "not_applicable"
+                if applicable_equiv_roots == 0
+                else (
+                    "complete"
+                    if known_equiv_roots == applicable_equiv_roots
+                    else (
+                        "partial"
+                        if known_equiv_roots or partial_equiv_roots
+                        else "unknown"
+                    )
+                )
+            ),
+            "unknown_run_count": sum(
+                int(root["unknown_run_count"] or 0) for root in roots
+            ),
+        },
+        "roots": visible_roots,
     }

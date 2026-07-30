@@ -110,6 +110,47 @@ describe("PlanSpecTransitionPanel", () => {
     expect(screen.getByText("Lane research ist nicht auflösbar")).toBeTruthy();
     expect(screen.getByText("Live-Test-Tiefe wurde auf smoke normalisiert")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Als gehaltene Kette übergeben" }) as HTMLButtonElement).disabled).toBe(true);
+    // Ein toter Knopf ohne Begründung liest sich wie ein kaputter Klick — der
+    // gesperrte Zustand muss sich selbst erklären.
+    expect(screen.getByText(/Übergabe gesperrt · 1 Blocker/)).toBeTruthy();
+  });
+
+  it("nennt eine nicht auflösbare Lane als Sperrgrund, wenn kein Blocker gelistet ist", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(preview({
+      can_ingest: false,
+      lanes_resolvable: false,
+      blocking_findings: [],
+      warnings: [],
+    })));
+    render(
+      <PlanSpecTransitionPanel
+        item={item()}
+        boardSlug="default"
+        readOnly={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Übergabe prüfen" }));
+    expect(await screen.findByText(/mindestens eine Lane ist nicht auflösbar/)).toBeTruthy();
+  });
+
+  it("Kontrollprobe: eine übergabefähige Vorschau zeigt keinen Sperrgrund", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(preview()))
+      .mockResolvedValueOnce(detailWithSubtasks([]));
+    render(
+      <PlanSpecTransitionPanel
+        item={item()}
+        boardSlug="default"
+        readOnly={false}
+        onChanged={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Übergabe prüfen" }));
+    expect((await screen.findByRole("button", { name: "Als gehaltene Kette übergeben" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/Übergabe gesperrt/)).toBeNull();
   });
 
   it("pins ingest to the previewed source digest", async () => {

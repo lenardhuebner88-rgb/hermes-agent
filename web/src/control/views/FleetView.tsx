@@ -295,6 +295,17 @@ export function FleetView() {
   // Offene PlanSpecs die auf Operator-Freigabe oder Kettenstart warten
   const planRecords = planspecs.data?.planspecs ?? [];
   const allPlanspecs = planRecords.filter((item) => item.open);
+  // Das geöffnete Detail wird beim Klick als Momentaufnahme abgelegt. Nach
+  // einer Mutation (Übergabe/Freigabe) lädt `onChanged` die Liste neu — die
+  // Momentaufnahme blieb dabei stehen, sodass eine erfolgreich übergebene
+  // Kette im offenen Detail weiter „bereit, Übergabe vorprüfen" zeigte: keine
+  // sichtbare Änderung trotz erfolgter Mutation. Der Datensatz wird deshalb
+  // aus der Liste nachgezogen; die Momentaufnahme bleibt nur Rückfallebene
+  // (Deep-Link vor dem ersten Laden, Quelle nicht mehr in der Liste).
+  const activePlanspecItem = useMemo(() => {
+    if (!planspecDrawerItem) return null;
+    return planRecords.find((record) => record.path === planspecDrawerItem.path) ?? planspecDrawerItem;
+  }, [planRecords, planspecDrawerItem]);
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps)).length;
   // Geparkte Release-Gates (post-merge, wartet auf Operator-Ausführung) — einziges
   // Zuhause ist Fleet → Risiko, aus dem /control-Postfach verschoben.
@@ -351,6 +362,21 @@ export function FleetView() {
     setPlanspecDrawerItem(null);
   }
 
+  /**
+   * Subtab-Wechsel schließt ein offenes Detail.
+   *
+   * Ohne das blieb ein offenes Detail über dem neu gewählten Tab stehen: der
+   * Wechsel war vollzogen (aria-pressed korrekt), sichtbar war aber weiter das
+   * Detail des alten Tabs. Auf Desktop (TwoPane) belegte die rechte Spalte
+   * dauerhaft ein fremdes PlanSpec-Detail, unter lg lag der modale Drawer
+   * komplett darüber.
+   */
+  function selectSubtab(next: FleetSubtab) {
+    closeNodeDetail();
+    closePlanSpecDetail();
+    setSubtab(next);
+  }
+
   function openPlanSpecDetail(item: PlanSpecRecord) {
     closeNodeDetail();
     setPlanspecDrawerItem(item);
@@ -371,10 +397,10 @@ export function FleetView() {
     setSearchParams(next, { replace: true });
   }
 
-  const planAction = planspecDrawerItem ? (
+  const planAction = activePlanspecItem ? (
     <PlanSpecTransitionPanel
-      key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}
-      item={planspecDrawerItem}
+      key={`${selectedBoard ?? "current"}:${activePlanspecItem.path}`}
+      item={activePlanspecItem}
       boardSlug={selectedBoard}
       readOnly={selectedBoard != null}
       onChanged={() => selectedBoard ? selectedPlanspecs.reload() : planspecs.reload()}
@@ -404,11 +430,11 @@ export function FleetView() {
             />
           </div>
         )
-      : planspecDrawerItem
+      : activePlanspecItem
         ? (
-            <div id="fleet-detail-pane" key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}>
+            <div id="fleet-detail-pane" key={`${selectedBoard ?? "current"}:${activePlanspecItem.path}`}>
               <PlanSpecDetailContent
-                item={planspecDrawerItem}
+                item={activePlanspecItem}
                 detail={planspecDetail.data}
                 loading={planspecDetail.loading}
                 error={planspecDetail.error}
@@ -459,7 +485,7 @@ export function FleetView() {
         <SubtabChips
           items={subtabDefs}
           active={subtab}
-          onSelect={setSubtab}
+          onSelect={selectSubtab}
           ariaLabelPrefix="Subtab"
           className="py-2.5 fleet-subtabs"
           classes={{ chip: "fleet-chip", chipActive: "fleet-chip-on", warnDot: "fleet-warn-dot" }}
@@ -507,10 +533,10 @@ export function FleetView() {
         />
       ) : null}
 
-      {!isLg && planspecDrawerItem ? (
+      {!isLg && activePlanspecItem ? (
         <PlanSpecDetailDrawer
-          key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}
-          item={planspecDrawerItem}
+          key={`${selectedBoard ?? "current"}:${activePlanspecItem.path}`}
+          item={activePlanspecItem}
           detail={planspecDetail.data}
           loading={planspecDetail.loading}
           error={planspecDetail.error}

@@ -258,6 +258,82 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(screen.getAllByText("noch nicht gestartet").length).toBeGreaterThan(0);
   });
 
+  it("marks a partial chain-cost rollup as a lower bound", async () => {
+    fetchJSONMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/chain-graph")) return Promise.resolve(CHAIN_GRAPH_PAYLOAD);
+      if (u.includes("/chain-costs")) {
+        return Promise.resolve({
+          schema: "kanban-chain-costs-v1",
+          root_id: ROOT_ID,
+          totals: {
+            input_tokens: 100,
+            output_tokens: 20,
+            cost_usd: 0,
+            actual_cost_usd: 0,
+            run_count: 2,
+            cost_usd_equivalent: 0.1,
+            api_equivalent_usd: 0.1,
+            cost_effective_usd: 0.1,
+            billing_neuralwatt_kwh: 0,
+            billing_neuralwatt_cost_usd: 0,
+            cost_usd_equivalent_candidate_runs: 2,
+            cost_usd_equivalent_known_runs: 1,
+            cost_usd_equivalent_state: "partial",
+          },
+          by_lane: [],
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    expect(await screen.findByText("≥$0.10 gesch.")).toBeTruthy();
+  });
+
+  it("marks a zero equivalent floor partial when candidate coverage is incomplete", async () => {
+    fetchJSONMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/chain-graph")) return Promise.resolve(CHAIN_GRAPH_PAYLOAD);
+      if (u.includes("/chain-costs")) {
+        return Promise.resolve({
+          schema: "kanban-chain-costs-v1",
+          root_id: ROOT_ID,
+          totals: {
+            input_tokens: 100,
+            output_tokens: 20,
+            cost_usd: 0.2,
+            actual_cost_usd: 0.2,
+            run_count: 2,
+            cost_usd_known_runs: 2,
+            cost_usd_total_runs: 2,
+            cost_usd_coverage: 1,
+            cost_usd_state: "complete",
+            cost_usd_equivalent: 0,
+            api_equivalent_usd: 0,
+            cost_effective_usd: 0.2,
+            billing_neuralwatt_kwh: 0,
+            billing_neuralwatt_cost_usd: 0,
+            cost_usd_equivalent_candidate_runs: 1,
+            cost_usd_equivalent_known_runs: 0,
+            cost_usd_equivalent_state: "partial",
+          },
+          by_lane: [],
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    expect(await screen.findByText("≥$0.20")).toBeTruthy();
+  });
+
   it("renders a scheduled approval hold as gehalten and not läuft", async () => {
     const holdChild: BoardTask = { ...ACTIVE_TASK, status: "scheduled", started_at: null };
     const holdBoard: BoardResponse = {

@@ -51,14 +51,6 @@ def classify_plan_record(record: dict[str, Any]) -> tuple[str, str, str]:
         return "blocked", "Die übergebene Kette ist blockiert.", "open_task"
     if kanban_state == "running":
         return "running", "Die übergebene Kette wird ausgeführt.", "open_task"
-    if root_id:
-        if (
-            kanban_state == "queued"
-            and _status_slug(record.get("kanban_root_status")) == "scheduled"
-            and str(record.get("freigabe") or "").strip().lower() == "operator"
-        ):
-            return "held", "Die Kette wartet auf Operator-Freigabe.", "release"
-        return "handed_off", "Der Plan wurde als Kette ans Board übergeben.", "open_task"
     # A CLOSED PlanSpec is a TERMINAL state -- never a blocker and never a draft.
     #
     # The ingest precheck answers "may I hand this to the board?", and for a
@@ -76,11 +68,28 @@ def classify_plan_record(record: dict[str, Any]) -> tuple[str, str, str]:
     # ``open is False`` -- NOT ``not open``: a record that simply does not carry
     # the field (other callers, fixtures) must stay in the normal flow rather
     # than be silently declared closed.
+    #
+    # This check sits ABOVE the ``root_id`` branch on purpose. ``kanban_root_task_id``
+    # falls back to the PlanSpec *frontmatter* (see hermes_cli.planspecs.list_planspecs),
+    # so a shipped plan keeps a root stamp long after its chain is gone. Measured
+    # 2026-07-30: all four "Im Board" entries in the live register were closed specs
+    # whose stamped root was ``done`` or absent from every board, while
+    # ``kanban_state`` read ``not_ingested``. A stamp is provenance, not a live state.
+    # Live chain states (archived/completed/blocked/running) are decided above and
+    # still outrank a closed source.
     if record.get("open") is False or closed_reason:
         closed_slug = f"{closed_reason} {record_status}"
         if any(mark in closed_slug for mark in ("obsolete", "superseded", "not-needed")):
             return "archived", "Die PlanSpec wurde als nicht mehr nötig geschlossen.", "none"
         return "completed", "Die PlanSpec ist abgeschlossen.", "open_result"
+    if root_id:
+        if (
+            kanban_state == "queued"
+            and _status_slug(record.get("kanban_root_status")) == "scheduled"
+            and str(record.get("freigabe") or "").strip().lower() == "operator"
+        ):
+            return "held", "Die Kette wartet auf Operator-Freigabe.", "release"
+        return "handed_off", "Der Plan wurde als Kette ans Board übergeben.", "open_task"
     if not valid:
         reason = findings[0] if findings else "Der Plan ist noch nicht bindend."
         return "draft", reason, "edit"
@@ -168,6 +177,31 @@ def _list_field(value: Any) -> list[str]:
     return []
 
 
+def _criteria_field(value: Any) -> list[str]:
+    """Normalise one authored ``acceptance_criteria`` list to display strings.
+
+    Canon ``planspec-taskgraph.md`` puts acceptance criteria per subtask; the
+    plan-level list is the fallback that threads down via ``applies_to``. Both
+    forms occur in the real Vault as plain strings and as mappings, so the
+    display projection accepts either instead of dropping the mapping form.
+    """
+
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            text = str(item.get("statement") or item.get("text") or "").strip()
+            marker = str(item.get("id") or "").strip()
+            if text:
+                out.append(f"{marker}: {text}" if marker else text)
+            continue
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
 def build_binding_detail(spec: Any) -> dict[str, Any]:
     """Project the authored contract and executable step details."""
 
@@ -231,6 +265,7 @@ def build_readable_plan_detail(path: str | Path, *, planspecs: Any) -> dict[str,
         return {
             "goal": resolved.stem,
             "acceptance_criteria": [],
+            "acceptance_criteria_total": 0,
             "anti_scope": [],
             "evidence_required": [],
             "freigabe": "",
@@ -299,9 +334,7 @@ def build_readable_plan_detail(path: str | Path, *, planspecs: Any) -> dict[str,
                 "instructions": str(raw.get("instructions") or ""),
                 "kind": str(raw.get("kind") or "") or None,
                 "max_iterations": raw.get("max_iterations"),
-                "acceptance_criteria": list(raw.get("acceptance_criteria") or [])
-                if isinstance(raw.get("acceptance_criteria"), list)
-                else [],
+                "acceptance_criteria": _criteria_field(raw.get("acceptance_criteria")),
             }
         )
 
@@ -317,6 +350,12 @@ def build_readable_plan_detail(path: str | Path, *, planspecs: Any) -> dict[str,
     return {
         "goal": str(frontmatter.get("goal") or topic),
         "acceptance_criteria": acceptance_criteria,
+        # Plan-level AC is the FALLBACK, not the norm: Canon puts criteria per
+        # subtask. Reporting only the plan-level count made the two live open
+        # plans -- 23 authored criteria (12+11) and 5 -- render as
+        # "Keine Kriterien im Plan" (measured 2026-07-30).
+        "acceptance_criteria_total": len(acceptance_criteria)
+        + sum(len(item["acceptance_criteria"]) for item in subtasks),
         "anti_scope": _list_field(frontmatter.get("anti_scope")),
         "evidence_required": _list_field(frontmatter.get("evidence_required")),
         "freigabe": freigabe,
