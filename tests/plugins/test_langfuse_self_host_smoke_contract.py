@@ -310,6 +310,56 @@ def test_control_surface_cli_returns_structured_exit_three_for_default_client_fa
     assert "secret-network-reason" not in json.dumps(report)
 
 
+def test_dashboard_auth_accepts_canonical_login_response(monkeypatch) -> None:
+    from scripts import smoke_health_status_auth as auth_smoke
+
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit.build_opener",
+        lambda *_handlers: object(),
+    )
+    monkeypatch.setattr(auth_smoke, "_read_password", lambda *_args, **_kwargs: "secret")
+    monkeypatch.setattr(
+        auth_smoke,
+        "_json_request",
+        lambda *_args, **_kwargs: {"ok": True, "next": "/"},
+    )
+    monkeypatch.setattr(auth_smoke, "_text_request", lambda *_args, **_kwargs: "")
+
+    probe = _authenticated_dashboard_request(
+        "http://127.0.0.1:9119",
+        provider="basic",
+        username="operator",
+        password_env="HERMES_DASHBOARD_PASSWORD",
+        no_prompt=True,
+    )
+
+    assert callable(probe)
+
+
+def test_dashboard_auth_rejects_login_response_without_ok(monkeypatch) -> None:
+    from scripts import smoke_health_status_auth as auth_smoke
+
+    monkeypatch.setattr(
+        "scripts.langfuse_worker_audit.build_opener",
+        lambda *_handlers: object(),
+    )
+    monkeypatch.setattr(auth_smoke, "_read_password", lambda *_args, **_kwargs: "secret")
+    monkeypatch.setattr(
+        auth_smoke,
+        "_json_request",
+        lambda *_args, **_kwargs: {"authenticated": True},
+    )
+
+    with pytest.raises(ValueError, match="dashboard_authentication_failed"):
+        _authenticated_dashboard_request(
+            "http://127.0.0.1:9119",
+            provider="basic",
+            username="operator",
+            password_env="HERMES_DASHBOARD_PASSWORD",
+            no_prompt=True,
+        )
+
+
 def test_dashboard_auth_rejects_non_loopback_before_any_request(monkeypatch) -> None:
     opener_called = False
 
@@ -355,7 +405,7 @@ def test_dashboard_auth_installs_cross_origin_credential_redirect_guard(
     monkeypatch.setattr(
         auth_smoke,
         "_json_request",
-        lambda *_args, **_kwargs: {"authenticated": True},
+        lambda *_args, **_kwargs: {"ok": True, "next": "/"},
     )
     monkeypatch.setattr(auth_smoke, "_text_request", lambda *_args, **_kwargs: "")
 

@@ -496,7 +496,7 @@ def _authenticated_dashboard_request(
             },
             timeout=timeout,
         )
-        if not login.get("authenticated"):
+        if login.get("ok") is not True:
             raise ValueError("dashboard_authentication_failed")
         control_html = auth_smoke._text_request(
             opener,
