@@ -45,16 +45,23 @@ export const ChainCostsResponseSchema = z.object({
   totals: z.object({
     input_tokens: z.coerce.number().catch(0),
     output_tokens: z.coerce.number().catch(0),
-    cost_usd: z.coerce.number().catch(0),
-    actual_cost_usd: z.coerce.number().catch(0),
+    cost_usd: nullableNumber,
+    actual_cost_usd: nullableNumber,
     run_count: z.coerce.number().catch(0),
     // Geschätzter API-Gegenwert für Abo-Runs (additiv; ältere Payloads liefern 0).
-    cost_usd_equivalent: z.coerce.number().catch(0),
-    api_equivalent_usd: z.coerce.number().catch(0),
-    cost_effective_usd: z.coerce.number().catch(0),
+    cost_usd_equivalent: nullableNumber,
+    api_equivalent_usd: nullableNumber,
+    cost_effective_usd: nullableNumber,
     billing_neuralwatt_kwh: z.coerce.number().catch(0),
     billing_neuralwatt_cost_usd: z.coerce.number().catch(0),
-  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: 0, actual_cost_usd: 0, run_count: 0, cost_usd_equivalent: 0, api_equivalent_usd: 0, cost_effective_usd: 0, billing_neuralwatt_kwh: 0, billing_neuralwatt_cost_usd: 0 }),
+    cost_usd_known_runs: z.coerce.number().catch(0).optional(),
+    cost_usd_total_runs: z.coerce.number().catch(0).optional(),
+    cost_usd_coverage: nullableNumber.optional(),
+    cost_usd_state: z.enum(["empty", "complete", "partial", "unknown"]).catch("unknown").optional(),
+    cost_usd_equivalent_candidate_runs: z.coerce.number().catch(0).optional(),
+    cost_usd_equivalent_known_runs: z.coerce.number().catch(0).optional(),
+    cost_usd_equivalent_state: z.enum(["not_applicable", "complete", "partial", "unknown"]).catch("unknown").optional(),
+  }).catch({ input_tokens: 0, output_tokens: 0, cost_usd: null, actual_cost_usd: null, run_count: 0, cost_usd_equivalent: null, api_equivalent_usd: null, cost_effective_usd: null, billing_neuralwatt_kwh: 0, billing_neuralwatt_cost_usd: 0 }),
   // absteigend nach cost_usd (Backend-Garantie)
   by_lane: z.array(ChainCostsLaneSchema).catch([]),
 });
@@ -77,6 +84,14 @@ const CostBucketSchema = z.object({
   output_tokens: nullableNumber,
   cached_tokens: nullableNumber.optional(),
   total_tokens: nullableNumber.optional(),
+  equivalent_cost_known_runs: z.coerce.number().catch(0).optional(),
+  equivalent_cost_total_runs: z.coerce.number().catch(0).optional(),
+  equivalent_cost_coverage: nullableNumber.optional(),
+  equivalent_cost_state: z.enum(["not_applicable", "complete", "partial", "unknown"]).catch("unknown").optional(),
+  cost_usd_known_runs: z.coerce.number().catch(0).optional(),
+  cost_usd_total_runs: z.coerce.number().catch(0).optional(),
+  cost_usd_coverage: nullableNumber.optional(),
+  cost_usd_state: z.enum(["empty", "complete", "partial", "unknown"]).catch("unknown").optional(),
 });
 const CostProfileRowSchema = CostBucketSchema.extend({
   profile: z.string().catch("unbekannt"),
@@ -116,6 +131,14 @@ export const RunsCostsResponseSchema = z.object({
 });
 export const RunsCostsSeriesPointSchema = CostBucketSchema.extend({
   day: z.string().catch(""),
+  token_known_runs: z.coerce.number().catch(0).optional(),
+  token_total_runs: z.coerce.number().catch(0).optional(),
+  token_coverage: nullableNumber.optional(),
+  token_state: z.enum(["empty", "complete", "partial", "unknown"]).catch("unknown").optional(),
+  equivalent_cost_known_runs: z.coerce.number().catch(0).optional(),
+  equivalent_cost_total_runs: z.coerce.number().catch(0).optional(),
+  equivalent_cost_coverage: nullableNumber.optional(),
+  equivalent_cost_state: z.enum(["not_applicable", "complete", "partial", "unknown"]).catch("unknown").optional(),
 });
 export const RunsCostsSeriesResponseSchema = z.object({
   days: z.coerce.number().catch(7),

@@ -144,6 +144,22 @@ export function workerTokens(worker: WindowedRollupWorker): number {
   return worker.input_tokens + worker.output_tokens;
 }
 
+export interface WorkerTokenDisplay {
+  tokens: number | null;
+  partial: boolean;
+}
+
+export function workerTokenDisplay(worker: WindowedRollupWorker): WorkerTokenDisplay {
+  const tokens = workerTokens(worker);
+  const known = worker.token_known_runs;
+  const total = worker.token_total_runs;
+  const partial = total == null || known == null || known !== total;
+  if (tokens === 0 && partial && (total == null || total > 0)) {
+    return { tokens: null, partial: true };
+  }
+  return { tokens, partial };
+}
+
 export function rootRuns(root: WindowedRollupRoot): number {
   return root.workers.reduce((sum, worker) => sum + worker.run_count, 0);
 }
@@ -397,6 +413,7 @@ export interface LaneBurn {
   tokens: number;
   /** ≈ API-Wert (echte $ + Subscription-Äquivalent); null wenn ungestampt. */
   costEquivalent: number | null;
+  costPartial: boolean;
   /** Tatsächliche Kosten inkl. kWh-basierter Neuralwatt-Abrechnung. */
   actualCostUsd: number | null;
   neuralwattKwh: number | null;
@@ -406,6 +423,39 @@ export interface LaneBurn {
    *  "gesch."-Schätzwert-Marker via formatEffectiveCost ab. */
   costUsd: number | null;
   runs: number;
+}
+
+export interface ProfileCostFact {
+  effectiveUsd: number | null;
+  partial: boolean;
+}
+
+export function profileCostFact(p: CostProfileRow): ProfileCostFact {
+  const hasRealFact = p.cost_usd != null;
+  const equivalentUsd = p.api_equivalent_usd ?? p.cost_usd_equivalent;
+  const hasEquivalentFact = equivalentUsd != null;
+  const realPartial = p.runs > 0
+    && (
+      p.cost_usd_total_runs == null
+      || p.cost_usd_known_runs == null
+      || p.cost_usd_state !== "complete"
+      || p.cost_usd_known_runs !== p.cost_usd_total_runs
+    );
+  const equivalentApplicable = (p.equivalent_cost_total_runs ?? 0) > 0
+    || hasEquivalentFact;
+  const equivalentPartial = equivalentApplicable
+    && (
+      p.equivalent_cost_total_runs == null
+      || p.equivalent_cost_known_runs == null
+      || p.equivalent_cost_state !== "complete"
+      || p.equivalent_cost_known_runs !== p.equivalent_cost_total_runs
+    );
+  return {
+    effectiveUsd: hasRealFact || hasEquivalentFact
+      ? (p.cost_usd ?? 0) + (equivalentUsd ?? 0)
+      : null,
+    partial: realPartial || equivalentPartial,
+  };
 }
 
 export interface SubscriptionBurnFlag {
@@ -437,7 +487,7 @@ export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
   return rosterProfiles(profiles)
     .map((p) => {
       const tokens = (p.input_tokens ?? 0) + (p.output_tokens ?? 0);
-      const cost = (p.cost_usd ?? 0) + (p.cost_usd_equivalent ?? 0);
+      const cost = profileCostFact(p);
       const actualCost = p.actual_cost_usd ?? p.cost_usd ?? null;
       const neuralwattKwh = p.billing_neuralwatt_kwh ?? null;
       const neuralwattCostUsd = p.billing_neuralwatt_cost_usd ?? null;
@@ -445,7 +495,8 @@ export function laneBurn(profiles: CostProfileRow[], limit = 5): LaneBurn[] {
         profile: p.profile,
         label: profileLabel[p.profile] ?? p.profile,
         tokens,
-        costEquivalent: cost > 0 ? cost : null,
+        costEquivalent: cost.effectiveUsd,
+        costPartial: cost.partial,
         actualCostUsd: actualCost,
         neuralwattKwh,
         neuralwattCostUsd,

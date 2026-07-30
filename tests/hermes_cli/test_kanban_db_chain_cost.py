@@ -129,12 +129,7 @@ def test_chain_cost_breakdown_aggregates_by_lane(kanban_home):
 
 
 def test_chain_cost_breakdown_null_cost_robust(kanban_home):
-    """chain_cost_breakdown handles NULL cost_usd rows without crashing.
-
-    Runs without cost data (pre-K5a / unattributed) produce cost_usd=0.0 in
-    the aggregate totals — the presence of a NULL-cost run is indicated only by
-    a non-zero run_count with zero cost, not a crash.
-    """
+    """NULL-only real cost remains unknown and carries an explicit denominator."""
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="null-cost-root", assignee="orchestrator",
                               triage=True)
@@ -163,16 +158,58 @@ def test_chain_cost_breakdown_null_cost_robust(kanban_home):
     assert result["totals"]["run_count"] == 1
     assert result["totals"]["input_tokens"] == 400
     assert result["totals"]["output_tokens"] == 80
-    # A NULL-only cost SUM is normalised to 0.0 via COALESCE — the NULL-cost run
-    # shows up as a non-zero run_count with zero cost, never None and never a crash.
-    assert result["totals"]["cost_usd"] == 0.0
+    assert result["totals"]["cost_usd"] is None
+    assert result["totals"]["cost_usd_known_runs"] == 0
+    assert result["totals"]["cost_usd_total_runs"] == 1
+    assert result["totals"]["cost_usd_coverage"] == 0.0
+    assert result["totals"]["cost_usd_state"] == "unknown"
     assert len(result["by_lane"]) == 1
-    assert result["by_lane"][0]["cost_usd"] == 0.0
+    assert result["by_lane"][0]["cost_usd"] is None
+    assert result["by_lane"][0]["cost_usd_state"] == "unknown"
     assert result["by_lane"][0]["run_count"] == 1
 
 
+def test_chain_cost_breakdown_mixed_real_cost_is_lower_bound(kanban_home):
+    """A known real-cost row plus a NULL row is numeric but explicitly partial."""
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="mixed-cost-root", assignee="orchestrator")
+        with kb.write_txn(conn):
+            _insert_run_cost(
+                conn,
+                root,
+                profile="coder",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=0.2,
+            )
+            _insert_run_cost(
+                conn,
+                root,
+                profile="coder",
+                input_tokens=50,
+                output_tokens=10,
+                cost_usd=None,
+            )
+
+    with kb.connect_closing() as conn:
+        result = kb.chain_cost_breakdown(conn, root)
+
+    totals = result["totals"]
+    assert totals["cost_usd"] == pytest.approx(0.2)
+    assert totals["actual_cost_usd"] == pytest.approx(0.2)
+    assert totals["cost_effective_usd"] == pytest.approx(0.2)
+    assert totals["cost_usd_known_runs"] == 1
+    assert totals["cost_usd_total_runs"] == 2
+    assert totals["cost_usd_coverage"] == pytest.approx(0.5)
+    assert totals["cost_usd_state"] == "partial"
+    lane = result["by_lane"][0]
+    assert lane["cost_usd_known_runs"] == 1
+    assert lane["cost_usd_total_runs"] == 2
+    assert lane["cost_usd_state"] == "partial"
+
+
 def test_chain_cost_breakdown_empty_chain(kanban_home):
-    """chain_cost_breakdown for a root with no runs returns zeroed totals."""
+    """An empty chain reports no cost fact and an empty denominator."""
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="empty-chain", assignee="orchestrator")
 
@@ -183,7 +220,9 @@ def test_chain_cost_breakdown_empty_chain(kanban_home):
     assert result["totals"]["run_count"] == 0
     assert result["totals"]["input_tokens"] == 0
     assert result["totals"]["output_tokens"] == 0
-    assert result["totals"]["cost_usd"] == 0.0
+    assert result["totals"]["cost_usd"] is None
+    assert result["totals"]["cost_usd_coverage"] is None
+    assert result["totals"]["cost_usd_state"] == "empty"
     assert result["by_lane"] == []
 
 
@@ -249,13 +288,13 @@ def test_chain_cost_breakdown_subscription_run_cost_usd_equivalent(kanban_home):
     assert lane["cost_usd_equivalent"] is None
     assert lane["cost_usd_equivalent_confidence"] == "unknown"
     assert lane["cost_usd_equivalent_coverage"] == 0.0
-    assert lane["cost_effective_usd"] is None
+    assert lane["cost_effective_usd"] == pytest.approx(0.0)
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.0)
     assert totals["cost_usd_equivalent"] is None
     assert totals["cost_usd_equivalent_confidence"] == "unknown"
-    assert totals["cost_effective_usd"] is None
+    assert totals["cost_effective_usd"] == pytest.approx(0.0)
 
 
 def test_runs_windowed_rollup_caches_lane_lookup_per_profile(kanban_home, monkeypatch):
@@ -502,12 +541,12 @@ def test_chain_cost_breakdown_real_cost_no_equivalent(kanban_home):
     assert lane["cost_usd"] == pytest.approx(0.03)
     assert lane["cost_usd_equivalent"] is None
     assert lane["cost_usd_equivalent_confidence"] == "unknown"
-    assert lane["cost_effective_usd"] is None
+    assert lane["cost_effective_usd"] == pytest.approx(0.03)
 
     totals = result["totals"]
     assert totals["cost_usd"] == pytest.approx(0.03)
     assert totals["cost_usd_equivalent"] is None
-    assert totals["cost_effective_usd"] is None
+    assert totals["cost_effective_usd"] == pytest.approx(0.03)
 
 
 def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
@@ -563,7 +602,7 @@ def test_chain_cost_breakdown_sort_by_cost_effective(kanban_home, monkeypatch):
     # stored legacy field and therefore ranks above the smaller metered lane.
     assert by_lane[0]["profile"] == "claude-cli"
     assert by_lane[0]["cost_usd_equivalent"] == pytest.approx(1.00)
-    assert by_lane[0]["cost_usd_equivalent_confidence"] == "derived"
+    assert by_lane[0]["cost_usd_equivalent_confidence"] == "lower_bound"
 
 
 def test_recompute_ready_uses_tripped_event_limit_without_dispatcher_config(kanban_home):
@@ -641,7 +680,7 @@ def test_s1_claude_included_session_priced_without_task_run_cache_columns(
         meta, input_tokens=row["input_tokens"], output_tokens=row["output_tokens"],
     )
     assert equivalent == pytest.approx(9.125)
-    assert confidence == "derived"
+    assert confidence == "lower_bound"
     assert meta["model"] == "claude-opus-4-8"
     assert meta["billing_mode"] == "subscription_included"
     assert meta["subscription"] == "claude"

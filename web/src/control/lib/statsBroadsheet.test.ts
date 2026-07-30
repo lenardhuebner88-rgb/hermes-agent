@@ -491,6 +491,7 @@ describe("laneBurn", () => {
     ]);
     expect(lane.costEquivalent).toBeCloseTo(1.5, 5);
     expect(lane.costUsd).toBe(0);
+    expect(lane.costPartial).toBe(true);
     const eff = formatEffectiveCost({
       cost_usd: lane.costUsd ?? 0,
       cost_effective_usd: lane.costEquivalent ?? 0,
@@ -498,6 +499,98 @@ describe("laneBurn", () => {
     });
     expect(eff.estimated).toBe(true);
     expect(eff.text).toContain("gesch.");
+  });
+
+  it("marks API-equivalent cost exact only with complete candidate coverage", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder-claude",
+        input_tokens: 200,
+        output_tokens: 100,
+        runs: 1,
+        cost_usd: 0,
+        cost_usd_known_runs: 1,
+        cost_usd_total_runs: 1,
+        cost_usd_coverage: 1,
+        cost_usd_state: "complete",
+        cost_usd_equivalent: 1.5,
+        equivalent_cost_known_runs: 1,
+        equivalent_cost_total_runs: 1,
+        equivalent_cost_coverage: 1,
+        equivalent_cost_state: "complete",
+      }),
+    ]);
+
+    expect(lane.costPartial).toBe(false);
+  });
+
+  it("marks a mixed known/unknown real-cost sum as a lower bound", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder",
+        input_tokens: 200,
+        output_tokens: 100,
+        runs: 2,
+        cost_usd: 0.2,
+        cost_usd_known_runs: 1,
+        cost_usd_total_runs: 2,
+        cost_usd_coverage: 0.5,
+        cost_usd_state: "partial",
+        equivalent_cost_known_runs: 0,
+        equivalent_cost_total_runs: 0,
+        equivalent_cost_state: "not_applicable",
+      }),
+    ]);
+
+    expect(lane.costPartial).toBe(true);
+  });
+
+  it("marks a complete equivalent amount partial when the real component is wholly unknown", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder-claude",
+        input_tokens: 200,
+        output_tokens: 100,
+        runs: 1,
+        cost_usd: null,
+        cost_usd_known_runs: 0,
+        cost_usd_total_runs: 1,
+        cost_usd_coverage: 0,
+        cost_usd_state: "unknown",
+        cost_usd_equivalent: 1.5,
+        equivalent_cost_known_runs: 1,
+        equivalent_cost_total_runs: 1,
+        equivalent_cost_coverage: 1,
+        equivalent_cost_state: "complete",
+      }),
+    ]);
+
+    expect(lane.costEquivalent).toBeCloseTo(1.5);
+    expect(lane.costPartial).toBe(true);
+  });
+
+  it("marks a known real amount partial when the equivalent candidate is wholly unknown", () => {
+    const [lane] = laneBurn([
+      costRow({
+        profile: "coder",
+        input_tokens: 200,
+        output_tokens: 100,
+        runs: 1,
+        cost_usd: 0.2,
+        cost_usd_known_runs: 1,
+        cost_usd_total_runs: 1,
+        cost_usd_coverage: 1,
+        cost_usd_state: "complete",
+        cost_usd_equivalent: null,
+        equivalent_cost_known_runs: 0,
+        equivalent_cost_total_runs: 1,
+        equivalent_cost_coverage: 0,
+        equivalent_cost_state: "unknown",
+      }),
+    ]);
+
+    expect(lane.costEquivalent).toBeCloseTo(0.2);
+    expect(lane.costPartial).toBe(true);
   });
 
   it("feeds metered lanes into formatEffectiveCost as real (no 'gesch.')", () => {

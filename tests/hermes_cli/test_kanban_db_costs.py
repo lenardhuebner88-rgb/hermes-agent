@@ -110,6 +110,10 @@ def test_equivalent_is_derived_from_raw_facts_not_stored_metadata(monkeypatch):
             "cost_usd_equivalent": 99.0,  # legacy materialization: ignored
             "cost_equivalent_model": "model-a",
             "cost_equivalent_provider": "provider-a",
+            "cost_equivalent_input_tokens": 100,
+            "cost_equivalent_output_tokens": 50,
+            "cost_equivalent_cache_read_tokens": 0,
+            "cost_equivalent_cache_write_tokens": 0,
         },
         input_tokens=100,
         output_tokens=50,
@@ -117,6 +121,71 @@ def test_equivalent_is_derived_from_raw_facts_not_stored_metadata(monkeypatch):
 
     assert value == pytest.approx(0.123456)
     assert confidence == "derived"
+
+
+def test_equivalent_usage_cache_facts_are_priced_once(monkeypatch):
+    captured = {}
+
+    def estimate(model, **kwargs):
+        captured.update({"model": model, **kwargs})
+        return (
+            kwargs["input_tokens"]
+            + kwargs["output_tokens"]
+            + kwargs["cache_read_tokens"]
+            + kwargs["cache_write_tokens"]
+        ) / 1000
+
+    monkeypatch.setattr(kb, "estimate_equivalent_cost_amount", estimate)
+
+    fact = kb._run_cost_equivalent_fact_from_facts(
+        {
+            "billing_mode": "subscription_included",
+            "provider": "provider-a",
+            "model": "model-a",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 50,
+                "cache_creation_input_tokens": 25,
+            },
+        },
+        # Claude persists raw input + cache creation here; pricing must prefer
+        # usage.input_tokens and add cache creation exactly once.
+        input_tokens=125,
+        output_tokens=20,
+    )
+
+    assert captured["input_tokens"] == 100
+    assert captured["output_tokens"] == 20
+    assert captured["cache_read_tokens"] == 50
+    assert captured["cache_write_tokens"] == 25
+    assert fact["value"] == pytest.approx(0.195)
+    assert fact["confidence"] == "derived"
+    assert fact["state"] == "complete"
+
+
+def test_equivalent_without_cache_contract_is_a_lower_bound(monkeypatch):
+    monkeypatch.setattr(
+        kb,
+        "estimate_equivalent_cost_amount",
+        lambda _model, **_kwargs: 0.25,
+    )
+
+    fact = kb._run_cost_equivalent_fact_from_facts(
+        {
+            "billing_mode": "subscription_included",
+            "provider": "provider-a",
+            "model": "model-a",
+        },
+        input_tokens=100,
+        output_tokens=20,
+    )
+
+    assert fact == {
+        "value": pytest.approx(0.25),
+        "confidence": "lower_bound",
+        "state": "partial",
+    }
 
 
 def test_unpriceable_equivalent_is_unknown_not_zero(monkeypatch):
@@ -1809,4 +1878,3 @@ def test_connect_migrates_legacy_db_before_optional_column_indexes(tmp_path):
     assert "idx_tasks_tenant" in indexes
     assert "idx_tasks_idempotency" in indexes
     assert "idx_events_run" in indexes
-

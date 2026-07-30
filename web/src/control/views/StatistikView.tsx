@@ -45,13 +45,14 @@ import {
   laneBurn,
   leaderboard,
   nutzerwert,
+  profileCostFact,
   rootRuns,
   rosterProfiles,
   sortedLedgerRoots,
   subscriptionBurnBreakdown,
   windowCostSummary,
   workerCost,
-  workerTokens,
+  workerTokenDisplay,
   type FigureStatus,
   type LedgerEntry,
   type MotherLedgerSortKey,
@@ -668,6 +669,7 @@ export function LaneBurnSection({ costs }: { costs: CostProfileRow[] }) {
               cost_effective_usd: lane.costEquivalent ?? 0,
               tokens: lane.tokens,
             });
+            const partialPrefix = lane.costPartial && cost.text !== "—" ? "≥" : "";
             return (
               <StLeaderRow
                 key={lane.profile}
@@ -678,9 +680,9 @@ export function LaneBurnSection({ costs }: { costs: CostProfileRow[] }) {
                 meta={
                   <>
                     {cost.estimated ? (
-                      <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
+                      <span title={de.ketten.costEstimatedTooltip}>{partialPrefix}{cost.text}</span>
                     ) : (
-                      cost.text
+                      `${partialPrefix}${cost.text}`
                     )}
                     {" · "}
                     {de.stats.leaderRuns(lane.runs)}
@@ -732,6 +734,7 @@ export function EffizienzSection({
               cost_effective_usd: l.costEquivalent ?? 0,
               tokens: l.tokens,
             });
+            const partialPrefix = l.costPartial && cost.text !== "—" ? "≥" : "";
             return (
               <StLeaderRow
                 key={l.profile}
@@ -742,9 +745,9 @@ export function EffizienzSection({
                 meta={
                   <>
                     {cost.estimated ? (
-                      <span title={de.ketten.costEstimatedTooltip}>{cost.text}</span>
+                      <span title={de.ketten.costEstimatedTooltip}>{partialPrefix}{cost.text}</span>
                     ) : (
-                      cost.text
+                      `${partialPrefix}${cost.text}`
                     )}
                     {" · "}
                     {de.stats.leaderRuns(l.runs)}
@@ -833,9 +836,27 @@ function CostTrendSection({
 }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const series = costs?.series ?? [];
-  const maxTokens = Math.max(1, ...series.map((row) => row.total_tokens ?? 0));
+  const rowTokens = (row: RunsCostsSeriesResponse["series"][number]) =>
+    row.total_tokens ?? null;
+  const rowTokensPartial = (row: RunsCostsSeriesResponse["series"][number]) => {
+    if (
+      row.token_state === "empty"
+      && row.token_known_runs === 0
+      && row.token_total_runs === 0
+    ) return false;
+    return row.token_state !== "complete"
+      || row.token_total_runs == null
+      || row.token_known_runs == null
+      || row.token_known_runs !== row.token_total_runs;
+  };
+  const rowEquivalentCostPartial = (row: RunsCostsSeriesResponse["series"][number]) =>
+    row.equivalent_cost_state !== "complete"
+    || row.equivalent_cost_total_runs == null
+    || row.equivalent_cost_known_runs == null
+    || row.equivalent_cost_known_runs !== row.equivalent_cost_total_runs;
+  const maxTokens = Math.max(1, ...series.map((row) => rowTokens(row) ?? 0));
   const maxCost = Math.max(1, ...series.map((row) => row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0));
-  const hasTrend = series.some((row) => (row.runs ?? 0) > 0 || (row.total_tokens ?? 0) > 0 || (row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0) > 0);
+  const hasTrend = series.some((row) => row.runs > 0 || (rowTokens(row) ?? 0) > 0 || (row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0) > 0);
   const laneRows = burn ? subscriptionBurnBreakdown(burn, 8).topLanes : [];
   const hasDrilldown = profiles.length > 0 || laneRows.length > 0;
 
@@ -852,18 +873,29 @@ function CostTrendSection({
         <>
           <div className="st-trend" data-testid="runs-costs-series-trend">
             {series.map((row) => {
-              const tokens = row.total_tokens ?? 0;
-              const cost = row.api_equivalent_usd ?? row.cost_usd_equivalent ?? 0;
+              const tokens = rowTokens(row);
+              const tokensPartial = rowTokensPartial(row);
+              const cost = row.api_equivalent_usd ?? row.cost_usd_equivalent;
+              const costPartial = rowEquivalentCostPartial(row);
+              const costLabel = cost == null
+                ? "Kosten unbekannt"
+                : `${costPartial ? "mindestens " : ""}${usdText(cost)}`;
+              const tokenCoverage = (row.token_total_runs ?? 0) > 0
+                ? `, Coverage ${row.token_known_runs ?? 0}/${row.token_total_runs} Runs`
+                : "";
+              const costCoverage = (row.equivalent_cost_total_runs ?? 0) > 0
+                ? `, Kosten-Coverage ${row.equivalent_cost_known_runs ?? 0}/${row.equivalent_cost_total_runs} Runs`
+                : "";
               return (
                 <div key={row.day} className="st-trend-row">
                   <span className="st-mono">{row.day.slice(5)}</span>
-                  <div className="st-trend-bars" aria-label={`${row.day}: ${fmtTokens(tokens)} tokens, ${usdText(cost)}, ${row.runs ?? 0} runs`}>
-                    <span className="st-trend-token" style={{ "--st-w": `${Math.max(3, Math.round((tokens / maxTokens) * 100))}%` } as CSSProperties} />
-                    <span className="st-trend-money" style={{ "--st-w": `${Math.max(3, Math.round((cost / maxCost) * 100))}%` } as CSSProperties} />
+                  <div className="st-trend-bars" aria-label={`${row.day}: ${tokens == null ? "Tokens unbekannt" : `${tokensPartial ? "mindestens " : ""}${fmtTokens(tokens)} tokens${tokenCoverage}`}, ${costLabel}${costCoverage}, ${row.runs} runs`}>
+                    {tokens != null && tokens > 0 ? <span className="st-trend-token" style={{ "--st-w": `${Math.max(3, Math.round((tokens / maxTokens) * 100))}%` } as CSSProperties} /> : null}
+                    {cost != null && cost > 0 ? <span className="st-trend-money" style={{ "--st-w": `${Math.max(3, Math.round((cost / maxCost) * 100))}%` } as CSSProperties} /> : null}
                   </div>
-                  <span className="st-mono">{fmtTokens(tokens)}</span>
-                  <span className="st-mono">{usdText(cost)}</span>
-                  <span className="st-mono">{row.runs ?? 0}×</span>
+                  <span className="st-mono">{tokens == null ? "—" : `${tokensPartial ? "≥" : ""}${fmtTokens(tokens)}`}</span>
+                  <span className="st-mono">{cost == null ? "—" : `${costPartial ? "≥" : ""}${usdText(cost)}`}</span>
+                  <span className="st-mono">{row.runs}×</span>
                 </div>
               );
             })}
@@ -888,8 +920,12 @@ function CostTrendSection({
                 {profiles.map((row) => (
                   <div key={`${row.profile}:${row.subscription ?? "api"}`} className="st-drilldown-row">
                     <span>{profileLabel[row.profile] ?? row.profile} · {row.subscription ?? "api"}</span>
-                    <b>{fmtTokens(row.total_tokens ?? ((row.input_tokens ?? 0) + (row.output_tokens ?? 0) + (row.cached_tokens ?? 0)))}</b>
-                    <span>{usdText(row.api_equivalent_usd ?? row.cost_usd_equivalent ?? row.cost_usd)}</span>
+                    <b>{row.total_tokens != null
+                      ? fmtTokens(row.total_tokens)
+                      : row.input_tokens != null && row.output_tokens != null
+                        ? `${row.cached_tokens == null ? "≥" : ""}${fmtTokens(row.input_tokens + row.output_tokens + (row.cached_tokens ?? 0))}`
+                        : "—"}</b>
+                    <ProfileCostValue row={row} />
                   </div>
                 ))}
               </div>
@@ -909,6 +945,22 @@ function CostTrendSection({
         </DrawerShell>
       ) : null}
     </section>
+  );
+}
+
+export function ProfileCostValue({ row }: { row: CostProfileRow }) {
+  const fact = profileCostFact(row);
+  const tokens = (row.input_tokens ?? 0) + (row.output_tokens ?? 0);
+  const cost = formatEffectiveCost({
+    cost_usd: row.cost_usd ?? 0,
+    cost_effective_usd: fact.effectiveUsd ?? 0,
+    tokens,
+  });
+  const partialPrefix = fact.partial && cost.text !== "—" ? "≥" : "";
+  return (
+    <span title={cost.estimated ? de.ketten.costEstimatedTooltip : undefined}>
+      {partialPrefix}{cost.text}
+    </span>
   );
 }
 
@@ -996,7 +1048,7 @@ export function SubscriptionBurnSection({
 // ── Kosten pro Kette — Helper functions shared by MotherLedgerSection ────────
 
 function fmtUsd(value: number | null | undefined): string {
-  return value != null && value > 0 ? `$${value.toFixed(2)}` : "—";
+  return value == null ? "—" : `$${value.toFixed(2)}`;
 }
 
 function fmtRuntime(seconds: number | null | undefined): string {
@@ -1016,7 +1068,9 @@ function fmtMaybeUsd(value: number | null | undefined): string {
 
 function ledgerDetailTitle(item: {
   cost_usd?: number | null;
+  cost_usd_coverage?: number | null;
   cost_usd_equivalent?: number | null;
+  cost_usd_equivalent_coverage?: number | null;
   cost_effective_usd?: number | null;
   provider?: string | null;
   providers?: string[];
@@ -1026,9 +1080,11 @@ function ledgerDetailTitle(item: {
 }): string {
   const provider = item.provider ?? item.providers?.join(", ") ?? null;
   const model = item.model ?? null;
+  const coveredCost = (value: number | null | undefined, coverage: number | null | undefined) =>
+    value == null ? "—" : `${coverage === 1 ? "" : "≥"}${fmtMaybeUsd(value)}`;
   return [
-    `${de.stats.motherLedgerColAbo}: ${fmtMaybeUsd(item.cost_usd_equivalent)} ${de.stats.motherLedgerAboMarker}`,
-    `${de.stats.motherLedgerColReal}: ${fmtMaybeUsd(item.cost_usd)}`,
+    `${de.stats.motherLedgerColAbo}: ${coveredCost(item.cost_usd_equivalent, item.cost_usd_equivalent_coverage)} ${de.stats.motherLedgerAboMarker}`,
+    `${de.stats.motherLedgerColReal}: ${coveredCost(item.cost_usd, item.cost_usd_coverage)}`,
     `Provider/Model: ${provider ?? "—"}${model ? ` · ${model}` : ""}`,
     `billing_mode: ${item.billing_mode ?? "—"}`,
     `Laufzeit: ${fmtRuntime(item.runtime_seconds)}`,
@@ -1066,9 +1122,9 @@ export function LedgerWorkerRunners({ root, worker }: { root: WindowedRollupRoot
         <div key={runner.id} className="st-ledger-runner" title={ledgerDetailTitle(runner)}>
           <span className="st-mono">#{runner.id}</span>
           <span>{runner.provider ?? "Provider n/a"}{runner.model ? ` · ${runner.model}` : ""}</span>
-          <b className="st-mono">{fmtTokens((runner.input_tokens ?? 0) + (runner.output_tokens ?? 0))}</b>
-          <b className="st-mono st-ledger-abo">{fmtMaybeUsd(runner.cost_usd_equivalent)} <small>{de.stats.motherLedgerAboMarker}</small></b>
-          <b className="st-mono st-ledger-real">{(runner.cost_usd ?? 0) > 0 ? fmtMaybeUsd(runner.cost_usd) : "—"}</b>
+          <b className="st-mono">{runner.input_tokens == null || runner.output_tokens == null ? "—" : `≥${fmtTokens(runner.input_tokens + runner.output_tokens)}`}</b>
+          <b className="st-mono st-ledger-abo">{runner.cost_usd_equivalent == null ? "—" : `${runner.cost_usd_equivalent_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(runner.cost_usd_equivalent)}`} <small>{de.stats.motherLedgerAboMarker}</small></b>
+          <b className={cn("st-mono st-ledger-real", runner.cost_usd != null && runner.cost_usd > 0 && "is-positive")}>{runner.cost_usd == null ? "—" : `${runner.cost_usd_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(runner.cost_usd)}`}</b>
           <small>{runner.billing_mode ?? "—"} · {fmtRuntime(runner.runtime_seconds)} · {de.stats.motherLedgerNeuralwatt}</small>
         </div>
       ))}
@@ -1087,17 +1143,55 @@ export function MotherLedgerSection() {
     () => sortedLedgerRoots(rollup.data?.roots ?? [], sortKey),
     [rollup.data, sortKey],
   );
-  const windowCost = useMemo(() => windowCostSummary(roots), [roots]);
+  const totalRoots = rollup.data?.totals?.root_count
+    ?? rollup.data?.completed_roots
+    ?? roots.length;
+  const windowCost = useMemo(
+    () => rollup.data?.totals
+      ? {
+          echtUsd: rollup.data.totals.cost_usd,
+          aboUsd: rollup.data.totals.cost_usd_equivalent,
+        }
+      : windowCostSummary(roots),
+    [rollup.data, roots],
+  );
+  const knownAboRoots = rollup.data?.totals?.cost_usd_equivalent_known_roots
+    ?? roots.filter(
+      (root) =>
+        root.cost_usd_equivalent != null
+        && (root.cost_usd_equivalent_coverage ?? 0) >= 1,
+    ).length;
+  const applicableAboRoots = rollup.data?.totals?.cost_usd_equivalent_applicable_roots
+    ?? (rollup.data?.totals?.cost_usd_equivalent_state === "not_applicable" ? 0 : totalRoots);
+  const knownRealRoots = rollup.data?.totals?.cost_usd_known_roots
+    ?? roots.filter(
+      (root) =>
+        root.cost_usd != null
+        && (root.cost_usd_coverage ?? 0) >= 1,
+    ).length;
+  const windowMoney = (value: number, known: number, denominator: number) => {
+    if (denominator === 0) return "n/a";
+    if (known === 0) return "—";
+    return `${known < denominator ? "≥" : ""}${fmtUsd(value)}`;
+  };
   const topAbo = roots.reduce((top, root) => Math.max(top, chainCost(root).abo ?? 0), 0);
   const showStaleNotice = Boolean((rollup.error || rollup.isStale) && rollup.data);
   const windowLabel = windowHours === 168 ? "7T" : "24Std";
-  const ratioText = windowCost.echtUsd > 0
+  const aboComplete = knownAboRoots === applicableAboRoots;
+  const realComplete = knownRealRoots === totalRoots;
+  const costsComplete = aboComplete && realComplete;
+  const ratioText = applicableAboRoots === 0 && realComplete
+    ? `Abo-Gegenwert nicht anwendbar · Echt ${fmtUsd(windowCost.echtUsd)} (${knownRealRoots}/${totalRoots})`
+    : costsComplete && windowCost.echtUsd > 0
     ? de.stats.motherLedgerHeroRatio
         .replace("{real}", fmtUsd(windowCost.echtUsd))
         .replace("{abo}", fmtUsd(windowCost.aboUsd))
         .replace("{ratio}", Math.round(windowCost.aboUsd / windowCost.echtUsd).toLocaleString("de-DE"))
-    : de.stats.motherLedgerHeroRatioNoReal.replace("{abo}", fmtUsd(windowCost.aboUsd));
-  const metaText = `${windowLabel}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
+    : costsComplete
+      ? de.stats.motherLedgerHeroRatioNoReal.replace("{abo}", fmtUsd(windowCost.aboUsd))
+      : `Kosten-Untergrenzen · Abo ${windowMoney(windowCost.aboUsd, knownAboRoots, applicableAboRoots)} (${knownAboRoots}/${applicableAboRoots} anwendbar) · Echt ${windowMoney(windowCost.echtUsd, knownRealRoots, totalRoots)} (${knownRealRoots}/${totalRoots})`;
+  const sampleText = roots.length < totalRoots ? ` · Auswahl ${roots.length}/${totalRoots} Ketten` : "";
+  const metaText = `${windowLabel}${sampleText}${showStaleNotice ? ` · ${de.stats.motherLedgerStaleNotice}` : ""}`;
   const toggleRoot = (rootId: string) => {
     setOpenRootId((prev) => (prev === rootId ? null : rootId));
     setOpenWorkerKey(null);
@@ -1132,12 +1226,12 @@ export function MotherLedgerSection() {
           <div className="st-ledger-hero">
             <div className="st-ledger-hero-primary">
               <span>{de.stats.motherLedgerHeroAbo.replace("{window}", windowLabel)}</span>
-              <b className="st-mono">{fmtUsd(windowCost.aboUsd)} <small>{de.stats.motherLedgerAboMarker}</small></b>
+              <b className="st-mono">{windowMoney(windowCost.aboUsd, knownAboRoots, applicableAboRoots)} <small>{de.stats.motherLedgerAboMarker}</small></b>
               <small>{de.stats.motherLedgerHeroAboSub}</small>
             </div>
             <div className="st-ledger-hero-real">
               <span>{de.stats.motherLedgerHeroReal.replace("{window}", windowLabel)}</span>
-              <b className="st-mono">{fmtUsd(windowCost.echtUsd)}</b>
+              <b className="st-mono">{windowMoney(windowCost.echtUsd, knownRealRoots, totalRoots)}</b>
             </div>
           </div>
           <p className="st-note">{ratioText}</p>
@@ -1151,6 +1245,12 @@ export function MotherLedgerSection() {
             {roots.map((root) => {
               const openRoot = openRootId === root.id;
               const money = chainCost(root);
+              const aboText = money.abo == null
+                ? "—"
+                : `${root.cost_usd_equivalent_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(money.abo)}`;
+              const realText = money.echt == null
+                ? "—"
+                : `${root.cost_usd_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(money.echt)}`;
               const share = chainShare(root, topAbo);
               const providerText = root.providers.length ? root.providers.join(", ") : "—";
               return (
@@ -1161,8 +1261,8 @@ export function MotherLedgerSection() {
                       <small className="st-mono">{root.id} · {fmtRuntime(root.runtime_seconds)} · {rootRuns(root)} Runs · {providerText}</small>
                     </span>
                     <span className="st-ledger-chain-money">
-                      <span className="st-ledger-abo"><b className="st-mono">{fmtMaybeUsd(money.abo)}</b><small>{de.stats.motherLedgerAboMarker}</small></span>
-                      <span className={(money.echt ?? 0) > 0 ? "st-ledger-real is-positive" : "st-ledger-real"}>{de.stats.motherLedgerRealShort} {(money.echt ?? 0) > 0 ? fmtMaybeUsd(money.echt) : "—"}</span>
+                      <span className="st-ledger-abo"><b className="st-mono">{aboText}</b><small>{de.stats.motherLedgerAboMarker}</small></span>
+                      <span className={money.echt != null && money.echt > 0 ? "st-ledger-real is-positive" : "st-ledger-real"}>{de.stats.motherLedgerRealShort} {realText}</span>
                     </span>
                   </button>
                   <div className="st-ledger-meter" aria-hidden="true"><span style={{ width: `${Math.round(share * 100)}%` }} /></div>
@@ -1175,13 +1275,20 @@ export function MotherLedgerSection() {
                         const key = `${root.id}:${worker.profile}`;
                         const openWorker = openWorkerKey === key;
                         const cost = workerCost(worker);
+                        const tokenDisplay = workerTokenDisplay(worker);
+                        const workerRealText = cost.echt == null
+                          ? "—"
+                          : `${worker.cost_usd_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(cost.echt)}`;
+                        const workerAboText = cost.abo == null
+                          ? "—"
+                          : `${worker.cost_usd_equivalent_coverage === 1 ? "" : "≥"}${fmtMaybeUsd(cost.abo)}`;
                         return (
                           <div key={key} className="st-ledger-worker-block">
                             <button type="button" className="st-ledger-worker-row" onClick={() => toggleWorker(root.id, worker.profile)} aria-expanded={openWorker} title={ledgerDetailTitle(worker)}>
                               <span className="st-ledger-worker-label"><LaneLabel profile={worker.profile} /><small>{worker.model ?? worker.provider ?? "—"}</small></span>
-                              <span className="st-mono" data-label={de.stats.motherLedgerColTokens}>{fmtTokens(workerTokens(worker))}</span>
-                              <span className="st-mono st-ledger-abo" data-label={de.stats.motherLedgerAboMobile}>{fmtMaybeUsd(cost.abo)}</span>
-                              <span className={(cost.echt ?? 0) > 0 ? "st-mono st-ledger-real is-positive" : "st-mono st-ledger-real"} data-label={de.stats.motherLedgerRealMobile}>{(cost.echt ?? 0) > 0 ? fmtMaybeUsd(cost.echt) : "—"}</span>
+                              <span className="st-mono" data-label={de.stats.motherLedgerColTokens}>{tokenDisplay.tokens == null ? "—" : `${tokenDisplay.partial ? "≥" : ""}${fmtTokens(tokenDisplay.tokens)}`}</span>
+                              <span className="st-mono st-ledger-abo" data-label={de.stats.motherLedgerAboMobile}>{workerAboText}</span>
+                              <span className={cost.echt != null && cost.echt > 0 ? "st-mono st-ledger-real is-positive" : "st-mono st-ledger-real"} data-label={de.stats.motherLedgerRealMobile}>{workerRealText}</span>
                             </button>
                             {openWorker ? <LedgerWorkerRunners root={root} worker={worker} /> : null}
                           </div>
@@ -1367,6 +1474,7 @@ function LangfuseSignals({ data }: { data: ObservabilityStatsResponse }) {
   const models = data.langfuse.models.slice(0, 6);
   const partial = data.langfuse.state === "partial";
   const lowerBound = partial ? "≥" : "";
+  const generationCalls = metricValue(data, "generation_calls");
   return (
     <div className="mt-3">
       {partial ? (
@@ -1383,7 +1491,7 @@ function LangfuseSignals({ data }: { data: ObservabilityStatsResponse }) {
         </div>
       ))}
       <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-semibold text-ink-2">
-        <span className="rounded-lg bg-surface-2 p-2">Generationen <b className="float-right font-data">{lowerBound}{fmtTokens(metricValue(data, "generation_calls") ?? 0)}</b></span>
+        <span className="rounded-lg bg-surface-2 p-2">Generationen <b className="float-right font-data">{generationCalls == null ? "—" : `${lowerBound}${fmtTokens(generationCalls)}`}</b></span>
         <span className="rounded-lg bg-surface-2 p-2">Kosten <b className="float-right font-data">{lowerBound}{compactUsd(metricValue(data, "known_cost_usd"))}</b></span>
       </div>
     </div>
