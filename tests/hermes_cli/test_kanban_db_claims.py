@@ -1002,6 +1002,79 @@ def test_rate_limit_exit_requeues_without_counting_failure(
         ]
         assert "rate_limited" in outcomes
         assert "crashed" not in outcomes
+        event_kinds = {
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=?", (tid,),
+            ).fetchall()
+        }
+        assert "protocol_violation" not in event_kinds
+
+
+@pytest.mark.parametrize(
+    "reclaim_reason",
+    ["archive_worker_alive", "manual_reclaim_worker_alive"],
+)
+def test_intentional_sigkill_is_not_a_protocol_violation(
+    kanban_home, monkeypatch, reclaim_reason,
+):
+    """A SIGKILL requested by archive/manual reclaim is an external
+    termination, not worker misconduct or a failure-streak input."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect_closing() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="intentional kill", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+        pid = 65001
+        conn.execute(
+            "UPDATE tasks SET worker_pid=?, started_at=? WHERE id=?",
+            (pid, int(time.time()) - 60, tid),
+        )
+        conn.execute(
+            "UPDATE task_runs SET worker_pid=? WHERE id=?",
+            (pid, run_id),
+        )
+        kb._append_event(
+            conn,
+            tid,
+            "reclaim_deferred",
+            {
+                "reason": reclaim_reason,
+                "termination": {"sigterm": True, "sigkill": True},
+            },
+            run_id=run_id,
+        )
+        conn.commit()
+        _kb._record_worker_exit(pid, 9)  # raw wait status for SIGKILL
+
+        crashed = kb.detect_crashed_workers(conn)
+
+        assert tid not in crashed
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        run = conn.execute(
+            "SELECT status, outcome FROM task_runs WHERE id=?", (run_id,),
+        ).fetchone()
+        assert (run["status"], run["outcome"]) == (
+            "externally_terminated",
+            "externally_terminated",
+        )
+        kinds = [
+            row["kind"]
+            for row in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,),
+            ).fetchall()
+        ]
+        assert "externally_terminated" in kinds
+        assert "protocol_violation" not in kinds
 
 
 def test_real_crash_still_counts_and_trips_breaker(kanban_home, monkeypatch):
