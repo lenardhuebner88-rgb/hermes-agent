@@ -81,6 +81,33 @@ def test_doc_sweep_routes_low_reasoning_luna_and_is_catalog_valid(tmp_path):
     assert phase.model == "gpt-5.6-luna"
     assert phase.effort == "low"
 
+
+def test_test_stabiliser_routes_balanced_terra_and_is_catalog_valid(tmp_path):
+    pack = load_pack(PACKS_DIR, "test-stabiliser")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner._validate_effective_phase_catalog()
+    phase = runner.phase_cfg("round")
+
+    assert pack.type == "sweep"
+    assert phase.engine == "codex"
+    assert phase.model == "gpt-5.6-terra"
+    assert phase.effort == "medium"
+
+
+def test_luna_is_confined_to_non_judgmental_sweep_rounds():
+    luna_routes: list[tuple[str, str]] = []
+    for manifest in sorted(PACKS_DIR.glob("*/pack.yaml")):
+        data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        for phase_name, phase in (data.get("phases") or {}).items():
+            if phase.get("model") != "gpt-5.6-luna":
+                continue
+            luna_routes.append((data["name"], phase_name))
+            assert data["type"] == "sweep"
+            assert phase_name == "round"
+
+    assert luna_routes == [("doc-sweep", "round")]
+
 # Echte, live gebounct(e) Frontmatter-Fallgrube (2026-07-12): `title:` beginnt mit
 # einem nackten `"` und läuft dann unquotiert weiter — invalides YAML. Wortgleich
 # aus dem geernteten Original-Plan
