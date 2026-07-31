@@ -1009,3 +1009,151 @@ def test_deepseek_v4_flash_estimate_usage_cost():
     assert result.amount_usd is not None
     # 1M input × $0.14/M + 500K output × $0.28/M = $0.14 + $0.14 = $0.28
     assert float(result.amount_usd) == 0.28
+
+
+# --- Probe/Lese-Symmetrie über alle Zweige -----------------------------------
+# Ein `observed`-Flag und der zugehörige Wert dürfen nie aus verschiedenen
+# Quellen kommen. `_usage_field_observed` versteht Mappings; ein blankes
+# `getattr` tut es nicht. Wo beide gemischt wurden, gab es zwei Fehlerbilder:
+# AttributeError (getattr ohne Default) oder "observed=True bei Wert 0"
+# (getattr mit Default) — also genau die Lüge, die die NULL/0-Unterscheidung
+# verhindern soll. Diese Tests fahren jeden Zweig mit dict-förmiger Nutzlast.
+
+
+def test_normalize_usage_anthropic_accepts_mapping_payload():
+    usage = normalize_usage(
+        {
+            "input_tokens": 5000,
+            "output_tokens": 700,
+            "cache_read_input_tokens": 1200,
+            "cache_creation_input_tokens": 800,
+        },
+        api_mode="anthropic_messages",
+    )
+
+    assert usage.cache_read_tokens == 1200
+    assert usage.cache_write_tokens == 800
+    assert usage.cache_read_tokens_observed is True
+    assert usage.cache_write_tokens_observed is True
+    # Der Anthropic-Zweig subtrahiert nicht — input_tokens ist der rohe Wert.
+    assert usage.input_tokens == 5000
+    assert usage.output_tokens == 700
+
+
+def test_normalize_usage_chat_completions_accepts_mapping_shaped_details():
+    usage = normalize_usage(
+        {
+            "prompt_tokens": 4000,
+            "completion_tokens": 600,
+            "prompt_tokens_details": {
+                "cached_tokens": 900,
+                "cache_write_tokens": 1500,
+            },
+            "completion_tokens_details": {"reasoning_tokens": 250},
+        },
+        provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert usage.cache_read_tokens == 900
+    assert usage.cache_write_tokens == 1500
+    assert usage.reasoning_tokens == 250
+    assert usage.cache_read_tokens_observed is True
+    assert usage.cache_write_tokens_observed is True
+    assert usage.reasoning_tokens_observed is True
+    assert usage.input_tokens == 4000 - 900 - 1500
+
+
+def test_normalize_usage_chat_completions_mapping_top_level_fallback():
+    """Proxy-Form: Cache-Felder nur oben, kein details-Objekt."""
+    usage = normalize_usage(
+        {
+            "prompt_tokens": 3000,
+            "completion_tokens": 200,
+            "cache_read_input_tokens": 400,
+            "cache_creation_input_tokens": 700,
+        },
+        provider="openrouter",
+        api_mode="chat_completions",
+    )
+
+    assert usage.cache_read_tokens == 400
+    assert usage.cache_write_tokens == 700
+    assert usage.cache_read_tokens_observed is True
+    assert usage.cache_write_tokens_observed is True
+    assert usage.input_tokens == 3000 - 400 - 700
+
+
+def test_normalize_usage_chat_completions_mapping_deepseek_cache_hits():
+    usage = normalize_usage(
+        {
+            "prompt_tokens": 2000,
+            "completion_tokens": 100,
+            "prompt_cache_hit_tokens": 1500,
+        },
+        provider="deepseek",
+        api_mode="chat_completions",
+    )
+
+    assert usage.cache_read_tokens == 1500
+    assert usage.cache_read_tokens_observed is True
+    assert usage.input_tokens == 500
+
+
+def test_normalize_usage_mapping_observed_flags_never_outrun_values():
+    """Kein Zweig darf `observed=True` bei stillem 0 melden."""
+    payloads = (
+        (
+            {
+                "input_tokens": 10,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 4,
+            },
+            {"api_mode": "anthropic_messages"},
+        ),
+        (
+            {
+                "input_tokens": 10,
+                "output_tokens": 1,
+                "input_tokens_details": {
+                    "cached_tokens": 3,
+                    "cache_write_tokens": 4,
+                },
+            },
+            {"api_mode": "codex_responses"},
+        ),
+        (
+            {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {
+                    "cached_tokens": 3,
+                    "cache_write_tokens": 4,
+                },
+            },
+            {"api_mode": "chat_completions", "provider": "openai"},
+        ),
+    )
+
+    for payload, kwargs in payloads:
+        usage = normalize_usage(payload, **kwargs)
+        assert usage.cache_read_tokens_observed is True
+        assert usage.cache_write_tokens_observed is True
+        # Der eigentliche Fund: beobachtet, aber der Wert war still auf 0.
+        assert usage.cache_read_tokens == 3, payload
+        assert usage.cache_write_tokens == 4, payload
+
+
+def test_normalize_usage_reasoning_accepts_mapping_output_details():
+    usage = normalize_usage(
+        {
+            "input_tokens": 100,
+            "output_tokens": 900,
+            "output_tokens_details": {"reasoning_tokens": 850},
+        },
+        api_mode="codex_responses",
+    )
+
+    assert usage.reasoning_tokens == 850
+    assert usage.reasoning_tokens_observed is True
