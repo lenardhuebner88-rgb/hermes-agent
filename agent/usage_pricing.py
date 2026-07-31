@@ -1337,14 +1337,35 @@ def normalize_usage(
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
         details = getattr(response_usage, "input_tokens_details", None)
         cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
-        cache_write_tokens = _to_int(
-            getattr(details, "cache_creation_tokens", 0) if details else 0
-        )
         cache_read_tokens_observed = _usage_field_observed(
             details, "cached_tokens"
         )
-        cache_write_tokens_observed = _usage_field_observed(
-            details, "cache_creation_tokens"
+        response_payload = response_usage
+        model_dump = getattr(response_usage, "model_dump", None)
+        if callable(model_dump):
+            response_payload = model_dump(exclude_unset=True)
+        # Primary: OpenAI-style input_tokens_details. Fallback: Anthropic-style
+        # top-level fields that non-OpenAI backends can expose while sharing
+        # the codex_responses API mode.
+        if _usage_field_observed(details, "cache_write_tokens"):
+            cache_write_tokens = _to_int(
+                getattr(details, "cache_write_tokens")
+            )
+        elif _usage_field_observed(
+            response_payload, "cache_creation_input_tokens"
+        ):
+            cache_write_tokens = _to_int(
+                getattr(response_usage, "cache_creation_input_tokens", 0)
+            )
+        else:
+            cache_write_tokens = 0
+        cache_write_tokens_observed = any(
+            (
+                _usage_field_observed(details, "cache_write_tokens"),
+                _usage_field_observed(
+                    response_payload, "cache_creation_input_tokens"
+                ),
+            )
         )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
