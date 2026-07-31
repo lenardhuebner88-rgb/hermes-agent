@@ -29,9 +29,12 @@ from hermes_cli.usage_facts_db import (
 # Bump when the transcript shape we accept changes in a way that would make
 # golden fixtures silently wrong.  Tests pin this value.
 #
-# v4 persists the transcript session identity and exact Kanban correlations, so
-# existing HWM snapshots re-harvest their captured files and backfill the link.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 4
+# v4 persists the transcript session identity and exact Kanban correlations.
+# v5 fixes exact subagent attribution: a sidechain can carry its own sessionId,
+# while the Kanban run records the parent session named by the transcript path.
+# The format bump intentionally re-harvests captured files so those proven
+# parent-session links replace previously unresolved rows.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 5
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -129,6 +132,63 @@ def request_id_or_fallback(request_id: Any) -> str:
         return NO_REQUEST_ID
     text = str(request_id).strip()
     return text if text else NO_REQUEST_ID
+
+
+def _draft_correlation(
+    draft: _CallDraft,
+    correlations: Mapping[str, Any],
+) -> tuple[Any, str] | None:
+    """Return one exact, internally consistent correlation for ``draft``.
+
+    Claude subagent transcripts are stored below the parent session directory,
+    but newer sidechains can expose a distinct child ``sessionId``.  The path
+    identity is therefore the exact worker lineage key.  If both identities
+    resolve and disagree, refusing the join is safer than charging either run.
+    """
+    candidates: list[tuple[str, bool]] = []
+    if draft.call_kind == "subagent" and draft.parent_session_id:
+        candidates.append((draft.parent_session_id, True))
+    if draft.session_id:
+        candidates.append((draft.session_id, False))
+    if draft.call_kind != "subagent" and draft.parent_session_id:
+        candidates.append((draft.parent_session_id, True))
+
+    matches: list[tuple[Any, bool]] = []
+    seen: set[str] = set()
+    for session_id, is_parent in candidates:
+        if session_id in seen:
+            continue
+        seen.add(session_id)
+        correlation = correlations.get(session_id)
+        if correlation is not None:
+            matches.append((correlation, is_parent))
+    if not matches:
+        return None
+
+    task_boards = {(item.task_id, item.board) for item, _ in matches}
+    exact_run_ids = {
+        item.task_run_id for item, _ in matches if item.task_run_id is not None
+    }
+    chain_ids = {item.chain_id for item, _ in matches if item.chain_id is not None}
+    if (
+        len(task_boards) != 1
+        or len(exact_run_ids) > 1
+        or len(chain_ids) > 1
+    ):
+        return None
+
+    exact_matches = [
+        match for match in matches if match[0].task_run_id is not None
+    ]
+    correlation, is_parent = (exact_matches or matches)[0]
+    source = correlation.source
+    if is_parent:
+        source = source.replace(
+            "claude_session_id_",
+            "claude_parent_session_id_",
+            1,
+        )
+    return correlation, source
 
 
 def _text(value: Any) -> Optional[str]:
@@ -769,101 +829,124 @@ def recorrelate_existing_calls(
             return 0
     else:
         connection = usage_facts_db_mod._connect(resolved)
+    connection.row_factory = sqlite3.Row
     try:
         updated = 0
         sorted_ambiguous = sorted(ambiguous_sessions)
         for offset in range(0, len(sorted_ambiguous), 500):
             chunk = sorted_ambiguous[offset : offset + 500]
             placeholders = ", ".join("?" for _ in chunk)
+            ambiguous_predicate = (
+                "((session_id IN ("
+                f"{placeholders}) "
+                "AND correlation_source LIKE 'claude_session_id_%') "
+                "OR (call_kind='subagent' AND lane IN ("
+                f"{placeholders}) "
+                "AND correlation_source LIKE "
+                "'claude_parent_session_id_%'))"
+            )
+            ambiguous_params = (ORIGIN, *chunk, *chunk)
             if dry_run:
                 row = connection.execute(
                     "SELECT COUNT(*) FROM run_usage_facts "
-                    "WHERE origin=? AND session_id IN ("
-                    f"{placeholders}) "
-                    "AND correlation_source LIKE 'claude_session_id_%'",
-                    (ORIGIN, *chunk),
+                    f"WHERE origin=? AND {ambiguous_predicate}",
+                    ambiguous_params,
                 ).fetchone()
                 updated += int(row[0]) if row is not None else 0
                 continue
             cursor = connection.execute(
                 "UPDATE run_usage_facts SET task_run_id=NULL, task_id=NULL, "
                 "chain_id=NULL, board=NULL, correlation_source=NULL "
-                "WHERE origin=? AND session_id IN ("
-                f"{placeholders}) "
-                "AND correlation_source LIKE 'claude_session_id_%'",
-                (ORIGIN, *chunk),
+                f"WHERE origin=? AND {ambiguous_predicate}",
+                ambiguous_params,
             )
             updated += max(0, int(cursor.rowcount))
 
-        for session_id, correlation in correlations.items():
-            fields = correlation.as_run_fields()
-            task_run_id = fields.get("task_run_id")
-            task_id = fields.get("task_id")
-            chain_id = fields.get("chain_id")
-            board = fields.get("board")
-            source = fields.get("correlation_source")
-            comparison_params = (
-                task_run_id,
-                task_id,
-                chain_id,
-                board,
-                task_run_id,
-                source,
-            )
-            if dry_run:
-                try:
-                    row = connection.execute(
-                        "SELECT COUNT(*) FROM run_usage_facts "
-                        "WHERE origin=? AND session_id=? AND ("
-                        "task_run_id IS NOT COALESCE(?, task_run_id) OR "
-                        "task_id IS NOT COALESCE(?, task_id) OR "
-                        "chain_id IS NOT COALESCE(?, chain_id) OR "
-                        "board IS NOT COALESCE(?, board) OR "
-                        "correlation_source IS NOT CASE "
-                        "WHEN ? IS NULL AND task_run_id IS NOT NULL "
-                        "THEN correlation_source ELSE ? END)",
-                        (
-                            ORIGIN,
-                            session_id,
-                            *comparison_params,
-                        ),
-                    ).fetchone()
-                except sqlite3.Error:
-                    return 0
-                updated += int(row[0]) if row is not None else 0
-                continue
-            cursor = connection.execute(
-                "UPDATE run_usage_facts SET "
-                "task_run_id=COALESCE(?, task_run_id), "
-                "task_id=COALESCE(?, task_id), "
-                "chain_id=COALESCE(?, chain_id), "
-                "board=COALESCE(?, board), "
-                "profile=COALESCE(profile, ?), "
-                "correlation_source=CASE "
-                "WHEN ? IS NULL AND task_run_id IS NOT NULL "
-                "THEN correlation_source ELSE ? END "
-                "WHERE origin=? AND session_id=? AND ("
-                "task_run_id IS NOT COALESCE(?, task_run_id) OR "
-                "task_id IS NOT COALESCE(?, task_id) OR "
-                "chain_id IS NOT COALESCE(?, chain_id) OR "
-                "board IS NOT COALESCE(?, board) OR "
-                "correlation_source IS NOT CASE "
-                "WHEN ? IS NULL AND task_run_id IS NOT NULL "
-                "THEN correlation_source ELSE ? END)",
-                (
-                    task_run_id,
-                    task_id,
-                    chain_id,
-                    board,
-                    fields.get("profile"),
-                    task_run_id,
-                    source,
-                    ORIGIN,
-                    session_id,
-                    *comparison_params,
-                ),
-            )
-            updated += max(0, int(cursor.rowcount))
+        correlation_ids = sorted(str(value) for value in correlations)
+        for offset in range(0, len(correlation_ids), 250):
+            chunk = correlation_ids[offset : offset + 250]
+            placeholders = ", ".join("?" for _ in chunk)
+            try:
+                candidates = connection.execute(
+                    "SELECT run_id, session_id, lane, call_kind, "
+                    "task_run_id, task_id, chain_id, board, profile, "
+                    "correlation_source FROM run_usage_facts "
+                    "WHERE origin=? AND (session_id IN ("
+                    f"{placeholders}) OR (call_kind='subagent' AND lane IN ("
+                    f"{placeholders}))) ORDER BY run_id",
+                    (ORIGIN, *chunk, *chunk),
+                ).fetchall()
+            except sqlite3.Error:
+                return 0
+            for row in candidates:
+                call_kind = _text(row["call_kind"]) or "main"
+                draft = _CallDraft(
+                    message_id=str(row["run_id"]),
+                    request_id=NO_REQUEST_ID,
+                    session_id=_text(row["session_id"]),
+                    call_kind=call_kind,
+                    parent_session_id=(
+                        _text(row["lane"])
+                        if call_kind == "subagent"
+                        else None
+                    ),
+                )
+                resolved_match = _draft_correlation(draft, correlations)
+                if resolved_match is None:
+                    # Parent and child correlations that disagree are not exact.
+                    continue
+                correlation, source = resolved_match
+                fields = correlation.as_run_fields()
+                existing = {
+                    key: row[key]
+                    for key in (
+                        "task_run_id",
+                        "task_id",
+                        "chain_id",
+                        "board",
+                        "profile",
+                        "correlation_source",
+                    )
+                }
+                resolved = {
+                    "task_run_id": existing["task_run_id"]
+                    or fields.get("task_run_id"),
+                    "task_id": existing["task_id"] or fields.get("task_id"),
+                    "chain_id": existing["chain_id"]
+                    or fields.get("chain_id"),
+                    "board": existing["board"] or fields.get("board"),
+                    "profile": existing["profile"] or fields.get("profile"),
+                    "correlation_source": source,
+                }
+                if (
+                    fields.get("task_run_id") is None
+                    and existing["task_run_id"] is not None
+                ):
+                    # Task-level evidence may enrich NULLs but never downgrade
+                    # an already exact run-level attribution.
+                    resolved["correlation_source"] = existing[
+                        "correlation_source"
+                    ]
+                if all(existing[key] == resolved[key] for key in existing):
+                    continue
+                updated += 1
+                if dry_run:
+                    continue
+                connection.execute(
+                    "UPDATE run_usage_facts SET task_run_id=?, task_id=?, "
+                    "chain_id=?, board=?, profile=?, correlation_source=? "
+                    "WHERE origin=? AND run_id=?",
+                    (
+                        resolved["task_run_id"],
+                        resolved["task_id"],
+                        resolved["chain_id"],
+                        resolved["board"],
+                        resolved["profile"],
+                        resolved["correlation_source"],
+                        ORIGIN,
+                        row["run_id"],
+                    ),
+                )
         if not dry_run:
             connection.commit()
         return updated
@@ -881,7 +964,11 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
     )
     try:
         rows = connection.execute(
-            "SELECT session_id, correlation_source FROM run_usage_facts "
+            "SELECT CASE "
+            "WHEN correlation_source LIKE 'claude_parent_session_id_%' "
+            "AND lane IS NOT NULL AND TRIM(lane) != '' THEN lane "
+            "ELSE session_id END AS correlation_session_id, "
+            "correlation_source FROM run_usage_facts "
             "WHERE origin=? AND session_id IS NOT NULL AND TRIM(session_id) != ''",
             (ORIGIN,),
         )
@@ -890,7 +977,13 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
             key = str(session_id).strip()
             value = str(source).strip() if source is not None else None
             previous = states.get(key)
-            if value == "claude_session_id_run" or previous is None:
+            if (
+                value in {
+                    "claude_session_id_run",
+                    "claude_parent_session_id_run",
+                }
+                or previous is None
+            ):
                 states[key] = value
         return states
     finally:
@@ -914,7 +1007,11 @@ def _backfill_snapshot(
             if session_id not in candidate_ids:
                 continue
             if (
-                projected_states.get(session_id) == "claude_session_id_run"
+                projected_states.get(session_id)
+                in {
+                    "claude_session_id_run",
+                    "claude_parent_session_id_run",
+                }
                 and correlation.task_run_id is None
             ):
                 continue
@@ -926,23 +1023,39 @@ def _backfill_snapshot(
         exact_run = {
             session_id
             for session_id, source in projected_states.items()
-            if source == "claude_session_id_run"
+            if source
+            in {
+                "claude_session_id_run",
+                "claude_parent_session_id_run",
+            }
         }
         task_only = {
             session_id
             for session_id, source in projected_states.items()
-            if source == "claude_session_id_task"
+            if source
+            in {
+                "claude_session_id_task",
+                "claude_parent_session_id_task",
+            }
         }
     else:
         exact_run = {
             session_id
             for session_id, source in states.items()
-            if source == "claude_session_id_run"
+            if source
+            in {
+                "claude_session_id_run",
+                "claude_parent_session_id_run",
+            }
         }
         task_only = {
             session_id
             for session_id, source in states.items()
-            if source == "claude_session_id_task"
+            if source
+            in {
+                "claude_session_id_task",
+                "claude_parent_session_id_task",
+            }
         }
     return {
         "candidate_sessions": len(candidate_ids),
@@ -1083,17 +1196,16 @@ def harvest(
                     draft.billing_mode_source = derived_billing_mode_source
 
         for draft in drafts.values():
-            correlation = correlations.get(
-                draft.session_id or draft.parent_session_id or ""
-            )
-            if correlation is None:
+            resolved_correlation = _draft_correlation(draft, correlations)
+            if resolved_correlation is None:
                 continue
+            correlation, correlation_source = resolved_correlation
             draft.task_run_id = correlation.task_run_id
             draft.task_id = correlation.task_id
             draft.chain_id = correlation.chain_id
             draft.board = correlation.board
             draft.profile = draft.profile or correlation.profile
-            draft.correlation_source = correlation.source
+            draft.correlation_source = correlation_source
             stats.calls_correlated += 1
 
         written = write_calls_batch(

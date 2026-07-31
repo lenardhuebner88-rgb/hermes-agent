@@ -39,6 +39,10 @@ def observability_app(tmp_path, monkeypatch):
     usage_path = tmp_path / "usage_facts.db"
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_USAGE_FACTS_DB", str(usage_path))
+    monkeypatch.setenv(
+        "HERMES_EXECUTION_FACTS_DB",
+        str(tmp_path / "execution_facts.db"),
+    )
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
@@ -212,6 +216,54 @@ def test_observability_route_separates_stats_from_quality(observability_app):
     }
     assert "approval_rate" not in payload
     assert "review_verdict" not in repr(payload)
+
+
+def test_fleet_metrics_route_exposes_attribution_and_source_contracts(
+    observability_app,
+):
+    client, _kanban_path, _usage_path = observability_app
+
+    response = client.get(
+        "/api/plugins/kanban/stats/fleet-metrics?days=7&limit=25"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["contract_version"] == "fleet-metrics.v1"
+    assert payload["usage"]["scope"]["task_and_chain_attribution"] == (
+        "exact_task_run_id_only"
+    )
+    assert payload["usage"]["coverage"]["exact_task_run"]["observed_rows"] == 2
+    assert payload["usage"]["tasks"]["total_buckets"] == 2
+    assert payload["provider_model_coverage"]["coverage"]["duration"][
+        "eligible_sources"
+    ]["observed_rows"] == 1
+    claude = next(
+        group
+        for group in payload["provider_model_coverage"]["groups"]
+        if group["key"]["origin"] == "claude_code"
+    )
+    assert claude["source_contract"]["ttft"] == "unavailable_source"
+    assert claude["coverage"]["ttft"]["eligible_sources"]["status"] == (
+        "not_applicable"
+    )
+    assert payload["alerts"]["sentinel"]["status"] == "unknown"
+
+
+def test_execution_facts_route_is_read_only_and_preserves_unknown(
+    observability_app,
+):
+    client, _kanban_path, _usage_path = observability_app
+
+    response = client.get("/api/plugins/kanban/stats/execution-facts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "execution-facts-read.v1"
+    assert payload["database"]["computed_status"] == "unavailable"
+    assert payload["database"]["reason"] == "database_missing"
+    assert payload["p0"]["run_identity"]["observed"] is None
+    assert payload["p0"]["run_identity"]["eligible"] is None
 
 
 def test_warm_observability_poll_meets_live_size_budget(observability_app):

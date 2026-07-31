@@ -51,7 +51,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 4
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 5
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -385,6 +385,152 @@ def test_recorrelation_clears_a_link_that_later_becomes_ambiguous(
             "correlation_source FROM run_usage_facts WHERE run_id='claude-exact'"
         ).fetchone()
     assert changed == 1
+    assert tuple(row) == (None, None, None, None, None)
+
+
+def test_recorrelation_clears_parent_sourced_subagent_link_when_ambiguous(
+    db_path: Path,
+) -> None:
+    parent_session_id = "parent-session-later-reused"
+    upsert_run_facts(
+        "claude-parent-exact",
+        {
+            "origin": "claude_code",
+            "session_id": "child-session",
+            "lane": parent_session_id,
+            "call_kind": "subagent",
+            "task_run_id": "77",
+            "task_id": "task-before",
+            "chain_id": "chain-before",
+            "board": "default",
+            "correlation_source": "claude_parent_session_id_run",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        {},
+        db_path=db_path,
+        dry_run=False,
+        ambiguous_session_ids={parent_session_id},
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts "
+            "WHERE run_id='claude-parent-exact'"
+        ).fetchone()
+    assert changed == 1
+    assert tuple(row) == (None, None, None, None, None)
+
+
+def test_hwm_parent_subagent_link_is_recorrelated_from_lane(
+    db_path: Path,
+) -> None:
+    from hermes_cli.usage_fact_correlation import WorkerCorrelation
+
+    parent_session_id = "parent-session-late"
+    upsert_run_facts(
+        "claude-parent-late",
+        {
+            "origin": "claude_code",
+            "session_id": "child-session-late",
+            "lane": parent_session_id,
+            "call_kind": "subagent",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+    correlation = WorkerCorrelation(
+        session_id=parent_session_id,
+        task_run_id="88",
+        task_id="task-late",
+        chain_id="chain-late",
+        board="default",
+    )
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        {parent_session_id: correlation},
+        db_path=db_path,
+        dry_run=False,
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts "
+            "WHERE run_id='claude-parent-late'"
+        ).fetchone()
+    assert changed == 1
+    assert tuple(row) == (
+        "88",
+        "task-late",
+        "chain-late",
+        "default",
+        "claude_parent_session_id_run",
+    )
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_hwm_recorrelation_rejects_conflicting_parent_and_child_runs(
+    db_path: Path,
+    reverse: bool,
+) -> None:
+    from hermes_cli.usage_fact_correlation import WorkerCorrelation
+
+    parent_id = "parent-conflicting-run"
+    child_id = "child-conflicting-run"
+    upsert_run_facts(
+        "claude-conflict",
+        {
+            "origin": "claude_code",
+            "session_id": child_id,
+            "lane": parent_id,
+            "call_kind": "subagent",
+            "captured_at": "2026-07-29T00:00:00Z",
+        },
+        path=db_path,
+    )
+    pairs = [
+        (
+            parent_id,
+            WorkerCorrelation(
+                session_id=parent_id,
+                task_run_id="101",
+                task_id="task-parent",
+                chain_id="chain-parent",
+                board="default",
+            ),
+        ),
+        (
+            child_id,
+            WorkerCorrelation(
+                session_id=child_id,
+                task_run_id="202",
+                task_id="task-child",
+                chain_id="chain-child",
+                board="default",
+            ),
+        ),
+    ]
+    if reverse:
+        pairs.reverse()
+
+    changed = harvester_mod.recorrelate_existing_calls(
+        dict(pairs),
+        db_path=db_path,
+        dry_run=False,
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, chain_id, board, "
+            "correlation_source FROM run_usage_facts "
+            "WHERE run_id='claude-conflict'"
+        ).fetchone()
+    assert changed == 0
     assert tuple(row) == (None, None, None, None, None)
 
 
@@ -883,6 +1029,66 @@ def test_session_dir_subagent_layout_and_sparse_meta(db_path: Path, tmp_path: Pa
     assert rows[0]["model_source"] == (
         "parent_session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     )
+
+
+def test_subagent_uses_exact_parent_session_correlation(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    parent_session_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    source_root = PROJECTS / "session-dir-project"
+    projects_root = tmp_path / "projects"
+    session_root = projects_root / parent_session_id
+    shutil.copytree(source_root / parent_session_id, session_root)
+
+    transcript = session_root / "subagents" / "agent-fixture0001.jsonl"
+    payload = json.loads(transcript.read_text(encoding="utf-8"))
+    payload["sessionId"] = "child-session-not-recorded-by-kanban"
+    transcript.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    kanban = tmp_path / "kanban.db"
+    with sqlite3.connect(kanban) as conn:
+        conn.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, metadata TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO task_runs VALUES (?, ?, ?, ?)",
+            (
+                77,
+                "task-parent-exact",
+                "coder",
+                json.dumps(
+                    {
+                        "claude_session_id": parent_session_id,
+                        "chain_id": "chain-parent-exact",
+                    }
+                ),
+            ),
+        )
+
+    stats = harvest(
+        projects_root=projects_root,
+        db_path=db_path,
+        state_path=tmp_path / "parent-correlation-hwm.json",
+        kanban_paths=[kanban],
+    )
+
+    with _connect(db_path) as conn:
+        run = conn.execute(
+            "SELECT task_run_id, task_id, chain_id, session_id, "
+            "correlation_source FROM run_usage_facts "
+            "WHERE call_kind='subagent'",
+        ).fetchone()
+    assert tuple(run) == (
+        "77",
+        "task-parent-exact",
+        "chain-parent-exact",
+        "child-session-not-recorded-by-kanban",
+        "claude_parent_session_id_run",
+    )
+    assert stats.sessions_correlated == 1
+    assert stats.calls_correlated == 1
 
 
 def test_missing_request_id_uses_fallback_and_is_idempotent(

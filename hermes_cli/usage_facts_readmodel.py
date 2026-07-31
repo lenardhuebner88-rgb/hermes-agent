@@ -33,6 +33,7 @@ from hermes_cli.active_provider_facts import (
 )
 
 CONTRACT_VERSION = "usage-facts.v1"
+ATTRIBUTED_CONTRACT_VERSION = "attributed-usage.v1"
 NORMALIZATION_VERSION = "origin-input.v1"
 
 INPUT_CACHE_EXCLUSIVE = "cache_exclusive"
@@ -407,6 +408,191 @@ def build_usage_facts_payload(
     }
 
 
+def build_attributed_usage_payload(
+    usage_facts_path: str | Path,
+    *,
+    origins: Sequence[str] | None = None,
+    captured_from: str | None = None,
+    captured_to: str | None = None,
+    generated_at: str | None = None,
+    limit: int = 100,
+    include_task_cost_population: bool = False,
+) -> dict[str, Any]:
+    """Roll exact usage into task, chain, and provider/model buckets.
+
+    Task and chain buckets deliberately require ``task_run_id``.  A task-only
+    correlation remains visible in the attribution coverage, but is not
+    promoted into price/performance output where it could charge the wrong run.
+    """
+    safe_limit = max(1, min(int(limit), 500))
+    payload_generated_at = generated_at or _utc_now_iso()
+    observed_at = (
+        _parse_utc_datetime(payload_generated_at)
+        or datetime.now(timezone.utc)
+    )
+    where_sql, params = _usage_scope_filters(
+        origins=origins,
+        captured_from=captured_from,
+        captured_to=captured_to,
+    )
+    with _read_only_connection(Path(usage_facts_path)) as connection:
+        coverage_row = connection.execute(
+            _attribution_coverage_sql(where_sql),
+            params,
+        ).fetchone()
+        rows = connection.execute(
+            _attributed_aggregate_sql(where_sql),
+            params,
+        ).fetchall()
+
+    pricing_cache: dict[tuple[str, str, str], _PriceVector] = {}
+    builders: dict[str, dict[Any, dict[str, Any]]] = {
+        "tasks": {},
+        "chains": {},
+        "models": {},
+    }
+    for row in rows:
+        raw = _row_metrics(row)
+        origin = str(row["origin"])
+        normalized = _normalize_metrics(origin, raw)
+        category = _billing_category(row["billing_mode"])
+        charge = _charge_for_breakdown(
+            category,
+            provider=row["provider"],
+            model=row["model"],
+            normalized=normalized,
+            raw=raw,
+            pricing_cache=pricing_cache,
+        )
+        atom = {
+            "fact_rows": raw["fact_rows"],
+            "run_count": int(row["distinct_runs"]),
+            "token_rows": raw["token_rows"],
+            "model_rows": raw["fact_rows"] if row["model"] is not None else 0,
+            "tokens": normalized,
+            "billing": {
+                "provider": row["provider"],
+                "billing_mode": row["billing_mode"],
+                "category": category,
+                "fact_rows": raw["fact_rows"],
+                "tokens": normalized,
+                "charge": charge,
+            },
+            "latest_captured_at": row["latest_captured_at"],
+        }
+        _add_attributed_atom(
+            builders["models"],
+            (
+                origin,
+                row["provider"],
+                row["model"],
+            ),
+            {
+                "origin": origin,
+                "provider": row["provider"],
+                "model": row["model"],
+                "model_label": row["model"] or UNATTRIBUTED_MODEL_LABEL,
+            },
+            atom,
+        )
+        if row["task_run_id"] is None or row["task_id"] is None:
+            continue
+        _add_attributed_atom(
+            builders["tasks"],
+            (row["board"], row["task_id"]),
+            {
+                "board": row["board"],
+                "task_id": row["task_id"],
+            },
+            atom,
+            run_identity=str(row["task_run_id"]),
+        )
+        if row["chain_id"] is not None:
+            _add_attributed_atom(
+                builders["chains"],
+                (row["board"], row["chain_id"]),
+                {
+                    "board": row["board"],
+                    "chain_id": row["chain_id"],
+                },
+                atom,
+                run_identity=str(row["task_run_id"]),
+            )
+
+    bucket_payloads = {
+        kind: _finish_attributed_buckets(
+            kind_builders,
+            observed_at=observed_at,
+            limit=safe_limit,
+            include_cost_population=(
+                include_task_cost_population and kind == "tasks"
+            ),
+        )
+        for kind, kind_builders in builders.items()
+    }
+    coverage = _attribution_coverage(coverage_row)
+    model_builders = list(builders["models"].values())
+    summary = {
+        "fact_rows": coverage["fact_rows"],
+        "tokens": _sum_normalized_tokens(
+            token_item
+            for builder in model_builders
+            for token_item in builder["tokens"]
+        ),
+        "billing": _billing_rollup(
+            (
+                billing_item
+                for builder in model_builders
+                for billing_item in builder["billing"]
+            ),
+        ),
+    }
+    return {
+        "contract_version": ATTRIBUTED_CONTRACT_VERSION,
+        "generated_at": payload_generated_at,
+        "scope": {
+            "origins": sorted(set(origins)) if origins else None,
+            "captured_from": captured_from,
+            "captured_to": captured_to,
+            "task_and_chain_attribution": "exact_task_run_id_only",
+        },
+        "summary": summary,
+        "coverage": coverage,
+        # ``coverage`` remains for v1 consumers.  Its denominator is facts,
+        # not executions; retain it under an explicit name so consumers do
+        # not mistake a well-harvested history for collector adoption.
+        "fact_coverage": {
+            **coverage,
+            "denominator_kind": "usage_fact_rows",
+        },
+        "execution_adoption": {
+            "observed_executions": None,
+            "denominator_executions": None,
+            "ratio": None,
+            "status": "unknown",
+            "reason": "universal_execution_denominator_unavailable",
+        },
+        "unknown": {
+            "task_run_unattributed_rows": (
+                coverage["fact_rows"]
+                - coverage["exact_task_run"]["observed_rows"]
+            ),
+            "task_only_rows_not_promoted": coverage["task_only_rows"],
+            "chain_unknown_rows": (
+                coverage["fact_rows"]
+                - coverage["exact_chain"]["observed_rows"]
+            ),
+            "model_unknown_rows": (
+                coverage["fact_rows"] - coverage["model"]["observed_rows"]
+            ),
+            "token_unknown_rows": (
+                coverage["fact_rows"] - coverage["tokens"]["observed_rows"]
+            ),
+        },
+        **bucket_payloads,
+    }
+
+
 def _usage_filters(
     *,
     origins: Sequence[str] | None,
@@ -433,6 +619,90 @@ def _usage_filters(
         conditions.append("captured_at < ?")
         params.append(captured_to)
     return " WHERE " + " AND ".join(conditions), tuple(params)
+
+
+def _usage_scope_filters(
+    *,
+    origins: Sequence[str] | None,
+    captured_from: str | None,
+    captured_to: str | None,
+) -> tuple[str, tuple[Any, ...]]:
+    conditions: list[str] = []
+    params: list[Any] = []
+    normalized_origins = sorted(
+        {str(origin).strip() for origin in origins or () if str(origin).strip()}
+    )
+    if normalized_origins:
+        placeholders = ", ".join("?" for _ in normalized_origins)
+        conditions.append(f"origin IN ({placeholders})")
+        params.extend(normalized_origins)
+    if captured_from:
+        conditions.append("captured_at >= ?")
+        params.append(captured_from)
+    if captured_to:
+        conditions.append("captured_at < ?")
+        params.append(captured_to)
+    return (
+        (" WHERE " + " AND ".join(conditions)) if conditions else "",
+        tuple(params),
+    )
+
+
+def _token_present_sql() -> str:
+    return "(" + " OR ".join(
+        f"{column} IS NOT NULL" for column in _TOKEN_COLUMNS
+    ) + ")"
+
+
+def _attribution_coverage_sql(where_sql: str) -> str:
+    token_present = _token_present_sql()
+    return f"""
+        SELECT COUNT(*) AS fact_rows,
+               SUM(CASE WHEN {token_present} THEN 1 ELSE 0 END) AS token_rows,
+               SUM(CASE WHEN model IS NOT NULL THEN 1 ELSE 0 END) AS model_rows,
+               SUM(CASE WHEN task_run_id IS NOT NULL THEN 1 ELSE 0 END)
+                   AS exact_task_run_rows,
+               SUM(CASE WHEN task_run_id IS NOT NULL AND task_id IS NOT NULL
+                        THEN 1 ELSE 0 END) AS exact_task_rows,
+               SUM(CASE WHEN task_run_id IS NULL AND task_id IS NOT NULL
+                        THEN 1 ELSE 0 END) AS task_only_rows,
+               SUM(CASE WHEN task_run_id IS NOT NULL
+                             AND task_id IS NOT NULL
+                             AND chain_id IS NOT NULL
+                        THEN 1 ELSE 0 END) AS exact_chain_rows,
+               MAX(captured_at) AS latest_captured_at
+          FROM run_usage_facts
+          {where_sql}
+    """
+
+
+def _attributed_aggregate_sql(where_sql: str) -> str:
+    observed = ",\n       ".join(
+        item
+        for pair in (
+            (
+                f"SUM({column}) AS {column}",
+                f"COUNT({column}) AS {column}_observed_rows",
+            )
+            for column in _TOKEN_COLUMNS
+        )
+        for item in pair
+    )
+    token_present = _token_present_sql()
+    return f"""
+        SELECT task_run_id, task_id, chain_id, board, origin, provider, model,
+               billing_mode,
+               COUNT(*) AS fact_rows,
+               COUNT(DISTINCT run_id) AS distinct_runs,
+               SUM(CASE WHEN {token_present} THEN 1 ELSE 0 END) AS token_rows,
+               {observed},
+               SUM(COALESCE(llm_call_count, 1)) AS request_count,
+               MAX(captured_at) AS latest_captured_at
+          FROM run_usage_facts
+          {where_sql}
+         GROUP BY task_run_id, task_id, chain_id, board, origin, provider,
+                  model, billing_mode
+    """
 
 
 def _aggregate_sql(where_sql: str) -> str:
@@ -666,25 +936,27 @@ def _charge_for_breakdown(
     raw: Mapping[str, Any],
     pricing_cache: dict[tuple[str, str, str], _PriceVector],
 ) -> dict[str, Any]:
+    equivalent = _price_normalized_usage(
+        "equivalent",
+        provider=provider,
+        model=model,
+        normalized=normalized,
+        raw=raw,
+        pricing_cache=pricing_cache,
+    )
     if category == BILLING_UNCLASSIFIED:
         return {
             "kind": "unclassified",
             "amount_usd": None,
             "status": "billing_mode_unknown",
+            "api_equivalent_usd": equivalent,
         }
     if category == BILLING_QUOTA:
-        equivalent = _price_normalized_usage(
-            "equivalent",
-            provider=provider,
-            model=model,
-            normalized=normalized,
-            raw=raw,
-            pricing_cache=pricing_cache,
-        )
         return {
             "kind": "quota",
             "marginal_usd": "0",
             "list_equivalent_usd": equivalent,
+            "api_equivalent_usd": equivalent,
         }
     return {
         "kind": "metered",
@@ -696,6 +968,7 @@ def _charge_for_breakdown(
             raw=raw,
             pricing_cache=pricing_cache,
         ),
+        "api_equivalent_usd": equivalent,
     }
 
 
@@ -866,7 +1139,7 @@ def _billing_rollup(
     include_empty: bool = True,
 ) -> dict[str, Any]:
     items = list(breakdowns)
-    return {
+    result = {
         category: _billing_category_rollup(
             category,
             [item for item in items if item["category"] == category],
@@ -879,6 +1152,10 @@ def _billing_rollup(
         if include_empty
         or any(item["category"] == category for item in items)
     }
+    result["api_equivalent_usd"] = _sum_prices(
+        item["charge"]["api_equivalent_usd"] for item in items
+    )
+    return result
 
 
 def _billing_category_rollup(
@@ -889,6 +1166,9 @@ def _billing_category_rollup(
     result: dict[str, Any] = {
         "fact_rows": sum(int(item["fact_rows"]) for item in items),
         "tokens": tokens,
+        "api_equivalent_usd": _sum_prices(
+            item["charge"]["api_equivalent_usd"] for item in items
+        ),
     }
     if category == BILLING_QUOTA:
         prices = [
@@ -906,6 +1186,14 @@ def _billing_category_rollup(
 
 def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     items = list(prices)
+    if not items:
+        return {
+            "known_amount_usd": None,
+            "status": "unknown",
+            "priced_breakdowns": 0,
+            "unpriced_breakdowns": 0,
+            "lower_bound_breakdowns": 0,
+        }
     known = [
         Decimal(str(item["amount_usd"]))
         for item in items
@@ -921,7 +1209,9 @@ def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         and item.get("token_coverage") != "complete"
     )
     return {
-        "known_amount_usd": _decimal_string(sum(known, Decimal("0"))),
+        "known_amount_usd": (
+            _decimal_string(sum(known, Decimal("0"))) if known else None
+        ),
         "status": (
             "unknown"
             if items and not known
@@ -933,6 +1223,171 @@ def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "unpriced_breakdowns": unknown_count,
         "lower_bound_breakdowns": lower_bound_count,
     }
+
+
+def _coverage_ratio(observed_rows: int, denominator_rows: int) -> dict[str, Any]:
+    return {
+        "observed_rows": observed_rows,
+        "denominator_rows": denominator_rows,
+        "ratio": (
+            observed_rows / denominator_rows if denominator_rows else None
+        ),
+        "status": (
+            "complete"
+            if denominator_rows > 0 and observed_rows >= denominator_rows
+            else "partial"
+            if observed_rows > 0
+            else "unknown"
+        ),
+    }
+
+
+def _attribution_coverage(row: sqlite3.Row) -> dict[str, Any]:
+    fact_rows = int(row["fact_rows"] or 0)
+    return {
+        "fact_rows": fact_rows,
+        "latest_captured_at": row["latest_captured_at"],
+        "tokens": _coverage_ratio(int(row["token_rows"] or 0), fact_rows),
+        "model": _coverage_ratio(int(row["model_rows"] or 0), fact_rows),
+        "exact_task_run": _coverage_ratio(
+            int(row["exact_task_run_rows"] or 0),
+            fact_rows,
+        ),
+        "exact_task": _coverage_ratio(
+            int(row["exact_task_rows"] or 0),
+            fact_rows,
+        ),
+        "exact_chain": _coverage_ratio(
+            int(row["exact_chain_rows"] or 0),
+            fact_rows,
+        ),
+        "task_only_rows": int(row["task_only_rows"] or 0),
+    }
+
+
+def _add_attributed_atom(
+    builders: dict[Any, dict[str, Any]],
+    key: Any,
+    key_payload: Mapping[str, Any],
+    atom: Mapping[str, Any],
+    run_identity: str | None = None,
+) -> None:
+    builder = builders.setdefault(
+        key,
+        {
+            "key": dict(key_payload),
+            "fact_rows": 0,
+            "run_count": 0,
+            "run_identities": set(),
+            "token_rows": 0,
+            "model_rows": 0,
+            "tokens": [],
+            "billing": [],
+            "latest_captured_at": None,
+        },
+    )
+    for field in ("fact_rows", "token_rows", "model_rows"):
+        builder[field] += int(atom[field])
+    if run_identity is None:
+        builder["run_count"] += int(atom["run_count"])
+    else:
+        builder["run_identities"].add(run_identity)
+    builder["tokens"].append(atom["tokens"])
+    builder["billing"].append(atom["billing"])
+    captured_at = atom["latest_captured_at"]
+    if captured_at and (
+        builder["latest_captured_at"] is None
+        or captured_at > builder["latest_captured_at"]
+    ):
+        builder["latest_captured_at"] = captured_at
+
+
+def _finish_attributed_buckets(
+    builders: Mapping[Any, Mapping[str, Any]],
+    *,
+    observed_at: datetime,
+    limit: int,
+    include_cost_population: bool = False,
+) -> dict[str, Any]:
+    buckets: list[dict[str, Any]] = []
+    for builder in builders.values():
+        latest = builder["latest_captured_at"]
+        latest_datetime = _parse_utc_datetime(latest)
+        age_seconds = (
+            max(0, int((observed_at - latest_datetime).total_seconds()))
+            if latest_datetime is not None
+            else None
+        )
+        buckets.append(
+            {
+                "key": builder["key"],
+                "fact_rows": builder["fact_rows"],
+                "run_count": (
+                    len(builder["run_identities"])
+                    if builder["run_identities"]
+                    else builder["run_count"]
+                ),
+                "tokens": _sum_normalized_tokens(builder["tokens"]),
+                "billing": _billing_rollup(
+                    builder["billing"],
+                    include_empty=False,
+                ),
+                "coverage": {
+                    "tokens": _coverage_ratio(
+                        builder["token_rows"],
+                        builder["fact_rows"],
+                    ),
+                    "model": _coverage_ratio(
+                        builder["model_rows"],
+                        builder["fact_rows"],
+                    ),
+                },
+                "freshness": {
+                    "latest_captured_at": latest,
+                    "age_seconds": age_seconds,
+                    "status": (
+                        "unknown"
+                        if age_seconds is None
+                        else "fresh"
+                        if age_seconds <= 24 * 60 * 60
+                        else "stale"
+                    ),
+                },
+            }
+        )
+    def sort_key(bucket: Mapping[str, Any]) -> tuple[Any, ...]:
+        context_tokens = bucket["tokens"]["context_input_tokens"]
+        return (
+            context_tokens is None,
+            -int(context_tokens or 0),
+            -int(bucket["fact_rows"]),
+            json.dumps(bucket["key"], sort_keys=True),
+        )
+
+    buckets.sort(key=sort_key)
+    result: dict[str, Any] = {
+        "total_buckets": len(buckets),
+        "returned_buckets": min(len(buckets), limit),
+        "truncated": len(buckets) > limit,
+        "sort": "context_input_tokens_desc",
+        "buckets": buckets[:limit],
+    }
+    if include_cost_population:
+        # This private-to-the-fleet call path deliberately uses every task
+        # bucket, not the display limit.  The fleet readmodel removes the
+        # collection before serializing its public contract.
+        result["_cost_population"] = [
+            {
+                "key": dict(bucket["key"]),
+                "amount_usd": (
+                    (bucket.get("billing") or {})
+                    .get("api_equivalent_usd", {})
+                    .get("known_amount_usd")
+                ),
+            }
+            for bucket in buckets
+        ]
+    return result
 
 
 def _derived_observed_rows(item: Mapping[str, Any], metric: str) -> int:
@@ -1326,7 +1781,9 @@ def _sort_group_key(
 
 
 def _decimal_string(value: Decimal) -> str:
-    return format(value.quantize(Decimal("0.000001")), "f")
+    """Serialize the exact derived decimal without float conversion/rounding."""
+
+    return format(value, "f")
 
 
 def _utc_now_iso() -> str:

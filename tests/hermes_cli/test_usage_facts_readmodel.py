@@ -201,6 +201,23 @@ def test_payload_separates_metered_quota_unattributed_and_kanban(
         ]
         != "0.000000"
     )
+    assert (
+        payload["summary"]["billing"]["api_equivalent_usd"][
+            "known_amount_usd"
+        ]
+        != "0.000000"
+    )
+    assert (
+        payload["summary"]["billing"]["unclassified"]["api_equivalent_usd"][
+            "status"
+        ]
+        in {"complete", "partial", "unknown"}
+    )
+    unclassified_equivalent = payload["summary"]["billing"]["unclassified"][
+        "api_equivalent_usd"
+    ]
+    if unclassified_equivalent["status"] == "unknown":
+        assert unclassified_equivalent["known_amount_usd"] is None
     assert payload["unattributed"]["label"] == "nicht_zuordenbar"
     assert payload["unattributed"]["fact_rows"] == 1
     assert payload["unattributed"]["by_origin"][0]["origin"] == "grok_cli"
@@ -413,11 +430,152 @@ def test_s7_example_fixture_matches_contract_version() -> None:
         "model": "qwen3.8-max-preview",
         "model_label": "qwen3.8-max-preview",
     }
-    assert set(example["summary"]["billing"]) == {
+    assert {
         readmodel.BILLING_METERED,
         readmodel.BILLING_QUOTA,
         readmodel.BILLING_UNCLASSIFIED,
+    }.issubset(example["summary"]["billing"])
+
+
+def test_attributed_payload_requires_exact_run_for_tasks_and_chains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+
+    def fake_equivalent(
+        model_name: str,
+        usage: CanonicalUsage,
+        *,
+        provider: str | None = None,
+        **_kwargs: Any,
+    ) -> CostResult:
+        amount = Decimal(
+            usage.input_tokens
+            + usage.output_tokens
+            + usage.cache_read_tokens
+            + usage.cache_write_tokens
+        ) / Decimal(1_000_000)
+        return CostResult(
+            amount_usd=amount,
+            status="equivalent",
+            source="user_override",
+            label=f"{provider}/{model_name}",
+            pricing_version="fixture-v1",
+        )
+
+    monkeypatch.setattr(
+        readmodel,
+        "estimate_equivalent_cost",
+        fake_equivalent,
+    )
+    for run_id, fields in (
+        (
+            "exact-run",
+            {
+                "task_run_id": "101",
+                "task_id": "task-exact",
+                "chain_id": "chain-exact",
+                "board": "main",
+            },
+        ),
+        (
+            "task-only",
+            {
+                "task_id": "task-history-only",
+                "chain_id": "chain-history-only",
+                "board": "main",
+            },
+        ),
+        ("unattributed", {}),
+    ):
+        upsert_run_facts(
+            run_id,
+            {
+                "origin": "hermes_agent",
+                "provider": "fixture-provider",
+                "model": "fixture-model",
+                "billing_mode": "subscription_included",
+                "input_tokens": 100,
+                "cache_read_tokens": 10,
+                "cache_write_tokens": 0,
+                "output_tokens": 5,
+                "captured_at": "2026-07-30T12:00:00+00:00",
+                "source": "measured",
+                **fields,
+            },
+            path=usage_path,
+        )
+    upsert_run_facts(
+        "exact-run-second-model-call",
+        {
+            "origin": "claude_code",
+            "task_run_id": "101",
+            "task_id": "task-exact",
+            "chain_id": "chain-exact",
+            "board": "main",
+            "provider": "fixture-provider",
+            "model": "fixture-second-model",
+            "billing_mode": "subscription_included",
+            "input_tokens": 50,
+            "cache_read_tokens": 5,
+            "cache_write_tokens": 0,
+            "output_tokens": 2,
+            "captured_at": "2026-07-30T12:00:00+00:00",
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+
+    payload = readmodel.build_attributed_usage_payload(
+        usage_path,
+        generated_at="2026-07-30T13:00:00+00:00",
+    )
+
+    assert payload["coverage"]["fact_rows"] == 4
+    assert payload["fact_coverage"]["denominator_kind"] == "usage_fact_rows"
+    assert payload["fact_coverage"]["exact_task_run"] == payload["coverage"][
+        "exact_task_run"
+    ]
+    assert payload["execution_adoption"] == {
+        "observed_executions": None,
+        "denominator_executions": None,
+        "ratio": None,
+        "status": "unknown",
+        "reason": "universal_execution_denominator_unavailable",
     }
+    assert payload["coverage"]["exact_task_run"]["observed_rows"] == 2
+    assert payload["coverage"]["task_only_rows"] == 1
+    assert payload["unknown"]["task_only_rows_not_promoted"] == 1
+    assert payload["summary"]["fact_rows"] == 4
+    assert payload["summary"]["billing"]["api_equivalent_usd"]["status"] == (
+        "complete"
+    )
+    assert payload["tasks"]["total_buckets"] == 1
+    assert payload["tasks"]["buckets"][0]["key"]["task_id"] == "task-exact"
+    assert payload["tasks"]["buckets"][0]["run_count"] == 1
+    assert payload["chains"]["total_buckets"] == 1
+    assert payload["chains"]["buckets"][0]["key"]["chain_id"] == "chain-exact"
+    assert payload["chains"]["buckets"][0]["run_count"] == 1
+    assert payload["models"]["total_buckets"] == 2
+    assert (
+        payload["tasks"]["buckets"][0]["billing"]["api_equivalent_usd"][
+            "status"
+        ]
+        == "complete"
+    )
+    assert payload["tasks"]["buckets"][0]["freshness"] == {
+        "latest_captured_at": "2026-07-30T12:00:00+00:00",
+        "age_seconds": 3600,
+        "status": "fresh",
+    }
+
+
+def test_price_serialization_preserves_sub_microcent_precision() -> None:
+    # Run 8802's Kimi K3 API-equivalent is 0.2116692 USD.  A derived value
+    # must remain an exact decimal string until an explicitly chosen display
+    # formatter rounds it.
+    assert readmodel._decimal_string(Decimal("0.2116692")) == "0.2116692"
 
 
 def test_workload_split_uses_discovered_subagent_profiles_and_keeps_unknown(

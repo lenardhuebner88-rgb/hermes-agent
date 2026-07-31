@@ -14,6 +14,8 @@ from typing import Any, Mapping, Optional
 from urllib.parse import quote
 
 from fastapi import Query
+from hermes_cli.execution_facts_readmodel import build_execution_facts_payload
+from hermes_cli.fleet_metrics_readmodel import build_fleet_metrics_payload
 from hermes_cli.kanban_score_hygiene import (
     RUN_CLASS_PRODUCTIVE,
     metric_scores_relation,
@@ -660,4 +662,40 @@ def get_observability_stats(
     }
 
 
-__all__ = ("clear_usage_projection_cache", "get_observability_stats")
+@observability_routes.get("/stats/fleet-metrics")
+def get_fleet_metrics(
+    board: Optional[str] = Query(
+        None,
+        description="Kanban board slug (omit for current)",
+    ),
+    days: int = Query(7, ge=1, le=30),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Return the trust-aware Fleet value/reliability metrics contract."""
+    resolved_board = _resolve_board(board)
+    generated_at = (
+        datetime.now(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    return build_fleet_metrics_payload(
+        usage_facts_db_path(),
+        kanban_db.kanban_db_path(board=resolved_board),
+        days=days,
+        generated_at=generated_at,
+        bucket_limit=limit,
+    )
+
+
+@observability_routes.get("/stats/execution-facts")
+def get_execution_facts():
+    """Return the versioned, read-only universal execution-facts contract."""
+    return build_execution_facts_payload()
+
+
+__all__ = (
+    "clear_usage_projection_cache",
+    "get_execution_facts",
+    "get_fleet_metrics",
+    "get_observability_stats",
+)

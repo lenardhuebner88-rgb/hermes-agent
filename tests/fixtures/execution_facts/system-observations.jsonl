@@ -1,0 +1,4 @@
+{"source_execution_id":"systemd:fixture-1","surface":"systemd","observed_at_ms":1785427200000,"phase":"scheduled","validity":"exact"}
+{"source_execution_id":"systemd:fixture-1","surface":"systemd","observed_at_ms":1785427200100,"phase":"process_started","validity":"exact"}
+{"source_execution_id":"systemd:fixture-1","surface":"systemd","observed_at_ms":1785427200200,"phase":"ended","status":"ok","exit_code":0,"validity":"exact"}
+{"source_execution_id":"crontab:fixture-1","surface":"crontab","observed_at_ms":1785427200300,"phase":"ended","status":"ok","exit_code":0,"validity":"exact"}

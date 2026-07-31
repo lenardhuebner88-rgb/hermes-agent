@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Hermes observability sentinel
+
+[Timer]
+OnCalendar=Sun *-*-* 08:15:00
+Persistent=true
+RandomizedDelaySec=900
+Unit=hermes-observability-sentinel.service
+
+[Install]
+WantedBy=timers.target
