@@ -505,7 +505,15 @@ def reconcile_usage_facts(
         billing_mode = str(row.get("billing_mode") or "")
         if actual_amount is not None:
             if billing_mode == "subscription_included":
-                cost_attributes["marginal_cost"] = actual_amount
+                # The recorded billing mode outranks the pricing route's
+                # guess: the route keys off the provider label, and Claude
+                # Code records `anthropic`, which reads as metered API usage.
+                # One more request on a flat subscription costs nothing
+                # extra, whatever the list price would have been -- that
+                # price stays in `api_equivalent_cost`, and the real money is
+                # the monthly fee, attributed via
+                # `allocated_subscription_cost`.
+                cost_attributes["marginal_cost"] = "0"
             else:
                 cost_attributes["metered_cost"] = actual_amount
                 cost_attributes["marginal_cost"] = actual_amount

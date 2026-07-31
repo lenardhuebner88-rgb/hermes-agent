@@ -788,3 +788,88 @@ def test_inclusive_usage_with_missing_cache_split_stays_unknown() -> None:
     assert usage.validity is Validity.UNKNOWN
     assert "total_tokens" not in usage.attributes
     assert not any(event.event_type.value == "cost_observed" for event in events)
+
+
+def test_subscription_row_is_free_at_the_margin_whatever_the_price_route() -> None:
+    """The recorded billing mode outranks the pricing route's provider guess.
+
+    Claude Code records provider='anthropic', which the pricing route reads as
+    metered API usage. Live that was 104253 of 109363 usage rows, every one of
+    them billed at list price although the recorded billing_mode says the
+    request is already covered by the subscription.
+    """
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE run_usage_facts (
+            run_id TEXT PRIMARY KEY, origin TEXT, task_run_id TEXT,
+            task_id TEXT, chain_id TEXT, board TEXT, provider TEXT, model TEXT,
+            profile TEXT, billing_mode TEXT, serving_tier TEXT,
+            reasoning_effort TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER, finish_reason TEXT, error_type TEXT,
+            duration_ms REAL, captured_at TEXT, source TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO run_usage_facts VALUES (
+            '9001', 'claude_code', NULL, NULL, NULL, NULL,
+            'anthropic', 'claude-sonnet-5', NULL,
+            'subscription_included', NULL, NULL,
+            1000, 500, 2000, 0, NULL, 'stop', NULL, NULL,
+            '2026-07-31T08:00:00+00:00', 'measured'
+        )
+        """
+    )
+
+    events = reconcile_usage_facts(connection)
+    cost = next(
+        event for event in events if event.event_type.value == "cost_observed"
+    )
+
+    # An extra request on a flat subscription costs nothing extra...
+    assert cost.attributes["marginal_cost"] == "0"
+    assert "metered_cost" not in cost.attributes
+    # ...while what it would have cost on the API stays visible.
+    assert float(cost.attributes["api_equivalent_cost"]) > 0
+
+
+def test_metered_row_keeps_its_real_price() -> None:
+    """Guard the other direction: real API usage must not become free."""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE run_usage_facts (
+            run_id TEXT PRIMARY KEY, origin TEXT, task_run_id TEXT,
+            task_id TEXT, chain_id TEXT, board TEXT, provider TEXT, model TEXT,
+            profile TEXT, billing_mode TEXT, serving_tier TEXT,
+            reasoning_effort TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER, finish_reason TEXT, error_type TEXT,
+            duration_ms REAL, captured_at TEXT, source TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO run_usage_facts VALUES (
+            '9002', 'hermes_agent', NULL, NULL, NULL, NULL,
+            'anthropic', 'claude-sonnet-5', NULL,
+            'metered', NULL, NULL,
+            1000, 500, 2000, 0, NULL, 'stop', NULL, NULL,
+            '2026-07-31T08:00:00+00:00', 'measured'
+        )
+        """
+    )
+
+    events = reconcile_usage_facts(connection)
+    cost = next(
+        event for event in events if event.event_type.value == "cost_observed"
+    )
+
+    assert float(cost.attributes["metered_cost"]) > 0
+    assert cost.attributes["marginal_cost"] == cost.attributes["metered_cost"]
