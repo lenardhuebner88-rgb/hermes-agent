@@ -28,6 +28,8 @@ from hermes_cli.foreign_lane_harvest import (  # noqa: E402
     ORIGIN_GROK,
     ORIGIN_KIMI,
     ORIGIN_QWEN,
+    backfill_session_from_transcripts,
+    correlate_from_run_metas,
     harvest_all,
 )
 from hermes_cli.usage_facts_db import initialize_usage_facts_db  # noqa: E402
@@ -61,6 +63,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qwen-usage-dir", default=None, help="Qwen usage directory")
     parser.add_argument("--grok-unified", default=None, help="Grok unified.jsonl path")
     parser.add_argument(
+        "--runs-root",
+        default=None,
+        help="foreign.sh run directories root (default: ~/.hermes/runs)",
+    )
+    parser.add_argument(
+        "--projects-root",
+        default=None,
+        help="Claude projects root for transcript backfill (default: ~/.claude/projects)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Ignore source-file fingerprints (still skips existing run_ids unless re-upsert)",
@@ -71,11 +83,68 @@ def main(argv: list[str] | None = None) -> int:
         help="Also write per-turn run_llm_calls (slow on large Codex rollouts; default off)",
     )
     parser.add_argument(
+        "--backfill-session-meta",
+        action="store_true",
+        help=(
+            "Preview filling NULL session_id from runs/*/meta claude_session_id "
+            "(correlation_source=foreign_run_meta)"
+        ),
+    )
+    parser.add_argument(
+        "--backfill-session-transcripts",
+        action="store_true",
+        help=(
+            "Preview filling NULL session_id by matching transcript foreign.sh "
+            "spawns to run dirs (correlation_source=foreign_transcript_spawn)"
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply a --backfill-session-* mode (preview is the default)",
+    )
+    parser.add_argument(
+        "--no-correlate",
+        action="store_true",
+        help="Skip post-harvest meta session correlation",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable stats JSON on stdout",
     )
     args = parser.parse_args(argv)
+
+    if args.backfill_session_meta and args.backfill_session_transcripts:
+        parser.error(
+            "choose one of --backfill-session-meta or --backfill-session-transcripts"
+        )
+    if args.apply and not (
+        args.backfill_session_meta or args.backfill_session_transcripts
+    ):
+        parser.error(
+            "--apply requires --backfill-session-meta or --backfill-session-transcripts"
+        )
+
+    if args.backfill_session_meta:
+        report = correlate_from_run_metas(
+            db_path=args.db,
+            runs_root=args.runs_root or Path.home() / ".hermes" / "runs",
+            apply=args.apply,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 0
+
+    if args.backfill_session_transcripts:
+        report = backfill_session_from_transcripts(
+            db_path=args.db,
+            runs_root=args.runs_root or Path.home() / ".hermes" / "runs",
+            projects_root=args.projects_root
+            or Path.home() / ".claude" / "projects",
+            apply=args.apply,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 0
 
     db_path = initialize_usage_facts_db(args.db)
     kwargs: dict = {
@@ -85,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "origins": args.origin,
         "force": args.force,
         "include_calls": args.include_calls,
+        "correlate_sessions": not args.no_correlate,
     }
     if args.codex_sessions:
         kwargs["codex_sessions"] = args.codex_sessions
@@ -94,10 +164,12 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["qwen_usage_dir"] = args.qwen_usage_dir
     if args.grok_unified:
         kwargs["grok_unified"] = args.grok_unified
+    if args.runs_root:
+        kwargs["runs_root"] = args.runs_root
 
     result = harvest_all(**kwargs)
     if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
+        print(json.dumps(result, indent=2, sort_keys=True, default=str))
     else:
         print(f"db={result['db_path']}")
         print(f"state={result['state_path']}")
@@ -110,6 +182,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"skipped_unchanged={stats['skipped_unchanged']} "
                 f"skipped_existing={stats['skipped_existing']} "
                 f"errors={stats['errors']} duration_s={stats['duration_s']:.3f}"
+            )
+        corr = result.get("session_correlation")
+        if isinstance(corr, dict):
+            print(
+                "session_correlation: "
+                f"metas={corr.get('metas_scanned')} "
+                f"with_claude={corr.get('metas_with_claude')} "
+                f"rows_filled={corr.get('rows_filled')} "
+                f"unassignable_no_handle={corr.get('unassignable_no_handle')}"
             )
     return 0
 

@@ -5,6 +5,7 @@ Sources (read-only):
   - Kimi wire logs: resume_handle → ``session_index.jsonl`` → ``wire.jsonl``
   - Qwen monthly usage: ``~/.qwen/usage/token-usage-YYYY-MM.jsonl``
   - Grok unified log: ``~/.grok/logs/unified.jsonl`` (``shell.turn.inference_done``)
+  - foreign.sh run metas: ``~/.hermes/runs/*/meta`` (session correlation)
 
 Does not touch loop dispatch. Writes only into the S2 usage-facts schema
 with ``origin`` in {codex_cli, kimi_cli, grok_cli, qwen_cli}.
@@ -13,19 +14,32 @@ Codex aggregation: session-level totals come from the **last**
 ``total_token_usage`` on a rollout (cumulative). Summing every
 ``total_token_usage`` would multi-count; summing ``last_token_usage`` yields
 the same total on complete sessions and is used for per-turn call rows.
+
+Session correlation (S8): map foreign-CLI usage rows back to the Claude Code
+session that spawned them. Evidence sources, strongest first:
+
+  1. ``foreign_run_meta`` — ``meta.claude_session_id`` + ``meta.resume_handle``
+  2. ``foreign_transcript_spawn`` — transcript ``foreign.sh`` spawn + run dir
+
+``NULL`` means unobserved. Ambiguous multi-candidate matches stay ``NULL``.
+Never overwrite an already-set ``session_id``.
 """
 
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional
+from typing import Any, Iterator, Mapping, Optional, Sequence
+from urllib.parse import quote
 
 from hermes_cli.usage_facts_db import (
+    initialize_usage_facts_db,
     record_llm_call,
     upsert_run_facts,
     usage_facts_db_path,
@@ -36,10 +50,18 @@ ORIGIN_KIMI = "kimi_cli"
 ORIGIN_GROK = "grok_cli"
 ORIGIN_QWEN = "qwen_cli"
 
+FOREIGN_ORIGINS = frozenset({ORIGIN_CODEX, ORIGIN_KIMI, ORIGIN_GROK, ORIGIN_QWEN})
+
+# correlation_source values — keep distinguishable (different proof strength).
+CORRELATION_SOURCE_META = "foreign_run_meta"
+CORRELATION_SOURCE_TRANSCRIPT = "foreign_transcript_spawn"
+
 DEFAULT_CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 DEFAULT_KIMI_INDEX = Path.home() / ".kimi-code" / "session_index.jsonl"
 DEFAULT_QWEN_USAGE_DIR = Path.home() / ".qwen" / "usage"
 DEFAULT_GROK_UNIFIED = Path.home() / ".grok" / "logs" / "unified.jsonl"
+DEFAULT_RUNS_ROOT = Path.home() / ".hermes" / "runs"
+DEFAULT_CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
 # Kimi usageScope values observed in production (2026-07-27 sample of 80 wires):
 # turn=2740, session=1. Only "turn" is additive; never mix scopes.
@@ -49,6 +71,23 @@ KIMI_SUMMABLE_SCOPE = "turn"
 QWEN_SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
 
 STATE_VERSION = 1
+
+# Run-dir timestamps from foreign.sh use local wall clock (`date +%Y%m%dT%H%M%S`).
+# Transcripts are UTC. Compare both as aware UTC datetimes.
+_RUN_DIR_NAME_RE = re.compile(
+    r"^(?P<ts>\d{8}T\d{6})-(?P<lane>codex|kimi|grok|qwen)-(?P<slug>.+)$"
+)
+_FOREIGN_SH_RE = re.compile(
+    r"(?:^|[\s;|&])(?:\S*/)?foreign\.sh\s+"
+    r"(?P<lane>codex|kimi|grok|qwen)\b(?P<rest>.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+# Spawn → run-dir matching window (seconds). Run dir is created at spawn time;
+# allow small clock skew before, generous lag after (preflight + queue).
+SPAWN_MATCH_WINDOW_BEFORE_S = 120
+SPAWN_MATCH_WINDOW_AFTER_S = 7200
+
+_INVALID_HANDLES = frozenset({"", "none", "null", "unavailable"})
 
 
 @dataclass
@@ -1150,11 +1189,18 @@ def harvest_all(
     kimi_index: Path | str = DEFAULT_KIMI_INDEX,
     qwen_usage_dir: Path | str = DEFAULT_QWEN_USAGE_DIR,
     grok_unified: Path | str = DEFAULT_GROK_UNIFIED,
+    runs_root: Path | str = DEFAULT_RUNS_ROOT,
     origins: Optional[list[str]] = None,
     force: bool = False,
     include_calls: bool = False,
+    correlate_sessions: bool = True,
 ) -> dict[str, Any]:
-    """Run selected harvesters; return per-origin stats + totals."""
+    """Run selected harvesters; return per-origin stats + totals.
+
+    After writing run facts, applies ``meta.claude_session_id`` correlation
+    (when present) so newly harvested foreign-CLI rows pick up the spawning
+    Claude session without a separate backfill pass.
+    """
     db = usage_facts_db_path(db_path)
     state_file = Path(state_path) if state_path else db.with_name("foreign_lane_harvest_state.json")
     rl_path = (
@@ -1207,14 +1253,764 @@ def harvest_all(
 
     save_state(state_file, state)
     total_written = sum(s.written_runs for s in results.values())
+
+    correlation: Optional[dict[str, Any]] = None
+    if correlate_sessions:
+        # Apply meta-based session binding (no-op when claude_session_id absent).
+        correlation = correlate_from_run_metas(
+            db_path=db,
+            runs_root=runs_root,
+            apply=True,
+        )
+
     return {
         "db_path": str(db),
         "state_path": str(state_file),
         "rate_limit_path": str(rl_path),
         "written_runs_total": total_written,
         "origins": {name: stats.as_dict() for name, stats in results.items()},
+        "session_correlation": correlation,
     }
 
 
 def default_state_path_for_db(db_path: Path | str) -> Path:
     return Path(db_path).with_name("foreign_lane_harvest_state.json")
+
+
+# ---------------------------------------------------------------------------
+# Session correlation: foreign.sh meta + transcript spawn backfill
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RunMetaRecord:
+    """One ``~/.hermes/runs/<ts>-<lane>-<slug>/meta`` parse."""
+
+    run_dir: Path
+    dir_name: str
+    lane: Optional[str]
+    slug: Optional[str]
+    started_at: Optional[datetime]
+    resume_handle: Optional[str]
+    claude_session_id: Optional[str]
+    raw: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ForeignSpawnRecord:
+    """One Claude Code transcript record that invoked foreign.sh."""
+
+    claude_session_id: str
+    timestamp: datetime
+    lane: str
+    slug: str
+    brief_path: Optional[str] = None
+    source_path: Optional[str] = None
+
+
+def parse_meta_file(path: Path | str) -> dict[str, str]:
+    """Parse foreign.sh meta: ``key=value`` per line (first ``=`` splits).
+
+    Real format measured 2026-07-31::
+
+        resume_handle=019fb847-9429-7922-9818-8fa2762450ab
+        usage=unavailable
+        lane=codex
+        exit=0
+        duration_s=3577
+        dir=/home/piet/...
+        run=/home/piet/.hermes/runs/...
+        read_only=0
+
+    Optional future key (written by a parallel wrapper change)::
+
+        claude_session_id=<uuid>
+    """
+    path = Path(path)
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            out[key] = value.strip()
+    return out
+
+
+def _is_valid_handle(handle: Optional[str]) -> bool:
+    if handle is None:
+        return False
+    h = handle.strip()
+    return bool(h) and h.lower() not in _INVALID_HANDLES
+
+
+def _slugify_foreign(name: str) -> str:
+    """Mirror foreign.sh: basename, strip .md, keep [A-Za-z0-9], collapse rest to -."""
+    base = Path(str(name).strip().strip("\"'")).name
+    if base.endswith(".md"):
+        base = base[:-3]
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", base).strip("-")
+    return slug
+
+
+def parse_run_dir_name(
+    name: str,
+    *,
+    local_tz: Optional[Any] = None,
+) -> Optional[tuple[datetime, str, str]]:
+    """Parse ``YYYYMMDDTHHMMSS-<lane>-<slug>`` → (utc_ts, lane, slug).
+
+    foreign.sh stamps the directory with local wall clock; convert to UTC for
+    comparison with transcript timestamps.
+    """
+    m = _RUN_DIR_NAME_RE.match(name)
+    if not m:
+        return None
+    tz = local_tz or datetime.now().astimezone().tzinfo or timezone.utc
+    try:
+        local_dt = datetime.strptime(m.group("ts"), "%Y%m%dT%H%M%S").replace(tzinfo=tz)
+    except ValueError:
+        return None
+    return local_dt.astimezone(timezone.utc), m.group("lane").lower(), m.group("slug")
+
+
+def resume_handle_from_run_id(run_id: str) -> Optional[str]:
+    """Extract the foreign-CLI session handle from a usage ``run_id``.
+
+    Forms (measured)::
+
+        codex_cli:<uuid>
+        kimi_cli:session_<uuid>
+        qwen_cli:<call-or-session-uuid>
+        grok_cli:<uuid>:loop17   ← third segment is NOT part of the handle
+    """
+    if not run_id or ":" not in run_id:
+        return None
+    origin, rest = run_id.split(":", 1)
+    if origin not in FOREIGN_ORIGINS or not rest:
+        return None
+    if origin == ORIGIN_GROK:
+        # strip trailing :loopN (loop index is not the session id)
+        m = re.match(r"^(?P<handle>.+):loop\d+$", rest)
+        if m:
+            return m.group("handle")
+        return rest
+    return rest
+
+
+def origin_for_lane(lane: str) -> Optional[str]:
+    mapping = {
+        "codex": ORIGIN_CODEX,
+        "kimi": ORIGIN_KIMI,
+        "grok": ORIGIN_GROK,
+        "qwen": ORIGIN_QWEN,
+    }
+    return mapping.get(lane.lower())
+
+
+def iter_run_metas(
+    runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    *,
+    local_tz: Optional[Any] = None,
+) -> list[RunMetaRecord]:
+    """Load every ``runs/*/meta`` file (skips non-run dirs like ``_briefs``)."""
+    root = Path(runs_root)
+    if not root.is_dir():
+        return []
+    records: list[RunMetaRecord] = []
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        if not child.is_dir():
+            continue
+        meta_path = child / "meta"
+        if not meta_path.is_file():
+            continue
+        raw = parse_meta_file(meta_path)
+        parsed = parse_run_dir_name(child.name, local_tz=local_tz)
+        if parsed:
+            started_at, lane_from_name, slug = parsed
+        else:
+            started_at, lane_from_name, slug = None, None, None
+        lane = (raw.get("lane") or lane_from_name or "").strip().lower() or None
+        handle = raw.get("resume_handle")
+        claude = raw.get("claude_session_id")
+        records.append(
+            RunMetaRecord(
+                run_dir=child,
+                dir_name=child.name,
+                lane=lane,
+                slug=slug,
+                started_at=started_at,
+                resume_handle=handle.strip() if isinstance(handle, str) else handle,
+                claude_session_id=(
+                    claude.strip() if isinstance(claude, str) and claude.strip() else None
+                ),
+                raw=raw,
+            )
+        )
+    return records
+
+
+def build_handle_to_claude_from_metas(
+    metas: Sequence[RunMetaRecord],
+) -> dict[str, Any]:
+    """Build resume_handle → claude_session_id from metas that carry both.
+
+    Handles that are missing/invalid (``none``) are counted as unassignable.
+    A handle mapping to **more than one** distinct claude session is ambiguous
+    and is dropped (NULL rule).
+    """
+    handle_sessions: dict[str, set[str]] = {}
+    unassignable_no_handle = 0
+    metas_with_claude = 0
+    metas_without_claude = 0
+
+    for meta in metas:
+        if meta.claude_session_id:
+            metas_with_claude += 1
+        else:
+            metas_without_claude += 1
+            continue
+        if not _is_valid_handle(meta.resume_handle):
+            unassignable_no_handle += 1
+            continue
+        handle = str(meta.resume_handle).strip()
+        handle_sessions.setdefault(handle, set()).add(meta.claude_session_id)
+
+    mapping: dict[str, str] = {}
+    ambiguous_handles = 0
+    for handle, sessions in handle_sessions.items():
+        if len(sessions) == 1:
+            mapping[handle] = next(iter(sessions))
+        else:
+            ambiguous_handles += 1
+
+    return {
+        "handle_to_session": mapping,
+        "metas_with_claude": metas_with_claude,
+        "metas_without_claude": metas_without_claude,
+        "unassignable_no_handle": unassignable_no_handle,
+        "ambiguous_handles": ambiguous_handles,
+        "unique_handles": len(mapping),
+    }
+
+
+def _connect_usage_db(db_path: Path, *, readonly: bool) -> sqlite3.Connection:
+    resolved = db_path.expanduser().resolve()
+    if readonly:
+        uri = f"file:{quote(str(resolved), safe='/')}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+    else:
+        conn = sqlite3.connect(str(resolved), timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def find_run_ids_for_handle(
+    conn: sqlite3.Connection,
+    handle: str,
+    *,
+    origins: Optional[Sequence[str]] = None,
+) -> list[str]:
+    """Locate ``run_usage_facts.run_id`` values for a foreign resume_handle.
+
+    Matching rules (per-lane, measured)::
+
+      codex_cli  → run_id == 'codex_cli:{handle}'
+      kimi_cli   → run_id == 'kimi_cli:{handle}'
+      grok_cli   → run_id LIKE 'grok_cli:{handle}:loop%'
+      qwen_cli   → run_id == 'qwen_cli:{handle}'
+                   OR profile == handle  (usage log stores sessionId in profile;
+                   run_id carries the per-call id, not the session handle)
+    """
+    handle = handle.strip()
+    if not handle:
+        return []
+    wanted = set(origins) if origins else set(FOREIGN_ORIGINS)
+    found: list[str] = []
+
+    if ORIGIN_CODEX in wanted:
+        row = conn.execute(
+            "SELECT run_id FROM run_usage_facts WHERE run_id=?",
+            (f"{ORIGIN_CODEX}:{handle}",),
+        ).fetchone()
+        if row:
+            found.append(str(row["run_id"]))
+
+    if ORIGIN_KIMI in wanted:
+        row = conn.execute(
+            "SELECT run_id FROM run_usage_facts WHERE run_id=?",
+            (f"{ORIGIN_KIMI}:{handle}",),
+        ).fetchone()
+        if row:
+            found.append(str(row["run_id"]))
+
+    if ORIGIN_GROK in wanted:
+        # Third component (:loopN) is not part of the session handle.
+        prefix = f"{ORIGIN_GROK}:{handle}:loop"
+        rows = conn.execute(
+            "SELECT run_id FROM run_usage_facts WHERE run_id LIKE ? ESCAPE '\\'",
+            (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",),
+        ).fetchall()
+        for row in rows:
+            found.append(str(row["run_id"]))
+
+    if ORIGIN_QWEN in wanted:
+        row = conn.execute(
+            "SELECT run_id FROM run_usage_facts WHERE run_id=?",
+            (f"{ORIGIN_QWEN}:{handle}",),
+        ).fetchone()
+        if row:
+            found.append(str(row["run_id"]))
+        # Session-level match: harvest stores Qwen sessionId on profile.
+        rows = conn.execute(
+            "SELECT run_id FROM run_usage_facts "
+            "WHERE origin=? AND profile=? AND run_id != ?",
+            (ORIGIN_QWEN, handle, f"{ORIGIN_QWEN}:{handle}"),
+        ).fetchall()
+        for row in rows:
+            found.append(str(row["run_id"]))
+
+    # de-dupe preserve order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for rid in found:
+        if rid not in seen:
+            seen.add(rid)
+            unique.append(rid)
+    return unique
+
+
+def _token_checksum(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Snapshot token/time columns — used to prove backfill does not touch them."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, "
+        "COALESCE(SUM(input_tokens),0) AS in_tok, "
+        "COALESCE(SUM(output_tokens),0) AS out_tok, "
+        "COALESCE(SUM(cache_read_tokens),0) AS cache_tok, "
+        "COALESCE(SUM(reasoning_tokens),0) AS reason_tok, "
+        "COALESCE(SUM(duration_ms),0) AS dur, "
+        "SUM(CASE WHEN task_run_id IS NOT NULL THEN 1 ELSE 0 END) AS task_n, "
+        "SUM(CASE WHEN first_call_at IS NOT NULL THEN 1 ELSE 0 END) AS first_n, "
+        "SUM(CASE WHEN last_call_at IS NOT NULL THEN 1 ELSE 0 END) AS last_n, "
+        "SUM(CASE WHEN captured_at IS NOT NULL THEN 1 ELSE 0 END) AS cap_n "
+        "FROM run_usage_facts WHERE origin IN (?,?,?,?)",
+        (ORIGIN_CODEX, ORIGIN_KIMI, ORIGIN_GROK, ORIGIN_QWEN),
+    ).fetchone()
+    return {
+        "rows": int(row["n"] or 0),
+        "input_tokens": int(row["in_tok"] or 0),
+        "output_tokens": int(row["out_tok"] or 0),
+        "cache_read_tokens": int(row["cache_tok"] or 0),
+        "reasoning_tokens": int(row["reason_tok"] or 0),
+        "duration_ms": float(row["dur"] or 0),
+        "task_run_id_set": int(row["task_n"] or 0),
+        "first_call_at_set": int(row["first_n"] or 0),
+        "last_call_at_set": int(row["last_n"] or 0),
+        "captured_at_set": int(row["cap_n"] or 0),
+    }
+
+
+def apply_handle_session_map(
+    *,
+    db_path: Path | str,
+    handle_to_session: Mapping[str, str],
+    correlation_source: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply session_id fills from a handle→claude_session map.
+
+    Only rows with ``session_id IS NULL`` are candidates. Already-set values
+    are never overwritten (COALESCE / WHERE guard). Token, time, and
+    ``task_run_id`` columns are not part of the UPDATE.
+    """
+    resolved = usage_facts_db_path(db_path)
+    if not resolved.is_file():
+        return {
+            "applied": apply,
+            "correlation_source": correlation_source,
+            "handles": len(handle_to_session),
+            "rows_to_fill": 0,
+            "rows_filled": 0,
+            "rows_already_set": 0,
+            "handles_with_rows": 0,
+            "handles_without_rows": 0,
+            "before": None,
+            "after": None,
+        }
+
+    if apply:
+        initialize_usage_facts_db(resolved)
+
+    conn = _connect_usage_db(resolved, readonly=not apply)
+    try:
+        before = _token_checksum(conn)
+        updates: list[tuple[str, str, str]] = []  # (session_id, source, run_id)
+        rows_already_set = 0
+        handles_with_rows = 0
+        handles_without_rows = 0
+
+        for handle, session_id in handle_to_session.items():
+            if not _is_valid_handle(handle) or not session_id:
+                continue
+            run_ids = find_run_ids_for_handle(conn, handle)
+            if not run_ids:
+                handles_without_rows += 1
+                continue
+            handles_with_rows += 1
+            for run_id in run_ids:
+                row = conn.execute(
+                    "SELECT session_id FROM run_usage_facts WHERE run_id=?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                existing = row["session_id"]
+                if existing is not None and str(existing).strip() != "":
+                    rows_already_set += 1
+                    continue
+                updates.append((session_id, correlation_source, run_id))
+
+        rows_to_fill = len(updates)
+        rows_filled = 0
+        if apply and updates:
+            for session_id, source, run_id in updates:
+                cur = conn.execute(
+                    "UPDATE run_usage_facts SET "
+                    "session_id=COALESCE(session_id, ?), "
+                    "correlation_source=COALESCE(correlation_source, ?) "
+                    "WHERE run_id=? AND session_id IS NULL",
+                    (session_id, source, run_id),
+                )
+                rows_filled += max(0, int(cur.rowcount))
+            conn.commit()
+        after = _token_checksum(conn) if apply else before
+        return {
+            "applied": apply,
+            "correlation_source": correlation_source,
+            "handles": len(handle_to_session),
+            "rows_to_fill": rows_to_fill,
+            "rows_filled": rows_filled if apply else 0,
+            "rows_already_set": rows_already_set,
+            "handles_with_rows": handles_with_rows,
+            "handles_without_rows": handles_without_rows,
+            "before": before,
+            "after": after,
+        }
+    finally:
+        conn.close()
+
+
+def correlate_from_run_metas(
+    *,
+    db_path: Path | str | None = None,
+    runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    apply: bool = False,
+    local_tz: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Correlate usage rows via ``meta.claude_session_id`` (preview default).
+
+    Metas **without** ``claude_session_id`` produce no assignment (no guessing).
+    ``resume_handle=none`` is counted as unassignable, not silently dropped.
+    """
+    resolved = usage_facts_db_path(db_path)
+    metas = iter_run_metas(runs_root, local_tz=local_tz)
+    built = build_handle_to_claude_from_metas(metas)
+    apply_stats = apply_handle_session_map(
+        db_path=resolved,
+        handle_to_session=built["handle_to_session"],
+        correlation_source=CORRELATION_SOURCE_META,
+        apply=apply,
+    )
+    return {
+        "mode": "foreign_run_meta",
+        "runs_root": str(Path(runs_root)),
+        "metas_scanned": len(metas),
+        "metas_with_claude": built["metas_with_claude"],
+        "metas_without_claude": built["metas_without_claude"],
+        "unassignable_no_handle": built["unassignable_no_handle"],
+        "ambiguous_handles": built["ambiguous_handles"],
+        "unique_handles": built["unique_handles"],
+        **apply_stats,
+    }
+
+
+def parse_foreign_spawn_command(command: str) -> Optional[dict[str, str]]:
+    """Extract lane + slug from a Bash command that invokes foreign.sh.
+
+    Respects ``--slug`` when present (overrides brief basename), matching
+    foreign.sh directory naming.
+    """
+    if not command or "foreign.sh" not in command:
+        return None
+    # Skip inspections of foreign.sh itself (cat/rg without a real spawn).
+    if "--brief" not in command and "--slug" not in command:
+        return None
+    m = _FOREIGN_SH_RE.search(command)
+    if not m:
+        return None
+    lane = m.group("lane").lower()
+    rest = m.group("rest") or ""
+    try:
+        tokens = shlex.split(rest)
+    except ValueError:
+        tokens = rest.split()
+    brief: Optional[str] = None
+    slug_arg: Optional[str] = None
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "--brief" and i + 1 < len(tokens):
+            brief = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--brief="):
+            brief = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok == "--slug" and i + 1 < len(tokens):
+            slug_arg = tokens[i + 1]
+            i += 2
+            continue
+        if tok.startswith("--slug="):
+            slug_arg = tok.split("=", 1)[1]
+            i += 1
+            continue
+        i += 1
+    if slug_arg:
+        slug = _slugify_foreign(slug_arg)
+    elif brief:
+        slug = _slugify_foreign(brief)
+    else:
+        return None
+    if not slug:
+        return None
+    return {"lane": lane, "slug": slug, "brief": brief or ""}
+
+
+def discover_foreign_spawns(
+    projects_root: Path | str = DEFAULT_CLAUDE_PROJECTS,
+) -> list[ForeignSpawnRecord]:
+    """Scan Claude Code JSONL transcripts for foreign.sh Bash tool_use records."""
+    root = Path(projects_root)
+    if not root.is_dir():
+        return []
+    spawns: list[ForeignSpawnRecord] = []
+    try:
+        paths = sorted(root.rglob("*.jsonl"))
+    except OSError:
+        return []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "foreign.sh" not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            msg = obj.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            session_id = obj.get("sessionId") or obj.get("session_id")
+            ts_raw = obj.get("timestamp")
+            if not isinstance(session_id, str) or not session_id.strip():
+                continue
+            if not isinstance(ts_raw, str) or not ts_raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            for part in content:
+                if not isinstance(part, dict) or part.get("type") != "tool_use":
+                    continue
+                inp = part.get("input")
+                if not isinstance(inp, dict):
+                    continue
+                command = inp.get("command")
+                if not isinstance(command, str):
+                    continue
+                parsed = parse_foreign_spawn_command(command)
+                if parsed is None:
+                    continue
+                spawns.append(
+                    ForeignSpawnRecord(
+                        claude_session_id=session_id.strip(),
+                        timestamp=ts.astimezone(timezone.utc),
+                        lane=parsed["lane"],
+                        slug=parsed["slug"],
+                        brief_path=parsed.get("brief") or None,
+                        source_path=str(path),
+                    )
+                )
+    return spawns
+
+
+def match_spawns_to_run_metas(
+    spawns: Sequence[ForeignSpawnRecord],
+    metas: Sequence[RunMetaRecord],
+    *,
+    window_before_s: int = SPAWN_MATCH_WINDOW_BEFORE_S,
+    window_after_s: int = SPAWN_MATCH_WINDOW_AFTER_S,
+) -> dict[str, Any]:
+    """Map spawns → run metas uniquely; ambiguities stay unassigned.
+
+    Key: (lane, slug) + time window around spawn timestamp.
+    If two run dirs match, **neither** is assigned.
+    """
+    by_lane: dict[str, dict[str, int]] = {}
+    handle_sessions: dict[str, set[str]] = {}
+    matched = 0
+    ambiguous = 0
+    no_candidate = 0
+    no_handle = 0
+
+    for sp in spawns:
+        lane_stats = by_lane.setdefault(
+            sp.lane,
+            {
+                "spawns": 0,
+                "matched": 0,
+                "ambiguous": 0,
+                "no_candidate": 0,
+                "no_handle": 0,
+            },
+        )
+        lane_stats["spawns"] += 1
+        cands: list[RunMetaRecord] = []
+        for meta in metas:
+            if meta.lane != sp.lane or meta.slug != sp.slug:
+                continue
+            if meta.started_at is None:
+                continue
+            delta = (meta.started_at - sp.timestamp).total_seconds()
+            if -window_before_s <= delta <= window_after_s:
+                cands.append(meta)
+        if len(cands) == 0:
+            no_candidate += 1
+            lane_stats["no_candidate"] += 1
+            continue
+        if len(cands) > 1:
+            ambiguous += 1
+            lane_stats["ambiguous"] += 1
+            continue
+        meta = cands[0]
+        if not _is_valid_handle(meta.resume_handle):
+            no_handle += 1
+            lane_stats["no_handle"] += 1
+            continue
+        handle = str(meta.resume_handle).strip()
+        handle_sessions.setdefault(handle, set()).add(sp.claude_session_id)
+        matched += 1
+        lane_stats["matched"] += 1
+
+    mapping: dict[str, str] = {}
+    ambiguous_handles = 0
+    for handle, sessions in handle_sessions.items():
+        if len(sessions) == 1:
+            mapping[handle] = next(iter(sessions))
+        else:
+            ambiguous_handles += 1
+
+    return {
+        "handle_to_session": mapping,
+        "matched_spawns": matched,
+        "ambiguous_spawns": ambiguous,
+        "no_candidate_spawns": no_candidate,
+        "no_handle_spawns": no_handle,
+        "ambiguous_handles": ambiguous_handles,
+        "by_lane": by_lane,
+    }
+
+
+def backfill_session_from_transcripts(
+    *,
+    db_path: Path | str | None = None,
+    runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    projects_root: Path | str = DEFAULT_CLAUDE_PROJECTS,
+    apply: bool = False,
+    local_tz: Optional[Any] = None,
+    window_before_s: int = SPAWN_MATCH_WINDOW_BEFORE_S,
+    window_after_s: int = SPAWN_MATCH_WINDOW_AFTER_S,
+) -> dict[str, Any]:
+    """Preview/apply session_id backfill via transcript foreign.sh spawns.
+
+    Preview (default) writes nothing. Apply fills only NULL ``session_id`` /
+    ``correlation_source`` with source ``foreign_transcript_spawn``.
+    """
+    resolved = usage_facts_db_path(db_path)
+    metas = iter_run_metas(runs_root, local_tz=local_tz)
+    spawns = discover_foreign_spawns(projects_root)
+    matched = match_spawns_to_run_metas(
+        spawns,
+        metas,
+        window_before_s=window_before_s,
+        window_after_s=window_after_s,
+    )
+    apply_stats = apply_handle_session_map(
+        db_path=resolved,
+        handle_to_session=matched["handle_to_session"],
+        correlation_source=CORRELATION_SOURCE_TRANSCRIPT,
+        apply=apply,
+    )
+    return {
+        "mode": "foreign_transcript_spawn",
+        "runs_root": str(Path(runs_root)),
+        "projects_root": str(Path(projects_root)),
+        "metas_scanned": len(metas),
+        "spawns_scanned": len(spawns),
+        "matched_spawns": matched["matched_spawns"],
+        "ambiguous_spawns": matched["ambiguous_spawns"],
+        "no_candidate_spawns": matched["no_candidate_spawns"],
+        "no_handle_spawns": matched["no_handle_spawns"],
+        "ambiguous_handles": matched["ambiguous_handles"],
+        "unique_handles": len(matched["handle_to_session"]),
+        "by_lane": matched["by_lane"],
+        **apply_stats,
+    }
+
+
+def correlate_foreign_sessions(
+    *,
+    db_path: Path | str | None = None,
+    runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    projects_root: Path | str = DEFAULT_CLAUDE_PROJECTS,
+    apply: bool = False,
+    include_transcript_backfill: bool = False,
+    local_tz: Optional[Any] = None,
+) -> dict[str, Any]:
+    """Run meta correlation; optionally transcript backfill. Preview default."""
+    meta_report = correlate_from_run_metas(
+        db_path=db_path,
+        runs_root=runs_root,
+        apply=apply,
+        local_tz=local_tz,
+    )
+    report: dict[str, Any] = {"meta": meta_report}
+    if include_transcript_backfill:
+        report["transcript"] = backfill_session_from_transcripts(
+            db_path=db_path,
+            runs_root=runs_root,
+            projects_root=projects_root,
+            apply=apply,
+            local_tz=local_tz,
+        )
+    return report
