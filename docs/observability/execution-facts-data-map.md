@@ -1,13 +1,12 @@
 # Execution Facts — what the data actually supports
 
-Measured 2026-07-31 08:52 CEST against the live ledger
-(`/mnt/data/hermes-observability/execution_facts.db`), after that morning's
-crontab identity fix and projection rebuild.
+Measured 2026-07-31 09:25 CEST against the live ledger
+(`/mnt/data/hermes-observability/execution_facts.db`).
 
 This is the answer to "what can we analyse today, and what would we be
-fooling ourselves about". It is deliberately written in terms of *questions
-you can ask*, not tables you can join. Numbers are a snapshot; the shape is
-what matters and the shape is stable.
+fooling ourselves about". It is written in terms of *questions you can ask*,
+not tables you can join, and it is the intended starting point for building
+any view on this data. Numbers are a snapshot; the shape is stable.
 
 Companion documents: the field-level contract is
 [execution-facts-contract.md](execution-facts-contract.md), operations are in
@@ -15,163 +14,220 @@ Companion documents: the field-level contract is
 of each invariant is in
 [execution-facts-validation-matrix.md](execution-facts-validation-matrix.md).
 
-## Identity: essentially solved
+## Traffic light
 
-Every execution the system performs is now attributed to a named unit of
-work. `run_identity_adoption` is **99.16 %** (17 926 of 18 078), validity
-`exact`.
+| question | status | number |
+|---|---|---|
+| Which execution was this? | **green** | 99.16 % exact identity |
+| What happened to it? | **green** | outcomes 100 %, 11 160 executions |
+| When did it run, how long? | **green for kanban/cron**, derived for old runs | see A below |
+| Did it ship? | **green since today** | 2 491 landed, 2 472 with commit SHA |
+| Was it deployed? | **red** | no evidence at all |
+| What did it cost? | **amber** | tokens yes, money not yet — see B |
+| Which task did this terminal work on? | **red** | wiring exists, no data yet — see C |
+| Why did it fail? | **amber** | 13.67 % instrumented |
 
-| source | executions | exact identity |
-|---|---:|---|
-| kanban_timeline | 8 845 | yes |
-| crontab_invocation | 6 875 | yes |
-| hermes_cron | 2 136 | yes |
-| systemd_invocation | 256 | yes |
-| usage_facts | 254 | partial |
-| loop_ledger | 152 | **no** |
-| tmux_reconciliation | 6 | yes |
+## Identity: solved
 
-The single remaining gap is `loop_ledger`: 152 executions, zero exact.
-Historical loop ledgers carry no universal run id, so date and round stay
-`derived`. That is 0.84 % of all executions and the only place where the
-answer to "which run was this?" is still a guess.
+`run_identity_adoption` is **99.16 %** (17 968 of 18 120), validity `exact`.
 
-**This closes the activation gate.** The Qwen goal plan
-(`vault/03-Agents/Codex/plans/2026-07-31-execution-facts-live-gap-closure-qwen-goal.md`)
-requires ≥ 99 % adoption; at 99.16 % that is met on the data side. Activation
-itself remains a separate operator decision — passing a data gate carries
-`activation_effect: none` by design.
-
-### How it got there (and the lesson)
-
-Until this morning the number read 38.32 %, and `crontab_invocation` reported
-**zero** exact identity across 17 604 executions. The obvious reading — "cron
-processes are inherently unidentifiable" — was wrong.
-
-The collector asked journalctl for three fields (`_BOOT_ID`, `_PID`,
-`__REALTIME_TIMESTAMP`) and counted every returned line as an execution. But
-`MESSAGE` is present on **100 %** of CRON lines and states `(user) CMD
-(command)`. There are only 9 distinct cron commands on this host. Identity
-was never missing — it was never read.
-
-Counting lines also inflated the source threefold. Over 7 days of journal:
-
-| line kind | count | share | is it a run? |
+| source | executions | exact | derived |
 |---|---:|---:|---|
-| PAM session open/close | 9 791 | 65.2 % | no |
-| `(user) CMD (…)` | 4 895 | 32.6 % | **yes** |
-| "No MTA installed" notice | 336 | 2.2 % | no |
+| kanban_timeline | 8 846 | 9 804 ev. | 17 450 ev. |
+| crontab_invocation | 6 891 | all | 0 |
+| git_landing | 2 472 | all | 0 |
+| hermes_cron | 2 161 | all | 0 |
+| systemd_invocation | 293 | all | 0 |
+| usage_facts | 261 | 146 ev. | 315 ev. |
+| loop_ledger | 152 | **0** | 432 ev. |
+| tmux_reconciliation | 6 | all | 0 |
 
-Lesson worth keeping: when a source reports 0 % identity, check what the
-reader discards before concluding the data cannot support identity.
+The only source without exact identity is `loop_ledger` — 152 executions,
+0.84 % of the total. Historical loop ledgers carry no universal run id, so
+date and round stay `derived`.
 
-## What you can analyse today, honestly
+**The activation gate is met on the data side** (the goal plan asks for
+≥ 99 %). Activation remains a separate operator decision: every payload
+carries `activation_effect: none` by design.
 
-### Fully supported — ask freely
+## A) Timing — exact only since 2026-07-29
 
-* **Kanban task lifecycle.** 8 845 executions, coverage **100 %**, `exact`.
-* **Outcomes.** 11 113 executions, coverage **100 %**, `exact`, across 16
-  statuses: `completed` 6 863 · `reclaimed` 2 102 · `blocked` 804 ·
-  `gave_up` 186 · `spawn_failed` 166 · `crashed` 127 · `timed_out` 94.
-  ~19 % `reclaimed` is worth a look on its own.
-* **Scheduled work.** hermes_cron, systemd and crontab together: 9 075
-  executions, adoption **100 %**. You can now ask "how often did *this named
-  job* run, and when" — e.g. `crontab:piet-loop_monitor.py-…`,
-  `crontab:piet-flock-…` (oma-sync), `crontab:root-command-…` (debian-sa1).
-* **Terminal runs.** 6 executions, 100 % identity — correct but tiny; do not
-  generalise from it.
+`kanban_timeline` shows 9 804 exact against 17 450 derived events, and that
+ratio is not a defect to fix. Per-phase instrumentation
+(`worker_run_timeline_events`) only exists since 2026-07-29: 131 of 8 846
+task runs have it. For the 8 714 runs before that, phase timestamps were
+never recorded, so the reconciler falls back to `started_at`/`ended_at` from
+`task_runs` and honestly marks them `derived`.
 
-### Partially supported — usable with the caveat stated
+Consequences:
 
-* **Error classification.** `unknown`, reason
-  `incomplete_error_instrumentation`. 1 521 of 11 113 executions carry an
-  error class (13.69 %). The classes present are trustworthy; their *absence*
-  means "not instrumented", not "no error". Do not compute an error rate yet.
-* **Cost and tokens.** 344 of 371 executions have usage rows (92.72 %) but the
-  metric stays `unknown`, reason
-  `missing_price_or_subscription_allocation`. Token counts are real; euro
-  amounts are not derivable for subscription lanes until a versioned monthly
-  fee input exists. Fixture:
-  `tests/fixtures/execution_facts/subscription-fees.example.json`.
+* `first_llm_request` / `first_token` do not exist for ~98.5 % of runs. There
+  is no legacy column to recover them from — this is not backfillable.
+* Even for new runs, coverage is ~87 % (131 of 151): the worker needs
+  `HERMES_KANBAN_RUN_ID` and `HERMES_KANBAN_DB` in its environment, and
+  without them the recorder silently does nothing.
 
-### Not supported — do not build on these yet
+So: trust exact timing for runs since 2026-07-29, treat older ones as
+coarse start/end only, and do not compute latency trends across that
+boundary.
 
-* **Landing.** 19 of 11 113 executions (0.17 %) and **zero** carry a commit
-  SHA. The signal is derived from status transitions, not evidence. We cannot
-  currently connect work to what shipped.
-* **Deployment.** `unknown`, reason `deployment_evidence_absent`. Zero
-  observations.
-* **Loop identity.** 152 executions, 0 exact (see above).
-* **Task bindings.** `task_binding_projection` is empty. Nothing joins
-  executions to tasks through this path yet.
+## B) Cost — tokens are real, money is not yet
 
-## Where the data physically lives
+Token counts are trustworthy. Euro/dollar amounts are not, and the metric
+says so: `usage_cost_coverage` is `unknown`,
+reason `missing_price_or_subscription_allocation` (351 of 378 executions
+have usage rows).
+
+Three distinct cost concepts — do not mix them up when building a view:
+
+* **`api_equivalent_cost`** — what the request *would* have cost at list
+  price. Populated and meaningful. For the Claude Code lane alone this is
+  **$11 659.20** across 104 253 rows. Read it as *the value the subscription
+  returns*, not as spend.
+* **`marginal_cost`** — what one more request actually costs. **0** for
+  anything with `billing_mode = subscription_included`. Until today this
+  wrongly carried the list price, so the system reported $11 659.20 of spend
+  that does not exist. The pricing route infers metered-vs-subscription from
+  the provider label, and Claude Code reports `anthropic`, which reads as
+  metered API usage; the recorded `billing_mode` is now the authority.
+* **`allocated_subscription_cost`** — the share of the monthly fee
+  attributable to a run. **Never populated**, because no fee input was ever
+  supplied.
+
+### What is still missing for real money numbers
+
+1. **The monthly fees themselves.** Format is
+   `{"YYYY-MM:<provider>": "<amount>"}` (see
+   `tests/fixtures/execution_facts/subscription-fees.example.json`), passed
+   via `--subscription-fees <file> --fee-version <tag>`. The subscription
+   lanes needing an amount, for 2026-07: `anthropic` (104 253 rows), `qwen`
+   (1 345), `openai-codex` (1 055), `openai` (624), `xai` (583),
+   `kimi-code` (110), `kimi-coding` (80), `alibaba-token-plan` (59),
+   `xai-oauth` (15). **This is operator knowledge; nothing in the system can
+   derive it.**
+2. **An FX rate**, if loop costs are to be aggregated with usage costs. Loop
+   ledgers record EUR, usage facts USD, and mixing currencies is refused
+   rather than guessed. Supply `--fx-rates '{"EUR": "1.08"}' --fx-version
+   <tag>`. Note the 238 EUR events already in the append-only ledger keep
+   their currency; only newly reconciled events convert.
+3. **Price coverage for 5 680 rows** that currently get no price at all:
+   `qwen3.8-max-preview` / `qwen3.7-*` recorded under provider `anthropic`
+   (a router label mismatch), `grok_cli` rows with `model = NULL`, and
+   `hermes_aux` rows with `provider = NULL`.
+
+### Why the cost denominator is small (378, not 18 120)
+
+Two independent reasons, both by design rather than by defect:
+
+* Usage rows without a `task_run_id` — 103 445 of 109 363, mostly
+  interactive sessions — each become their own execution, while rows with a
+  task run collapse onto that run's execution.
+* The collector reads a sample of usage rows by default. That cap used to be
+  liftable only as a side effect of configuring fees; `--usage-sample-limit
+  0` now reads all 109 356 rows independently. **A full scan takes ~5m30s**,
+  so it belongs in a less frequent run than the 15-minute collector, not in
+  every pass.
+
+## C) Terminal ↔ task — wired today, still without data
+
+`task_binding_projection` was empty because nothing ever bound: the collector
+asked tmux for six fields, none of them the task, and `bind_task_run()` had
+no production caller at all. Both halves now exist and are connected.
+
+It is still empty in practice, and the reason is worth knowing: the six live
+panes carry `@hermes_kind` (claude, codex, kimi, qwen, grok) but **no**
+`@hermes_task_id` — they are interactive agent terminals, not task workers.
+Bindings will appear when a task-bound terminal runs. Do not build a view
+that assumes this table is populated.
+
+## D) Landing and deployment
+
+**Landing is evidence-backed since today.** 2 491 executions landed, 2 472
+of them carrying a commit SHA (22.32 % of 11 160). The evidence is the git
+history itself: the landing convention names the task in the commit subject
+(`kanban(t_ab12cd34): …`), and reachability from `main` proves the work
+shipped. The landing event reuses the *kanban* execution identity, so
+evidence attaches to the execution that produced the work.
+
+Landing overall still reports `derived` because the pre-existing loop-ledger
+landings have no SHA; the git-backed ones are `exact`.
+
+**Deployment has no evidence at all** — `unknown`,
+reason `deployment_evidence_absent`. Reachability from `main` proves
+*shipped*, not *deployed*. Closing this needs evidence from the deploy path
+(`scripts/deploy_dashboard.sh`, or the `release/pre-deploy/*` tags) tied back
+to a SHA. This is the largest remaining blind spot.
+
+## E) Errors
+
+`error_rate` is `unknown`, reason `incomplete_error_instrumentation`: 1 526
+of 11 160 executions carry an error class (13.67 %). The classes that are
+present are trustworthy; their *absence* means "not instrumented", not "no
+error". Do not compute an error rate from this yet.
+
+Outcomes, by contrast, are complete (11 160, 100 %, `exact`) across 16
+statuses: `completed` 6 863 · `reclaimed` 2 102 · `blocked` 804 ·
+`gave_up` 186 · `spawn_failed` 166 · `crashed` 127 · `timed_out` 94. The
+~19 % `reclaimed` share is worth investigating on its own.
+
+## Where the data lives
 
 | store | path | role |
 |---|---|---|
-| execution facts ledger | `/mnt/data/hermes-observability/execution_facts.db` | append-only events + derived projections |
+| execution facts ledger | `/mnt/data/hermes-observability/execution_facts.db` | append-only events + projections |
 | usage facts | `/mnt/data/hermes-observability/usage_facts.db` | tokens/model/duration per run |
-| sentinel status | `/mnt/data/hermes-observability/sentinel-status.json` | weekly non-agentic smoke result |
+| sentinel status | `/mnt/data/hermes-observability/sentinel-status.json` | weekly non-agentic smoke |
 | shadow evidence | `/mnt/data/hermes-observability/execution-facts-shadow/` | per-scan census payloads |
 
-Every path is overridable by environment variable
-(`HERMES_EXECUTION_FACTS_DB`, `HERMES_USAGE_FACTS_DB`,
-`HERMES_SENTINEL_STATUS_PATH`) — tests must set them, otherwise they read live
-host state and change verdict on their own.
+All overridable by environment variable (`HERMES_EXECUTION_FACTS_DB`,
+`HERMES_USAGE_FACTS_DB`, `HERMES_SENTINEL_STATUS_PATH`) — tests must set
+them, otherwise they read live host state and change verdict on their own.
 
-## Collection health — how to tell it is actually working
+## Collection health — how to tell it is really working
 
 The collector runs every 15 min via `hermes-execution-facts-shadow.timer`.
 `systemctl --user is-active` is **not** sufficient evidence: the unit can be
 green while a source has silently stopped contributing.
 
-Check the collector payload instead:
-
 * `collector.identity_conflicts` — must be **0**. Non-zero means a source
-  restated a fact under an identity it had already used. The retained fact
+  restated a fact under an identity it had already used; the retained fact
   wins and the sweep continues, but that source's identity rule is broken.
 * `cohorts[].dedupe_reconciled` — false means that source did not reconcile.
-* per-source `MAX(ingested_at_ms)` — a source whose timestamp stops advancing
-  while others move on has died quietly.
+* per-source `MAX(ingested_at_ms)` — a source whose timestamp stops
+  advancing while others move on has died quietly.
 
-That third check is what would have caught the 2026-07-31 outage in minutes
+The third check is what would have caught the 2026-07-31 outage in minutes
 instead of hours: from 04:28 the unit failed every 15 min and 7 of 11 sources
 stopped collecting, while the failure looked like one generic unit error.
 
 ## Known-wrong data that was removed
 
-The crontab identity was replaced twice on 2026-07-31 and both superseded
-generations were deleted by
+Two superseded crontab identity generations were deleted by
 `scripts/migrate_execution_facts_crontab_identity.py` (backup:
-`execution_facts.db.pre-crontab-identity`), because generations otherwise look
-alike to the projection and double-count:
+`execution_facts.db.pre-crontab-identity`), because generations look alike to
+the projection and double-count:
 
 1. `crontab:BOOT:PID` (14 456 rows) — a recycled PID merged unrelated runs,
    and `min()` over a rotating journal window let a retained fact be
    restated. That restatement raised `IdempotencyConflictError` and rolled
-   back the whole batch, which is what jammed the collector.
-2. `crontab:BOOT:PID:FIRST_MS` (17 612 rows) — stable, but still counted
-   session bookkeeping as executions.
+   back the whole batch — the outage above.
+2. `crontab:BOOT:PID:FIRST_MS` (17 612 rows) — stable, but counted every CRON
+   journal line as an execution. On this host 65.2 % of those lines are PAM
+   session bookkeeping and 2.2 % are daemon notices; only 32.6 % are runs.
 
-Current: `crontab:USER-LABEL-DIGEST:RUN_MS`.
+Current: `crontab:USER-LABEL-DIGEST:RUN_MS`, taken from the command the
+journal states — e.g. `crontab:piet-loop_monitor.py-…`,
+`crontab:piet-flock-…` (oma-sync), `crontab:root-command-…` (debian-sa1).
 
-## API surface
+Lesson worth keeping: when a source reports 0 % identity, check what the
+reader discards before concluding the data cannot support identity.
 
-| endpoint | status |
-|---|---|
-| `GET /api/plugins/kanban/stats/observability` | live, consumed by the Statistik tab |
-| `GET /api/plugins/kanban/stats/fleet-metrics` | live, **no frontend consumer** |
-| `GET /api/plugins/kanban/stats/execution-facts` | live, **no frontend consumer** |
+## Next, in order of what it unlocks
 
-All three are read-only and carry `activation_effect: none`.
-
-## What to fix next, in order of what it unlocks
-
-1. **Landing evidence (SHA).** 0.17 % coverage with zero SHA evidence is now
-   the single largest blind spot: we cannot connect work to what shipped.
-2. **Subscription fee input.** Unblocks euro-denominated cost for the
-   subscription lanes, which is where most of the spend is.
-3. **Error instrumentation.** Turns a 13.69 % partial signal into a real
-   error rate.
-4. **Loop run ids.** The last source without exact identity, 152 executions.
-5. **Task bindings.** Empty projection; needed to join executions to tasks.
+1. **Subscription fees** (operator input) — turns tokens into money for the
+   lanes where nearly all the spend is.
+2. **Deployment evidence** — the last completely dark stage of the pipeline.
+3. **Error instrumentation** — turns a 13.67 % partial signal into a rate.
+4. **Price coverage** for the 5 680 unpriced rows.
+5. **Loop run ids** — the last source without exact identity.
+6. **Task-bound terminals** — makes the terminal↔task join produce data.
