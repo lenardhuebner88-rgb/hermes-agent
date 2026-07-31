@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
-"""Retire crontab shadow facts recorded under the pre-2026-07-31 identity.
+"""Drop crontab shadow facts recorded under a superseded identity scheme.
 
-Until 2026-07-31 a crontab execution was identified as ``crontab:BOOT:PID``.
-That identity is wrong twice over: a recycled PID merges unrelated runs into
-one fact, and the fact's observed time was derived with ``min()`` over a
-journal window that rotates underneath the collector -- so a retained fact
-could be restated, which is what jammed the live collector.
+The crontab identity changed twice on 2026-07-31:
 
-The identity is now ``crontab:BOOT:PID:FIRST_RECORD_MS``. Both generations
-otherwise look alike to the projection, so leaving the old rows in place
-double-counts every crontab execution in the window.
+1. ``crontab:BOOT:PID`` -- wrong twice over. A recycled PID merged unrelated
+   runs into one fact, and the fact's time came from ``min()`` over a journal
+   window that rotates underneath the collector, so a retained fact could be
+   restated. That restatement is what jammed the live collector.
+2. ``crontab:BOOT:PID:FIRST_MS`` -- stable, but still anonymous: it counted
+   every CRON journal line, and on this host 65% of those are PAM session
+   bookkeeping and 2% are daemon notices, not job runs.
+3. ``crontab:USER-LABEL-DIGEST:RUN_MS`` (current) -- the journal states which
+   command ran, so a run is attributed to a named job.
 
-These are shadow-only facts with ``activation_effect: none``, and the
-collector rebuilds them from the journal on its next pass, so dropping the
-superseded generation loses no measurement -- it removes a known-wrong one.
-The append-only guarantee still holds for every identity that is still in
-use: nothing is rewritten, only the retired generation is deleted.
+Generations otherwise look alike to the projection, so leaving superseded rows
+in place double-counts executions. These are shadow-only facts with
+``activation_effect: none`` and the collector rebuilds the whole source from
+the journal on its next pass, so clearing the source loses no measurement --
+it removes known-wrong ones. The append-only guarantee is unaffected for every
+identity still in use: nothing is rewritten.
 
-Read-only by default; pass --apply to write, which always takes a backup
-first.
+Read-only by default; --apply always takes a backup first.
 """
 
 from __future__ import annotations
@@ -29,24 +31,24 @@ import shutil
 import sqlite3
 import sys
 
-# Rows of the retired generation have exactly two colons; the current one
-# appends the first record's epoch-ms and therefore has three.
-LEGACY_PREDICATE = (
-    "source = 'crontab_invocation' "
-    "AND source_execution_id NOT GLOB 'crontab:*:*:*'"
+SOURCE = "crontab_invocation"
+# Current scheme: exactly one colon between the prefix and the run timestamp.
+CURRENT_IDENTITY_GLOB = "crontab:*:*"
+SUPERSEDED_PREDICATE = (
+    f"source = '{SOURCE}' AND ("
+    f"source_execution_id NOT GLOB '{CURRENT_IDENTITY_GLOB}' "
+    "OR source_execution_id GLOB 'crontab:*:*:*')"
 )
 
 
 def _counts(connection: sqlite3.Connection) -> tuple[int, int]:
-    legacy = connection.execute(
-        f"SELECT COUNT(*) FROM execution_events WHERE {LEGACY_PREDICATE}"
+    superseded = connection.execute(
+        f"SELECT COUNT(*) FROM execution_events WHERE {SUPERSEDED_PREDICATE}"
     ).fetchone()[0]
-    current = connection.execute(
-        "SELECT COUNT(*) FROM execution_events "
-        "WHERE source = 'crontab_invocation' "
-        "AND source_execution_id GLOB 'crontab:*:*:*'"
+    total = connection.execute(
+        "SELECT COUNT(*) FROM execution_events WHERE source = ?", (SOURCE,)
     ).fetchone()[0]
-    return int(legacy), int(current)
+    return int(superseded), int(total)
 
 
 def main() -> int:
@@ -68,39 +70,39 @@ def main() -> int:
         return 1
 
     with sqlite3.connect(args.db) as connection:
-        legacy, current = _counts(connection)
+        superseded, total = _counts(connection)
 
-    print(f"database              : {args.db}")
-    print(f"retired identity rows : {legacy}")
-    print(f"current identity rows : {current}")
+    print(f"database         : {args.db}")
+    print(f"crontab rows     : {total}")
+    print(f"superseded rows  : {superseded}")
 
-    if legacy == 0:
+    if superseded == 0:
         print("nothing to migrate")
         return 0
     if not args.apply:
-        print("dry run - pass --apply to delete the retired generation")
+        print("dry run - pass --apply to delete the superseded generation")
         return 0
 
     backup = args.db.with_suffix(f"{args.db.suffix}.pre-crontab-identity")
     shutil.copy2(args.db, backup)
-    print(f"backup                : {backup}")
+    print(f"backup           : {backup}")
 
     with sqlite3.connect(args.db) as connection:
         connection.execute("BEGIN IMMEDIATE")
-        # Clear the dedupe registry entries first so the identities cannot be
-        # resurrected by a later append carrying the old fingerprint.
+        # Clear the dedupe registry first so a superseded identity cannot be
+        # resurrected by a later append carrying its old fingerprint.
         connection.execute(
             "DELETE FROM execution_event_dedupe WHERE (source, "
             "idempotency_key) IN (SELECT source, idempotency_key "
-            f"FROM execution_events WHERE {LEGACY_PREDICATE})"
+            f"FROM execution_events WHERE {SUPERSEDED_PREDICATE})"
         )
         deleted = connection.execute(
-            f"DELETE FROM execution_events WHERE {LEGACY_PREDICATE}"
+            f"DELETE FROM execution_events WHERE {SUPERSEDED_PREDICATE}"
         ).rowcount
         connection.commit()
 
-    print(f"deleted               : {deleted}")
-    print("run `execution_facts.py rebuild` to refresh the projections")
+    print(f"deleted          : {deleted}")
+    print("run `execution_facts.py rebuild --db <db>` to refresh projections")
     return 0
 
 

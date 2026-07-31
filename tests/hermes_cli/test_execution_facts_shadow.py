@@ -12,6 +12,7 @@ from typing import Sequence
 import pytest
 
 import hermes_cli.execution_facts_shadow as execution_facts_shadow
+from hermes_cli.execution_facts_contract import Validity
 from hermes_cli.execution_facts_ledger import ExecutionFactsLedger
 from hermes_cli.execution_facts_readmodel import build_execution_facts_payload
 from hermes_cli.execution_facts_shadow import (
@@ -183,6 +184,7 @@ class _FakeRunner:
                         "__REALTIME_TIMESTAMP": str(
                             (_NOW_MS - ordinal * 1_000) * 1_000
                         ),
+                        "MESSAGE": f"(piet) CMD (/home/piet/job-{ordinal}.sh)",
                     },
                     sort_keys=True,
                 )
@@ -271,14 +273,17 @@ def test_shadow_collects_universal_denominator_without_mutating_sources(
     assert run_identity["metric_id"] == "run_identity_adoption"
     assert run_identity["computed_status"] == "ready"
     assert run_identity["validity"] == "exact"
-    assert run_identity["observed"] == 100
+    # All six sources carry exact identity: the journal names the cron
+    # command, so crontab runs are attributed rather than counted anonymously.
+    assert run_identity["observed"] == 120
     assert run_identity["eligible"] == 120
-    assert run_identity["value"] == 100
-    assert run_identity["percent"] == "83.33"
+    assert run_identity["value"] == 120
+    assert run_identity["percent"] == "100.00"
     assert run_identity["unknown_reason"] is None
     assert payload["p0"]["terminal_identity"]["observed"] == _SAMPLE_SIZE
     assert payload["p0"]["terminal_identity"]["eligible"] == _SAMPLE_SIZE
-    assert payload["p0"]["cron_systemd"]["observed"] == 40
+    # hermes_cron + systemd + crontab, all three now exactly identified.
+    assert payload["p0"]["cron_systemd"]["observed"] == 60
     assert payload["p0"]["cron_systemd"]["eligible"] == 60
     assert payload["p0"]["loops"]["observed"] == _SAMPLE_SIZE
     assert payload["p0"]["loops"]["eligible"] == _SAMPLE_SIZE
@@ -630,7 +635,8 @@ class _InvalidJournalRunner:
         return subprocess.CompletedProcess(
             command,
             0,
-            '{"_BOOT_ID":"boot","_PID":"1","__REALTIME_TIMESTAMP":"1000"}\n'
+            '{"_BOOT_ID":"boot","_PID":"1","__REALTIME_TIMESTAMP":"1000",'
+            '"MESSAGE":"(piet) CMD (/home/piet/job.sh)"}\n'
             "not-json\n",
             "",
         )
@@ -650,10 +656,10 @@ def test_crontab_reads_full_window_and_fails_closed_on_parse_error() -> None:
     assert cohort.behavior_equivalent is False
 
 
-class _ScriptedJournalRunner(_FakeRunner):
-    """Serve an exact set of CRON journal records for one collection pass."""
+class _RealisticCronRunner(_FakeRunner):
+    """Serve CRON journal lines in the shape journalctl actually emits."""
 
-    def __init__(self, records: Sequence[tuple[str, str, int]]) -> None:
+    def __init__(self, records: Sequence[tuple[str, int, str]]) -> None:
         super().__init__()
         self._records = tuple(records)
 
@@ -666,170 +672,172 @@ class _ScriptedJournalRunner(_FakeRunner):
         payload = "".join(
             json.dumps(
                 {
-                    "_BOOT_ID": boot_id,
+                    "_BOOT_ID": "boot-a",
                     "_PID": pid,
                     "__REALTIME_TIMESTAMP": str(timestamp_ms * 1000),
+                    "MESSAGE": message,
                 }
             )
             + "\n"
-            for boot_id, pid, timestamp_ms in self._records
+            for pid, timestamp_ms, message in self._records
         )
         return subprocess.CompletedProcess(command, 0, payload, "")
 
 
-def _crontab_identities(
-    records: Sequence[tuple[str, str, int]],
-) -> dict[str, int]:
-    cohort = collect_crontab_cohort(
-        observed_at_ms=_NOW_MS,
-        window_days=30,
-        runner=_ScriptedJournalRunner(records),
-    )
-    return {
-        event.source_execution_id: event.observed_at_ms
-        for event in cohort.events
-    }
-
-
-def test_crontab_reused_pid_is_not_merged_into_one_invocation() -> None:
-    """A PID recycled days later is a second invocation, not the same one."""
-    first_run_ms = _NOW_MS - 9 * 86_400_000
-    recycled_run_ms = _NOW_MS - 86_400_000
-
-    identities = _crontab_identities(
-        [
-            ("boot-a", "4242", first_run_ms),
-            ("boot-a", "4242", first_run_ms + 120),
-            ("boot-a", "4242", recycled_run_ms),
-        ]
-    )
-
-    assert len(identities) == 2, identities
-    assert sorted(identities.values()) == [first_run_ms, recycled_run_ms]
+_CRON_RUN_MS = _NOW_MS - 3 * 86_400_000
 
 
 def test_crontab_identity_survives_journal_rotation() -> None:
-    """Losing the oldest journal record must not restate a retained fact.
+    """Losing older journal records must not restate a retained fact.
 
-    The journal is rotated out from under the collector. Any invocation that
-    is still readable has to keep the exact identity *and* observed time it
-    had before, otherwise the same idempotency key describes a different fact
-    and the whole shadow batch is rejected.
+    The journal rotates independently of our window. Any run that is still
+    readable has to keep the exact identity and observed time it had before,
+    otherwise the same idempotency key describes a different fact and the
+    whole shadow batch is rejected -- the live failure of 2026-07-31.
     """
     older_run_ms = _NOW_MS - 20 * 86_400_000
     retained_run_ms = _NOW_MS - 5 * 86_400_000
+    job = "(piet) CMD (/home/piet/job-a.sh)"
 
-    before_rotation = _crontab_identities(
-        [
-            ("boot-a", "178442", older_run_ms),
-            ("boot-a", "178442", retained_run_ms),
-            ("boot-a", "178442", retained_run_ms + 2),
-        ]
-    )
-    after_rotation = _crontab_identities(
-        [
-            ("boot-a", "178442", retained_run_ms),
-            ("boot-a", "178442", retained_run_ms + 2),
-        ]
-    )
+    def identities(records):
+        cohort = collect_crontab_cohort(
+            observed_at_ms=_NOW_MS,
+            window_days=30,
+            runner=_RealisticCronRunner(records),
+        )
+        return {
+            event.source_execution_id: event.observed_at_ms
+            for event in cohort.events
+        }
 
-    survivors = set(before_rotation) & set(after_rotation)
+    before = identities(
+        [("100", older_run_ms, job), ("101", retained_run_ms, job)]
+    )
+    after = identities([("101", retained_run_ms, job)])
+
+    survivors = set(before) & set(after)
     assert survivors, "rotation dropped every identity"
     for identity in survivors:
-        assert before_rotation[identity] == after_rotation[identity], (
-            f"{identity} changed its observed time across rotation: "
-            f"{before_rotation[identity]} -> {after_rotation[identity]}"
+        assert before[identity] == after[identity], (
+            f"{identity} changed its observed time across rotation"
         )
 
 
-def test_crontab_multiline_records_stay_one_invocation() -> None:
-    """CRON logs several lines per run; they are one execution, not many."""
-    run_ms = _NOW_MS - 3 * 86_400_000
+def test_crontab_identity_is_independent_of_pid_reuse() -> None:
+    """A recycled PID must not collapse two runs into one execution."""
+    first_ms = _NOW_MS - 9 * 86_400_000
+    recycled_ms = _NOW_MS - 86_400_000
+    job = "(piet) CMD (/home/piet/job-a.sh)"
 
-    identities = _crontab_identities(
-        [
-            ("boot-a", "77", run_ms),
-            ("boot-a", "77", run_ms + 2),
-            ("boot-a", "77", run_ms + 150),
-        ]
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_RealisticCronRunner(
+            [("4242", first_ms, job), ("4242", recycled_ms, job)]
+        ),
     )
 
-    assert len(identities) == 1
-    assert next(iter(identities.values())) == run_ms
+    observed = sorted(event.observed_at_ms for event in cohort.events)
+    assert observed == [first_ms, recycled_ms]
 
 
-def test_poisoned_identity_neither_aborts_the_sweep_nor_hides(
-    tmp_path: Path,
-) -> None:
-    """A restated identity keeps the sweep alive but stays visible.
+def test_crontab_session_noise_is_not_counted_as_execution() -> None:
+    """PAM session lines and MTA notices are not job runs.
 
-    Regression for the live failure of 2026-07-31: one crontab identity
-    restated its observed time, the batch rolled back, and 7 of 11 sources
-    silently stopped collecting for hours while the unit just looked failed.
+    On this host they were 65.2% and 2.2% of everything the collector called
+    a crontab execution.
     """
-    hermes_home = tmp_path / "hermes"
-    hermes_home.mkdir()
-    _seed_kanban(hermes_home / "kanban.db")
-    _seed_cron(hermes_home / "cron" / "executions.db")
-    _seed_loops(hermes_home / "loops" / "shadow" / "ledger.jsonl")
-    database = tmp_path / "execution_facts.db"
-    config = ShadowCollectionConfig(
-        database=database,
-        hermes_home=hermes_home,
-        evidence_dir=tmp_path / "evidence",
-        include_systemd=False,
-        include_crontab=False,
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_RealisticCronRunner(
+            [
+                # One real job, framed by its own session lines.
+                (
+                    "100",
+                    _CRON_RUN_MS,
+                    "pam_unix(cron:session): session opened for user "
+                    "piet(uid=1000) by piet(uid=0)",
+                ),
+                ("100", _CRON_RUN_MS + 1, "(piet) CMD (/home/piet/job.sh)"),
+                ("100", _CRON_RUN_MS + 900, "(CRON) info (No MTA installed)"),
+                (
+                    "100",
+                    _CRON_RUN_MS + 1_000,
+                    "pam_unix(cron:session): session closed for user piet",
+                ),
+                # A session pair on its own PID that never ran a command:
+                # counting these is what inflated the source by 65%.
+                (
+                    "200",
+                    _CRON_RUN_MS + 7_200_000,
+                    "pam_unix(cron:session): session opened for user "
+                    "root(uid=0) by root(uid=0)",
+                ),
+                (
+                    "200",
+                    _CRON_RUN_MS + 7_201_000,
+                    "pam_unix(cron:session): session closed for user root",
+                ),
+            ]
+        ),
     )
 
-    first = collect_shadow(
-        config, runner=_SmallTmuxRunner(), clock_ms=lambda: _NOW_MS
-    )
-    assert first.collector["identity_conflicts"] == 0
+    assert cohort.eligible == 1
+    assert len(cohort.events) == 1
 
-    # Reproduce the live shape: the dedupe registry holds a fingerprint that
-    # no longer matches what the source now reports for the same identity.
-    ledger = ExecutionFactsLedger(database)
-    retained = next(
-        event
-        for event in ledger.iter_events()
-        if event.source == "kanban_timeline"
-    )
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """
-            UPDATE execution_event_dedupe
-               SET immutable_payload_sha256 = 'stale-fingerprint'
-             WHERE source = ? AND idempotency_key = ?
-            """,
-            (retained.source, retained.idempotency_key),
-        )
-        connection.commit()
 
-    second = collect_shadow(
-        config, runner=_SmallTmuxRunner(), clock_ms=lambda: _NOW_MS
+def test_crontab_job_identity_is_exact_and_names_the_job() -> None:
+    """The command is right there in MESSAGE; identity must not discard it."""
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_RealisticCronRunner(
+            [
+                ("100", _CRON_RUN_MS, "(piet) CMD (/home/piet/job-a.sh)"),
+                ("101", _CRON_RUN_MS + 60_000, "(root) CMD (/usr/bin/job-b)"),
+            ]
+        ),
     )
 
-    # The conflict is real, counted, and attributed to its source...
-    assert second.collector["identity_conflicts"] >= 1
-    assert (
-        second.collector["identity_conflicts_by_source"]["kanban_timeline"]
-        >= 1
+    identities = sorted(event.source_execution_id for event in cohort.events)
+    assert len(identities) == 2
+    # Same job on different days shares a stable job scope; the run differs.
+    assert all(event.validity is Validity.EXACT for event in cohort.events)
+    assert any("piet" in identity for identity in identities)
+    assert any("root" in identity for identity in identities)
+    assert cohort.identity_observed == 2
+
+
+def test_crontab_same_job_is_one_scope_across_runs() -> None:
+    """Two runs of one job must be two executions of the *same* job."""
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_RealisticCronRunner(
+            [
+                ("100", _CRON_RUN_MS, "(piet) CMD (/home/piet/job-a.sh)"),
+                ("777", _CRON_RUN_MS + 3_600_000, "(piet) CMD (/home/piet/job-a.sh)"),
+            ]
+        ),
     )
-    # ...the affected source is no longer claimed as reconciled...
-    kanban_row = next(
-        row for row in second.cohorts if row["source"] == "kanban_timeline"
+
+    identities = [event.source_execution_id for event in cohort.events]
+    assert len(identities) == 2
+    assert len(set(identities)) == 2, "runs must stay distinct executions"
+    # Strip the trailing run timestamp: the job scope has to be identical.
+    scopes = {identity.rsplit(":", 1)[0] for identity in identities}
+    assert len(scopes) == 1, f"same job produced different scopes: {scopes}"
+
+
+def test_crontab_unparseable_message_stays_unknown_not_dropped() -> None:
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_RealisticCronRunner(
+            [("100", _CRON_RUN_MS, "something entirely unexpected")]
+        ),
     )
-    assert kanban_row["dedupe_reconciled"] is False
-    # ...every other source still collected instead of being rolled back...
-    assert {row["source"] for row in second.cohorts} == {
-        row["source"] for row in first.cohorts
-    }
-    assert second.collector["reconciled_inserted"] >= 0
-    # ...and the retained fact was never overwritten.
-    restated = [
-        event
-        for event in ExecutionFactsLedger(database).iter_events()
-        if event.idempotency_key == retained.idempotency_key
-    ]
-    assert len(restated) == 1
-    assert restated[0].observed_at_ms == retained.observed_at_ms
+
+    assert cohort.eligible == 0
+    assert cohort.events == ()

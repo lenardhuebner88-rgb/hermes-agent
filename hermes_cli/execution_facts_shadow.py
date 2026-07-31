@@ -66,12 +66,11 @@ DEFAULT_EVIDENCE_DIR = Path(
 )
 DEFAULT_CRONTAB_WINDOW_DAYS = 30
 DEFAULT_USAGE_SAMPLE_LIMIT = 200
-# CRON writes several journal lines for a single run (CMD plus session
-# open/close) within milliseconds. Measured against 30 days of this host's
-# journal the two populations are cleanly bimodal: same-run lines land inside
-# 2s, while a recycled PID is at least ~34s (p50) later. Splitting at 2s keeps
-# multi-line runs whole without merging recycled PIDs.
-CRONTAB_INVOCATION_GAP_MS = 2_000
+# `(user) CMD (command)` - the only CRON line that marks an actual run.
+_CRONTAB_COMMAND = re.compile(
+    r"^\((?P<user>[^)]+)\)\s+CMD\s+\((?P<command>.*)\)\s*$"
+)
+_SAFE_JOB_LABEL = re.compile(r"[^A-Za-z0-9_.+-]+")
 _SAFE_SCOPE = re.compile(r"[^A-Za-z0-9_.:+@/-]+")
 
 
@@ -776,36 +775,39 @@ def collect_systemd_cohort(
     )
 
 
-def _cluster_crontab_invocations(
-    grouped: Mapping[tuple[str, str], Sequence[int]],
-) -> tuple[tuple[str, int], ...]:
-    """Resolve CRON journal records into stable per-invocation identities.
+def _journal_message(raw: object) -> str:
+    """Decode a journal MESSAGE, which may arrive as a byte array."""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return bytes(int(byte) for byte in raw).decode("utf-8", "replace")
+    raise TypeError("unsupported MESSAGE encoding")
 
-    Two properties matter and neither survives grouping on ``boot_id:pid``
-    alone:
 
-    * A PID is recycled within a boot, so one ``boot_id:pid`` bucket can hold
-      several unrelated runs. Splitting on a gap keeps them apart.
-    * The journal is rotated independently of our window, so deriving a
-      bucket's time from ``min()`` restates a retained fact once the oldest
-      record ages out. Anchoring identity to the invocation's own first record
-      keeps it constant for as long as that record is readable.
+def _crontab_job_scope(message: str) -> str | None:
+    """Identify which cron job a journal line belongs to, if any.
+
+    CRON writes three kinds of line: the command it ran, PAM session
+    bookkeeping, and daemon notices. Only the first is an execution, and it
+    carries the invoking user plus the command -- enough to attribute the run
+    to a specific job instead of to an anonymous process.
+
+    The command is hashed into the identity so that a long or path-heavy
+    crontab entry cannot bloat or leak through the scope, while a readable
+    prefix keeps the identity diagnosable by eye.
     """
-    invocations: list[tuple[str, int]] = []
-    for (boot_id, pid), timestamps in sorted(grouped.items()):
-        started_at_ms: int | None = None
-        previous_ms: int | None = None
-        for timestamp_ms in sorted(timestamps):
-            if (
-                previous_ms is None
-                or timestamp_ms - previous_ms > CRONTAB_INVOCATION_GAP_MS
-            ):
-                started_at_ms = timestamp_ms
-                invocations.append(
-                    (f"crontab:{boot_id}:{pid}:{started_at_ms}", started_at_ms)
-                )
-            previous_ms = timestamp_ms
-    return tuple(invocations)
+    match = _CRONTAB_COMMAND.match(message)
+    if match is None:
+        return None
+    user = _safe_scope(match.group("user"))
+    command = match.group("command").strip()
+    if not command:
+        return None
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+    label = _SAFE_JOB_LABEL.sub("-", Path(command.split()[0]).name)[:40]
+    # One segment, because evidence references allow only a few colon-
+    # separated parts and the surface and phase already claim two of them.
+    return f"crontab:{user}-{label or 'job'}-{digest}"
 
 
 def collect_crontab_cohort(
@@ -822,7 +824,7 @@ def collect_crontab_cohort(
             "SYSLOG_IDENTIFIER=CRON",
             "-o",
             "json",
-            "--output-fields=_BOOT_ID,_PID,__REALTIME_TIMESTAMP",
+            "--output-fields=_BOOT_ID,_PID,__REALTIME_TIMESTAMP,MESSAGE",
             "--no-pager",
         ]
     )
@@ -830,42 +832,48 @@ def collect_crontab_cohort(
     if result.returncode != 0:
         return _unknown_cohort(
             "crontab_invocation",
-            eligibility_rule="cron_processes_in_bounded_journal_window",
+            eligibility_rule="cron_command_invocations_in_journal_window",
             observed_at_ms=observed_at_ms,
         )
-    grouped: dict[tuple[str, str], list[int]] = {}
+    invocations: list[tuple[str, int]] = []
     errors = 0
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
         try:
             record = json.loads(line)
-            boot_id = str(record["_BOOT_ID"])
-            pid = str(record["_PID"])
             timestamp_ms = int(record["__REALTIME_TIMESTAMP"]) // 1000
+            message = _journal_message(record["MESSAGE"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             errors += 1
             continue
-        grouped.setdefault((boot_id, pid), []).append(timestamp_ms)
-    invocations = _cluster_crontab_invocations(grouped)
+        job_scope = _crontab_job_scope(message)
+        if job_scope is None:
+            # Session bookkeeping and daemon notices are not job runs. On this
+            # host they were 67% of every line CRON writes; counting them made
+            # the source look three times busier than it is.
+            continue
+        invocations.append((f"{job_scope}:{timestamp_ms}", timestamp_ms))
     observations = [
         SystemInvocationObservation(
             source_execution_id=_safe_scope(source_execution_id),
             surface=ExecutionSurface.CRONTAB,
             observed_at_ms=started_at_ms,
             phase=LifecyclePhase.PROCESS_STARTED,
-            validity=Validity.DERIVED,
+            # The journal names the command, so the run is exactly attributed
+            # to a job rather than guessed from process bookkeeping.
+            validity=Validity.EXACT,
         )
-        for source_execution_id, started_at_ms in invocations
+        for source_execution_id, started_at_ms in sorted(invocations)
     ]
     events = tuple(reconcile_system_invocations(observations))
     return SourceCohort(
         source="crontab_invocation",
         events=events,
         eligible=len(invocations) if errors == 0 else None,
-        identity_observed=0,
+        identity_observed=len(invocations),
         metric_observed=_metric_execution_count(events),
-        eligibility_rule="cron_processes_in_bounded_journal_window",
+        eligibility_rule="cron_command_invocations_in_journal_window",
         store_count=1,
         read_errors=errors,
         window_start_ms=window_start_ms,
