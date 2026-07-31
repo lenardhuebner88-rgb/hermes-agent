@@ -854,6 +854,254 @@ def test_backfill_cli_is_explicit_and_preview_only_by_default(
     }
 
 
+def test_harvest_writes_occurred_at_from_fixture_timestamp(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """Source event time must be the transcript timestamp, not harvest wall clock.
+
+    The flat streaming fixture has two assistant fragments; merge keeps the last
+    non-empty ``timestamp`` (same as ``draft.timestamp``).
+    """
+    flat = (
+        PROJECTS
+        / "flat-project"
+        / "7df0db96-dab8-4f17-92bc-a3a57004b32d.jsonl"
+    )
+    # Last assistant fragment timestamp, literal from the fixture file.
+    fixture_timestamp = "2026-07-12T06:21:53.803Z"
+    drafts, _stats = parse_transcript_file(flat, projects_root=PROJECTS)
+    expected = GOLDEN["flat_streaming"]
+    run_id = make_run_id(expected["message_id"], expected["request_id"])
+    assert drafts[run_id].timestamp == fixture_timestamp
+
+    harvest(
+        projects_root=PROJECTS / "flat-project",
+        db_path=db_path,
+        state_path=tmp_path / "occurred-hwm.json",
+    )
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT occurred_at FROM run_llm_calls WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        run = conn.execute(
+            "SELECT first_call_at, last_call_at, captured_at "
+            "FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    assert call is not None
+    assert call["occurred_at"] == fixture_timestamp
+    assert run["first_call_at"] == fixture_timestamp
+    assert run["last_call_at"] == fixture_timestamp
+    # Write time is not the transcript event time.
+    assert run["captured_at"] != fixture_timestamp
+
+
+def test_draft_without_timestamp_yields_null_occurred_at() -> None:
+    draft = merge_assistant_fragment(
+        None,
+        {
+            "type": "assistant",
+            "requestId": "req_no_ts",
+            "message": {
+                "id": "msg_no_ts",
+                "model": "claude-test",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            # no timestamp key
+        },
+    )
+    assert draft is not None
+    assert draft.timestamp is None
+    call_fields, _run_fields = draft_to_fields(draft)
+    assert call_fields.get("occurred_at") is None
+
+
+def test_timestamp_backfill_preview_writes_nothing(
+    db_path: Path, tmp_path: Path
+) -> None:
+    expected = GOLDEN["flat_streaming"]
+    run_id = make_run_id(expected["message_id"], expected["request_id"])
+    # Pre-migration shape: fact rows without event times (NULL).
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO run_usage_facts "
+            "(run_id, origin, source, input_tokens, captured_at) "
+            "VALUES (?, 'claude_code', 'measured', 2, '2026-07-29T00:00:00Z')",
+            (run_id,),
+        )
+        conn.execute(
+            "INSERT INTO run_llm_calls "
+            "(run_id, call_index, origin, input_tokens, occurred_at) "
+            "VALUES (?, 0, 'claude_code', 2, NULL)",
+            (run_id,),
+        )
+        conn.commit()
+        before_calls = conn.execute(
+            "SELECT COUNT(*) FROM run_llm_calls"
+        ).fetchone()[0]
+        before_null = conn.execute(
+            "SELECT COUNT(*) FROM run_llm_calls WHERE occurred_at IS NULL"
+        ).fetchone()[0]
+        before_captured = conn.execute(
+            "SELECT captured_at FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()[0]
+
+    report = harvester_mod.backfill_occurred_at(
+        db_path=db_path,
+        projects_root=PROJECTS / "flat-project",
+        apply=False,
+    )
+
+    assert report["applied"] is False
+    assert report["calls_to_fill"] == 1
+    assert report["runs_to_fill"] == 1
+    assert report["calls_filled"] == 0
+    assert report["runs_filled"] == 0
+    with _connect(db_path) as conn:
+        after_calls = conn.execute(
+            "SELECT COUNT(*) FROM run_llm_calls"
+        ).fetchone()[0]
+        after_null = conn.execute(
+            "SELECT COUNT(*) FROM run_llm_calls WHERE occurred_at IS NULL"
+        ).fetchone()[0]
+        after_captured = conn.execute(
+            "SELECT captured_at, first_call_at, last_call_at "
+            "FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    assert after_calls == before_calls
+    assert after_null == before_null
+    assert after_captured["captured_at"] == before_captured
+    assert after_captured["first_call_at"] is None
+    assert after_captured["last_call_at"] is None
+
+
+def test_timestamp_backfill_apply_fills_only_null_time_columns(
+    db_path: Path, tmp_path: Path
+) -> None:
+    expected = GOLDEN["flat_streaming"]
+    run_id = make_run_id(expected["message_id"], expected["request_id"])
+    fixture_timestamp = "2026-07-12T06:21:53.803Z"
+    prefilled_call_time = "2019-06-01T00:00:00Z"
+    prefilled_first = "2019-01-01T00:00:00Z"
+    # One NULL call to fill, one prefilled call that must stay untouched.
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO run_usage_facts "
+            "(run_id, origin, source, input_tokens, captured_at, "
+            "first_call_at, task_id, correlation_source) "
+            "VALUES (?, 'claude_code', 'measured', 99, "
+            "'2026-07-29T00:00:00Z', ?, 'task-keep', 'claude_session_id_run')",
+            (run_id, prefilled_first),
+        )
+        conn.execute(
+            "INSERT INTO run_llm_calls "
+            "(run_id, call_index, origin, input_tokens, occurred_at) "
+            "VALUES (?, 0, 'claude_code', 99, NULL)",
+            (run_id,),
+        )
+        other_run = "claude_code:prefilled:req"
+        conn.execute(
+            "INSERT INTO run_usage_facts "
+            "(run_id, origin, source, input_tokens, captured_at, "
+            "first_call_at, last_call_at) "
+            "VALUES (?, 'claude_code', 'measured', 7, "
+            "'2026-07-28T00:00:00Z', ?, ?)",
+            (other_run, prefilled_call_time, prefilled_call_time),
+        )
+        conn.execute(
+            "INSERT INTO run_llm_calls "
+            "(run_id, call_index, origin, input_tokens, occurred_at) "
+            "VALUES (?, 0, 'claude_code', 7, ?)",
+            (other_run, prefilled_call_time),
+        )
+        conn.commit()
+        before_other = conn.execute(
+            "SELECT * FROM run_llm_calls WHERE run_id=?",
+            (other_run,),
+        ).fetchone()
+        before_main_non_time = conn.execute(
+            "SELECT input_tokens, task_id, correlation_source, captured_at "
+            "FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+
+    report = harvester_mod.backfill_occurred_at(
+        db_path=db_path,
+        projects_root=PROJECTS / "flat-project",
+        apply=True,
+    )
+
+    assert report["applied"] is True
+    assert report["calls_filled"] == 1
+    assert report["runs_filled"] == 1
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT occurred_at, input_tokens FROM run_llm_calls WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        run = conn.execute(
+            "SELECT first_call_at, last_call_at, captured_at, input_tokens, "
+            "task_id, correlation_source FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        other_call = conn.execute(
+            "SELECT * FROM run_llm_calls WHERE run_id=?",
+            (other_run,),
+        ).fetchone()
+        other_run_row = conn.execute(
+            "SELECT first_call_at, last_call_at, captured_at "
+            "FROM run_usage_facts WHERE run_id=?",
+            (other_run,),
+        ).fetchone()
+
+    assert call["occurred_at"] == fixture_timestamp
+    assert call["input_tokens"] == 99
+    # first_call_at was prefilled — COALESCE must keep it.
+    assert run["first_call_at"] == prefilled_first
+    assert run["last_call_at"] == fixture_timestamp
+    assert run["captured_at"] == before_main_non_time["captured_at"]
+    assert run["input_tokens"] == before_main_non_time["input_tokens"]
+    assert run["task_id"] == before_main_non_time["task_id"]
+    assert run["correlation_source"] == before_main_non_time["correlation_source"]
+    assert other_call["occurred_at"] == before_other["occurred_at"]
+    assert other_call["input_tokens"] == before_other["input_tokens"]
+    assert other_run_row["first_call_at"] == prefilled_call_time
+    assert other_run_row["last_call_at"] == prefilled_call_time
+    assert other_run_row["captured_at"] == "2026-07-28T00:00:00Z"
+
+
+def test_timestamp_backfill_cli_preview_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_backfill(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "applied": kwargs["apply"],
+            "calls_to_fill": 3,
+            "runs_to_fill": 2,
+            "calls_filled": 0,
+            "runs_filled": 0,
+        }
+
+    monkeypatch.setattr(harvester_mod, "backfill_occurred_at", fake_backfill)
+
+    assert harvester_mod.main(["--backfill-timestamps"]) == 0
+    assert calls == [
+        {
+            "db_path": None,
+            "projects_root": harvester_mod.DEFAULT_PROJECTS_ROOT,
+            "apply": False,
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["calls_to_fill"] == 3
+
+
 def test_explicit_raw_billing_mode_is_preserved() -> None:
     record = {
         "type": "assistant",
