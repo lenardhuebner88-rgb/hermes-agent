@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic Hermes usage-facts harvest (every 15 min)
+
+[Timer]
+# Canon 2026-07-31-metrik-ssot-register rule 4: capture is periodic and idle,
+# never in the session or worker critical path.
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+AccuracySec=1min
+Persistent=true
+Unit=hermes-usage-harvest.service
+
+[Install]
+WantedBy=timers.target
