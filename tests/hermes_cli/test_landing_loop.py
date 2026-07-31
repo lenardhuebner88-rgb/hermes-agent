@@ -736,6 +736,26 @@ def test_baseline_probe_accepts_landing_pass_but_prefers_nightly():
     assert nightly_probe.source == "nightly"
 
 
+def test_nightly_fail_for_same_sha_overrides_landing_pass():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    landing = {
+        "result": "pass",
+        "head_sha": baseline,
+        "source": "landing_loop",
+    }
+
+    probe = BaselineProbe.from_records(
+        baseline,
+        [{"result": "fail", "head_sha": baseline}],
+        [landing],
+    )
+
+    assert probe.green is False
+    assert probe.failure_class is FailureClass.MAIN_RED
+    assert probe.source == "nightly"
+    assert "rot" in probe.reason
+
+
 def test_two_runs_land_consecutively_from_dedicated_landing_evidence(git_world):
     repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
     first_worktree = add_loop("first")

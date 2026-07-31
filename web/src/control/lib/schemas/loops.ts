@@ -127,7 +127,9 @@ export const LoopPackSummarySchema = z.object({
   baseline_sha: z.string().nullable().optional(),
   baseline_ok: z.boolean().nullable().optional(),
   baseline_reason: z.string().nullable().optional(),
-  baseline_source: z.enum(["nightly", "landing", "none"]).nullable().optional(),
+  // Preserve future provenance strings during deploy skew. The renderer maps
+  // unknown values to a neutral label; rejecting one must not empty all packs.
+  baseline_source: z.string().nullable().optional(),
   queue_summary: LoopLandingQueueSummarySchema.optional(),
   next_trigger_at: z.string().nullable().optional(),
   last_result: z.string().nullable().optional(),

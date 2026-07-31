@@ -65,6 +65,17 @@ describe("LoopPackSummarySchema — Landing (deterministic)", () => {
     expect(parsed.queue_summary).toBeUndefined();
   });
 
+  it("bewahrt eine künftige Baseline-Quelle ohne das Pack-Array zu leeren", () => {
+    const parsed = LoopsResponseSchema.parse({
+      packs: [{ ...landingSummaryPayload, baseline_source: "release-gate" }],
+    });
+    expect(parsed.packs).toHaveLength(1);
+    const pack = parsed.packs[0];
+    expect("type" in pack).toBe(true);
+    if (!("type" in pack)) throw new Error("Landing-Summary wurde verworfen");
+    expect(pack.baseline_source).toBe("release-gate");
+  });
+
   it("pipeline/sweep bleiben unverändert gültig", () => {
     expect(LoopPackSummarySchema.parse({ name: "p", type: "pipeline" }).type).toBe("pipeline");
     expect(LoopPackSummarySchema.parse({ name: "s", type: "sweep" }).type).toBe("sweep");

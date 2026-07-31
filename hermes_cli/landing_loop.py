@@ -118,17 +118,31 @@ class BaselineProbe:
         nightly_records: list[dict[str, object]],
         landing_records: list[dict[str, object]] | None = None,
     ) -> BaselineProbe:
-        nightly_pass = any(
-            cls.sha_matches(str(record.get("head_sha", "")), baseline_sha)
-            and str(record.get("result", "")).lower() == "pass"
-            for record in nightly_records
+        latest_nightly = next(
+            (
+                str(record.get("result", "")).lower()
+                for record in reversed(nightly_records)
+                if cls.sha_matches(
+                    str(record.get("head_sha", "")), baseline_sha
+                )
+                and str(record.get("result", "")).lower() in {"pass", "fail"}
+            ),
+            None,
         )
-        if nightly_pass:
+        if latest_nightly == "pass":
             return cls(
                 baseline_sha,
                 True,
                 FailureClass.CLEAN_LAND,
                 "Nightly-Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "nightly",
+            )
+        if latest_nightly == "fail":
+            return cls(
+                baseline_sha,
+                False,
+                FailureClass.MAIN_RED,
+                "Nightly-Full-Gate ist für den aktuellen main-SHA rot",
                 "nightly",
             )
         landing_pass = any(

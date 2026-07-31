@@ -13,7 +13,8 @@
 # Die Einträge müssen `claude --model <id>` akzeptieren (`claude -p` = Max-Abo-Lane).
 # Die Reihenfolge ist die Anzeigereihenfolge in den Dropdowns.
 # Codex-Modell 2026-07-31 live gegen Codex CLI 0.145.0 geprüft:
-# `codex exec -m gpt-5.6-luna -c model_reasoning_effort=low "ping"` → exit 0.
+# `codex exec -m gpt-5.6-luna -c model_reasoning_effort=low "ping"` → exit 0;
+# `codex exec -m gpt-5.6-terra -c model_reasoning_effort=medium "ping"` → exit 0.
 # Sol bleibt zuerst; Terra/Luna sind die konservativen First-Pass-/Sweep-Lanes,
 # gpt-5.5/gpt-5.3-codex bleiben als bewiesene Fallbacks im Katalog.
 # neuralwatt-Modelle: vollständige auf diesem Host konfigurierte Auswahl
