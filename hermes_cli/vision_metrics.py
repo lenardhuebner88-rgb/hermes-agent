@@ -48,6 +48,7 @@ DAY_SECONDS = 86_400
 SCHEMA_VERSION = 3
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
+LANDING_GATE_LEDGER_FILENAME = "landing-gate-ledger.jsonl"
 
 GATE_RESULTS = ("pass", "fail")
 
@@ -118,6 +119,16 @@ def metrics_snapshot_path() -> Path:
 
 def gate_ledger_path() -> Path:
     return vision_state_dir() / GATE_LEDGER_FILENAME
+
+
+def landing_gate_ledger_path() -> Path:
+    """Return the dedicated post-landing evidence ledger.
+
+    Landing proofs intentionally never enter :func:`gate_ledger_path`: that
+    ledger represents nightly dispositions and feeds trust streaks and release
+    brakes.
+    """
+    return vision_state_dir() / LANDING_GATE_LEDGER_FILENAME
 
 
 # Flaky de-flake accountability (GATE-FLAKY-RETRY-HONESTY-S1): the set of
@@ -322,6 +333,67 @@ def read_gate_records(path: Optional[Path] = None) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if isinstance(obj, dict) and obj.get("date") and obj.get("result"):
+            records.append(obj)
+    return records
+
+
+def record_landing_gate_pass(
+    head_sha: str,
+    gates: list[str] | tuple[str, ...],
+    candidate: str,
+    *,
+    ts: Optional[str] = None,
+    now: Optional[int] = None,
+    path: Optional[Path] = None,
+) -> dict:
+    """Append a green post-merge proof to the landing-only ledger."""
+    cleaned_sha = str(head_sha).strip()
+    cleaned_candidate = str(candidate).strip()
+    cleaned_gates = [str(gate).strip() for gate in gates if str(gate).strip()]
+    if not cleaned_sha:
+        raise ValueError("head_sha must not be empty")
+    if not cleaned_candidate:
+        raise ValueError("candidate must not be empty")
+    if not cleaned_gates:
+        raise ValueError("gates must not be empty")
+    dt = _parse_ts(ts, now=now)
+    record = {
+        "result": "pass",
+        "head_sha": cleaned_sha,
+        "source": "landing_loop",
+        "gates": cleaned_gates,
+        "candidate": cleaned_candidate,
+        "ts": dt.isoformat(),
+        "date": dt.date().isoformat(),
+    }
+    target = path or landing_gate_ledger_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return record
+
+
+def read_landing_gate_records(path: Optional[Path] = None) -> list[dict]:
+    """Read well-formed records from the landing-only proof ledger."""
+    target = path or landing_gate_ledger_path()
+    if not target.exists():
+        return []
+    records: list[dict] = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("result") == "pass"
+            and obj.get("head_sha")
+            and obj.get("source") == "landing_loop"
+            and obj.get("date")
+        ):
             records.append(obj)
     return records
 

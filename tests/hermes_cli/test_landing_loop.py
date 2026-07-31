@@ -81,6 +81,8 @@ def make_loop(repo: Path, loops_root: Path, ledger_dir: Path, **kwargs) -> Landi
             }
         ],
     )
+    kwargs.setdefault("landing_baseline_records", lambda: [])
+    kwargs.setdefault("landing_evidence_writer", lambda *_args: None)
     return LandingLoop(
         repo,
         loops_root,
@@ -641,6 +643,63 @@ def test_baseline_probe_matches_short_sha_pass_record():
     )
 
     assert probe.green is True
+    assert probe.source == "nightly"
+
+
+def test_baseline_probe_accepts_landing_pass_but_prefers_nightly():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    landing = {
+        "result": "pass",
+        "head_sha": baseline,
+        "source": "landing_loop",
+    }
+
+    landing_probe = BaselineProbe.from_records(baseline, [], [landing])
+    nightly_probe = BaselineProbe.from_records(
+        baseline,
+        [{"result": "pass", "head_sha": baseline}],
+        [landing],
+    )
+
+    assert landing_probe.green is True
+    assert landing_probe.source == "landing"
+    assert "Landing-Gate" in landing_probe.reason
+    assert nightly_probe.source == "nightly"
+
+
+def test_two_runs_land_consecutively_from_dedicated_landing_evidence(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first_worktree = add_loop("first")
+    commit_loop(first_worktree, "first")
+    nightly_head = git(repo, "rev-parse", "main").stdout.strip()
+    landing_ledger = ledger_dir / "landing-gate-ledger.jsonl"
+
+    def write_evidence(head, gates, candidate, ts):
+        return landing_module.record_landing_gate_pass(
+            head, gates, candidate, ts=ts, path=landing_ledger
+        )
+
+    common = {
+        "baseline_records": lambda: [
+            {"result": "pass", "head_sha": nightly_head}
+        ],
+        "landing_baseline_records": lambda: landing_module.read_landing_gate_records(
+            landing_ledger
+        ),
+        "landing_evidence_writer": write_evidence,
+        "gate_runner": lambda _repo, _base: (True, "collection + affected grün"),
+    }
+    first_run = make_loop(repo, loops_root, ledger_dir, **common).run()
+    second_worktree = add_loop("second")
+    commit_loop(second_worktree, "second")
+    second_run = make_loop(repo, loops_root, ledger_dir, **common).run()
+
+    assert outcome(first_run, "loop/first").action == "landed"
+    assert second_run.plan.baseline.source == "landing"
+    assert outcome(second_run, "loop/second").action == "landed"
+    assert (repo / "first.txt").is_file()
+    assert (repo / "second.txt").is_file()
+    assert len(landing_module.read_landing_gate_records(landing_ledger)) == 2
 
 
 def test_baseline_probe_rejects_foreign_and_degenerate_shas():

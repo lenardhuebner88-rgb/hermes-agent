@@ -25,12 +25,17 @@ from hermes_cli.control_loops import (
     get_landing_automation_enabled,
     write_landing_runtime_status,
 )
-from hermes_cli.vision_metrics import read_gate_records
+from hermes_cli.vision_metrics import (
+    read_gate_records,
+    read_landing_gate_records,
+    record_landing_gate_pass,
+)
 from loops.runner import _land_gates
 
 Action = Literal["landed", "cleaned", "parked"]
 GateRunner = Callable[[Path, str], tuple[bool, str]]
 BaselineRecords = Callable[[], list[dict[str, object]]]
+LandingEvidenceWriter = Callable[[str, tuple[str, ...], str, str], object]
 
 _STASH_MESSAGE = "landing-loop: fremde Basis-Änderungen (autostash)"
 # Ein Stash, den wir selbst angelegt haben und nicht mehr zurückholen
@@ -82,6 +87,7 @@ class BaselineProbe:
     green: bool
     failure_class: FailureClass
     reason: str
+    source: Literal["nightly", "landing", "none"] = "none"
 
     @staticmethod
     def sha_matches(record_sha: str, baseline_sha: str) -> bool:
@@ -103,25 +109,42 @@ class BaselineProbe:
     def from_records(
         cls,
         baseline_sha: str,
-        records: list[dict[str, object]],
+        nightly_records: list[dict[str, object]],
+        landing_records: list[dict[str, object]] | None = None,
     ) -> BaselineProbe:
-        proven_pass = any(
+        nightly_pass = any(
             cls.sha_matches(str(record.get("head_sha", "")), baseline_sha)
             and str(record.get("result", "")).lower() == "pass"
-            for record in records
+            for record in nightly_records
         )
-        if proven_pass:
+        if nightly_pass:
             return cls(
                 baseline_sha,
                 True,
                 FailureClass.CLEAN_LAND,
-                "Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "Nightly-Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "nightly",
+            )
+        landing_pass = any(
+            cls.sha_matches(str(record.get("head_sha", "")), baseline_sha)
+            and str(record.get("result", "")).lower() == "pass"
+            and str(record.get("source", "")) == "landing_loop"
+            for record in (landing_records or [])
+        )
+        if landing_pass:
+            return cls(
+                baseline_sha,
+                True,
+                FailureClass.CLEAN_LAND,
+                "Landing-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "landing",
             )
         return cls(
             baseline_sha,
             False,
             FailureClass.MAIN_RED,
-            "Kein grüner Full-Gate-Nachweis für den aktuellen main-SHA",
+            "Weder Nightly- noch Landing-Gate-Nachweis für den aktuellen main-SHA",
+            "none",
         )
 
 
@@ -271,6 +294,8 @@ class LandingLoop:
         dry_run: bool = False,
         gate_runner: GateRunner | None = None,
         baseline_records: BaselineRecords | None = None,
+        landing_baseline_records: BaselineRecords | None = None,
+        landing_evidence_writer: LandingEvidenceWriter | None = None,
         automation_enabled: Callable[[], bool] | None = None,
         recovery_request: Callable[[LL2Candidate], str | bool] | None = None,
         excluded_branches: Iterable[str] = (),
@@ -285,6 +310,14 @@ class LandingLoop:
         self.dry_run = dry_run
         self.gate_runner = gate_runner
         self.baseline_records = baseline_records or read_gate_records
+        self.landing_baseline_records = (
+            landing_baseline_records or read_landing_gate_records
+        )
+        self.landing_evidence_writer = landing_evidence_writer or (
+            lambda head, gates, candidate, ts: record_landing_gate_pass(
+                head, gates, candidate, ts=ts
+            )
+        )
         self.automation_enabled = automation_enabled or (lambda: True)
         self.recovery_request = recovery_request
         self.excluded_branches = frozenset(excluded_branches)
@@ -820,6 +853,31 @@ class LandingLoop:
                 f"Gate rot; ROLLBACK FEHLGESCHLAGEN ({rollback_report}): {gate_report}",
             )
 
+        landed_head = self._git("rev-parse", "HEAD", check=True).stdout.strip()
+        gates = ("collection", "affected")
+        if "frontend" in gate_report.lower():
+            gates += ("frontend",)
+        try:
+            self.landing_evidence_writer(
+                landed_head,
+                gates,
+                item.branch,
+                self.now().isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001 - missing proof is fail-closed
+            rolled_back, rollback_report = self._rollback(pre_merge_head)
+            if rolled_back:
+                return self._park(
+                    item,
+                    "Landing-Evidenz nicht schreibbar; "
+                    f"{rollback_report}: {_one_line(str(exc))}",
+                )
+            return self._park(
+                item,
+                "Landing-Evidenz nicht schreibbar; "
+                f"ROLLBACK FEHLGESCHLAGEN ({rollback_report}): {_one_line(str(exc))}",
+            )
+
         # The loop worktree was clean immediately before the merge and the repo
         # lock excludes official loop writers. Re-check both reset conditions
         # against the newly advanced base before freshening the branch.
@@ -929,7 +987,11 @@ class LandingLoop:
         started_at = self.now()
         inventory = self.inventory()
         baseline_sha = self._git("rev-parse", self.base, check=True).stdout.strip()
-        baseline = BaselineProbe.from_records(baseline_sha, self.baseline_records())
+        baseline = BaselineProbe.from_records(
+            baseline_sha,
+            self.baseline_records(),
+            self.landing_baseline_records(),
+        )
         candidates = tuple(LL2Candidate(item.branch, item.head) for item in inventory)
         plan = plan_queue(candidates, baseline)
         if after_inventory is not None:
