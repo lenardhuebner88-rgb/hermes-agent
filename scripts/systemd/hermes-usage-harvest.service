@@ -1,0 +1,31 @@
+[Unit]
+Description=Hermes usage-facts harvest (Claude Code + foreign CLI lanes)
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/usage_harvest.WIRING.md
+After=default.target
+ConditionUser=piet
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/piet/.hermes/hermes-agent
+Environment=HERMES_HOME=/home/piet/.hermes
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The two harvesters run sequentially inside one unit on purpose: both write the
+# same SQLite file, and oneshot ExecStart lines never overlap. Both are
+# incremental (high-water mark / state file), so a run with no new source data
+# costs about a second and writes nothing.
+ExecStart=/home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/harvest_claude_code_usage.py --db /mnt/data/hermes-observability/usage_facts.db --projects-root /home/piet/.claude/projects --progress-every 0
+ExecStart=/home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/harvest_foreign_lanes.py --db /mnt/data/hermes-observability/usage_facts.db --rate-limit-out /mnt/data/hermes-observability/foreign_rate_limit_snapshots.jsonl --json
+# A cold first run over a multi-day backlog took 42 s + 7 s; the ceiling is for
+# the case where a long outage piles the backlog up.
+TimeoutStartSec=900
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data/hermes-observability
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
