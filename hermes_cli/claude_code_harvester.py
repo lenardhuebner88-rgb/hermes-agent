@@ -34,7 +34,9 @@ from hermes_cli.usage_facts_db import (
 # while the Kanban run records the parent session named by the transcript path.
 # The format bump intentionally re-harvests captured files so those proven
 # parent-session links replace previously unresolved rows.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 5
+# v6 stores every observed parent-binding field independently and restores
+# ``model_source`` to the provenance of the model name itself.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 6
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -113,6 +115,7 @@ class _CallDraft:
     parent_session_id: Optional[str] = None
     parent_tool_use_id: Optional[str] = None
     parent_agent_id: Optional[str] = None
+    spawn_depth: Optional[int] = None
     source_path: Optional[str] = None
     task_run_id: Optional[str] = None
     task_id: Optional[str] = None
@@ -357,6 +360,7 @@ def merge_assistant_fragment(
     parent_session_id: Optional[str] = None,
     parent_tool_use_id: Optional[str] = None,
     parent_agent_id: Optional[str] = None,
+    spawn_depth: Optional[int] = None,
 ) -> Optional[_CallDraft]:
     """Merge one assistant JSONL record into a call draft.
 
@@ -401,6 +405,8 @@ def merge_assistant_fragment(
     draft.parent_session_id = parent_session_id or draft.parent_session_id
     draft.parent_tool_use_id = parent_tool_use_id or draft.parent_tool_use_id
     draft.parent_agent_id = parent_agent_id or draft.parent_agent_id
+    if spawn_depth is not None:
+        draft.spawn_depth = spawn_depth
 
     usage = message.get("usage")
     if isinstance(usage, Mapping):
@@ -452,6 +458,7 @@ def _session_context_for_path(path: Path, projects_root: Path) -> dict[str, Any]
         "parent_session_id": None,
         "parent_tool_use_id": None,
         "parent_agent_id": None,
+        "spawn_depth": None,
     }
     # .../<sessionId>/subagents/agent-*.jsonl
     if len(parts) >= 2 and parts[-2] == "subagents":
@@ -465,22 +472,9 @@ def _session_context_for_path(path: Path, projects_root: Path) -> dict[str, Any]
         ctx["profile"] = _text(meta.get("agentType"))
         ctx["parent_tool_use_id"] = _text(meta.get("toolUseId"))
         ctx["parent_agent_id"] = _text(meta.get("parentAgentId"))
-        # spawnDepth / description / model / stoppedByUser are intentionally
-        # ignored when absent — never required.
+        ctx["spawn_depth"] = _int(meta.get("spawnDepth"))
+        # description / model / stoppedByUser remain unrelated to binding.
     return ctx
-
-
-def _model_source(ctx: Mapping[str, Any]) -> Optional[str]:
-    tool_use = ctx.get("parent_tool_use_id")
-    if tool_use:
-        return f"parent_tool_use:{tool_use}"
-    parent_agent = ctx.get("parent_agent_id")
-    if parent_agent:
-        return f"parent_agent:{parent_agent}"
-    parent_session = ctx.get("parent_session_id")
-    if parent_session:
-        return f"parent_session:{parent_session}"
-    return "session"
 
 
 def iter_jsonl_records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -536,6 +530,7 @@ def parse_transcript_file(
                     parent_session_id=ctx.get("parent_session_id"),
                     parent_tool_use_id=ctx.get("parent_tool_use_id"),
                     parent_agent_id=ctx.get("parent_agent_id"),
+                    spawn_depth=ctx.get("spawn_depth"),
                 )
             except ValueError:
                 stats.parse_errors += 1
@@ -607,13 +602,11 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "provider": PROVIDER,
         "model": draft.model,
         "requested_model": draft.model,
-        "model_source": _model_source(
-            {
-                "parent_tool_use_id": draft.parent_tool_use_id,
-                "parent_agent_id": draft.parent_agent_id,
-                "parent_session_id": draft.parent_session_id,
-            }
-        ),
+        "model_source": "transcript",
+        "parent_tool_use_id": draft.parent_tool_use_id,
+        "parent_agent_id": draft.parent_agent_id,
+        "parent_session_id": draft.parent_session_id,
+        "spawn_depth": draft.spawn_depth,
         "serving_tier": draft.service_tier,
         "reasoning_effort": draft.effort,
         "response_id": draft.message_id,
@@ -641,6 +634,11 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "provider": PROVIDER,
         "model": draft.model,
         "requested_model": draft.model,
+        "model_source": "transcript",
+        "parent_tool_use_id": draft.parent_tool_use_id,
+        "parent_agent_id": draft.parent_agent_id,
+        "parent_session_id": draft.parent_session_id,
+        "spawn_depth": draft.spawn_depth,
         "lane": lane,
         "profile": draft.profile,
         "call_kind": draft.call_kind,
@@ -1254,6 +1252,264 @@ def backfill_occurred_at(
         connection.close()
 
 
+_PARENT_BINDING_COLUMNS = (
+    "parent_tool_use_id",
+    "parent_agent_id",
+    "parent_session_id",
+    "spawn_depth",
+)
+
+
+def _empty_parent_binding_backfill_report(*, apply: bool) -> dict[str, Any]:
+    table_report = {
+        **{f"{column}_to_fill": 0 for column in _PARENT_BINDING_COLUMNS},
+        **{f"{column}_filled": 0 for column in _PARENT_BINDING_COLUMNS},
+        "model_source_to_update": 0,
+        "model_source_updated": 0,
+    }
+    return {
+        "applied": apply,
+        "run_llm_calls": dict(table_report),
+        "run_usage_facts": dict(table_report),
+        "totals": dict(table_report),
+    }
+
+
+def _transcript_parent_meta_by_run_id(
+    projects_root: Path,
+) -> dict[str, dict[str, Any]]:
+    """Return unambiguous parent-agent/spawn observations per transcript call.
+
+    Only values carried by the matching ``agent-*.meta.json`` are considered.
+    The parent session path and legacy ``model_source`` values are deliberately
+    excluded here: they are different observations. Conflicting meta values for
+    a resumed call are not guessed and therefore remain absent.
+    """
+    observations: dict[str, dict[str, set[Any]]] = {}
+    for path in discover_jsonl_files(projects_root):
+        if path.parent.name != "subagents":
+            continue
+        drafts, _stats = parse_transcript_file(path, projects_root=projects_root)
+        for run_id, draft in drafts.items():
+            run_observations = observations.setdefault(
+                run_id,
+                {"parent_agent_id": set(), "spawn_depth": set()},
+            )
+            if draft.parent_agent_id is not None:
+                run_observations["parent_agent_id"].add(draft.parent_agent_id)
+            if draft.spawn_depth is not None:
+                run_observations["spawn_depth"].add(draft.spawn_depth)
+
+    resolved: dict[str, dict[str, Any]] = {}
+    for run_id, fields in observations.items():
+        exact = {
+            column: next(iter(values))
+            for column, values in fields.items()
+            if len(values) == 1
+        }
+        if exact:
+            resolved[run_id] = exact
+    return resolved
+
+
+def _legacy_parent_binding(model_source: Any) -> tuple[str, str] | None:
+    if not isinstance(model_source, str):
+        return None
+    for prefix, column in (
+        ("parent_tool_use:", "parent_tool_use_id"),
+        ("parent_session:", "parent_session_id"),
+        ("parent_agent:", "parent_agent_id"),
+    ):
+        if model_source.startswith(prefix):
+            value = model_source[len(prefix) :].strip()
+            return (column, value) if value else None
+    return None
+
+
+def _parent_binding_candidates(
+    connection: sqlite3.Connection,
+    table: str,
+    parent_meta: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    columns = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+    keys = ("run_id", "call_index") if table == "run_llm_calls" else ("run_id",)
+    select_columns = [*keys, "model", "model_source"]
+    select_columns.extend(
+        column if column in columns else f"NULL AS {column}"
+        for column in _PARENT_BINDING_COLUMNS
+    )
+    rows = connection.execute(
+        f"SELECT {', '.join(select_columns)} FROM {table} WHERE origin=?",
+        (ORIGIN,),
+    ).fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        run_id = str(row["run_id"])
+        source = row["model_source"]
+        observed: dict[str, Any] = {}
+        legacy = _legacy_parent_binding(source)
+        if legacy is not None and legacy[0] in {
+            "parent_tool_use_id",
+            "parent_session_id",
+        }:
+            observed[legacy[0]] = legacy[1]
+        observed.update(parent_meta.get(run_id, {}))
+
+        updates = {
+            column: observed[column]
+            for column in _PARENT_BINDING_COLUMNS
+            if row[column] is None and observed.get(column) is not None
+        }
+        projected = {
+            column: row[column] if row[column] is not None else updates.get(column)
+            for column in _PARENT_BINDING_COLUMNS
+        }
+
+        normalize_source = False
+        if row["model"] is not None:
+            if source is None or source == "session":
+                normalize_source = True
+            elif legacy is not None:
+                required_column, required_value = legacy
+                normalize_source = projected.get(required_column) == required_value
+
+        if updates or normalize_source:
+            candidates.append(
+                {
+                    "key": tuple(row[key] for key in keys),
+                    "updates": updates,
+                    "model_source": source,
+                    "normalize_source": normalize_source,
+                }
+            )
+    return candidates
+
+
+def _summarize_parent_binding_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    summary = {
+        **{f"{column}_to_fill": 0 for column in _PARENT_BINDING_COLUMNS},
+        **{f"{column}_filled": 0 for column in _PARENT_BINDING_COLUMNS},
+        "model_source_to_update": 0,
+        "model_source_updated": 0,
+    }
+    for candidate in candidates:
+        for column in candidate["updates"]:
+            summary[f"{column}_to_fill"] += 1
+        if candidate["normalize_source"]:
+            summary["model_source_to_update"] += 1
+    return summary
+
+
+def backfill_parent_bindings(
+    *,
+    db_path: Path | str | None = None,
+    projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or atomically apply Claude parent-binding normalization.
+
+    Legacy tool-use/session prefixes are transformed from each row's own
+    ``model_source`` value. ``parent_agent_id`` and ``spawn_depth`` come only
+    from the exact transcript's adjacent meta file. All writes are origin-
+    scoped, NULL-only via ``COALESCE``, and model-source cleanup happens after
+    the binding writes in the same transaction.
+    """
+    resolved_db = usage_facts_db_path(db_path)
+    if not resolved_db.is_file():
+        return _empty_parent_binding_backfill_report(apply=apply)
+
+    parent_meta = _transcript_parent_meta_by_run_id(Path(projects_root))
+    if apply:
+        connection = usage_facts_db_mod._connect(resolved_db)
+        connection.execute("BEGIN IMMEDIATE")
+    else:
+        connection = sqlite3.connect(
+            f"file:{quote(str(resolved_db.expanduser().resolve()), safe='/')}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+    connection.row_factory = sqlite3.Row
+
+    report = _empty_parent_binding_backfill_report(apply=apply)
+    try:
+        table_candidates = {
+            table: _parent_binding_candidates(connection, table, parent_meta)
+            for table in ("run_llm_calls", "run_usage_facts")
+        }
+        for table, candidates in table_candidates.items():
+            report[table] = _summarize_parent_binding_candidates(candidates)
+
+        if apply:
+            for table, candidates in table_candidates.items():
+                keys = (
+                    ("run_id", "call_index")
+                    if table == "run_llm_calls"
+                    else ("run_id",)
+                )
+                key_where = " AND ".join(f"{key}=?" for key in keys)
+                for column in _PARENT_BINDING_COLUMNS:
+                    params = [
+                        (candidate["updates"][column], *candidate["key"], ORIGIN)
+                        for candidate in candidates
+                        if column in candidate["updates"]
+                    ]
+                    if not params:
+                        continue
+                    before = connection.total_changes
+                    connection.executemany(
+                        f"UPDATE {table} SET {column}=COALESCE({column}, ?) "
+                        f"WHERE {key_where} AND origin=? AND {column} IS NULL",
+                        params,
+                    )
+                    report[table][f"{column}_filled"] = (
+                        connection.total_changes - before
+                    )
+
+            # Bindings are durable now. Only then replace the legacy vocabulary.
+            for table, candidates in table_candidates.items():
+                keys = (
+                    ("run_id", "call_index")
+                    if table == "run_llm_calls"
+                    else ("run_id",)
+                )
+                key_where = " AND ".join(f"{key}=?" for key in keys)
+                params = [
+                    (*candidate["key"], ORIGIN, candidate["model_source"])
+                    for candidate in candidates
+                    if candidate["normalize_source"]
+                ]
+                if not params:
+                    continue
+                before = connection.total_changes
+                connection.executemany(
+                    f"UPDATE {table} SET model_source='transcript' "
+                    f"WHERE {key_where} AND origin=? AND model_source IS ?",
+                    params,
+                )
+                report[table]["model_source_updated"] = (
+                    connection.total_changes - before
+                )
+            connection.commit()
+
+        total_keys = tuple(report["totals"])
+        report["totals"] = {
+            key: sum(report[table][key] for table in table_candidates)
+            for key in total_keys
+        }
+        return report
+    except Exception:
+        if apply:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def harvest(
     *,
     projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
@@ -1433,10 +1689,18 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--backfill-parent-bindings",
+        action="store_true",
+        help=(
+            "Preview filling NULL Claude parent-binding columns and replacing "
+            "safe legacy model_source values with transcript"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
-            "Apply --backfill-correlations or --backfill-timestamps "
+            "Apply one explicit --backfill-* operation "
             "(preview is the default)"
         ),
     )
@@ -1460,16 +1724,18 @@ def build_arg_parser():
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    if args.backfill_correlations and args.backfill_timestamps:
-        parser.error(
-            "choose one of --backfill-correlations or --backfill-timestamps"
+    backfill_modes = sum(
+        bool(enabled)
+        for enabled in (
+            args.backfill_correlations,
+            args.backfill_timestamps,
+            args.backfill_parent_bindings,
         )
-    if args.apply and not (
-        args.backfill_correlations or args.backfill_timestamps
-    ):
-        parser.error(
-            "--apply requires --backfill-correlations or --backfill-timestamps"
-        )
+    )
+    if backfill_modes > 1:
+        parser.error("choose exactly one --backfill-* operation")
+    if args.apply and backfill_modes == 0:
+        parser.error("--apply requires one --backfill-* operation")
     if args.backfill_correlations:
         report = backfill_existing_correlations(
             db_path=args.db,
@@ -1480,6 +1746,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     if args.backfill_timestamps:
         report = backfill_occurred_at(
+            db_path=args.db,
+            projects_root=args.projects_root,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.backfill_parent_bindings:
+        report = backfill_parent_bindings(
             db_path=args.db,
             projects_root=args.projects_root,
             apply=args.apply,

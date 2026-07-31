@@ -59,7 +59,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 5
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 6
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -1102,6 +1102,268 @@ def test_timestamp_backfill_cli_preview_by_default(
     assert json.loads(capsys.readouterr().out)["calls_to_fill"] == 3
 
 
+def _seed_parent_binding_backfill_rows(db_path: Path) -> dict[str, str]:
+    run_ids = {
+        "binding": make_run_id(
+            "msg_parent_binding_fixture", "req_parent_binding_fixture"
+        ),
+        "session": "claude_code:legacy-parent-session:req",
+        "main": "claude_code:legacy-main:req",
+        "null_source": "claude_code:legacy-null-source:req",
+        "prefilled": "claude_code:prefilled-conflict:req",
+        "foreign": "codex_cli:foreign-row",
+    }
+    call_rows = (
+        (
+            run_ids["binding"],
+            "claude_code",
+            "claude-opus-4-8",
+            "parent_tool_use:toolu_01ParentBindingFixture",
+            101,
+        ),
+        (
+            run_ids["session"],
+            "claude_code",
+            "claude-sonnet-4-6",
+            "parent_session:legacy-parent-session",
+            102,
+        ),
+        (
+            run_ids["main"],
+            "claude_code",
+            "claude-sonnet-4-6",
+            "session",
+            103,
+        ),
+        (
+            run_ids["null_source"],
+            "claude_code",
+            "claude-sonnet-4-6",
+            None,
+            106,
+        ),
+        (
+            run_ids["prefilled"],
+            "claude_code",
+            "claude-sonnet-4-6",
+            "parent_session:encoded-parent",
+            104,
+        ),
+        (
+            run_ids["foreign"],
+            "codex_cli",
+            "gpt-5.6-codex",
+            "parent_session:must-not-change",
+            105,
+        ),
+    )
+    with _connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO run_llm_calls "
+            "(run_id, call_index, origin, model, model_source, input_tokens, "
+            "occurred_at) VALUES (?, 0, ?, ?, ?, ?, "
+            "'2026-07-31T12:00:00Z')",
+            call_rows,
+        )
+        conn.executemany(
+            "INSERT INTO run_usage_facts "
+            "(run_id, origin, model, model_source, input_tokens, captured_at, "
+            "first_call_at, last_call_at, task_id, correlation_source, source) "
+            "VALUES (?, ?, ?, ?, ?, '2026-07-31T12:01:00Z', "
+            "'2026-07-31T12:00:00Z', '2026-07-31T12:00:00Z', "
+            "'task-preserve', 'correlation-preserve', 'measured')",
+            call_rows,
+        )
+        for table in ("run_llm_calls", "run_usage_facts"):
+            conn.execute(
+                f"UPDATE {table} SET parent_session_id='keep-existing' "
+                "WHERE run_id=?",
+                (run_ids["prefilled"],),
+            )
+        conn.commit()
+    return run_ids
+
+
+def _fact_table_snapshot(db_path: Path) -> dict[str, list[tuple[object, ...]]]:
+    with _connect(db_path) as conn:
+        return {
+            "run_llm_calls": [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT * FROM run_llm_calls ORDER BY run_id, call_index"
+                )
+            ],
+            "run_usage_facts": [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT * FROM run_usage_facts ORDER BY run_id"
+                )
+            ],
+        }
+
+
+def test_parent_binding_backfill_preview_is_fully_read_only(
+    db_path: Path,
+) -> None:
+    _seed_parent_binding_backfill_rows(db_path)
+    before = _fact_table_snapshot(db_path)
+
+    report = harvester_mod.backfill_parent_bindings(
+        db_path=db_path,
+        projects_root=PROJECTS / "parent-binding-project",
+        apply=False,
+    )
+
+    after = _fact_table_snapshot(db_path)
+    assert after == before
+    assert report["applied"] is False
+    for table in ("run_llm_calls", "run_usage_facts"):
+        assert report[table]["parent_tool_use_id_to_fill"] == 1
+        assert report[table]["parent_agent_id_to_fill"] == 1
+        assert report[table]["parent_session_id_to_fill"] == 1
+        assert report[table]["spawn_depth_to_fill"] == 1
+        assert report[table]["model_source_to_update"] == 4
+        assert all(
+            value == 0
+            for key, value in report[table].items()
+            if key.endswith("_filled") or key.endswith("_updated")
+        )
+
+
+def test_parent_binding_backfill_apply_preserves_non_binding_facts_and_is_idempotent(
+    db_path: Path,
+) -> None:
+    run_ids = _seed_parent_binding_backfill_rows(db_path)
+    with _connect(db_path) as conn:
+        protected_calls = {
+            row["run_id"]: tuple(row)
+            for row in conn.execute(
+                "SELECT run_id, input_tokens, occurred_at FROM run_llm_calls"
+            )
+        }
+        protected_runs = {
+            row["run_id"]: tuple(row)
+            for row in conn.execute(
+                "SELECT run_id, input_tokens, captured_at, first_call_at, "
+                "last_call_at, task_id, correlation_source "
+                "FROM run_usage_facts"
+            )
+        }
+
+    report = harvester_mod.backfill_parent_bindings(
+        db_path=db_path,
+        projects_root=PROJECTS / "parent-binding-project",
+        apply=True,
+    )
+
+    with _connect(db_path) as conn:
+        calls = {
+            row["run_id"]: row
+            for row in conn.execute("SELECT * FROM run_llm_calls")
+        }
+        runs = {
+            row["run_id"]: row
+            for row in conn.execute("SELECT * FROM run_usage_facts")
+        }
+        after_protected_calls = {
+            row["run_id"]: tuple(row)
+            for row in conn.execute(
+                "SELECT run_id, input_tokens, occurred_at FROM run_llm_calls"
+            )
+        }
+        after_protected_runs = {
+            row["run_id"]: tuple(row)
+            for row in conn.execute(
+                "SELECT run_id, input_tokens, captured_at, first_call_at, "
+                "last_call_at, task_id, correlation_source "
+                "FROM run_usage_facts"
+            )
+        }
+
+    expected_binding = (
+        "toolu_01ParentBindingFixture",
+        "agent-parent-observed",
+        None,
+        2,
+        "transcript",
+    )
+    columns = (
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+        "model_source",
+    )
+    assert tuple(calls[run_ids["binding"]][column] for column in columns) == (
+        expected_binding
+    )
+    assert tuple(runs[run_ids["binding"]][column] for column in columns) == (
+        expected_binding
+    )
+    for table_rows in (calls, runs):
+        assert table_rows[run_ids["session"]]["parent_session_id"] == (
+            "legacy-parent-session"
+        )
+        assert table_rows[run_ids["session"]]["model_source"] == "transcript"
+        assert table_rows[run_ids["main"]]["model_source"] == "transcript"
+        assert table_rows[run_ids["null_source"]]["model_source"] == "transcript"
+        assert table_rows[run_ids["prefilled"]]["parent_session_id"] == (
+            "keep-existing"
+        )
+        assert table_rows[run_ids["prefilled"]]["model_source"] == (
+            "parent_session:encoded-parent"
+        )
+        assert table_rows[run_ids["foreign"]]["model_source"] == (
+            "parent_session:must-not-change"
+        )
+        assert table_rows[run_ids["foreign"]]["parent_session_id"] is None
+
+    assert after_protected_calls == protected_calls
+    assert after_protected_runs == protected_runs
+    assert report["applied"] is True
+    for table in ("run_llm_calls", "run_usage_facts"):
+        assert report[table]["parent_tool_use_id_filled"] == 1
+        assert report[table]["parent_agent_id_filled"] == 1
+        assert report[table]["parent_session_id_filled"] == 1
+        assert report[table]["spawn_depth_filled"] == 1
+        assert report[table]["model_source_updated"] == 4
+
+    second = harvester_mod.backfill_parent_bindings(
+        db_path=db_path,
+        projects_root=PROJECTS / "parent-binding-project",
+        apply=True,
+    )
+    for table in ("run_llm_calls", "run_usage_facts", "totals"):
+        assert all(
+            value == 0
+            for key, value in second[table].items()
+            if key.endswith("_filled") or key.endswith("_updated")
+        )
+
+
+def test_parent_binding_backfill_cli_previews_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_backfill(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"applied": kwargs["apply"], "totals": {"spawn_depth_filled": 0}}
+
+    monkeypatch.setattr(harvester_mod, "backfill_parent_bindings", fake_backfill)
+
+    assert harvester_mod.main(["--backfill-parent-bindings"]) == 0
+    assert calls == [
+        {
+            "db_path": None,
+            "projects_root": harvester_mod.DEFAULT_PROJECTS_ROOT,
+            "apply": False,
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["applied"] is False
+
+
 def test_explicit_raw_billing_mode_is_preserved() -> None:
     record = {
         "type": "assistant",
@@ -1334,10 +1596,23 @@ def test_flat_session_layout_is_processed(db_path: Path, tmp_path: Path) -> None
     )
     assert stats.files_processed >= 1
     with _connect(db_path) as conn:
-        n = conn.execute(
-            "SELECT COUNT(*) AS c FROM run_llm_calls WHERE origin='claude_code'"
-        ).fetchone()["c"]
-    assert n >= 1
+        calls = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth, model_source FROM run_llm_calls "
+            "WHERE origin='claude_code'"
+        ).fetchall()
+        runs = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth, call_kind, model_source FROM run_usage_facts "
+            "WHERE origin='claude_code'"
+        ).fetchall()
+    assert calls
+    assert runs
+    assert all(tuple(row)[:4] == (None, None, None, None) for row in calls)
+    assert all(tuple(row)[:4] == (None, None, None, None) for row in runs)
+    assert all(row["call_kind"] == "main" for row in runs)
+    assert all(row["model_source"] == "transcript" for row in calls)
+    assert all(row["model_source"] == "transcript" for row in runs)
 
 
 def test_session_dir_subagent_layout_and_sparse_meta(db_path: Path, tmp_path: Path) -> None:
@@ -1370,10 +1645,135 @@ def test_session_dir_subagent_layout_and_sparse_meta(db_path: Path, tmp_path: Pa
     assert runs[0]["call_kind"] == "subagent"
     assert runs[0]["profile"] == "general-purpose"
     assert runs[0]["lane"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    # Parent toolUseId absent → association falls back to parent session path.
-    assert rows[0]["model_source"] == (
-        "parent_session:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    # The one documented exception: parent_session_id is observed from the
+    # enclosing session path even though this sparse meta file lacks binding.
+    expected_binding = (
+        None,
+        None,
+        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        None,
     )
+    assert tuple(rows[0][column] for column in (
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+    )) == expected_binding
+    assert tuple(runs[0][column] for column in (
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+    )) == expected_binding
+    assert rows[0]["model_source"] == "transcript"
+    assert runs[0]["model_source"] == "transcript"
+
+
+def test_real_subagent_fixture_writes_each_parent_binding_observation(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    harvest(
+        projects_root=PROJECTS / "parent-binding-project",
+        db_path=db_path,
+        state_path=tmp_path / "parent-binding-hwm.json",
+    )
+    columns = (
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+        "model_source",
+    )
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            f"SELECT {', '.join(columns)} FROM run_llm_calls "
+            "WHERE response_id='msg_parent_binding_fixture'"
+        ).fetchone()
+        run = conn.execute(
+            f"SELECT {', '.join(columns)}, call_kind FROM run_usage_facts "
+            "WHERE run_id LIKE 'claude_code:msg_parent_binding_fixture:%'"
+        ).fetchone()
+
+    expected = (
+        "toolu_01ParentBindingFixture",
+        "agent-parent-observed",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        2,
+        "transcript",
+    )
+    assert tuple(call[column] for column in columns) == expected
+    assert tuple(run[column] for column in columns) == expected
+    assert run["call_kind"] == "subagent"
+
+
+def test_missing_meta_keeps_only_path_observed_parent_session(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    shutil.copytree(PROJECTS / "parent-binding-project", projects_root)
+    meta_path = next(projects_root.rglob("agent-parent-binding.meta.json"))
+    meta_path.unlink()
+
+    harvest(
+        projects_root=projects_root,
+        db_path=db_path,
+        state_path=tmp_path / "missing-meta-hwm.json",
+    )
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth FROM run_llm_calls "
+            "WHERE response_id='msg_parent_binding_fixture'"
+        ).fetchone()
+        run = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth FROM run_usage_facts "
+            "WHERE run_id LIKE 'claude_code:msg_parent_binding_fixture:%'"
+        ).fetchone()
+
+    expected = (None, None, "bbbbbbbb-cccc-dddd-eeee-ffffffffffff", None)
+    assert tuple(call) == expected
+    assert tuple(run) == expected
+
+
+def test_meta_without_spawn_depth_keeps_spawn_null_and_other_bindings(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    projects_root = tmp_path / "projects"
+    shutil.copytree(PROJECTS / "parent-binding-project", projects_root)
+    meta_path = next(projects_root.rglob("agent-parent-binding.meta.json"))
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("spawnDepth")
+    meta_path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
+
+    harvest(
+        projects_root=projects_root,
+        db_path=db_path,
+        state_path=tmp_path / "missing-spawn-hwm.json",
+    )
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth FROM run_llm_calls "
+            "WHERE response_id='msg_parent_binding_fixture'"
+        ).fetchone()
+        run = conn.execute(
+            "SELECT parent_tool_use_id, parent_agent_id, parent_session_id, "
+            "spawn_depth FROM run_usage_facts "
+            "WHERE run_id LIKE 'claude_code:msg_parent_binding_fixture:%'"
+        ).fetchone()
+
+    expected = (
+        "toolu_01ParentBindingFixture",
+        "agent-parent-observed",
+        "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+        None,
+    )
+    assert tuple(call) == expected
+    assert tuple(run) == expected
 
 
 def test_subagent_uses_exact_parent_session_correlation(
