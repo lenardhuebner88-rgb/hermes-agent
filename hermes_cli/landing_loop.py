@@ -1394,6 +1394,9 @@ def main(argv: list[str] | None = None) -> int:
     stop_path_value = os.environ.get("HERMES_LOOP_STOP_PATH")
     state_dir = Path(state_dir_value) if state_dir_value else None
     stop_path = Path(stop_path_value) if stop_path_value else None
+    excluded_branches = {"loop/landing"}
+    if state_dir is not None:
+        excluded_branches.add(f"loop/{state_dir.name}")
 
     loop = LandingLoop(
         args.repo,
@@ -1407,7 +1410,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         recovery_request=None if args.dry_run else request_candidate_recovery,
-        excluded_branches=(f"loop/{state_dir.name}",) if state_dir else (),
+        excluded_branches=tuple(sorted(excluded_branches)),
         state_dir=state_dir,
         stop_path=stop_path,
     )

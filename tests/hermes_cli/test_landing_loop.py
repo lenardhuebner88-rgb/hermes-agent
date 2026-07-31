@@ -316,6 +316,33 @@ def test_red_gate_rolls_merge_back_and_parks_branch(git_world):
     assert git(repo, "status", "--porcelain").stdout == ""
 
 
+def test_unwritable_landing_evidence_rolls_merge_back_and_parks_branch(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("evidence-red")
+    branch_head = commit_loop(worktree, "evidence-work")
+    pre_merge_main = git(repo, "rev-parse", "main").stdout.strip()
+
+    def fail_evidence(*_args):
+        raise OSError("disk full")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "collection + affected grün"),
+        landing_evidence_writer=fail_evidence,
+    ).run()
+
+    item = outcome(run, "loop/evidence-red")
+    assert item.action == "parked"
+    assert "Landing-Evidenz nicht schreibbar" in item.reason
+    assert "disk full" in item.reason
+    assert "zurückgerollt" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == pre_merge_main
+    assert git(repo, "rev-parse", "loop/evidence-red").stdout.strip() == branch_head
+    assert git(repo, "status", "--porcelain").stdout == ""
+
+
 def test_dry_run_parks_a_predictable_merge_conflict_without_touching_refs(git_world):
     repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
     worktree = add_loop("conflict")
@@ -381,7 +408,7 @@ def test_cli_dry_run_changes_no_ref_branch_or_worktree(git_world, capsys):
 
 
 def test_cli_excludes_its_own_loop_branch_from_inventory(
-    git_world, capsys, monkeypatch
+    git_world, capsys
 ):
     repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
     own_worktree = add_loop("landing")
@@ -389,8 +416,6 @@ def test_cli_excludes_its_own_loop_branch_from_inventory(
     commit_loop(own_worktree, "own-work")
     commit_loop(other_worktree, "other-work")
     own_head = git(repo, "rev-parse", "loop/landing").stdout.strip()
-    monkeypatch.setenv("HERMES_LOOP_STATE_DIR", str(loops_root / "landing"))
-
     rc = main(
         [
             "--repo",
