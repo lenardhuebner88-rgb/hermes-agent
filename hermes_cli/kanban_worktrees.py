@@ -1090,18 +1090,148 @@ def _path_is_under(path: str, roots: Sequence[str]) -> bool:
     )
 
 
-def _dirty_scope_overlap(
-    dirty_paths: Sequence[str], scope_files: Sequence[str]
-) -> list[str]:
-    overlap: list[str] = []
-    for dirty_path in dirty_paths:
-        if any(
-            _path_is_under(dirty_path, [scope_file])
-            or _path_is_under(scope_file, [dirty_path])
-            for scope_file in scope_files
-        ):
-            overlap.append(dirty_path)
-    return sorted(dict.fromkeys(overlap))
+def _changed_paths(repo: Path, base_ref: str, candidate_ref: str) -> set[str]:
+    """Return branch-side paths changed from the refs' merge base."""
+    raw = _git(
+        repo, "diff", "--name-only", "--no-renames", "-z",
+        f"{base_ref}...{candidate_ref}", "--", strip=False,
+    )
+    return {path for path in raw.split("\0") if path}
+
+
+def _tree_blob_oid(repo: Path, ref: str, path: str) -> str | None:
+    oid = _git(repo, "rev-parse", "--verify", f"{ref}:{path}", check=False)
+    return oid or None
+
+
+def _worktree_blob_oid(repo: Path, path: str) -> str | None:
+    candidate = repo / path
+    if not candidate.exists() and not candidate.is_symlink():
+        return None
+    oid = _git(repo, "hash-object", "--", path, check=False)
+    return oid or None
+
+
+def _dirty_content_collisions(
+    repo: Path,
+    dirty_paths: Sequence[str],
+    *,
+    base_ref: str,
+    candidate_ref: str,
+    scope_files: Sequence[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Classify dirty files by whether candidate content would replace them.
+
+    Both spawn and integration guards use this policy. A scope only narrows the
+    candidate's actual diff; path equality alone is never a collision. The
+    second list contains dirty paths whose worktree blob already equals the
+    candidate blob. Git still refuses to merge over those paths, so the
+    integrator may clear them temporarily without losing content.
+    """
+    changed = _changed_paths(repo, base_ref, candidate_ref)
+    if scope_files:
+        changed = {
+            path for path in changed
+            if any(
+                _path_is_under(path, [scope_path])
+                or _path_is_under(scope_path, [path])
+                for scope_path in scope_files
+            )
+        }
+    relevant = sorted(set(dirty_paths) & changed)
+    collisions: list[str] = []
+    matching: list[str] = []
+    for path in relevant:
+        if _worktree_blob_oid(repo, path) == _tree_blob_oid(repo, candidate_ref, path):
+            matching.append(path)
+        else:
+            collisions.append(path)
+    return collisions, matching
+
+
+def _git_binary(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    input_data: bytes | None = None,
+) -> bytes:
+    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["git", "-C", str(repo), *args], input=input_data, capture_output=True,
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+    if check and proc.returncode != 0:
+        message = (proc.stderr or proc.stdout).decode(errors="replace").strip()
+        raise WorktreeError(
+            f"git {' '.join(args[:3])}… failed in {repo}: {message[:500]}"
+        )
+    return proc.stdout
+
+
+def _dirty_path_patch(repo: Path, path: str) -> bytes:
+    if _tree_blob_oid(repo, "HEAD", path) is not None:
+        return _git_binary(repo, "diff", "--binary", "HEAD", "--", path)
+    return _git_binary(
+        repo, "diff", "--no-index", "--binary", "--", "/dev/null", path,
+        check=False,
+    )
+
+
+def _reset_dirty_path(repo: Path, path: str) -> None:
+    if _tree_blob_oid(repo, "HEAD", path) is not None:
+        _git(repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", path)
+        return
+    candidate = repo / path
+    if candidate.is_dir() and not candidate.is_symlink():
+        raise WorktreeError(f"refusing to rescue untracked directory as one file: {path}")
+    candidate.unlink(missing_ok=True)
+
+
+def _validate_dirty_relative_path(repo: Path, path: str) -> str:
+    path_obj = Path(path)
+    normalized = path_obj.as_posix()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or path_obj.is_absolute() or ".." in path_obj.parts:
+        raise WorktreeError(f"rescue path must be repository-relative: {path!r}")
+    if normalized not in dirty_files(repo):
+        raise WorktreeError(f"path is not dirty in {repo}: {normalized}")
+    return normalized
+
+
+def rescue_dirty_path(
+    repo: Path | str,
+    path: str,
+    *,
+    rescue_dir: Path | str,
+    task_id: str,
+) -> dict[str, str]:
+    """Write a reversible patch, then reset one dirty path to ``HEAD``."""
+    root = Path(repo).resolve()
+    normalized = _validate_dirty_relative_path(root, path)
+    patch = _dirty_path_patch(root, normalized)
+    if not patch:
+        raise WorktreeError(f"could not produce a rescue patch for {normalized}")
+    digest = hashlib.sha256(patch).hexdigest()
+    safe_path = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "_", normalized).strip("_") or "path"
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination_dir = Path(rescue_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = (
+        destination_dir / f"{task_id}-{stamp}-{safe_path}-{digest[:12]}.patch"
+    )
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(patch)
+    _reset_dirty_path(root, normalized)
+    return {
+        "path": normalized,
+        "patch_path": str(destination),
+        "patch_sha256": digest,
+        "repo": str(root),
+        "head": _git(root, "rev-parse", "HEAD"),
+    }
 
 
 def _select_wip_paths(
@@ -1362,12 +1492,18 @@ def prepare_worker_base(
         actual_head = _git(wt, "rev-parse", "HEAD")
     if live_checkout is not None:
         if scope_files:
-            live_dirty = dirty_files(Path(live_checkout))
-            overlap = _dirty_scope_overlap(live_dirty, scope_files)
-            if overlap:
+            live_root = Path(live_checkout)
+            collisions, _matching = _dirty_content_collisions(
+                live_root,
+                dirty_files(live_root),
+                base_ref=target,
+                candidate_ref=actual_head,
+                scope_files=scope_files,
+            )
+            if collisions:
                 raise WorktreeError(
-                    "dirty files in live checkout overlap declared task scope "
-                    f"before worker spawn: {', '.join(overlap[:10])}"
+                    "dirty files in live checkout collide with worker branch content "
+                    f"before worker spawn: {', '.join(collisions[:10])}"
                 )
         else:
             _log.info(
@@ -6282,6 +6418,7 @@ def _integrate_merge_and_gate(
     artifact_receipt: Optional[dict],
     *,
     cleanup: bool = True,
+    restore_dirty_patches: Sequence[bytes] = (),
 ) -> dict:
     """(b) --no-ff merge + post-merge gate; park on red/conflict."""
     # (b) the merge itself; conflicts → abort + park.
@@ -6291,6 +6428,11 @@ def _integrate_merge_and_gate(
              branch, timeout=MERGE_TIMEOUT_SECONDS)
     except (WorktreeError, subprocess.TimeoutExpired) as exc:
         _git(repo_root, "merge", "--abort", check=False)
+        for patch in restore_dirty_patches:
+            _git_binary(
+                repo_root, "apply", "--whitespace=nowarn", "-",
+                input_data=patch,
+            )
         return _integrate_parked(
             branch, f"merge conflict/failure (aborted): {exc}",
         )
@@ -6312,6 +6454,12 @@ def _integrate_merge_and_gate(
             _git(repo_root, "revert", "--abort", check=False)
             reverted = False
             detail += f" — AND REVERT FAILED: {exc}"
+        if reverted:
+            for patch in restore_dirty_patches:
+                _git_binary(
+                    repo_root, "apply", "--whitespace=nowarn", "-",
+                    input_data=patch,
+                )
         return _integrate_parked(
             branch,
             f"post-merge gate failed: {detail}",
@@ -6404,20 +6552,19 @@ def integrate_chain(
                     _drop_writer_lease_for_removed_worktree(conn, wt_path)
                 return result
 
-            diff_files = [
-                f for f in _git(
-                    repo_root, "diff", "--name-only", f"{cur}...{branch}"
-                ).splitlines() if f
-            ]
-
-            # (a) overlap of foreign dirty files with the branch diff.
-            dirty = set(dirty_files(repo_root))
-            overlap = sorted(dirty & set(diff_files))
-            if overlap:
+            diff_files = sorted(_changed_paths(repo_root, cur, branch))
+            dirty = dirty_files(repo_root)
+            collisions, _matching_dirty = _dirty_content_collisions(
+                repo_root,
+                dirty,
+                base_ref=cur,
+                candidate_ref=branch,
+            )
+            if collisions:
                 return _integrate_parked(
                     branch,
                     "dirty files in live checkout overlap the branch diff: "
-                    + ", ".join(overlap[:10]),
+                    + ", ".join(collisions[:10]),
                 )
 
             try:
@@ -6431,9 +6578,28 @@ def integrate_chain(
             if early is not None:
                 return early
 
+            collisions, matching_dirty = _dirty_content_collisions(
+                repo_root,
+                dirty,
+                base_ref=cur,
+                candidate_ref=branch,
+            )
+            if collisions:
+                return _integrate_parked(
+                    branch,
+                    "dirty files in live checkout overlap the rebased branch diff: "
+                    + ", ".join(collisions[:10]),
+                )
+            matching_patches = [
+                _dirty_path_patch(repo_root, path) for path in matching_dirty
+            ]
+            for path in matching_dirty:
+                _reset_dirty_path(repo_root, path)
+
             result = _integrate_merge_and_gate(
                 repo_root, wt_path, branch, cur, diff_files,
                 gate_runner, artifact_receipt, cleanup=cleanup,
+                restore_dirty_patches=matching_patches,
             )
             if cleanup and result.get("action") in {"merged", "clean"}:
                 _drop_writer_lease_for_removed_worktree(conn, wt_path)
