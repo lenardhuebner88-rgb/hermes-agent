@@ -1337,10 +1337,14 @@ def normalize_usage(
     mode = (api_mode or "").strip().lower()
 
     if mode == "anthropic_messages" or provider_name == "anthropic":
-        input_tokens = _to_int(getattr(response_usage, "input_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
-        cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
-        cache_write_tokens = _to_int(getattr(response_usage, "cache_creation_input_tokens", 0))
+        input_tokens = _to_int(_usage_field_value(response_usage, "input_tokens"))
+        output_tokens = _to_int(_usage_field_value(response_usage, "output_tokens"))
+        cache_read_tokens = _to_int(
+            _usage_field_value(response_usage, "cache_read_input_tokens")
+        )
+        cache_write_tokens = _to_int(
+            _usage_field_value(response_usage, "cache_creation_input_tokens")
+        )
         cache_read_tokens_observed = _usage_field_observed(
             response_usage, "cache_read_input_tokens"
         )
@@ -1348,9 +1352,11 @@ def normalize_usage(
             response_usage, "cache_creation_input_tokens"
         )
     elif mode == "codex_responses":
-        input_total = _to_int(getattr(response_usage, "input_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
-        details = getattr(response_usage, "input_tokens_details", None)
+        input_total = _to_int(_usage_field_value(response_usage, "input_tokens"))
+        output_tokens = _to_int(_usage_field_value(response_usage, "output_tokens"))
+        details = _usage_field_value(
+            response_usage, "input_tokens_details", None
+        )
         cache_read_tokens = _to_int(_usage_field_value(details, "cached_tokens"))
         cache_read_tokens_observed = _usage_field_observed(
             details, "cached_tokens"
@@ -1378,9 +1384,13 @@ def normalize_usage(
             )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
-        prompt_total = _to_int(getattr(response_usage, "prompt_tokens", 0))
-        output_tokens = _to_int(getattr(response_usage, "completion_tokens", 0))
-        details = getattr(response_usage, "prompt_tokens_details", None)
+        prompt_total = _to_int(_usage_field_value(response_usage, "prompt_tokens"))
+        output_tokens = _to_int(
+            _usage_field_value(response_usage, "completion_tokens")
+        )
+        details = _usage_field_value(
+            response_usage, "prompt_tokens_details", None
+        )
         # Primary: OpenAI-style prompt_tokens_details. Fallback: Anthropic-style
         # top-level fields that some OpenAI-compatible proxies (OpenRouter, Cline)
         # expose when routing Claude models — without this
@@ -1388,9 +1398,13 @@ def normalize_usage(
         # missed when the proxy only surfaces them at the top level.
         # Port of cline/cline#10266.
         if _usage_field_observed(details, "cached_tokens"):
-            cache_read_tokens = _to_int(getattr(details, "cached_tokens"))
+            cache_read_tokens = _to_int(
+                _usage_field_value(details, "cached_tokens")
+            )
         elif _usage_field_observed(response_usage, "cache_read_input_tokens"):
-            cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
+            cache_read_tokens = _to_int(
+                _usage_field_value(response_usage, "cache_read_input_tokens")
+            )
         elif _usage_field_observed(response_usage, "prompt_cache_hit_tokens"):
             # DeepSeek's native API (api.deepseek.com) reports context-cache
             # hits as top-level prompt_cache_hit_tokens (+ the complementary
@@ -1398,7 +1412,7 @@ def normalize_usage(
             # OpenAI nested shape. Without this, direct DeepSeek sessions
             # always showed 0 cache-hit tokens (#61871).
             cache_read_tokens = _to_int(
-                getattr(response_usage, "prompt_cache_hit_tokens", 0)
+                _usage_field_value(response_usage, "prompt_cache_hit_tokens")
             )
         else:
             cache_read_tokens = 0
@@ -1415,13 +1429,15 @@ def normalize_usage(
         )
         if _usage_field_observed(details, "cache_write_tokens"):
             cache_write_tokens = _to_int(
-                getattr(details, "cache_write_tokens")
+                _usage_field_value(details, "cache_write_tokens")
             )
         elif _usage_field_observed(
             response_usage, "cache_creation_input_tokens"
         ):
             cache_write_tokens = _to_int(
-                getattr(response_usage, "cache_creation_input_tokens", 0)
+                _usage_field_value(
+                    response_usage, "cache_creation_input_tokens"
+                )
             )
         else:
             cache_write_tokens = 0
@@ -1444,18 +1460,20 @@ def normalize_usage(
     # hidden thinking was invisible in session accounting even though it
     # dominates output spend on models like deepseek-v4-flash (measured:
     # single calls burning 21K reasoning tokens to emit 500 visible tokens).
-    output_details = getattr(response_usage, "output_tokens_details", None)
-    completion_details = getattr(
+    output_details = _usage_field_value(
+        response_usage, "output_tokens_details", None
+    )
+    completion_details = _usage_field_value(
         response_usage, "completion_tokens_details", None
     )
     if _usage_field_observed(output_details, "reasoning_tokens"):
         reasoning_tokens = _to_int(
-            getattr(output_details, "reasoning_tokens", 0)
+            _usage_field_value(output_details, "reasoning_tokens")
         )
         reasoning_tokens_observed = True
     elif _usage_field_observed(completion_details, "reasoning_tokens"):
         reasoning_tokens = _to_int(
-            getattr(completion_details, "reasoning_tokens", 0)
+            _usage_field_value(completion_details, "reasoning_tokens")
         )
         reasoning_tokens_observed = True
 
