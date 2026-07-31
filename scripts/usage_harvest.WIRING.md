@@ -46,9 +46,37 @@ unique across a probe run on a DB copy.
 
 ## Verifying it works
 
-`captured_at` carries the **source** timestamp — when the session or call
-happened — not when the harvest ran. A lane that nobody used for 13 hours
-therefore has a 13-hour-old newest row, and that is correct, not a backlog.
+**`captured_at` is write time, not event time — never filter a report by it.**
+An earlier version of this file claimed the opposite; it was wrong, and the
+error is load-bearing enough to spell out. Measured 2026-07-31 against the live
+DB:
+
+| origin | rows | distinct `captured_at` seconds |
+|---|---|---|
+| `claude_code` | 106 026 | **76** |
+| `hermes_agent` | 1 661 | 1 238 |
+| `qwen_cli` | 1 637 | 1 557 |
+| `codex_cli` | 1 255 | 1 248 |
+| `grok_cli` | 901 | 896 |
+| `kimi_cli` | 171 | 171 |
+
+The live-writing origins land near 1:1 because writing and happening coincide
+for them. `claude_code` does not: the harvester reads transcripts *later*, so
+106 026 rows collapse onto the 76 seconds its ticks were running. The mechanism
+is `_refresh_run_aggregates` in `hermes_cli/usage_facts_db.py`, whose last
+statement stamps `captured_at=utc_now_iso()` unconditionally after every call —
+overwriting the source timestamp the harvester correctly passed one statement
+earlier. `_upsert_run_facts` fills the same default when the value is absent.
+
+The practical consequence: a "what did today cost" query filtered on
+`captured_at` reports weeks of transcript history as today. On 2026-07-31 that
+would have been ~101 M input tokens attributed to a single day.
+
+Until the event-time columns land, the honest time source per origin is:
+transcript `timestamp` for `claude_code`, `task_runs.started_at` (epoch int, in
+`kanban.db`) for anything correlated to a Kanban run, and the run directory for
+the foreign lanes.
+
 So do not check freshness against the clock; check the harvest against its
 source:
 
@@ -63,4 +91,4 @@ compare the newest session in its source tree against the rows in
 Note that Codex writes the session **start** into `captured_at`, so a long
 session that ended recently still sorts by its old start time. Ordering
 `codex_cli` rows by `captured_at` does not give you the most recently active
-session.
+session — a second reason not to treat the column as an event clock.
