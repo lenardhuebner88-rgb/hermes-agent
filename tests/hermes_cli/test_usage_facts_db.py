@@ -591,3 +591,286 @@ def test_increment_tool_call_accepts_zero_duration(tmp_path):
         "SELECT tool_duration_ms FROM run_llm_calls WHERE run_id='run-1'",
     )
     assert row["tool_duration_ms"] == 0
+
+
+# --- occurred_at / first_call_at / last_call_at (event time as own fact) ---
+
+
+_PRE_OCCURRED_AT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_usage_facts (
+    run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL DEFAULT 'hermes_agent',
+    task_run_id TEXT,
+    task_id TEXT,
+    chain_id TEXT,
+    board TEXT,
+    session_id TEXT,
+    correlation_source TEXT,
+    provider TEXT,
+    model TEXT,
+    requested_provider TEXT,
+    requested_model TEXT,
+    model_source TEXT,
+    fallback_depth INTEGER,
+    lane TEXT,
+    profile TEXT,
+    wall_ms INTEGER,
+    call_kind TEXT,
+    billing_mode TEXT,
+    billing_mode_source TEXT,
+    cost_status TEXT,
+    cost_source TEXT,
+    serving_tier TEXT,
+    reasoning_effort TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    total_tokens INTEGER,
+    tool_call_count INTEGER,
+    tool_output_chars INTEGER,
+    finish_reason TEXT,
+    error_type TEXT,
+    first_token_ms REAL,
+    duration_ms REAL,
+    tool_duration_ms INTEGER,
+    context_window_limit INTEGER,
+    context_window_limit_source TEXT,
+    context_window_used INTEGER,
+    llm_call_count INTEGER,
+    temperature REAL,
+    top_p REAL,
+    captured_at TEXT,
+    source TEXT NOT NULL DEFAULT 'unknown'
+);
+
+CREATE TABLE IF NOT EXISTS run_llm_calls (
+    run_id TEXT NOT NULL,
+    call_index INTEGER NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'hermes_agent',
+    provider TEXT,
+    model TEXT,
+    requested_model TEXT,
+    model_source TEXT,
+    serving_tier TEXT,
+    reasoning_effort TEXT,
+    response_id TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cache_read_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    total_tokens INTEGER,
+    finish_reason TEXT,
+    error_type TEXT,
+    first_token_ms REAL,
+    duration_ms REAL,
+    tool_duration_ms INTEGER,
+    context_window_used INTEGER,
+    tool_call_count INTEGER,
+    tool_output_chars INTEGER,
+    temperature REAL,
+    top_p REAL,
+    PRIMARY KEY (run_id, call_index)
+);
+
+CREATE TABLE IF NOT EXISTS run_traces (
+    run_id TEXT NOT NULL,
+    call_index INTEGER,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    message_fingerprint TEXT,
+    captured_at TEXT NOT NULL
+);
+"""
+
+
+def test_fresh_schema_includes_event_time_columns(tmp_path):
+    path = tmp_path / "fresh.db"
+    initialize_usage_facts_db(path)
+
+    with sqlite3.connect(path) as conn:
+        call_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_llm_calls)")
+        }
+        run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
+        }
+
+    assert "occurred_at" in call_columns
+    assert "first_call_at" in run_columns
+    assert "last_call_at" in run_columns
+    assert call_columns == {"run_id", "call_index", *LLM_CALL_COLUMNS}
+    assert run_columns == {"run_id", *RUN_FACT_COLUMNS}
+
+
+def test_migration_adds_event_time_columns_matching_fresh_schema(tmp_path):
+    old_path = tmp_path / "old.db"
+    with sqlite3.connect(old_path) as conn:
+        conn.executescript(_PRE_OCCURRED_AT_SCHEMA)
+        conn.commit()
+
+    with sqlite3.connect(old_path) as conn:
+        before_calls = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_llm_calls)")
+        }
+        before_runs = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
+        }
+    assert "occurred_at" not in before_calls
+    assert "first_call_at" not in before_runs
+    assert "last_call_at" not in before_runs
+
+    initialize_usage_facts_db(old_path)
+
+    fresh_path = tmp_path / "fresh.db"
+    initialize_usage_facts_db(fresh_path)
+
+    with sqlite3.connect(old_path) as conn:
+        migrated_calls = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_llm_calls)")
+        }
+        migrated_runs = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
+        }
+    with sqlite3.connect(fresh_path) as conn:
+        fresh_calls = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_llm_calls)")
+        }
+        fresh_runs = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
+        }
+
+    assert migrated_calls == fresh_calls
+    assert migrated_runs == fresh_runs
+    assert "occurred_at" in migrated_calls
+    assert {"first_call_at", "last_call_at"} <= migrated_runs
+
+
+def test_occurred_at_round_trips_and_null_stays_null(tmp_path):
+    path = tmp_path / "facts.db"
+    event_time = "2026-07-12T06:21:53.803Z"
+
+    record_llm_call(
+        "run-with-time",
+        0,
+        {"occurred_at": event_time, "input_tokens": 2},
+        path=path,
+    )
+    record_llm_call(
+        "run-without-time",
+        0,
+        {"input_tokens": 3},
+        path=path,
+    )
+
+    with_time = _row(
+        path,
+        "SELECT occurred_at FROM run_llm_calls WHERE run_id='run-with-time'",
+    )
+    without = _row(
+        path,
+        "SELECT occurred_at FROM run_llm_calls WHERE run_id='run-without-time'",
+    )
+    assert with_time["occurred_at"] == event_time
+    assert without["occurred_at"] is None
+
+
+def test_first_and_last_call_at_are_min_max_of_call_times(tmp_path):
+    path = tmp_path / "facts.db"
+    early = "2026-07-01T10:00:00Z"
+    late = "2026-07-01T12:30:00Z"
+
+    record_llm_call(
+        "run-interval",
+        0,
+        {"occurred_at": late, "input_tokens": 1},
+        path=path,
+    )
+    record_llm_call(
+        "run-interval",
+        1,
+        {"occurred_at": early, "input_tokens": 2},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT first_call_at, last_call_at FROM run_usage_facts "
+        "WHERE run_id='run-interval'",
+    )
+    assert fact["first_call_at"] == early
+    assert fact["last_call_at"] == late
+
+
+def test_run_without_any_call_times_keeps_null_interval(tmp_path):
+    path = tmp_path / "facts.db"
+    record_llm_call("run-no-times", 0, {"input_tokens": 1}, path=path)
+    record_llm_call("run-no-times", 1, {"input_tokens": 2}, path=path)
+
+    fact = _row(
+        path,
+        "SELECT first_call_at, last_call_at FROM run_usage_facts "
+        "WHERE run_id='run-no-times'",
+    )
+    assert fact["first_call_at"] is None
+    assert fact["last_call_at"] is None
+
+
+def test_second_refresh_without_time_does_not_null_first_call_at(tmp_path):
+    path = tmp_path / "facts.db"
+    event_time = "2026-07-10T08:00:00Z"
+
+    record_llm_call(
+        "run-coalesce",
+        0,
+        {"occurred_at": event_time, "input_tokens": 1},
+        path=path,
+    )
+    record_llm_call(
+        "run-coalesce",
+        1,
+        {"input_tokens": 2},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT first_call_at, last_call_at FROM run_usage_facts "
+        "WHERE run_id='run-coalesce'",
+    )
+    assert fact["first_call_at"] == event_time
+    assert fact["last_call_at"] == event_time
+
+
+def test_captured_at_remains_write_time_not_event_time(tmp_path):
+    path = tmp_path / "facts.db"
+    event_time = "2020-01-01T00:00:00+00:00"
+    before = datetime.now(timezone.utc)
+
+    record_llm_call(
+        "run-write-time",
+        0,
+        {"occurred_at": event_time, "input_tokens": 1},
+        run_fields={"source": "measured"},
+        path=path,
+    )
+    after = datetime.now(timezone.utc)
+
+    fact = _row(
+        path,
+        "SELECT captured_at, first_call_at FROM run_usage_facts "
+        "WHERE run_id='run-write-time'",
+    )
+    call = _row(
+        path,
+        "SELECT occurred_at FROM run_llm_calls WHERE run_id='run-write-time'",
+    )
+    assert call["occurred_at"] == event_time
+    assert fact["first_call_at"] == event_time
+    assert fact["captured_at"] != event_time
+    captured = datetime.fromisoformat(fact["captured_at"])
+    if captured.tzinfo is None:
+        captured = captured.replace(tzinfo=timezone.utc)
+    assert before <= captured <= after

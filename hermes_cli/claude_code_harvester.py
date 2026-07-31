@@ -625,6 +625,8 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "finish_reason": draft.stop_reason,
         "tool_call_count": draft.tool_call_count,
         "tool_output_chars": draft.tool_output_chars or None,
+        # Source event time from the transcript; NULL when the record has none.
+        "occurred_at": draft.timestamp,
         # Explicitly unavailable in Claude Code transcripts — do not invent:
         # first_token_ms, duration_ms, context_window_used
     }
@@ -1103,6 +1105,155 @@ def backfill_existing_correlations(
     }
 
 
+def _transcript_occurred_at_by_run_id(
+    projects_root: Path,
+) -> dict[str, str]:
+    """Map run_id → transcript event time for Claude assistant turns.
+
+    Only non-empty source timestamps are returned. Absence stays absent —
+    never filled from mtime or wall clock.
+    """
+    root = Path(projects_root)
+    timestamps: dict[str, str] = {}
+    for path in discover_jsonl_files(root):
+        drafts, _stats = parse_transcript_file(path, projects_root=root)
+        for run_id, draft in drafts.items():
+            if draft.timestamp:
+                timestamps[run_id] = draft.timestamp
+    return timestamps
+
+
+def backfill_occurred_at(
+    *,
+    db_path: Path | str | None = None,
+    projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply source-event timestamps for existing Claude facts.
+
+    Fills only NULL time columns (``run_llm_calls.occurred_at``,
+    ``run_usage_facts.first_call_at`` / ``last_call_at``). Never touches
+    ``captured_at``, tokens, or correlation fields. Preview is the default.
+    """
+    resolved_db = usage_facts_db_path(db_path)
+    if not resolved_db.is_file():
+        return {
+            "applied": apply,
+            "calls_to_fill": 0,
+            "runs_to_fill": 0,
+            "calls_filled": 0,
+            "runs_filled": 0,
+        }
+    initialize_usage_facts_db(resolved_db)
+    source_times = _transcript_occurred_at_by_run_id(Path(projects_root))
+
+    if apply:
+        connection = usage_facts_db_mod._connect(resolved_db)
+    else:
+        try:
+            connection = sqlite3.connect(
+                f"file:{quote(str(resolved_db.expanduser().resolve()), safe='/')}?mode=ro",
+                uri=True,
+                timeout=2.0,
+            )
+        except sqlite3.Error:
+            return {
+                "applied": apply,
+                "calls_to_fill": 0,
+                "runs_to_fill": 0,
+                "calls_filled": 0,
+                "runs_filled": 0,
+            }
+    connection.row_factory = sqlite3.Row
+    try:
+        null_calls = connection.execute(
+            "SELECT run_id, call_index FROM run_llm_calls "
+            "WHERE origin=? AND occurred_at IS NULL",
+            (ORIGIN,),
+        ).fetchall()
+        call_updates: list[tuple[str, int, str]] = []
+        for row in null_calls:
+            run_id = str(row["run_id"])
+            timestamp = source_times.get(run_id)
+            if timestamp:
+                call_updates.append((timestamp, run_id, int(row["call_index"])))
+
+        calls_to_fill = len(call_updates)
+        calls_filled = 0
+        if apply and call_updates:
+            for timestamp, run_id, call_index in call_updates:
+                cursor = connection.execute(
+                    "UPDATE run_llm_calls SET occurred_at=? "
+                    "WHERE run_id=? AND call_index=? AND origin=? "
+                    "AND occurred_at IS NULL",
+                    (timestamp, run_id, call_index, ORIGIN),
+                )
+                calls_filled += max(0, int(cursor.rowcount))
+
+        # Project call times that would exist after the fill for run aggregates.
+        projected_times: dict[str, list[str]] = {}
+        for row in connection.execute(
+            "SELECT run_id, occurred_at FROM run_llm_calls "
+            "WHERE origin=? AND occurred_at IS NOT NULL",
+            (ORIGIN,),
+        ):
+            projected_times.setdefault(str(row["run_id"]), []).append(
+                str(row["occurred_at"])
+            )
+        if not apply:
+            for timestamp, run_id, _call_index in call_updates:
+                projected_times.setdefault(run_id, []).append(timestamp)
+
+        null_runs = connection.execute(
+            "SELECT run_id, first_call_at, last_call_at FROM run_usage_facts "
+            "WHERE origin=? AND (first_call_at IS NULL OR last_call_at IS NULL)",
+            (ORIGIN,),
+        ).fetchall()
+        run_updates: list[tuple[str | None, str | None, str]] = []
+        for row in null_runs:
+            run_id = str(row["run_id"])
+            times = projected_times.get(run_id) or []
+            if not times:
+                continue
+            computed_first = min(times)
+            computed_last = max(times)
+            new_first = (
+                None if row["first_call_at"] is not None else computed_first
+            )
+            new_last = (
+                None if row["last_call_at"] is not None else computed_last
+            )
+            if new_first is None and new_last is None:
+                continue
+            run_updates.append((new_first, new_last, run_id))
+
+        runs_to_fill = len(run_updates)
+        runs_filled = 0
+        if apply and run_updates:
+            for new_first, new_last, run_id in run_updates:
+                cursor = connection.execute(
+                    "UPDATE run_usage_facts SET "
+                    "first_call_at=COALESCE(first_call_at, ?), "
+                    "last_call_at=COALESCE(last_call_at, ?) "
+                    "WHERE run_id=? AND origin=?",
+                    (new_first, new_last, run_id, ORIGIN),
+                )
+                runs_filled += max(0, int(cursor.rowcount))
+            connection.commit()
+        elif apply:
+            connection.commit()
+
+        return {
+            "applied": apply,
+            "calls_to_fill": calls_to_fill,
+            "runs_to_fill": runs_to_fill,
+            "calls_filled": calls_filled if apply else 0,
+            "runs_filled": runs_filled if apply else 0,
+        }
+    finally:
+        connection.close()
+
+
 def harvest(
     *,
     projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
@@ -1274,9 +1425,20 @@ def build_arg_parser():
         help="Preview exact-session correlation backfill for existing Claude facts",
     )
     parser.add_argument(
+        "--backfill-timestamps",
+        action="store_true",
+        help=(
+            "Preview filling NULL occurred_at / first_call_at / last_call_at "
+            "from transcript source times (never touches captured_at)"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
-        help="Apply --backfill-correlations (preview is the default)",
+        help=(
+            "Apply --backfill-correlations or --backfill-timestamps "
+            "(preview is the default)"
+        ),
     )
     parser.add_argument(
         "--update-existing-only",
@@ -1298,10 +1460,26 @@ def build_arg_parser():
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    if args.apply and not args.backfill_correlations:
-        parser.error("--apply requires --backfill-correlations")
+    if args.backfill_correlations and args.backfill_timestamps:
+        parser.error(
+            "choose one of --backfill-correlations or --backfill-timestamps"
+        )
+    if args.apply and not (
+        args.backfill_correlations or args.backfill_timestamps
+    ):
+        parser.error(
+            "--apply requires --backfill-correlations or --backfill-timestamps"
+        )
     if args.backfill_correlations:
         report = backfill_existing_correlations(
+            db_path=args.db,
+            projects_root=args.projects_root,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.backfill_timestamps:
+        report = backfill_occurred_at(
             db_path=args.db,
             projects_root=args.projects_root,
             apply=args.apply,

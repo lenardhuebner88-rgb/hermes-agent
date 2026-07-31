@@ -64,6 +64,8 @@ RUN_FACT_COLUMNS = (
     "temperature",
     "top_p",
     "captured_at",
+    "first_call_at",
+    "last_call_at",
     "source",
 )
 
@@ -92,6 +94,7 @@ LLM_CALL_COLUMNS = (
     "tool_output_chars",
     "temperature",
     "top_p",
+    "occurred_at",
 )
 
 _SOURCE_RANK = {"unknown": 0, "derived": 1, "measured": 2}
@@ -156,6 +159,8 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     temperature REAL,
     top_p REAL,
     captured_at TEXT,
+    first_call_at TEXT,
+    last_call_at TEXT,
     source TEXT NOT NULL DEFAULT 'unknown'
         CHECK (source IN ('measured', 'derived', 'unknown'))
 );
@@ -187,6 +192,7 @@ CREATE TABLE IF NOT EXISTS run_llm_calls (
     tool_output_chars INTEGER,
     temperature REAL,
     top_p REAL,
+    occurred_at TEXT,
     PRIMARY KEY (run_id, call_index)
 );
 
@@ -323,6 +329,8 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                         ("cost_source", "TEXT"),
                         ("total_tokens", "INTEGER"),
                         ("tool_duration_ms", "INTEGER"),
+                        ("first_call_at", "TEXT"),
+                        ("last_call_at", "TEXT"),
                     ),
                     "run_llm_calls": (
                         (
@@ -330,6 +338,7 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                             "TEXT NOT NULL DEFAULT 'hermes_agent'",
                         ),
                         ("tool_duration_ms", "INTEGER"),
+                        ("occurred_at", "TEXT"),
                     ),
                 }
                 for table, table_additions in additions.items():
@@ -514,7 +523,12 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
             -- calls without a measurement do not invalidate that observation.
             MIN(first_token_ms) AS first_token_ms,
             -- Context usage is the maximum available observation, not a sum.
-            MAX(context_window_used) AS context_window_used
+            MAX(context_window_used) AS context_window_used,
+            -- Event times are source observations only; never invent from now().
+            CASE WHEN COUNT(occurred_at)>0 THEN MIN(occurred_at) END
+                AS first_call_at,
+            CASE WHEN COUNT(occurred_at)>0 THEN MAX(occurred_at) END
+                AS last_call_at
         FROM run_llm_calls
         WHERE run_id=?
         """,
