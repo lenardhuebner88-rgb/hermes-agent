@@ -1019,8 +1019,37 @@ def reconcile_cron(
     return events
 
 
+LEDGER_CURRENCY = "USD"
+
+
+def convert_to_ledger_currency(
+    amount: str,
+    currency: str,
+    fx_rates: Mapping[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Convert into the ledger currency, or report that we cannot.
+
+    Returns None when no rate is available: aggregating mixed currencies is
+    wrong, and inventing a rate is worse than reporting the amount in the
+    currency it was actually recorded in.
+    """
+    if currency == LEDGER_CURRENCY:
+        return amount, currency
+    rate = (fx_rates or {}).get(currency)
+    if rate is None:
+        return None
+    try:
+        converted = Decimal(str(amount)) * Decimal(str(rate))
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+    return format(converted, "f"), LEDGER_CURRENCY
+
+
 def reconcile_loop_records(
     records: Iterable[Mapping[str, Any]],
+    *,
+    fx_rates: Mapping[str, Any] | None = None,
+    fx_version: str | None = None,
 ) -> list[ExecutionEvent]:
     """Translate structured loop JSONL records through a content-free allowlist."""
     events: list[ExecutionEvent] = []
@@ -1074,8 +1103,14 @@ def reconcile_loop_records(
                 attributes[target_key] = value
         metered = _decimal_string(record.get("metered_cost_eur"))
         if metered is not None:
-            attributes["metered_cost"] = metered
-            attributes["currency"] = "EUR"
+            converted = convert_to_ledger_currency(metered, "EUR", fx_rates)
+            if converted is None:
+                attributes["metered_cost"] = metered
+                attributes["currency"] = "EUR"
+            else:
+                attributes["metered_cost"], attributes["currency"] = converted
+                if fx_version is not None:
+                    attributes["fx_version"] = fx_version
         duration = record.get("secs")
         if isinstance(duration, (int, float)) and not isinstance(duration, bool):
             attributes["duration_ms"] = max(0, int(float(duration) * 1000))

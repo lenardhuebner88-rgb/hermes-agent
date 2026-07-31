@@ -163,6 +163,8 @@ class ShadowCollectionConfig:
     usage_sample_limit: int = DEFAULT_USAGE_SAMPLE_LIMIT
     repository: Path | None = None
     integration_ref: str = DEFAULT_INTEGRATION_REF
+    fx_rates: Mapping[str, Any] | None = None
+    fx_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,6 +482,8 @@ def collect_loop_cohort(
     hermes_home: Path,
     *,
     observed_at_ms: int,
+    fx_rates: Mapping[str, Any] | None = None,
+    fx_version: str | None = None,
 ) -> SourceCohort:
     paths = sorted((hermes_home / "loops").glob("*/ledger.jsonl"))
     events: list[ExecutionEvent] = []
@@ -499,7 +503,9 @@ def collect_loop_cohort(
                         "pack": record.get("pack") or path.parent.name,
                     }
                     for record in records
-                ]
+                ],
+                fx_rates=fx_rates,
+                fx_version=fx_version,
             )
             after = _prefix_digest(path, initial_size)
         except (OSError, json.JSONDecodeError, ValueError):
@@ -1256,7 +1262,12 @@ def collect_shadow(
             observed_at_ms=now_ms,
         ),
         collect_cron_cohort(config.hermes_home, observed_at_ms=now_ms),
-        collect_loop_cohort(config.hermes_home, observed_at_ms=now_ms),
+        collect_loop_cohort(
+            config.hermes_home,
+            observed_at_ms=now_ms,
+            fx_rates=config.fx_rates,
+            fx_version=config.fx_version,
+        ),
     ]
 
     ledger = ExecutionFactsLedger(config.database)

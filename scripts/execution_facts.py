@@ -363,6 +363,16 @@ def _parser() -> argparse.ArgumentParser:
         help="git checkout supplying landing evidence (omit to skip)",
     )
     collect.add_argument("--integration-ref", default="main")
+    collect.add_argument(
+        "--fx-rates",
+        type=Path,
+        help=(
+            "JSON object of currency->rate into USD, e.g. "
+            '{"EUR": "1.08"}; without it mixed-currency costs stay '
+            "unaggregatable rather than being converted at a guessed rate"
+        ),
+    )
+    collect.add_argument("--fx-version")
 
     proof = commands.add_parser(
         "record-shadow-proof",
@@ -435,6 +445,13 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(
                 "subscription fee file must contain a JSON object"
             )
+        fx_rates = (
+            json.loads(Path(args.fx_rates).read_text(encoding="utf-8"))
+            if args.fx_rates
+            else None
+        )
+        if fx_rates is not None and not isinstance(fx_rates, dict):
+            raise ValueError("fx rate file must contain a JSON object")
         result = collect_shadow(
             ShadowCollectionConfig(
                 database=args.db,
@@ -450,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
                 usage_sample_limit=args.usage_sample_limit,
                 repository=args.repository,
                 integration_ref=args.integration_ref,
+                fx_rates=fx_rates,
+                fx_version=args.fx_version,
             )
         )
         _print(result.to_dict())

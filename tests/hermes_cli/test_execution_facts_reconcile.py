@@ -873,3 +873,55 @@ def test_metered_row_keeps_its_real_price() -> None:
 
     assert float(cost.attributes["metered_cost"]) > 0
     assert cost.attributes["marginal_cost"] == cost.attributes["metered_cost"]
+
+
+def test_loop_cost_converts_to_the_ledger_currency_when_a_rate_is_given() -> None:
+    """One mixed currency blocks every cost metric, not just its own.
+
+    Loop ledgers record EUR while usage facts record USD, and the readmodel
+    refuses to aggregate across currencies -- so 238 EUR events kept the whole
+    cost contract `unknown` regardless of how good the pricing was.
+    """
+    records = [
+        {
+            "ts": "2026-07-30T11:00:00+00:00",
+            "pack": "shadow",
+            "event": "phase",
+            "phase": "build",
+            "loop_run_id": "run-1",
+            "metered_cost_eur": "10.00",
+        }
+    ]
+
+    events = reconcile_loop_records(
+        records, fx_rates={"EUR": "1.10"}, fx_version="ecb-2026-07-31"
+    )
+    cost = next(
+        event for event in events if "metered_cost" in event.attributes
+    )
+
+    assert cost.attributes["currency"] == "USD"
+    assert Decimal(cost.attributes["metered_cost"]) == Decimal("11")
+    assert cost.attributes["fx_version"] == "ecb-2026-07-31"
+
+
+def test_loop_cost_without_a_rate_stays_in_its_own_currency() -> None:
+    """Without an operator-supplied rate, inventing one would be worse."""
+    records = [
+        {
+            "ts": "2026-07-30T11:00:00+00:00",
+            "pack": "shadow",
+            "event": "phase",
+            "phase": "build",
+            "loop_run_id": "run-1",
+            "metered_cost_eur": "10.00",
+        }
+    ]
+
+    events = reconcile_loop_records(records)
+    cost = next(
+        event for event in events if "metered_cost" in event.attributes
+    )
+
+    assert cost.attributes["currency"] == "EUR"
+    assert "fx_version" not in cost.attributes
