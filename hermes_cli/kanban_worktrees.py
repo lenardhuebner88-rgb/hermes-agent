@@ -1080,7 +1080,14 @@ def _scope_contract_files(
 
 def _path_is_under(path: str, roots: Sequence[str]) -> bool:
     normalized = _normalize_dirty_path(path)
-    return any(normalized == root or normalized.startswith(f"{root}/") for root in roots)
+    normalized_roots = (
+        _normalize_dirty_path(root).removesuffix("/**").rstrip("/")
+        for root in roots
+    )
+    return any(
+        normalized == root or normalized.startswith(f"{root}/")
+        for root in normalized_roots
+    )
 
 
 def _dirty_scope_overlap(
@@ -6702,10 +6709,12 @@ def _enforce_lane_scope_on_complete(
     """Hard lane-scope check at the worker-commit boundary.
 
     Called from :func:`maybe_integrate_on_complete` for every completion of a
-    provisioned task — BEFORE the done write — so a coder/coder-frontend task
-    whose branch diff crosses the lane split is rejected here instead of
-    landing. Returns a ``parked`` outcome on violation (caller must NOT move
-    the task to done), ``None`` when the task is not lane-bound or clean.
+    provisioned task — BEFORE the done write. A declared task scope is
+    authoritative: paths inside it may cross the binary coder/frontend split,
+    while paths outside it are rejected. Tasks without a declared scope retain
+    the historical binary lane rule. Returns a ``parked`` outcome on violation
+    (caller must NOT move the task to done), ``None`` when the task is not
+    lane-bound or clean.
 
     Fail-open on git inspection errors: the integrator's own prechecks run
     immediately after and park on any real git problem.
@@ -6714,6 +6723,10 @@ def _enforce_lane_scope_on_complete(
     assignee = (row["assignee"] or "").strip().lower() if row else ""
     if assignee not in LANE_SCOPE_ENFORCED_ASSIGNEES:
         return None
+    task = kb.get_task(conn, task_id)
+    declared_scope = (
+        _task_scope_paths(task.body, task.scope_contract) if task is not None else None
+    )
     if not _branch_exists(repo_root, branch):
         return None
     base = merge_target
@@ -6973,8 +6986,16 @@ def _enforce_lane_scope_on_complete(
             "lane-scope check could not diff %s: %s", diff_spec, exc,
         )
         return None
-    violating, expected_lane = _lane_scope_violations(assignee, changed_files)
-    if violating:
+    if declared_scope is None:
+        violating, expected_lane = _lane_scope_violations(assignee, changed_files)
+    else:
+        violating = [
+            path for path in changed_files if not _path_is_under(path, declared_scope)
+        ]
+        # Out-of-contract work has no alternate owner lane. Keeping this empty
+        # also prevents the lane-fixer router from inventing a same-lane child.
+        expected_lane = ""
+    if violating and declared_scope is None:
         # After a successful lane-scope fixer, the shared chain branch still
         # contains the fixer's paths in this task's attributed range. Subtract
         # paths already owned by a completed fixer child so re-complete does
@@ -7002,11 +7023,17 @@ def _enforce_lane_scope_on_complete(
             )
     if not violating:
         return None
-    reason = (
-        f"lane-scope violation: assignee '{assignee}' changed paths outside "
-        f"its lane: {', '.join(violating)} — this task should have been "
-        f"assigned to lane '{expected_lane}'."
-    )
+    if declared_scope is None:
+        reason = (
+            f"lane-scope violation: assignee '{assignee}' changed paths outside "
+            f"its lane: {', '.join(violating)} — this task should have been "
+            f"assigned to lane '{expected_lane}'."
+        )
+    else:
+        reason = (
+            "lane-scope violation: changed paths outside the declared task "
+            f"scope: {', '.join(violating)}."
+        )
     # Capture branch tip at park time so the allowlist path without a resume
     # event (operator unblock) can still retouch-check later parent commits
     # (Opus R2-2 residual B5).
@@ -7032,19 +7059,20 @@ def _enforce_lane_scope_on_complete(
     }
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
-    try:
-        from hermes_cli.kanban_lane_fixer import maybe_route_lane_scope_fixer
+    if declared_scope is None:
+        try:
+            from hermes_cli.kanban_lane_fixer import maybe_route_lane_scope_fixer
 
-        maybe_route_lane_scope_fixer(
-            conn,
-            row,
-            violating_paths=violating,
-            expected_lane=expected_lane,
-        )
-    except Exception:
-        # The hard gate remains authoritative: a routing failure must never
-        # turn a lane-scope violation into a successful completion.
-        _log.exception("lane-scope fixer routing failed for %s", task_id)
+            maybe_route_lane_scope_fixer(
+                conn,
+                row,
+                violating_paths=violating,
+                expected_lane=expected_lane,
+            )
+        except Exception:
+            # The hard gate remains authoritative: a routing failure must never
+            # turn a lane-scope violation into a successful completion.
+            _log.exception("lane-scope fixer routing failed for %s", task_id)
     return {
         "action": "parked",
         "reason": reason,

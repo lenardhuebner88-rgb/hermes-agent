@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
+from tests.hermes_cli._kanban_test_helpers import _commit_in, _events, _git, _ok_gate
 
 
 @pytest.fixture
@@ -28,6 +30,152 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
     kb.init_db()
     return home
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """Real git repo used to exercise the completion-time lane guard."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "tester")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "base")
+    return root
+
+
+def _complete_scoped_task(
+    conn,
+    repo,
+    root_id,
+    *,
+    assignee,
+    scope_files,
+    commits,
+    scope_contract=None,
+):
+    info = kwt.ensure_worktree(repo, root_id)
+    for relpath, content in commits:
+        _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): work")
+    body = None
+    if scope_files is not None:
+        body = (
+            "Scope files (allowed edit paths):\n"
+            + "\n".join(scope_files)
+            + "\n\n- AC-1: done\n"
+        )
+    task_id = kb.create_task(
+        conn,
+        title=f"declared scope {assignee}",
+        body=body,
+        assignee=assignee,
+        workspace_kind="dir",
+        workspace_path=str(info["path"]),
+        scope_contract=scope_contract,
+    )
+    result = kwt.maybe_integrate_on_complete(
+        conn, task_id, gate_runner=_ok_gate,
+    )
+    return task_id, result
+
+
+@pytest.mark.parametrize("assignee", ["coder", "coder-frontend"])
+def test_declared_mixed_scope_overrides_binary_lane_guard(
+    repo, kanban_home, assignee,
+):
+    """Regression for t_d73f9deb: one declared task may span both lanes."""
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            f"t_mixed_{assignee}",
+            assignee=assignee,
+            scope_files=["web/src/control/**", "tests/hermes_cli/**"],
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_declared_scope_rejects_out_of_scope_path_even_when_lane_matches(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            "t_narrow_scope",
+            assignee="coder",
+            scope_files=["web/src/control/**"],
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "parked"
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "tests/hermes_cli/test_landing_pack.py",
+        ]
+
+
+def test_structured_scope_contract_also_overrides_binary_lane_guard(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            "t_structured_scope",
+            assignee="coder-frontend",
+            scope_files=None,
+            scope_contract={
+                "allowed_paths": ["web/src/control/**", "tests/hermes_cli/**"],
+            },
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_guard_without_declared_scope_keeps_binary_rule(repo, kanban_home):
+    info = kwt.ensure_worktree(repo, "t_no_declared_scope")
+    _commit_in(
+        info["path"],
+        "web/src/control/LandingPack.tsx",
+        "export const LandingPack = 1\n",
+        msg="kanban(t_no_declared_scope): work",
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="unscoped backend task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+        )
+        result = kwt.maybe_integrate_on_complete(
+            conn, task_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked"
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "web/src/control/LandingPack.tsx",
+        ]
 
 
 # ---------------------------------------------------------------------------
