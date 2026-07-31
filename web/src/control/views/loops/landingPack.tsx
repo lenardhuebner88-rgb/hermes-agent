@@ -172,7 +172,7 @@ export function LandingCardSection({
         </div>
         <div className="flex flex-wrap items-baseline gap-x-2">
           <dt>{t.landingLastResultLabel}</dt>
-          <dd style={{ color: "var(--ln-ink)" }}>{lastResultLabel(pack.last_result)}</dd>
+          <dd role="status" style={{ color: "var(--ln-ink)" }}>{lastResultLabel(pack.last_result)}</dd>
         </div>
       </dl>
     </section>
@@ -295,7 +295,7 @@ export function LandingDetailSections({ detail }: { detail: LoopDetailResponse }
         <SectionCaption>{t.landingPreviewTitle}</SectionCaption>
         {preview ? (
           <div className="mt-1 space-y-1" style={inkSoft}>
-            <p>
+            <p role="status">
               {preview.running
                 ? t.landingPreviewRunning
                 : preview.finished_at

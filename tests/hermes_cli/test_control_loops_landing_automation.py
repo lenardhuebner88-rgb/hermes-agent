@@ -242,6 +242,9 @@ def test_landing_preview_route_lifecycle(tmp_path, monkeypatch):
 
     def fake_spawn(root):
         started_at = datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc).isoformat()
+        # Spiegelt das mkdir aus _spawn_landing_preview (control_loops.py),
+        # das im Fake sonst umgangen waere.
+        root.mkdir(parents=True, exist_ok=True)
         (root / control_loops.LANDING_PREVIEW_STATE_FILENAME).write_text(
             json.dumps({"started_at": started_at}), encoding="utf-8"
         )

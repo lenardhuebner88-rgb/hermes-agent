@@ -1529,6 +1529,25 @@ describe("LoopsGrid — Landing-Pack-Karte (LL2-S5, AC-3)", () => {
     const html = renderGrid([landingPack]);
     expect(html).toContain("Deterministisch");
   });
+
+  it("390px-Smoke: Karte bleibt im Mobile-Stack vollständig erreichbar (AC-5)", () => {
+    // jsdom wendet keine Media-Queries an; der Test pinnt den Vertrag, dass
+    // die Landing-Karte keine Breiten-abhängige Conditional-Renders nutzt —
+    // bei 390px stackt das Grid (Basis: einspaltig, md:grid-cols-2) und alle
+    // AC-3-Elemente bleiben per Tastatur/Screenreader erreichbar.
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    try {
+      renderInteractiveGrid([landingPack]);
+      // getByRole wirft, wenn das Element fehlt — Anwesenheit ist damit Assertion.
+      screen.getByRole("switch", { name: "Automatik" });
+      screen.getByRole("button", { name: /Vorschau/ });
+      // Laufstatus ist als aria-live-Region (role=status) angekündigt.
+      expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+    }
+  });
 });
 
 describe("LoopsGrid — Landing-Drawer (LL2-S5, AC-4)", () => {
