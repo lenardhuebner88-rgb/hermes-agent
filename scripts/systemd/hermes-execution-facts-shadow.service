@@ -9,7 +9,7 @@ Type=oneshot
 WorkingDirectory=/home/piet/.hermes/hermes-agent
 Environment=HERMES_HOME=/home/piet/.hermes
 Environment=HERMES_EXECUTION_FACTS_MODE=shadow
-ExecStart=/home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/execution_facts.py collect-shadow --db /mnt/data/hermes-observability/execution_facts.db --hermes-home /home/piet/.hermes --usage-db /mnt/data/hermes-observability/usage_facts.db --evidence-dir /mnt/data/hermes-observability/execution-facts-shadow
+ExecStart=/home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/execution_facts.py collect-shadow --db /mnt/data/hermes-observability/execution_facts.db --hermes-home /home/piet/.hermes --usage-db /mnt/data/hermes-observability/usage_facts.db --evidence-dir /mnt/data/hermes-observability/execution-facts-shadow --repository /home/piet/.hermes/hermes-agent --integration-ref main
 TimeoutStartSec=900
 Nice=10
 UMask=0077
