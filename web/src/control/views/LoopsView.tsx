@@ -20,7 +20,7 @@ import type { LucideIcon } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { extractDetail } from "../hooks/internal";
-import { duplicateLoop, getLoopNightOverrides, landLoop, putLoopNightOverrides, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
+import { duplicateLoop, getLoopNightOverrides, landLoop, putLandingAutomation, putLoopNightOverrides, saveLoopFile, setLoopTimerSchedule, startLandingPreview, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
 import { de } from "../i18n/de";
 import { SignalLabel, FreshnessStrip, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";
@@ -50,6 +50,7 @@ import {
   type PhaseRoute,
 } from "./loops/routeOverrides";
 import { sortPacksByAttention } from "./loops/packOrder";
+import { LandingCardSection, LandingDetailSections } from "./loops/landingPack";
 
 const t = de.loops;
 
@@ -364,12 +365,12 @@ function SourceBadge({ source }: { source?: "repo" | "custom" }) {
   );
 }
 
-function TypeBadge({ type }: { type: "pipeline" | "sweep" }) {
-  const Icon = type === "pipeline" ? Workflow : RefreshCw;
+function TypeBadge({ type }: { type: "pipeline" | "sweep" | "deterministic" }) {
+  const Icon = type === "pipeline" ? Workflow : type === "sweep" ? RefreshCw : Anchor;
   return (
     <span className="inline-flex items-center gap-1 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
       <Icon aria-hidden className="h-3.5 w-3.5" />
-      {type === "pipeline" ? t.typePipeline : t.typeSweep}
+      {type === "pipeline" ? t.typePipeline : type === "sweep" ? t.typeSweep : t.typeDeterministic}
     </span>
   );
 }
@@ -654,6 +655,7 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
           <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoOverrides}</p>
         )}
       </div>
+      {detail.name === "landing" ? <LandingDetailSections detail={detail} /> : null}
     </div>
   );
 }
@@ -1310,6 +1312,8 @@ interface LoopCardProps {
   onSaveTimerSchedule: (name: string, time: string) => void;
   onSaveFile: (pack: string, filename: string, content: string) => void;
   onDuplicate: (source: string, name: string) => void;
+  onToggleAutomation: (enabled: boolean) => void;
+  onPreview: () => void;
 }
 
 function LoopCardAction({
@@ -1647,6 +1651,8 @@ function LoopCard({
   onSaveTimerSchedule,
   onSaveFile,
   onDuplicate,
+  onToggleAutomation,
+  onPreview,
 }: LoopCardProps) {
   const isStable = pack.stability === "stable";
   const hasStrandedBuild = !pack.running && (pack.queue?.["10-building"] ?? 0) > 0;
@@ -1715,6 +1721,17 @@ function LoopCard({
       <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-soft)" }}>{statusLabel}</p>
       <p className="mt-1.5 line-clamp-2 text-[13px]" style={{ color: "var(--ln-ink-soft)" }}>{pack.description}</p>
       <LoopLandingLine pack={pack} />
+
+      {pack.name === "landing" ? (
+        <div className="mt-3">
+          <LandingCardSection
+            pack={pack}
+            busy={busy}
+            onToggleAutomation={onToggleAutomation}
+            onPreview={onPreview}
+          />
+        </div>
+      ) : null}
 
       <CardTelemetryLine pack={pack} nowMs={nowMs} />
       {pack.heartbeat?.last.length ? <PhaseHistoryBars last={pack.heartbeat.last} /> : null}
@@ -2108,6 +2125,8 @@ export interface LoopsGridProps {
   onSaveTimerSchedule: (name: string, time: string) => void;
   onSaveFile: (pack: string, filename: string, content: string) => void;
   onDuplicate: (source: string, name: string) => void;
+  onToggleAutomation: (enabled: boolean) => void;
+  onPreview: () => void;
 }
 
 /** Pure presentation — Lagebild-Hero + Karten-Flotte. Exportiert für Tests
@@ -2147,6 +2166,8 @@ export function LoopsGrid({
   onSaveTimerSchedule,
   onSaveFile,
   onDuplicate,
+  onToggleAutomation,
+  onPreview,
 }: LoopsGridProps) {
   const [repoFilter, setRepoFilter] = useState<string | null>(null);
   if (packs.length === 0) {
@@ -2214,6 +2235,8 @@ export function LoopsGrid({
       onSaveTimerSchedule={onSaveTimerSchedule}
       onSaveFile={onSaveFile}
       onDuplicate={onDuplicate}
+      onToggleAutomation={onToggleAutomation}
+      onPreview={onPreview}
     />
   );
 
@@ -2408,6 +2431,35 @@ export function LoopsView() {
     }
   };
 
+  // Landing-Pack: Server-Confirm statt Optimistic UI — der Switch zeigt erst
+  // nach erfolgreichem PUT den neuen Zustand (fail-closed Contract, S4).
+  const handleToggleAutomation = async (enabled: boolean) => {
+    setBusyPack("landing");
+    clearActionError("landing");
+    try {
+      await putLandingAutomation(enabled);
+      await loops.reload();
+    } catch (e) {
+      setActionErrorByPack((prev) => ({ ...prev, landing: `${t.landingAutomationFailed}: ${extractDetail(e)}` }));
+    } finally {
+      setBusyPack(null);
+    }
+  };
+
+  const handlePreview = async () => {
+    setBusyPack("landing");
+    clearActionError("landing");
+    try {
+      await startLandingPreview();
+      setSelectedPack("landing"); // Drawer öffnet die Vorschau-Statuszeile
+      await loops.reload();
+    } catch (e) {
+      setActionErrorByPack((prev) => ({ ...prev, landing: `${t.landingPreviewFailed}: ${extractDetail(e)}` }));
+    } finally {
+      setBusyPack(null);
+    }
+  };
+
   return (
     <div className="loops-night relative isolate space-y-5" style={NIGHT_VARS}>
       <div
@@ -2466,6 +2518,8 @@ export function LoopsView() {
         onSaveTimerSchedule={(name, time) => void handleSaveTimerSchedule(name, time)}
         onSaveFile={(pack, filename, content) => void handleSaveFile(pack, filename, content)}
         onDuplicate={(source, name) => void handleDuplicate(source, name)}
+        onToggleAutomation={(enabled) => void handleToggleAutomation(enabled)}
+        onPreview={() => void handlePreview()}
       />
     </div>
   );

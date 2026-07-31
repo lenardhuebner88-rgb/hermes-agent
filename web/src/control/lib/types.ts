@@ -1384,9 +1384,49 @@ export interface LoopPhaseUsage {
   metered_cost_eur?: number;
 }
 
+export interface LoopLandingQueueSummary {
+  total?: number;
+  landed?: number;
+  cleaned?: number;
+  parked?: number;
+}
+
+export interface LoopLandingCollectionWindow {
+  opened_at?: string | null;
+  closes_at?: string | null;
+}
+
+export interface LoopLandingCandidate {
+  branch: string;
+  head?: string | null;
+  ahead?: number;
+  behind?: number;
+}
+
+export type LoopLandingRecoveryState = "requested" | "started" | "exhausted";
+
+export interface LoopLandingRecoveryEntry {
+  task_id: string;
+  fingerprint?: string;
+  failure_class?: string;
+  failing_gate?: string;
+  candidate_commit?: string;
+  state: LoopLandingRecoveryState;
+  requested_at?: string | null;
+  started_at?: string | null;
+}
+
+export interface LoopLandingPreview {
+  running?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  rc?: number | null;
+  output_tail?: string;
+}
+
 export interface LoopPackSummary {
   name: string;
-  type: "pipeline" | "sweep";
+  type: "pipeline" | "sweep" | "deterministic";
   /** "repo" = kuratiertes Manifest aus loops/packs/, "custom" = per Werkstatt dupliziert. */
   source?: "repo" | "custom";
   /** Gebundener Projektpfad aus dem Pack-Manifest; kein frei editierbares Ziel. */
@@ -1424,6 +1464,15 @@ export interface LoopPackSummary {
   timer_schedule: string;
   /** Von systemd gemeldeter nächster Lauf; null bei deaktiviertem/unbekanntem Timer. */
   timer_next_run: string | null;
+  // Landing-Pack (deterministic) — additiv, Vertrag: control_loops._landing_control_payload.
+  automation_enabled?: boolean;
+  baseline_sha?: string | null;
+  baseline_ok?: boolean | null;
+  queue_summary?: LoopLandingQueueSummary;
+  next_trigger_at?: string | null;
+  last_result?: string | null;
+  collection_window?: LoopLandingCollectionWindow | null;
+  candidates?: LoopLandingCandidate[];
   token_usage?: LoopTokenUsageSummary;
   /**
    * Infrastruktur-Fehler einer Teil-Probe (z.B. git-Timeout beim Zählen von
@@ -1470,6 +1519,12 @@ export interface LoopDetailResponse extends LoopPackSummary {
   commits: string[];
   overrides: Record<string, string>;
   phase_usage: LoopPhaseUsage[];
+  // Landing-Pack Detail — additiv (control_loops.pack_detail, LL2-S5).
+  gate_stages?: string[];
+  trigger_history?: string[];
+  followup_pending?: boolean;
+  recovery?: LoopLandingRecoveryEntry[];
+  preview?: LoopLandingPreview | null;
 }
 
 export interface LoopQueueFileResponse {

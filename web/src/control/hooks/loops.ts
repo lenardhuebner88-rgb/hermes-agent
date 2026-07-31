@@ -197,6 +197,35 @@ export async function landLoop(pack: string): Promise<LoopLandResult> {
 }
 
 
+// ── Landing-Pack (deterministic): Automatik-Schalter + manuelle Vorschau ────
+export interface LandingAutomationResult {
+  enabled: boolean;
+}
+
+/** Persistenten Automatik-Schalter setzen (fail-closed Server-Vertrag). */
+export function putLandingAutomation(enabled: boolean): Promise<LandingAutomationResult> {
+  return fetchJSON<LandingAutomationResult>(`/api/loops/landing/automation`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+export interface LandingPreviewStartResult {
+  ok: boolean;
+  started_at: string;
+}
+
+/** Manuellen Dry-Run (Vorschau) starten — referenzfrei, kein systemd. */
+export function startLandingPreview(): Promise<LandingPreviewStartResult> {
+  return fetchJSON<LandingPreviewStartResult>(`/api/loops/landing/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+
 // Werkstatt: Pack-Dateien fetch-once laden (wie usePlanSpecDetail — kein Polling,
 // die Dateien ändern sich nur durch die eigenen Save/Duplicate-Mutationen unten,
 // die selbst reload() aufrufen).

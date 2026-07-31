@@ -22,8 +22,11 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
+import sqlite3
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -75,6 +78,15 @@ LANDING_AUTOMATION_FILENAME = "automation.json"
 LANDING_TRIGGER_FILENAME = "trigger-state.json"
 LANDING_RUNTIME_FILENAME = "runtime-status.json"
 LANDING_COLLECTION_WINDOW_SECONDS = 600
+# Manueller Dry-Run (Vorschau) — Ergebnis landet als Datei im Landing-State-Dir,
+# die Detail-Route liest es additiv ein (LL2-S5).
+LANDING_PREVIEW_STATE_FILENAME = "preview-state.json"
+LANDING_PREVIEW_DONE_FILENAME = "preview-done.json"
+LANDING_PREVIEW_OUTPUT_FILENAME = "preview-output.txt"
+LANDING_PREVIEW_OUTPUT_TAIL = 4000
+# Älter als das ohne done-Marker ⇒ Preview-Prozess gilt als verwaist (Crash/Restart).
+LANDING_PREVIEW_STALE_SECONDS = 900
+LANDING_RECOVERY_EVENT_LIMIT = 20
 
 
 def _packs_dir() -> Path:
@@ -322,6 +334,197 @@ def _landing_control_payload(state_dir: Path | None = None) -> dict[str, Any]:
         "collection_window": trigger.get("collection_window"),
         "candidates": runtime.get("candidates", []),
     }
+
+
+def _landing_repo() -> Path:
+    """Repo-Pfad des Landing-Packs — identisch zur pack.yaml/landing_loop-Default."""
+    try:
+        from hermes_cli.landing_loop import HERMES_REPO
+
+        return Path(HERMES_REPO)
+    except Exception:  # landing_loop nicht importierbar → hermes_home-Default
+        from hermes_cli.hermes_constants import get_hermes_home
+
+        return get_hermes_home() / "hermes-agent"
+
+
+def _landing_gate_stages() -> list[str]:
+    """Statische Gate-Reihenfolge aus landing_loop (lazy: landing_loop importiert uns)."""
+    try:
+        from hermes_cli.landing_loop import GateStage
+    except Exception:
+        return []
+    return [stage.value for stage in GateStage]
+
+
+def _landing_recovery_entries(limit: int = LANDING_RECOVERY_EVENT_LIMIT) -> list[dict[str, Any]]:
+    """Recovery-Anfragen/-Versuche aus dem Kanban-Event-Ledger (read-only).
+
+    Pro (task_id, fingerprint) genau ein Eintrag mit dem weitesten Zustand
+    (requested → started → exhausted) — so sieht der Drawer Fingerprint und
+    Versuch, ohne das Board zu duplizieren. Fehler (fehlende DB, fehlende
+    Tabelle) sind bewusst fail-open: der Rest des Detail-Payloads bleibt nutzbar.
+    """
+    try:
+        from hermes_cli import kanban_db as _kanban_db
+
+        db_path = Path(_kanban_db.kanban_db_path())
+    except Exception:
+        return []
+    if not db_path.is_file():
+        return []
+    kinds = (
+        "landing_recovery_requested",
+        "landing_recovery_started",
+        "landing_recovery_exhausted",
+    )
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT task_id, kind, payload, created_at FROM task_events "
+            "WHERE kind IN (?, ?, ?) ORDER BY id",
+            kinds,
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for task_id, kind, payload_raw, created_at in rows:
+        try:
+            payload = json.loads(payload_raw) if payload_raw else {}
+        except (TypeError, ValueError):
+            payload = {}
+        fingerprint = str(payload.get("fingerprint") or "")
+        key = (str(task_id), fingerprint)
+        entry = grouped.setdefault(
+            key,
+            {
+                "task_id": str(task_id),
+                "fingerprint": fingerprint,
+                "failure_class": str(payload.get("failure_class") or ""),
+                "failing_gate": str(payload.get("failing_gate") or ""),
+                "candidate_commit": str(payload.get("candidate_commit") or ""),
+                "state": "requested",
+                "requested_at": None,
+                "started_at": None,
+            },
+        )
+        if kind == "landing_recovery_requested":
+            entry["requested_at"] = payload.get("requested_at") or entry["requested_at"]
+            for field in ("failure_class", "failing_gate", "candidate_commit"):
+                if payload.get(field):
+                    entry[field] = str(payload[field])
+        elif kind == "landing_recovery_started":
+            entry["state"] = "started"
+            entry["started_at"] = payload.get("started_at") or entry["started_at"]
+        elif kind == "landing_recovery_exhausted":
+            entry["state"] = "exhausted"
+        if not entry["requested_at"] and created_at:
+            entry["requested_at"] = datetime.fromtimestamp(
+                int(created_at), tz=timezone.utc
+            ).isoformat(timespec="seconds")
+
+    ordered = sorted(
+        grouped.values(),
+        key=lambda e: (e.get("requested_at") or "", e["task_id"]),
+        reverse=True,
+    )
+    return ordered[:limit]
+
+
+def _landing_preview_status(state_dir: Path | None = None) -> dict[str, Any] | None:
+    """Zustand des letzten manuellen Dry-Runs; None, wenn nie eine Vorschau lief."""
+    root = _landing_state_dir(state_dir)
+    state = _read_json_object(root / LANDING_PREVIEW_STATE_FILENAME)
+    done = _read_json_object(root / LANDING_PREVIEW_DONE_FILENAME)
+    # _read_json_object liefert {} bei fehlender/kaputter Datei — beide leer
+    # heisst: es lief noch nie eine Vorschau.
+    if not state and not done:
+        return None
+    output_tail = ""
+    out_path = root / LANDING_PREVIEW_OUTPUT_FILENAME
+    try:
+        if out_path.is_file():
+            output_tail = out_path.read_text(encoding="utf-8", errors="replace")[
+                -LANDING_PREVIEW_OUTPUT_TAIL:
+            ]
+    except OSError:
+        pass
+    running = bool(state) and not done
+    if running:
+        started_raw = (state or {}).get("started_at")
+        try:
+            started = datetime.fromisoformat(str(started_raw))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+        except (TypeError, ValueError):
+            age = LANDING_PREVIEW_STALE_SECONDS + 1
+        if age > LANDING_PREVIEW_STALE_SECONDS:
+            running = False  # verwaist: kein done-Marker nach Timeout
+    return {
+        "running": running,
+        "started_at": (state or {}).get("started_at"),
+        "finished_at": (done or {}).get("finished_at"),
+        "rc": (done or {}).get("rc"),
+        "output_tail": output_tail,
+    }
+
+
+def _spawn_landing_preview(root: Path) -> str:
+    """Startet einen manuellen Dry-Run (landing_loop --dry-run) detached.
+
+    Kein systemd: die Vorschau ist ein kurzer, referenz-freier Lauf, dessen
+    Receipt in Dateien unter dem Landing-State-Dir landet. Aufräumen des
+    vorherigen Ergebnisses passiert VOR dem Spawn, damit die Status-Logik
+    (state ohne done ⇒ running) eindeutig bleibt.
+    """
+    for fname in (LANDING_PREVIEW_DONE_FILENAME, LANDING_PREVIEW_OUTPUT_FILENAME):
+        try:
+            (root / fname).unlink(missing_ok=True)
+        except OSError:
+            pass
+    root.mkdir(parents=True, exist_ok=True)
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    (root / LANDING_PREVIEW_STATE_FILENAME).write_text(
+        json.dumps({"started_at": started_at}) + "\n", encoding="utf-8"
+    )
+    from hermes_cli.hermes_constants import get_hermes_home
+
+    repo = _landing_repo()
+    venv_py = repo / "venv" / "bin" / "python"
+    py = str(venv_py) if venv_py.exists() else sys.executable
+    loops_root = get_hermes_home() / "loops"
+    out_tmp = root / "preview-output.tmp"
+    done_tmp = root / "preview-done.tmp"
+    script = (
+        f"{shlex.quote(py)} -m hermes_cli.landing_loop"
+        f" --repo {shlex.quote(str(repo))}"
+        f" --loops-root {shlex.quote(str(loops_root))}"
+        f" --dry-run"
+        f" > {shlex.quote(str(out_tmp))} 2>&1"
+        f"; rc=$?"
+        f"; mv {shlex.quote(str(out_tmp))} {shlex.quote(str(root / LANDING_PREVIEW_OUTPUT_FILENAME))}"
+        f"; printf '%s\\n' \"{{\\\"rc\\\": $rc, \\\"finished_at\\\": \\\"$(date -Iseconds)\\\"}}\""
+        f" > {shlex.quote(str(done_tmp))}"
+        f" && mv {shlex.quote(str(done_tmp))} {shlex.quote(str(root / LANDING_PREVIEW_DONE_FILENAME))}"
+    )
+    env = dict(os.environ)
+    env["HERMES_LOOP_STATE_DIR"] = str(root)
+    subprocess.Popen(  # noqa: S603 - alle Pfade serverseitig konstant, kein User-Input
+        ["bash", "-c", script],
+        cwd=str(repo) if repo.is_dir() else None,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return started_at
 
 
 def _read_night_overrides(name: str) -> dict[str, str]:
@@ -1065,7 +1268,7 @@ def register_loops_routes(app: FastAPI) -> None:
         }
         overrides_path = state / "overrides.env"
         _token_usage, phase_usage = _phase_usage(state)
-        return {
+        detail: dict[str, Any] = {
             **_pack_summary(loaded.name, source),
             "ledger_tail": ledger_tail,
             "queue_entries": queue_entries if loaded.type == "pipeline" else None,
@@ -1073,12 +1276,39 @@ def register_loops_routes(app: FastAPI) -> None:
             "overrides": loop_runner.parse_overrides(overrides_path),
             "phase_usage": phase_usage,
         }
+        if loaded.name == "landing":
+            # Additiver Drawer-Vertrag (LL2-S5): Kandidaten stehen bereits in
+            # der Summary; hier kommen Gate-Stufen, Trigger-Historie, Recovery
+            # und der letzte manuelle Dry-Run dazu.
+            trigger_state = _read_json_object(state / LANDING_TRIGGER_FILENAME)
+            seen = trigger_state.get("seen_signals")
+            detail["gate_stages"] = _landing_gate_stages()
+            detail["trigger_history"] = (
+                [str(s) for s in seen][-10:] if isinstance(seen, list) else []
+            )
+            detail["followup_pending"] = bool(trigger_state.get("followup_pending"))
+            detail["recovery"] = _landing_recovery_entries()
+            detail["preview"] = _landing_preview_status(state)
+        return detail
 
     @app.put("/api/loops/landing/automation")
     @app.post("/api/loops/landing/automation")
     def set_landing_automation(body: LandingAutomationBody) -> dict[str, Any]:
         _load_pack_or_404("landing")
         return set_landing_automation_enabled(body.enabled, updated_by="control-api")
+
+    @app.post("/api/loops/landing/preview")
+    def landing_preview() -> dict[str, Any]:
+        """Manueller Dry-Run (Vorschau) — referenzfrei, auch bei Automation=off."""
+        _load_pack_or_404("landing")
+        state = _landing_state_dir()
+        if _is_running(state):
+            raise HTTPException(status_code=409, detail="Landing-Loop läuft bereits")
+        current = _landing_preview_status(state)
+        if current and current.get("running"):
+            raise HTTPException(status_code=409, detail="Vorschau läuft bereits")
+        started_at = _spawn_landing_preview(state)
+        return {"ok": True, "started_at": started_at}
 
     @app.post("/api/loops/{pack}/start")
     def start_loop(pack: str, body: StartBody) -> dict[str, Any]:
