@@ -220,6 +220,14 @@ CREATE TABLE IF NOT EXISTS run_llm_calls (
     PRIMARY KEY (run_id, call_index)
 );
 
+CREATE TABLE IF NOT EXISTS run_tool_calls (
+    run_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    call_count INTEGER NOT NULL,
+    output_chars INTEGER,
+    PRIMARY KEY (run_id, tool_name)
+);
+
 CREATE TABLE IF NOT EXISTS run_traces (
     run_id TEXT NOT NULL,
     call_index INTEGER,
@@ -633,6 +641,67 @@ def record_llm_call(
             params,
         )
         _refresh_run_aggregates(conn, str(run_id))
+
+
+def _record_tool_call_on_conn(
+    conn: sqlite3.Connection,
+    run_id: str,
+    tool_name: str,
+    call_count: int,
+    output_chars: Optional[int] = None,
+) -> None:
+    """Upsert one observed per-tool aggregate on an open connection."""
+    conn.execute(
+        """
+        INSERT INTO run_tool_calls (
+            run_id, tool_name, call_count, output_chars
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(run_id, tool_name) DO UPDATE SET
+            call_count=COALESCE(
+                excluded.call_count, run_tool_calls.call_count
+            ),
+            output_chars=COALESCE(
+                excluded.output_chars, run_tool_calls.output_chars
+            )
+        """,
+        (run_id, tool_name, call_count, output_chars),
+    )
+
+
+def record_tool_call(
+    run_id: str,
+    tool_name: str,
+    call_count: int,
+    *,
+    output_chars: Optional[int] = None,
+    run_fields: Optional[Mapping[str, Any]] = None,
+    path: Optional[os.PathLike[str] | str] = None,
+) -> None:
+    """Upsert one named tool aggregate without inventing absent observations."""
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id must be non-empty")
+    normalized_tool_name = str(tool_name).strip()
+    if not normalized_tool_name:
+        raise ValueError("tool_name must be non-empty")
+    normalized_call_count = int(call_count)
+    if normalized_call_count <= 0:
+        raise ValueError("call_count must be positive")
+    normalized_output_chars = None
+    if output_chars is not None:
+        normalized_output_chars = int(output_chars)
+        if normalized_output_chars < 0:
+            raise ValueError("output_chars must be non-negative")
+
+    with _connection(path) as conn:
+        _upsert_run_facts(conn, normalized_run_id, run_fields)
+        _record_tool_call_on_conn(
+            conn,
+            normalized_run_id,
+            normalized_tool_name,
+            normalized_call_count,
+            normalized_output_chars,
+        )
 
 
 def increment_tool_call(
