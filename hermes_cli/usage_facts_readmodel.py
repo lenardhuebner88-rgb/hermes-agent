@@ -1750,7 +1750,12 @@ def _rate_limit_projection(
     return {"available": True, "snapshots": snapshots}
 
 
-def _parse_utc_datetime(value: str) -> datetime | None:
+def _parse_utc_datetime(value: str | None) -> datetime | None:
+    # Rows written before the capture timestamp was mandatory still carry
+    # NULL, and a bucket built only from those has no latest timestamp at all.
+    # An unparsable stamp is an unknown age, never an exception.
+    if not isinstance(value, str):
+        return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
