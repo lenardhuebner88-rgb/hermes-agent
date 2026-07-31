@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple, Sequence
@@ -25,10 +26,12 @@ from typing import NamedTuple, Sequence
 
 _FIXED_ISO_RE = re.compile(r"^20\d\d-\d\d-\d\d[T ]\d\d:\d\d")
 _EXCLUDED_PARTS = {
+    ".claude",
     ".git",
     ".mypy_cache",
     ".pytest_cache",
     ".venv",
+    ".worktrees",
     "node_modules",
     "scripts",
     "tests",
@@ -223,11 +226,24 @@ def _function_expires_key(function: ast.AST, state_key: str) -> bool:
     )
 
 
+def _production_python_paths(root: Path) -> list[Path]:
+    tracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-z", "--", "*.py"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if tracked.returncode == 0:
+        return [root / relative for relative in tracked.stdout.split("\0") if relative]
+    return list(root.rglob("*.py"))
+
+
 def _production_expiry_keys(root: Path, candidate_keys: set[str]) -> set[str]:
     if not candidate_keys:
         return set()
     matched: set[str] = set()
-    for path in root.rglob("*.py"):
+    for path in _production_python_paths(root):
         if any(part in _EXCLUDED_PARTS for part in path.relative_to(root).parts):
             continue
         try:
