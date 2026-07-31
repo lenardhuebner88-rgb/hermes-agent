@@ -1468,6 +1468,8 @@ export interface LoopPackSummary {
   automation_enabled?: boolean;
   baseline_sha?: string | null;
   baseline_ok?: boolean | null;
+  baseline_reason?: string | null;
+  baseline_source?: "nightly" | "landing" | "none" | null;
   queue_summary?: LoopLandingQueueSummary;
   next_trigger_at?: string | null;
   last_result?: string | null;

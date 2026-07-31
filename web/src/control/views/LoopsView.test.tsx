@@ -1414,6 +1414,8 @@ const landingPack: LoopPackSummary = {
   automation_enabled: false,
   baseline_sha: "abc1234def5678",
   baseline_ok: true,
+  baseline_reason: "Landing-Gate-Nachweis für aktuellen main-SHA",
+  baseline_source: "landing",
   queue_summary: { total: 2, landed: 1, cleaned: 0, parked: 0 },
   next_trigger_at: "2026-07-31T01:00:00+00:00",
   last_result: "held",
@@ -1496,6 +1498,7 @@ describe("LoopsGrid — Landing-Pack-Karte (LL2-S5, AC-3)", () => {
     expect(html).toContain("2 · gelandet 1 · bereinigt 0 · geparkt 0");
     expect(html).toContain("abc1234");
     expect(html).toContain("grün");
+    expect(html).toContain("Landing: Landing-Gate-Nachweis für aktuellen main-SHA");
     expect(html).toContain("zurückgehalten");
     expect(html).toContain("Vorschau");
   });
@@ -1509,6 +1512,14 @@ describe("LoopsGrid — Landing-Pack-Karte (LL2-S5, AC-3)", () => {
   it("zeigt fehlgeschlagene Baseline als Text (nicht farballeinig)", () => {
     const html = renderGrid([{ ...landingPack, baseline_ok: false }]);
     expect(html).toContain("nicht grün");
+  });
+
+  it("erfindet für ältere Payloads keinen Baseline-Nachweis", () => {
+    const html = renderGrid([
+      { ...landingPack, baseline_reason: undefined, baseline_source: undefined },
+    ]);
+    expect(html).not.toContain("Landing-Gate-Nachweis für aktuellen main-SHA");
+    expect(html).not.toContain("Nachweis</dt>");
   });
 
   it("Switch-Klick meldet den Zielzustand — Server-Confirm bleibt dem Container", () => {

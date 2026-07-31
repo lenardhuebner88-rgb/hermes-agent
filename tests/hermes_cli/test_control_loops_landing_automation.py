@@ -115,6 +115,8 @@ def test_control_api_exposes_and_toggles_landing_contract(tmp_path, monkeypatch)
         assert payload["automation_enabled"] is False
         assert payload["baseline_sha"] is None
         assert payload["baseline_ok"] is None
+        assert payload["baseline_reason"] is None
+        assert payload["baseline_source"] is None
         assert payload["queue_summary"] == {}
         assert payload["next_trigger_at"] is None
         assert payload["last_result"] is None
@@ -126,6 +128,23 @@ def test_control_api_exposes_and_toggles_landing_contract(tmp_path, monkeypatch)
     ).json()
     assert enabled["enabled"] is True
     assert client.get("/api/loops/landing/detail").json()["automation_enabled"] is True
+
+
+def test_landing_control_payload_whitelists_baseline_provenance(tmp_path):
+    control_loops.write_landing_runtime_status(
+        {
+            "baseline_sha": "abc123def",
+            "baseline_ok": False,
+            "baseline_reason": "Kein grüner Nachweis für abc123def",
+            "baseline_source": "none",
+        },
+        state_dir=tmp_path,
+    )
+
+    payload = control_loops._landing_control_payload(tmp_path)
+
+    assert payload["baseline_reason"] == "Kein grüner Nachweis für abc123def"
+    assert payload["baseline_source"] == "none"
 
 
 # ── LL2-S5: Drawer-Detail-Payload + manuelle Vorschau (Dry-Run) ─────────────

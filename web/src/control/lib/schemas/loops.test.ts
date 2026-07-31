@@ -23,6 +23,8 @@ const landingSummaryPayload = {
   automation_enabled: false,
   baseline_sha: "abc1234def5678",
   baseline_ok: true,
+  baseline_reason: "Nightly-Full-Gate-Nachweis für aktuellen main-SHA",
+  baseline_source: "nightly",
   queue_summary: { total: 2, landed: 1, cleaned: 0, parked: 0 },
   next_trigger_at: "2026-07-31T01:00:00+00:00",
   last_result: "held",
@@ -38,6 +40,10 @@ describe("LoopPackSummarySchema — Landing (deterministic)", () => {
     const parsed = LoopPackSummarySchema.parse(landingSummaryPayload);
     expect(parsed.type).toBe("deterministic");
     expect(parsed.automation_enabled).toBe(false);
+    expect(parsed.baseline_reason).toBe(
+      "Nightly-Full-Gate-Nachweis für aktuellen main-SHA",
+    );
+    expect(parsed.baseline_source).toBe("nightly");
     expect(parsed.queue_summary?.total).toBe(2);
     expect(parsed.candidates).toHaveLength(2);
     expect(parsed.candidates?.[1].head).toBeNull();
@@ -53,6 +59,8 @@ describe("LoopPackSummarySchema — Landing (deterministic)", () => {
   it("funktioniert auch ohne die additiven Felder (älteres Backend)", () => {
     const parsed = LoopPackSummarySchema.parse({ name: "landing", type: "deterministic" });
     expect(parsed.automation_enabled).toBeUndefined();
+    expect(parsed.baseline_reason).toBeUndefined();
+    expect(parsed.baseline_source).toBeUndefined();
     expect(parsed.candidates).toBeUndefined();
     expect(parsed.queue_summary).toBeUndefined();
   });

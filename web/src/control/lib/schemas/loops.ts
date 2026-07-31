@@ -126,6 +126,8 @@ export const LoopPackSummarySchema = z.object({
   automation_enabled: z.boolean().optional(),
   baseline_sha: z.string().nullable().optional(),
   baseline_ok: z.boolean().nullable().optional(),
+  baseline_reason: z.string().nullable().optional(),
+  baseline_source: z.enum(["nightly", "landing", "none"]).nullable().optional(),
   queue_summary: LoopLandingQueueSummarySchema.optional(),
   next_trigger_at: z.string().nullable().optional(),
   last_result: z.string().nullable().optional(),

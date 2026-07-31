@@ -358,6 +358,8 @@ class LandingLoop:
             {
                 "baseline_sha": baseline.baseline_sha,
                 "baseline_ok": baseline.green,
+                "baseline_reason": baseline.reason,
+                "baseline_source": baseline.source,
                 "queue_summary": {
                     "total": len(inventory),
                     "landed": sum(item.action == "landed" for item in outcomes),

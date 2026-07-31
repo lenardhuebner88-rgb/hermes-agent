@@ -328,6 +328,8 @@ def _landing_control_payload(state_dir: Path | None = None) -> dict[str, Any]:
         "automation_enabled": get_landing_automation_enabled(root),
         "baseline_sha": runtime.get("baseline_sha"),
         "baseline_ok": runtime.get("baseline_ok"),
+        "baseline_reason": runtime.get("baseline_reason"),
+        "baseline_source": runtime.get("baseline_source"),
         "queue_summary": runtime.get("queue_summary", {}),
         "next_trigger_at": trigger.get("next_trigger_at"),
         "last_result": runtime.get("last_result"),
