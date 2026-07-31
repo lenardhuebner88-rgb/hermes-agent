@@ -1,6 +1,6 @@
 # Execution Facts — what the data actually supports
 
-Measured 2026-07-31 09:25 CEST against the live ledger
+Measured 2026-07-31 09:36 CEST (after the first full usage scan) against the live ledger
 (`/mnt/data/hermes-observability/execution_facts.db`).
 
 This is the answer to "what can we analyse today, and what would we be
@@ -23,7 +23,7 @@ of each invariant is in
 | When did it run, how long? | **green for kanban/cron**, derived for old runs | see A below |
 | Did it ship? | **green since today** | 2 491 landed, 2 472 with commit SHA |
 | Was it deployed? | **red** | no evidence at all |
-| What did it cost? | **amber** | tokens yes, money not yet — see B |
+| What did it cost? | **amber** | 95 247 of 103 412 executions priced; money still needs a fee input — see B |
 | Which task did this terminal work on? | **red** | wiring exists, no data yet — see C |
 | Why did it fail? | **amber** | 13.67 % instrumented |
 
@@ -75,8 +75,9 @@ boundary.
 
 Token counts are trustworthy. Euro/dollar amounts are not, and the metric
 says so: `usage_cost_coverage` is `unknown`,
-reason `missing_price_or_subscription_allocation` (351 of 378 executions
-have usage rows).
+reason `missing_price_or_subscription_allocation`. Coverage is now 95 247 of
+103 412 executions (92.10 %) — the denominator before the first full scan was
+378.
 
 Three distinct cost concepts — do not mix them up when building a view:
 
@@ -134,9 +135,11 @@ Two independent reasons, both by design rather than by defect:
   task run collapse onto that run's execution.
 * The collector reads a sample of usage rows by default. That cap used to be
   liftable only as a side effect of configuring fees; `--usage-sample-limit
-  0` now reads all 109 356 rows independently. **A full scan takes ~5m30s**,
-  so it belongs in a less frequent run than the 15-minute collector, not in
-  every pass.
+  0` now reads all rows independently. **A full scan takes ~6 minutes**, so
+  it runs as its own daily unit
+  (`hermes-execution-facts-fullscan.timer`, 04:40) rather than in the
+  15-minute collector. The ledger holds 254 262 events after the first full
+  pass.
 
 ## C) Terminal ↔ task — wired today, still without data
 
