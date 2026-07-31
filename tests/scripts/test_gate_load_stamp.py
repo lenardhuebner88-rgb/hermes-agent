@@ -18,7 +18,15 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 STAMP_SCRIPT = SCRIPTS / "gate_load_stamp.py"
-_REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py", "gate_load_stamp.py")
+_REAL = (
+    "run-affected.sh",
+    "affected-tests.sh",
+    "affected_tests.py",
+    "gate_load_stamp.py",
+    # run-affected.sh invokes this before pytest (added 2026-07-31); without
+    # it the throwaway fixture aborts with exit 2 and never reaches the runner.
+    "check_test_wallclock_expiry.py",
+)
 _MAPPING_MODULE = REPO_ROOT / "hermes_cli" / "affected_test_mapping.py"
 
 

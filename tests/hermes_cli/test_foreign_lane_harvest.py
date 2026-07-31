@@ -5,30 +5,40 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from hermes_cli.foreign_lane_harvest import (
+    CORRELATION_SOURCE_META,
+    CORRELATION_SOURCE_TRANSCRIPT,
     ORIGIN_CODEX,
     ORIGIN_GROK,
     ORIGIN_KIMI,
     ORIGIN_QWEN,
+    backfill_session_from_transcripts,
+    correlate_from_run_metas,
     distill_foreign_events,
     extract_codex_rollout,
     extract_grok_inference_event,
     extract_kimi_wire,
     extract_qwen_row,
+    find_run_ids_for_handle,
     harvest_all,
     legacy_line_parser,
     load_kimi_usage_for_handle,
+    parse_foreign_spawn_command,
     parse_json_event_stream,
+    parse_meta_file,
+    resume_handle_from_run_id,
     resolve_kimi_wire_path,
     sum_codex_last_token_usage,
     write_extracted_run,
 )
-from hermes_cli.usage_facts_db import initialize_usage_facts_db
+from hermes_cli.usage_facts_db import initialize_usage_facts_db, upsert_run_facts
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "foreign_lane_harvest"
+LOCAL_TZ = ZoneInfo("Europe/Berlin")
 
 
 @pytest.fixture()
@@ -360,6 +370,8 @@ def test_harvest_all_idempotent_second_pass(
     grok_path.write_text((FIXTURES / "grok" / "unified-sample.jsonl").read_text())
 
     state = tmp_path / "state.json"
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
     common = dict(
         db_path=empty_db,
         state_path=state,
@@ -368,6 +380,8 @@ def test_harvest_all_idempotent_second_pass(
         kimi_index=kimi_index,
         qwen_usage_dir=qwen_dir,
         grok_unified=grok_path,
+        runs_root=runs_root,
+        correlate_sessions=False,
     )
     first = harvest_all(**common)
     assert first["written_runs_total"] > 0
@@ -385,3 +399,674 @@ def test_harvest_all_idempotent_second_pass(
     assert _count_origin(empty_db, ORIGIN_CODEX) == 1
     assert _count_origin(empty_db, ORIGIN_KIMI) == 1
     assert _count_origin(empty_db, ORIGIN_QWEN) == 5
+
+
+# ---------------------------------------------------------------------------
+# Session correlation helpers
+# ---------------------------------------------------------------------------
+
+
+def _write_meta(run_dir: Path, **fields: object) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    meta = run_dir / "meta"
+    lines = [f"{k}={v}" for k, v in fields.items()]
+    meta.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return meta
+
+
+def _insert_run(
+    db: Path,
+    run_id: str,
+    *,
+    origin: str,
+    lane: str,
+    session_id: str | None = None,
+    correlation_source: str | None = None,
+    profile: str | None = None,
+    input_tokens: int = 10,
+    output_tokens: int = 2,
+    task_run_id: str | None = None,
+) -> None:
+    fields: dict = {
+        "origin": origin,
+        "lane": lane,
+        "call_kind": "foreign_cli",
+        "provider": "test",
+        "model": "test-model",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "captured_at": "2026-07-31T12:00:00+00:00",
+        "source": "measured",
+    }
+    if session_id is not None:
+        fields["session_id"] = session_id
+    if correlation_source is not None:
+        fields["correlation_source"] = correlation_source
+    if profile is not None:
+        fields["profile"] = profile
+    if task_run_id is not None:
+        fields["task_run_id"] = task_run_id
+    upsert_run_facts(run_id, fields, path=db)
+
+
+def _row(db: Path, run_id: str) -> dict:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id=?", (run_id,)
+        ).fetchone()
+        assert row is not None, f"missing run_id={run_id}"
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def _checksum(db: Path) -> dict:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, "
+            "COALESCE(SUM(input_tokens),0) AS in_tok, "
+            "COALESCE(SUM(output_tokens),0) AS out_tok, "
+            "SUM(CASE WHEN task_run_id IS NOT NULL THEN 1 ELSE 0 END) AS task_n, "
+            "SUM(CASE WHEN session_id IS NOT NULL THEN 1 ELSE 0 END) AS sid_n "
+            "FROM run_usage_facts"
+        ).fetchone()
+        return {
+            "n": row[0],
+            "in_tok": row[1],
+            "out_tok": row[2],
+            "task_n": row[3],
+            "sid_n": row[4],
+        }
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# done-when 4: run_id suffix → resume_handle per lane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "run_id,expected",
+    [
+        ("codex_cli:019f9aba-39ff-73c1-8f8d-61d16ac50528", "019f9aba-39ff-73c1-8f8d-61d16ac50528"),
+        (
+            "kimi_cli:session_90e4ccf8-e8fd-4b18-98b3-5ad0a9462de5",
+            "session_90e4ccf8-e8fd-4b18-98b3-5ad0a9462de5",
+        ),
+        ("qwen_cli:2811611d-89ab-4f13-8206-13f67f0aca5c", "2811611d-89ab-4f13-8206-13f67f0aca5c"),
+        (
+            "grok_cli:019f695f-9076-7e33-b484-447468419c3c:loop17",
+            "019f695f-9076-7e33-b484-447468419c3c",
+        ),
+    ],
+)
+def test_resume_handle_from_run_id_per_lane(run_id: str, expected: str):
+    assert resume_handle_from_run_id(run_id) == expected
+
+
+def test_resume_handle_grok_loop_not_part_of_session_id():
+    handle = resume_handle_from_run_id(
+        "grok_cli:019f695f-9076-7e33-b484-447468419c3c:loop17"
+    )
+    assert handle is not None
+    assert ":loop" not in handle
+    assert handle == "019f695f-9076-7e33-b484-447468419c3c"
+
+
+# ---------------------------------------------------------------------------
+# done-when 1 + 2: meta with/without claude_session_id
+# ---------------------------------------------------------------------------
+
+
+def test_meta_with_claude_session_id_correlates_usage_row(
+    empty_db: Path, tmp_path: Path
+):
+    """Real key=value meta format → session_id + foreign_run_meta."""
+    handle = "019fb847-9429-7922-9818-8fa2762450ab"
+    claude = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    runs = tmp_path / "runs"
+    run_dir = runs / "20260731T150526-codex-cache-write-feldname-fix"
+    # Exact shape measured from production meta files.
+    _write_meta(
+        run_dir,
+        resume_handle=handle,
+        usage='{"input_tokens": 100}',
+        lane="codex",
+        exit=0,
+        duration_s=432,
+        dir="/home/piet/.hermes/hermes-agent/.worktrees/cachewrite-fieldname",
+        run=str(run_dir),
+        read_only=0,
+        claude_session_id=claude,
+    )
+    # Round-trip the on-disk format.
+    parsed = parse_meta_file(run_dir / "meta")
+    assert parsed["resume_handle"] == handle
+    assert parsed["claude_session_id"] == claude
+    assert parsed["lane"] == "codex"
+
+    run_id = f"codex_cli:{handle}"
+    _insert_run(empty_db, run_id, origin=ORIGIN_CODEX, lane="codex", input_tokens=42)
+
+    report = correlate_from_run_metas(
+        db_path=empty_db, runs_root=runs, apply=True, local_tz=LOCAL_TZ
+    )
+    assert report["rows_filled"] == 1
+    assert report["correlation_source"] == CORRELATION_SOURCE_META
+    assert report["unassignable_no_handle"] == 0
+
+    row = _row(empty_db, run_id)
+    assert row["session_id"] == claude
+    assert row["correlation_source"] == CORRELATION_SOURCE_META
+    assert row["input_tokens"] == 42
+
+
+def test_meta_without_claude_session_id_leaves_null(empty_db: Path, tmp_path: Path):
+    handle = "019fb81c-2c05-7c23-bca4-0d89275f05b1"
+    runs = tmp_path / "runs"
+    _write_meta(
+        runs / "20260731T141801-codex-usage-korrelation-backfill",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=100,
+        dir="/tmp",
+        run="/tmp/run",
+        read_only=0,
+        # deliberately no claude_session_id
+    )
+    run_id = f"codex_cli:{handle}"
+    _insert_run(empty_db, run_id, origin=ORIGIN_CODEX, lane="codex")
+
+    report = correlate_from_run_metas(
+        db_path=empty_db, runs_root=runs, apply=True, local_tz=LOCAL_TZ
+    )
+    assert report["metas_without_claude"] == 1
+    assert report["metas_with_claude"] == 0
+    assert report["rows_filled"] == 0
+    assert report["unique_handles"] == 0
+
+    row = _row(empty_db, run_id)
+    assert row["session_id"] is None
+    assert row["correlation_source"] is None
+
+
+# ---------------------------------------------------------------------------
+# done-when 3: resume_handle=none (Grok)
+# ---------------------------------------------------------------------------
+
+
+def test_resume_handle_none_unassignable_no_crash(empty_db: Path, tmp_path: Path):
+    runs = tmp_path / "runs"
+    _write_meta(
+        runs / "20260731T155708-grok-occurred-at-zeitstempel",
+        resume_handle="none",
+        usage="unavailable",
+        lane="grok",
+        exit=0,
+        duration_s=3577,
+        dir="/tmp",
+        run="/tmp/run",
+        read_only=0,
+        claude_session_id="claude-sess-grok-1",
+    )
+    # Grok usage rows exist but cannot be tied via none-handle.
+    _insert_run(
+        empty_db,
+        "grok_cli:019fb876-ea27-7372-9e21-b73614ac9878:loop17",
+        origin=ORIGIN_GROK,
+        lane="grok",
+    )
+
+    report = correlate_from_run_metas(
+        db_path=empty_db, runs_root=runs, apply=True, local_tz=LOCAL_TZ
+    )
+    assert report["unassignable_no_handle"] == 1
+    assert report["rows_filled"] == 0
+    assert report["unique_handles"] == 0
+    row = _row(empty_db, "grok_cli:019fb876-ea27-7372-9e21-b73614ac9878:loop17")
+    assert row["session_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# done-when 4 (matching side): find_run_ids_for_handle per lane
+# ---------------------------------------------------------------------------
+
+
+def test_find_run_ids_for_handle_all_lanes(empty_db: Path):
+    codex_h = "019f9aba-39ff-73c1-8f8d-61d16ac50528"
+    kimi_h = "session_90e4ccf8-e8fd-4b18-98b3-5ad0a9462de5"
+    grok_h = "019f695f-9076-7e33-b484-447468419c3c"
+    qwen_h = "07e807e0-87a9-4ca2-bff4-cdb22286b68d"
+
+    _insert_run(empty_db, f"codex_cli:{codex_h}", origin=ORIGIN_CODEX, lane="codex")
+    _insert_run(empty_db, f"kimi_cli:{kimi_h}", origin=ORIGIN_KIMI, lane="kimi")
+    _insert_run(
+        empty_db,
+        f"grok_cli:{grok_h}:loop0",
+        origin=ORIGIN_GROK,
+        lane="grok",
+    )
+    _insert_run(
+        empty_db,
+        f"grok_cli:{grok_h}:loop17",
+        origin=ORIGIN_GROK,
+        lane="grok",
+    )
+    # Qwen: call-level run_id + sessionId on profile
+    _insert_run(
+        empty_db,
+        "qwen_cli:6fa0d5d0-9677-43ba-932c-3fab09793f87",
+        origin=ORIGIN_QWEN,
+        lane="qwen",
+        profile=qwen_h,
+    )
+
+    conn = sqlite3.connect(str(empty_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        assert find_run_ids_for_handle(conn, codex_h) == [f"codex_cli:{codex_h}"]
+        assert find_run_ids_for_handle(conn, kimi_h) == [f"kimi_cli:{kimi_h}"]
+        grok_ids = find_run_ids_for_handle(conn, grok_h)
+        assert set(grok_ids) == {
+            f"grok_cli:{grok_h}:loop0",
+            f"grok_cli:{grok_h}:loop17",
+        }
+        qwen_ids = find_run_ids_for_handle(conn, qwen_h)
+        assert qwen_ids == ["qwen_cli:6fa0d5d0-9677-43ba-932c-3fab09793f87"]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# done-when 5: transcript backfill unique vs ambiguous
+# ---------------------------------------------------------------------------
+
+
+def _write_transcript_spawn(
+    path: Path,
+    *,
+    session_id: str,
+    timestamp: str,
+    lane: str,
+    brief: str,
+    slug: str | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = f"~/.claude/tools/foreign.sh {lane} --brief {brief}"
+    if slug:
+        cmd += f" --slug {slug}"
+    cmd += " --dir /tmp/work"
+    record = {
+        "type": "assistant",
+        "sessionId": session_id,
+        "timestamp": timestamp,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_test",
+                    "name": "Bash",
+                    "input": {
+                        "command": cmd,
+                        "description": f"Spawn {lane}",
+                    },
+                }
+            ],
+        },
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def test_transcript_backfill_unique_match(empty_db: Path, tmp_path: Path):
+    handle = "019fac5a-e7fd-7a02-832e-46e495ed2871"
+    claude = "20849fe8-e0b1-468e-883b-c95f94445eea"
+    runs = tmp_path / "runs"
+    projects = tmp_path / "projects" / "proj"
+
+    # Run dir at local 2026-07-29 08:19:50 Europe/Berlin = 06:19:50 UTC
+    _write_meta(
+        runs / "20260729T081950-codex-bp-1-nachbesserung",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=100,
+        dir="/tmp",
+        run="/tmp/run",
+        read_only=0,
+    )
+    spawn_ts = "2026-07-29T06:19:46.000Z"  # a few seconds before local run stamp
+    _write_transcript_spawn(
+        projects / f"{claude}.jsonl",
+        session_id=claude,
+        timestamp=spawn_ts,
+        lane="codex",
+        brief="/home/piet/.hermes/briefs/bp-1-nachbesserung.md",
+    )
+    run_id = f"codex_cli:{handle}"
+    _insert_run(empty_db, run_id, origin=ORIGIN_CODEX, lane="codex", input_tokens=99)
+
+    report = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=True,
+        local_tz=LOCAL_TZ,
+    )
+    assert report["matched_spawns"] == 1
+    assert report["ambiguous_spawns"] == 0
+    assert report["rows_filled"] == 1
+    assert report["correlation_source"] == CORRELATION_SOURCE_TRANSCRIPT
+    row = _row(empty_db, run_id)
+    assert row["session_id"] == claude
+    assert row["correlation_source"] == CORRELATION_SOURCE_TRANSCRIPT
+    assert row["input_tokens"] == 99
+
+
+def test_transcript_backfill_ambiguous_candidates_stay_null(
+    empty_db: Path, tmp_path: Path
+):
+    handle_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    handle_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    claude = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    runs = tmp_path / "runs"
+    projects = tmp_path / "projects" / "proj"
+
+    # Two run dirs, same lane+slug, both inside the window → ambiguous.
+    _write_meta(
+        runs / "20260729T081950-codex-shared-slug",
+        resume_handle=handle_a,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=10,
+        dir="/tmp",
+        run="/tmp/a",
+        read_only=0,
+    )
+    _write_meta(
+        runs / "20260729T082100-codex-shared-slug",
+        resume_handle=handle_b,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=10,
+        dir="/tmp",
+        run="/tmp/b",
+        read_only=0,
+    )
+    _write_transcript_spawn(
+        projects / f"{claude}.jsonl",
+        session_id=claude,
+        timestamp="2026-07-29T06:19:40.000Z",
+        lane="codex",
+        brief="/tmp/shared-slug.md",
+    )
+    _insert_run(
+        empty_db, f"codex_cli:{handle_a}", origin=ORIGIN_CODEX, lane="codex"
+    )
+    _insert_run(
+        empty_db, f"codex_cli:{handle_b}", origin=ORIGIN_CODEX, lane="codex"
+    )
+
+    report = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=True,
+        local_tz=LOCAL_TZ,
+    )
+    assert report["ambiguous_spawns"] == 1
+    assert report["matched_spawns"] == 0
+    assert report["rows_filled"] == 0
+    assert _row(empty_db, f"codex_cli:{handle_a}")["session_id"] is None
+    assert _row(empty_db, f"codex_cli:{handle_b}")["session_id"] is None
+
+
+def test_parse_foreign_spawn_command_respects_slug_override():
+    cmd = (
+        "~/.claude/tools/foreign.sh codex "
+        "--brief /home/piet/.hermes/briefs/ae-1-anker-entkoppeln-20260729.md "
+        "--slug ae-1-anker-entkoppeln --dir /tmp/wt"
+    )
+    parsed = parse_foreign_spawn_command(cmd)
+    assert parsed is not None
+    assert parsed["lane"] == "codex"
+    assert parsed["slug"] == "ae-1-anker-entkoppeln"
+
+
+# ---------------------------------------------------------------------------
+# done-when 6 + 7 + 8: preview no-write, apply scopes, idempotent, no overwrite
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_preview_writes_nothing(empty_db: Path, tmp_path: Path):
+    handle = "019fac5a-e7fd-7a02-832e-46e495ed2871"
+    claude = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    runs = tmp_path / "runs"
+    projects = tmp_path / "projects" / "p"
+    _write_meta(
+        runs / "20260729T081950-codex-preview-slug",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=1,
+        dir="/tmp",
+        run="/tmp/r",
+        read_only=0,
+    )
+    _write_transcript_spawn(
+        projects / f"{claude}.jsonl",
+        session_id=claude,
+        timestamp="2026-07-29T06:19:46.000Z",
+        lane="codex",
+        brief="/tmp/preview-slug.md",
+    )
+    _insert_run(
+        empty_db,
+        f"codex_cli:{handle}",
+        origin=ORIGIN_CODEX,
+        lane="codex",
+        input_tokens=77,
+        output_tokens=5,
+        task_run_id="task-keep-me",
+    )
+    before = _checksum(empty_db)
+
+    report = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=False,  # preview
+        local_tz=LOCAL_TZ,
+    )
+    assert report["applied"] is False
+    assert report["rows_to_fill"] == 1
+    assert report["rows_filled"] == 0
+    assert report["before"] == report["after"]
+    assert _checksum(empty_db) == before
+    assert _row(empty_db, f"codex_cli:{handle}")["session_id"] is None
+    assert _row(empty_db, f"codex_cli:{handle}")["task_run_id"] == "task-keep-me"
+
+
+def test_backfill_apply_only_touches_session_fields(empty_db: Path, tmp_path: Path):
+    handle = "019fac5a-e7fd-7a02-832e-46e495ed2871"
+    claude = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    runs = tmp_path / "runs"
+    projects = tmp_path / "projects" / "p"
+    _write_meta(
+        runs / "20260729T081950-codex-apply-slug",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=1,
+        dir="/tmp",
+        run="/tmp/r",
+        read_only=0,
+    )
+    _write_transcript_spawn(
+        projects / f"{claude}.jsonl",
+        session_id=claude,
+        timestamp="2026-07-29T06:19:46.000Z",
+        lane="codex",
+        brief="/tmp/apply-slug.md",
+    )
+    run_id = f"codex_cli:{handle}"
+    _insert_run(
+        empty_db,
+        run_id,
+        origin=ORIGIN_CODEX,
+        lane="codex",
+        input_tokens=123,
+        output_tokens=9,
+        task_run_id="task-immutable",
+    )
+    before_row = _row(empty_db, run_id)
+
+    report = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=True,
+        local_tz=LOCAL_TZ,
+    )
+    assert report["rows_filled"] == 1
+    after = _row(empty_db, run_id)
+    assert after["session_id"] == claude
+    assert after["correlation_source"] == CORRELATION_SOURCE_TRANSCRIPT
+    # Untouched columns
+    assert after["input_tokens"] == before_row["input_tokens"] == 123
+    assert after["output_tokens"] == before_row["output_tokens"] == 9
+    assert after["task_run_id"] == "task-immutable"
+    assert after["captured_at"] == before_row["captured_at"]
+    assert after["lane"] == "codex"
+
+
+def test_backfill_second_run_idempotent(empty_db: Path, tmp_path: Path):
+    handle = "019fac5a-e7fd-7a02-832e-46e495ed2871"
+    claude = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    runs = tmp_path / "runs"
+    projects = tmp_path / "projects" / "p"
+    _write_meta(
+        runs / "20260729T081950-codex-idem-slug",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=1,
+        dir="/tmp",
+        run="/tmp/r",
+        read_only=0,
+    )
+    _write_transcript_spawn(
+        projects / f"{claude}.jsonl",
+        session_id=claude,
+        timestamp="2026-07-29T06:19:46.000Z",
+        lane="codex",
+        brief="/tmp/idem-slug.md",
+    )
+    _insert_run(
+        empty_db, f"codex_cli:{handle}", origin=ORIGIN_CODEX, lane="codex"
+    )
+
+    first = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=True,
+        local_tz=LOCAL_TZ,
+    )
+    assert first["rows_filled"] == 1
+
+    second = backfill_session_from_transcripts(
+        db_path=empty_db,
+        runs_root=runs,
+        projects_root=tmp_path / "projects",
+        apply=True,
+        local_tz=LOCAL_TZ,
+    )
+    assert second["rows_filled"] == 0
+    assert second["rows_to_fill"] == 0
+    assert second["rows_already_set"] == 1
+
+
+def test_existing_session_id_never_overwritten(empty_db: Path, tmp_path: Path):
+    handle = "019fac5a-e7fd-7a02-832e-46e495ed2871"
+    original = "already-set-session-id"
+    other = "should-not-win"
+    runs = tmp_path / "runs"
+    _write_meta(
+        runs / "20260731T150526-codex-no-overwrite",
+        resume_handle=handle,
+        usage="unavailable",
+        lane="codex",
+        exit=0,
+        duration_s=1,
+        dir="/tmp",
+        run="/tmp/r",
+        read_only=0,
+        claude_session_id=other,
+    )
+    run_id = f"codex_cli:{handle}"
+    _insert_run(
+        empty_db,
+        run_id,
+        origin=ORIGIN_CODEX,
+        lane="codex",
+        session_id=original,
+        correlation_source="session_model_usage_run",
+    )
+
+    report = correlate_from_run_metas(
+        db_path=empty_db, runs_root=runs, apply=True, local_tz=LOCAL_TZ
+    )
+    assert report["rows_filled"] == 0
+    assert report["rows_already_set"] == 1
+    row = _row(empty_db, run_id)
+    assert row["session_id"] == original
+    assert row["correlation_source"] == "session_model_usage_run"
+
+
+def test_usage_unavailable_is_not_an_error(empty_db: Path, tmp_path: Path):
+    """Grok/Kimi meta with usage=unavailable must not invent token numbers."""
+    runs = tmp_path / "runs"
+    _write_meta(
+        runs / "20260731T152231-kimi-review-usage-slices",
+        resume_handle="session_660bd75d-c736-4b04-a385-c074ee76be21",
+        usage="unavailable",
+        lane="kimi",
+        exit=0,
+        duration_s=1681,
+        dir="/tmp",
+        run="/tmp/r",
+        read_only=1,
+        claude_session_id="claude-kimi-1",
+    )
+    handle = "session_660bd75d-c736-4b04-a385-c074ee76be21"
+    _insert_run(
+        empty_db,
+        f"kimi_cli:{handle}",
+        origin=ORIGIN_KIMI,
+        lane="kimi",
+        input_tokens=0,
+        output_tokens=0,
+    )
+    report = correlate_from_run_metas(
+        db_path=empty_db, runs_root=runs, apply=True, local_tz=LOCAL_TZ
+    )
+    assert report["rows_filled"] == 1
+    row = _row(empty_db, f"kimi_cli:{handle}")
+    assert row["session_id"] == "claude-kimi-1"
+    # Tokens stay as harvested (zeros here) — correlation did not invent usage.
+    assert row["input_tokens"] == 0
+    assert row["output_tokens"] == 0
