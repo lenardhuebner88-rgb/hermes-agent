@@ -27,6 +27,14 @@ FIXTURES = (
     Path(__file__).resolve().parents[1] / "fixtures" / "claude_code_harvest"
 )
 PROJECTS = FIXTURES / "projects"
+TOOL_NAMES_PROJECT = PROJECTS / "tool-names-project"
+TOOL_NAMES_RUN_ID = make_run_id(
+    "msg_tool_names_fixture", "req_tool_names_fixture"
+)
+NO_TOOLS_RUN_ID = make_run_id(
+    "msg_no_tools_fixture", "req_no_tools_fixture"
+)
+EXPECTED_TOOL_COUNTS = {"Bash": 2, "Edit": 1, "Read": 1}
 GOLDEN = json.loads((FIXTURES / "golden" / "expected.json").read_text(encoding="utf-8"))
 REAL_ROWS = json.loads(
     (
@@ -59,7 +67,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 7
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 8
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -229,6 +237,217 @@ def test_golden_file_harvest_writes_expected_measured_fields(db_path: Path, tmp_
     assert run["billing_mode"] == "unknown"
     assert run["billing_mode_source"] is None
     assert run["session_id"] == expected["session_id"]
+
+
+def test_real_transcript_harvest_persists_named_tools_once_and_no_duration(
+    db_path: Path, tmp_path: Path
+) -> None:
+    first = harvest(
+        projects_root=TOOL_NAMES_PROJECT,
+        db_path=db_path,
+        state_path=tmp_path / "first-hwm.json",
+    )
+    assert first.calls_written == 2
+
+    with _connect(db_path) as conn:
+        first_rows = conn.execute(
+            "SELECT tool_name, call_count, output_chars "
+            "FROM run_tool_calls WHERE run_id=? ORDER BY tool_name",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchall()
+        run_tool_count = conn.execute(
+            "SELECT tool_call_count, tool_duration_ms "
+            "FROM run_usage_facts WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchone()
+        call_duration = conn.execute(
+            "SELECT tool_duration_ms FROM run_llm_calls WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchone()[0]
+        no_tool_rows = conn.execute(
+            "SELECT COUNT(*) FROM run_tool_calls WHERE run_id=?",
+            (NO_TOOLS_RUN_ID,),
+        ).fetchone()[0]
+        tool_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_tool_calls)")
+        }
+
+    observed_counts = {row["tool_name"]: row["call_count"] for row in first_rows}
+    assert observed_counts == EXPECTED_TOOL_COUNTS
+    assert sum(observed_counts.values()) == run_tool_count["tool_call_count"]
+    assert no_tool_rows == 0
+    assert "duration_ms" not in tool_columns
+    assert "tool_duration_ms" not in tool_columns
+    assert run_tool_count["tool_duration_ms"] is None
+    assert call_duration is None
+
+    second = harvest(
+        projects_root=TOOL_NAMES_PROJECT,
+        db_path=db_path,
+        state_path=tmp_path / "second-hwm.json",
+    )
+    assert second.calls_written == 2
+    with _connect(db_path) as conn:
+        second_rows = conn.execute(
+            "SELECT tool_name, call_count, output_chars "
+            "FROM run_tool_calls WHERE run_id=? ORDER BY tool_name",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchall()
+    assert [tuple(row) for row in second_rows] == [
+        tuple(row) for row in first_rows
+    ]
+
+
+def _seed_tool_name_backfill(db_path: Path, tmp_path: Path) -> None:
+    harvest(
+        projects_root=TOOL_NAMES_PROJECT,
+        db_path=db_path,
+        state_path=tmp_path / "seed-hwm.json",
+    )
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM run_tool_calls")
+        conn.commit()
+
+
+def _existing_table_snapshot(db_path: Path) -> dict[str, tuple[tuple[object, ...], ...]]:
+    with _connect(db_path) as conn:
+        return {
+            table: tuple(
+                tuple(row)
+                for row in conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
+            )
+            for table in ("run_usage_facts", "run_llm_calls", "run_traces")
+        }
+
+
+def test_tool_call_backfill_preview_is_read_only_and_origin_filtered(
+    db_path: Path, tmp_path: Path
+) -> None:
+    _seed_tool_name_backfill(db_path, tmp_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE run_usage_facts SET origin='codex_cli' WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        )
+        conn.commit()
+    foreign_report = harvester_mod.backfill_tool_calls(
+        db_path=db_path,
+        projects_root=TOOL_NAMES_PROJECT,
+        apply=False,
+    )
+    assert foreign_report["tool_rows_to_fill"] == 0
+
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE run_usage_facts SET origin='claude_code' WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        )
+        conn.commit()
+    before = _existing_table_snapshot(db_path)
+    with _connect(db_path) as conn:
+        before_counts_and_tokens = tuple(
+            conn.execute(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), "
+                "SUM(cache_read_tokens), SUM(cache_write_tokens) "
+                "FROM run_usage_facts"
+            ).fetchone()
+        )
+        before_tool_rows = conn.execute(
+            "SELECT COUNT(*) FROM run_tool_calls"
+        ).fetchone()[0]
+
+    report = harvester_mod.backfill_tool_calls(
+        db_path=db_path,
+        projects_root=TOOL_NAMES_PROJECT,
+        apply=False,
+    )
+
+    assert report == {
+        "applied": False,
+        "runs_to_fill": 1,
+        "tool_rows_to_fill": 3,
+        "tool_rows_filled": 0,
+    }
+    assert _existing_table_snapshot(db_path) == before
+    with _connect(db_path) as conn:
+        after_counts_and_tokens = tuple(
+            conn.execute(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), "
+                "SUM(cache_read_tokens), SUM(cache_write_tokens) "
+                "FROM run_usage_facts"
+            ).fetchone()
+        )
+        after_tool_rows = conn.execute(
+            "SELECT COUNT(*) FROM run_tool_calls"
+        ).fetchone()[0]
+    assert after_counts_and_tokens == before_counts_and_tokens
+    assert after_tool_rows == before_tool_rows == 0
+
+
+def test_tool_call_backfill_apply_only_inserts_missing_rows_and_is_idempotent(
+    db_path: Path, tmp_path: Path
+) -> None:
+    _seed_tool_name_backfill(db_path, tmp_path)
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE run_usage_facts SET tool_duration_ms=321 WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        )
+        conn.execute(
+            "UPDATE run_llm_calls SET tool_duration_ms=321 WHERE run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        )
+        conn.execute(
+            "INSERT INTO run_tool_calls "
+            "(run_id, tool_name, call_count, output_chars) VALUES (?, 'Bash', 2, 999)",
+            (TOOL_NAMES_RUN_ID,),
+        )
+        conn.commit()
+    existing_before = _existing_table_snapshot(db_path)
+
+    first = harvester_mod.backfill_tool_calls(
+        db_path=db_path,
+        projects_root=TOOL_NAMES_PROJECT,
+        apply=True,
+    )
+    assert first == {
+        "applied": True,
+        "runs_to_fill": 1,
+        "tool_rows_to_fill": 2,
+        "tool_rows_filled": 2,
+    }
+    assert _existing_table_snapshot(db_path) == existing_before
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT tool_name, call_count, output_chars "
+            "FROM run_tool_calls WHERE run_id=? ORDER BY tool_name",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchall()
+        durations = conn.execute(
+            "SELECT f.tool_duration_ms, c.tool_duration_ms "
+            "FROM run_usage_facts AS f JOIN run_llm_calls AS c USING (run_id) "
+            "WHERE f.run_id=?",
+            (TOOL_NAMES_RUN_ID,),
+        ).fetchone()
+    assert {row["tool_name"]: row["call_count"] for row in rows} == (
+        EXPECTED_TOOL_COUNTS
+    )
+    assert next(row for row in rows if row["tool_name"] == "Bash")[
+        "output_chars"
+    ] == 999
+    assert tuple(durations) == (321, 321)
+
+    second = harvester_mod.backfill_tool_calls(
+        db_path=db_path,
+        projects_root=TOOL_NAMES_PROJECT,
+        apply=True,
+    )
+    assert second == {
+        "applied": True,
+        "runs_to_fill": 0,
+        "tool_rows_to_fill": 0,
+        "tool_rows_filled": 0,
+    }
 
 
 def test_every_fixture_cache_write_split_equals_total() -> None:
@@ -1214,6 +1433,34 @@ def test_timestamp_backfill_cli_preview_by_default(
         }
     ]
     assert json.loads(capsys.readouterr().out)["calls_to_fill"] == 3
+
+
+def test_tool_call_backfill_cli_previews_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_backfill(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "applied": kwargs["apply"],
+            "runs_to_fill": 2,
+            "tool_rows_to_fill": 5,
+            "tool_rows_filled": 0,
+        }
+
+    monkeypatch.setattr(harvester_mod, "backfill_tool_calls", fake_backfill)
+
+    assert harvester_mod.main(["--backfill-tool-calls"]) == 0
+    assert calls == [
+        {
+            "db_path": None,
+            "projects_root": harvester_mod.DEFAULT_PROJECTS_ROOT,
+            "apply": False,
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["tool_rows_to_fill"] == 5
 
 
 def _seed_cache_write_backfill_rows(db_path: Path) -> dict[str, str]:

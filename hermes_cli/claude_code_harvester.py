@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, TextIO
@@ -22,7 +23,6 @@ from urllib.parse import quote
 from hermes_cli import usage_facts_db as usage_facts_db_mod
 from hermes_cli.usage_facts_db import (
     initialize_usage_facts_db,
-    record_llm_call,
     usage_facts_db_path,
 )
 
@@ -37,7 +37,8 @@ from hermes_cli.usage_facts_db import (
 # v6 stores every observed parent-binding field independently and restores
 # ``model_source`` to the provenance of the model name itself.
 # v7 stores Anthropic's observed cache-write split by 1h and 5m lifetime.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 7
+# v8 stores the observed tool name and output size per run/tool aggregate.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 8
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -112,6 +113,8 @@ class _CallDraft:
     cache_write_1h_tokens: Optional[int] = None
     cache_write_5m_tokens: Optional[int] = None
     tool_use_ids: set[str] = field(default_factory=set)
+    tool_names_by_use_id: dict[str, str] = field(default_factory=dict)
+    tool_output_chars_by_use_id: dict[str, int] = field(default_factory=dict)
     tool_output_chars: int = 0
     call_kind: str = "main"
     profile: Optional[str] = None
@@ -312,17 +315,24 @@ def _content_parts(message: Mapping[str, Any]) -> list[Any]:
     return []
 
 
-def _tool_use_ids_from_content(content: Iterable[Any]) -> set[str]:
-    ids: set[str] = set()
+def _tool_uses_from_content(
+    content: Iterable[Any],
+) -> tuple[set[str], dict[str, str]]:
+    tool_ids: set[str] = set()
+    tool_uses: dict[str, str] = {}
     for part in content:
         if not isinstance(part, Mapping):
             continue
         if part.get("type") != "tool_use":
             continue
         tool_id = _text(part.get("id"))
-        if tool_id is not None:
-            ids.add(tool_id)
-    return ids
+        tool_name = _text(part.get("name"))
+        if tool_id is None:
+            continue
+        tool_ids.add(tool_id)
+        if tool_name is not None:
+            tool_uses[tool_id] = tool_name
+    return tool_ids, tool_uses
 
 
 def _tool_result_chars(part: Mapping[str, Any]) -> int:
@@ -424,7 +434,11 @@ def merge_assistant_fragment(
     if isinstance(usage, Mapping):
         _apply_usage(draft, usage)
 
-    draft.tool_use_ids |= _tool_use_ids_from_content(_content_parts(message))
+    observed_tool_ids, observed_tool_uses = _tool_uses_from_content(
+        _content_parts(message)
+    )
+    draft.tool_use_ids.update(observed_tool_ids)
+    draft.tool_names_by_use_id.update(observed_tool_uses)
     return draft
 
 
@@ -576,7 +590,12 @@ def parse_transcript_file(
                 draft = drafts.get(owner)
                 if draft is None:
                     continue
-                draft.tool_output_chars += _tool_result_chars(part)
+                draft.tool_output_chars_by_use_id[tool_id] = _tool_result_chars(
+                    part
+                )
+                draft.tool_output_chars = sum(
+                    draft.tool_output_chars_by_use_id.values()
+                )
             continue
 
         # attachment, queue-operation, last-prompt, system, …
@@ -742,15 +761,30 @@ def write_call(
     """Persist one call (opens its own connection). Prefer ``write_calls_batch``."""
     if dry_run:
         return True
-    call_fields, run_fields = draft_to_fields(draft)
-    record_llm_call(
-        draft.run_id,
-        0,
-        call_fields,
-        run_fields=run_fields,
-        path=db_path,
-    )
+    with usage_facts_db_mod._connection(db_path) as conn:
+        _record_llm_call_on_conn(conn, draft)
     return True
+
+
+def _tool_call_rows(draft: _CallDraft) -> list[tuple[str, int, int | None]]:
+    """Return per-name counts and only the output sizes actually observed."""
+    counts = Counter(draft.tool_names_by_use_id.values())
+    output_totals: Counter[str] = Counter()
+    names_with_output: set[str] = set()
+    for tool_id, output_chars in draft.tool_output_chars_by_use_id.items():
+        tool_name = draft.tool_names_by_use_id.get(tool_id)
+        if tool_name is None:
+            continue
+        output_totals[tool_name] += output_chars
+        names_with_output.add(tool_name)
+    return [
+        (
+            tool_name,
+            call_count,
+            output_totals[tool_name] if tool_name in names_with_output else None,
+        )
+        for tool_name, call_count in sorted(counts.items())
+    ]
 
 
 def _record_llm_call_on_conn(
@@ -785,6 +819,14 @@ def _record_llm_call_on_conn(
         """,
         params,
     )
+    for tool_name, call_count, output_chars in _tool_call_rows(draft):
+        usage_facts_db_mod._record_tool_call_on_conn(
+            conn,
+            run_id,
+            tool_name,
+            call_count,
+            output_chars,
+        )
     usage_facts_db_mod._refresh_run_aggregates(conn, run_id)
 
 
@@ -1262,6 +1304,143 @@ def backfill_occurred_at(
             "calls_filled": calls_filled if apply else 0,
             "runs_filled": runs_filled if apply else 0,
         }
+    finally:
+        connection.close()
+
+
+def _transcript_tool_calls_by_run_id(
+    projects_root: Path,
+) -> dict[str, list[tuple[str, int, int | None]]]:
+    """Aggregate observed tool names across duplicate transcript copies."""
+    root = Path(projects_root)
+    observed: dict[str, dict[str, tuple[str, int | None]]] = {}
+    for path in discover_jsonl_files(root):
+        drafts, _stats = parse_transcript_file(path, projects_root=root)
+        for run_id, draft in drafts.items():
+            run_tools = observed.setdefault(run_id, {})
+            for tool_id, tool_name in draft.tool_names_by_use_id.items():
+                previous = run_tools.get(tool_id)
+                output_chars = draft.tool_output_chars_by_use_id.get(tool_id)
+                if output_chars is None and previous is not None:
+                    output_chars = previous[1]
+                run_tools[tool_id] = (tool_name, output_chars)
+
+    aggregates: dict[str, list[tuple[str, int, int | None]]] = {}
+    for run_id, tool_uses in observed.items():
+        counts = Counter(tool_name for tool_name, _output in tool_uses.values())
+        output_totals: Counter[str] = Counter()
+        names_with_output: set[str] = set()
+        for tool_name, output_chars in tool_uses.values():
+            if output_chars is None:
+                continue
+            output_totals[tool_name] += output_chars
+            names_with_output.add(tool_name)
+        aggregates[run_id] = [
+            (
+                tool_name,
+                call_count,
+                output_totals[tool_name]
+                if tool_name in names_with_output
+                else None,
+            )
+            for tool_name, call_count in sorted(counts.items())
+        ]
+    return aggregates
+
+
+def backfill_tool_calls(
+    *,
+    db_path: Path | str | None = None,
+    projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or insert missing named-tool rows for existing Claude runs.
+
+    Existing rows are never updated. The origin filter is resolved from
+    ``run_usage_facts`` and preview opens the target database read-only.
+    """
+    empty_report = {
+        "applied": apply,
+        "runs_to_fill": 0,
+        "tool_rows_to_fill": 0,
+        "tool_rows_filled": 0,
+    }
+    resolved_db = usage_facts_db_path(db_path)
+    if not resolved_db.is_file():
+        return empty_report
+
+    transcript_rows = _transcript_tool_calls_by_run_id(Path(projects_root))
+    if apply:
+        initialize_usage_facts_db(resolved_db)
+        connection = usage_facts_db_mod._connect(resolved_db)
+    else:
+        connection = sqlite3.connect(
+            f"file:{quote(str(resolved_db.expanduser().resolve()), safe='/')}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+    connection.row_factory = sqlite3.Row
+    try:
+        claude_run_ids = {
+            str(row["run_id"])
+            for row in connection.execute(
+                "SELECT run_id FROM run_usage_facts WHERE origin=?",
+                (ORIGIN,),
+            )
+        }
+        has_tool_table = connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='run_tool_calls'"
+        ).fetchone()
+        existing: set[tuple[str, str]] = set()
+        if has_tool_table is not None:
+            existing = {
+                (str(row["run_id"]), str(row["tool_name"]))
+                for row in connection.execute(
+                    "SELECT run_id, tool_name FROM run_tool_calls"
+                )
+            }
+
+        candidates = [
+            (run_id, tool_name, call_count, output_chars)
+            for run_id, tool_rows in transcript_rows.items()
+            if run_id in claude_run_ids
+            for tool_name, call_count, output_chars in tool_rows
+            if (run_id, tool_name) not in existing
+        ]
+        runs_to_fill = len({run_id for run_id, *_rest in candidates})
+        rows_filled = 0
+        if apply:
+            for run_id, tool_name, call_count, output_chars in candidates:
+                cursor = connection.execute(
+                    "INSERT INTO run_tool_calls "
+                    "(run_id, tool_name, call_count, output_chars) "
+                    "SELECT ?, ?, ?, ? WHERE EXISTS ("
+                    "SELECT 1 FROM run_usage_facts "
+                    "WHERE run_id=? AND origin=?"
+                    ") ON CONFLICT(run_id, tool_name) DO NOTHING",
+                    (
+                        run_id,
+                        tool_name,
+                        call_count,
+                        output_chars,
+                        run_id,
+                        ORIGIN,
+                    ),
+                )
+                rows_filled += max(0, int(cursor.rowcount))
+            connection.commit()
+
+        return {
+            "applied": apply,
+            "runs_to_fill": runs_to_fill,
+            "tool_rows_to_fill": len(candidates),
+            "tool_rows_filled": rows_filled if apply else 0,
+        }
+    except Exception:
+        if apply:
+            connection.rollback()
+        raise
     finally:
         connection.close()
 
@@ -1910,6 +2089,14 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--backfill-tool-calls",
+        action="store_true",
+        help=(
+            "Preview inserting missing per-tool rows for existing Claude "
+            "runs from transcript tool_use names"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -1944,6 +2131,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.backfill_timestamps,
             args.backfill_parent_bindings,
             args.backfill_cache_writes,
+            args.backfill_tool_calls,
         )
     )
     if backfill_modes > 1:
@@ -1976,6 +2164,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     if args.backfill_cache_writes:
         report = backfill_cache_write_splits(
+            db_path=args.db,
+            projects_root=args.projects_root,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.backfill_tool_calls:
+        report = backfill_tool_calls(
             db_path=args.db,
             projects_root=args.projects_root,
             apply=args.apply,

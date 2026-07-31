@@ -12,6 +12,7 @@ from hermes_cli.usage_facts_db import (
     initialize_usage_facts_db,
     purge_expired_traces,
     record_llm_call,
+    record_tool_call,
     record_trace,
     upsert_run_facts,
 )
@@ -37,6 +38,9 @@ def test_schema_contains_complete_contract(tmp_path):
         trace_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(run_traces)")
         }
+        tool_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(run_tool_calls)")
+        }
 
     assert run_columns == {"run_id", *RUN_FACT_COLUMNS}
     assert call_columns == {"run_id", "call_index", *LLM_CALL_COLUMNS}
@@ -54,6 +58,40 @@ def test_schema_contains_complete_contract(tmp_path):
         "message_fingerprint",
         "captured_at",
     }
+    assert tool_columns == {
+        "run_id",
+        "tool_name",
+        "call_count",
+        "output_chars",
+    }
+    assert not any("duration" in column for column in tool_columns)
+
+
+def test_record_tool_call_upserts_without_doubling_or_null_overwrite(tmp_path):
+    path = tmp_path / "facts.db"
+    record_tool_call(
+        "run-tools",
+        "Bash",
+        2,
+        output_chars=17,
+        run_fields={"origin": "claude_code", "source": "measured"},
+        path=path,
+    )
+    record_tool_call("run-tools", "Bash", 2, path=path)
+
+    row = _row(
+        path,
+        "SELECT tool_name, call_count, output_chars FROM run_tool_calls "
+        "WHERE run_id='run-tools'",
+    )
+    assert tuple(row) == ("Bash", 2, 17)
+
+    with pytest.raises(ValueError, match="call_count must be positive"):
+        record_tool_call("run-tools", "Read", 0, path=path)
+    assert (
+        _row(path, "SELECT COUNT(*) AS count FROM run_tool_calls")["count"]
+        == 1
+    )
 
 
 def test_large_fact_tables_have_additive_read_path_indexes(tmp_path):
@@ -901,6 +939,11 @@ def test_migration_matches_fresh_schema_with_parent_binding_columns(tmp_path):
     assert "occurred_at" not in before_calls
     assert "first_call_at" not in before_runs
     assert "last_call_at" not in before_runs
+    with sqlite3.connect(old_path) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='run_tool_calls'"
+        ).fetchone() is None
 
     initialize_usage_facts_db(old_path)
 
@@ -914,6 +957,13 @@ def test_migration_matches_fresh_schema_with_parent_binding_columns(tmp_path):
         migrated_runs = {
             row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
         }
+        migrated_tools = tuple(
+            conn.execute("PRAGMA table_info(run_tool_calls)").fetchall()
+        )
+        migrated_tool_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='run_tool_calls'"
+        ).fetchone()[0]
     with sqlite3.connect(fresh_path) as conn:
         fresh_calls = {
             row[1] for row in conn.execute("PRAGMA table_info(run_llm_calls)")
@@ -921,9 +971,18 @@ def test_migration_matches_fresh_schema_with_parent_binding_columns(tmp_path):
         fresh_runs = {
             row[1] for row in conn.execute("PRAGMA table_info(run_usage_facts)")
         }
+        fresh_tools = tuple(
+            conn.execute("PRAGMA table_info(run_tool_calls)").fetchall()
+        )
+        fresh_tool_sql = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='run_tool_calls'"
+        ).fetchone()[0]
 
     assert migrated_calls == fresh_calls
     assert migrated_runs == fresh_runs
+    assert migrated_tools == fresh_tools
+    assert migrated_tool_sql == fresh_tool_sql
     cache_write_split_columns = {
         "cache_write_1h_tokens",
         "cache_write_5m_tokens",
