@@ -66,6 +66,12 @@ DEFAULT_EVIDENCE_DIR = Path(
 )
 DEFAULT_CRONTAB_WINDOW_DAYS = 30
 DEFAULT_USAGE_SAMPLE_LIMIT = 200
+# CRON writes several journal lines for a single run (CMD plus session
+# open/close) within milliseconds. Measured against 30 days of this host's
+# journal the two populations are cleanly bimodal: same-run lines land inside
+# 2s, while a recycled PID is at least ~34s (p50) later. Splitting at 2s keeps
+# multi-line runs whole without merging recycled PIDs.
+CRONTAB_INVOCATION_GAP_MS = 2_000
 _SAFE_SCOPE = re.compile(r"[^A-Za-z0-9_.:+@/-]+")
 
 
@@ -770,6 +776,38 @@ def collect_systemd_cohort(
     )
 
 
+def _cluster_crontab_invocations(
+    grouped: Mapping[tuple[str, str], Sequence[int]],
+) -> tuple[tuple[str, int], ...]:
+    """Resolve CRON journal records into stable per-invocation identities.
+
+    Two properties matter and neither survives grouping on ``boot_id:pid``
+    alone:
+
+    * A PID is recycled within a boot, so one ``boot_id:pid`` bucket can hold
+      several unrelated runs. Splitting on a gap keeps them apart.
+    * The journal is rotated independently of our window, so deriving a
+      bucket's time from ``min()`` restates a retained fact once the oldest
+      record ages out. Anchoring identity to the invocation's own first record
+      keeps it constant for as long as that record is readable.
+    """
+    invocations: list[tuple[str, int]] = []
+    for (boot_id, pid), timestamps in sorted(grouped.items()):
+        started_at_ms: int | None = None
+        previous_ms: int | None = None
+        for timestamp_ms in sorted(timestamps):
+            if (
+                previous_ms is None
+                or timestamp_ms - previous_ms > CRONTAB_INVOCATION_GAP_MS
+            ):
+                started_at_ms = timestamp_ms
+                invocations.append(
+                    (f"crontab:{boot_id}:{pid}:{started_at_ms}", started_at_ms)
+                )
+            previous_ms = timestamp_ms
+    return tuple(invocations)
+
+
 def collect_crontab_cohort(
     *,
     observed_at_ms: int,
@@ -795,7 +833,7 @@ def collect_crontab_cohort(
             eligibility_rule="cron_processes_in_bounded_journal_window",
             observed_at_ms=observed_at_ms,
         )
-    grouped: dict[str, list[int]] = {}
+    grouped: dict[tuple[str, str], list[int]] = {}
     errors = 0
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -808,22 +846,23 @@ def collect_crontab_cohort(
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             errors += 1
             continue
-        grouped.setdefault(f"crontab:{boot_id}:{pid}", []).append(timestamp_ms)
+        grouped.setdefault((boot_id, pid), []).append(timestamp_ms)
+    invocations = _cluster_crontab_invocations(grouped)
     observations = [
         SystemInvocationObservation(
             source_execution_id=_safe_scope(source_execution_id),
             surface=ExecutionSurface.CRONTAB,
-            observed_at_ms=min(timestamps),
+            observed_at_ms=started_at_ms,
             phase=LifecyclePhase.PROCESS_STARTED,
             validity=Validity.DERIVED,
         )
-        for source_execution_id, timestamps in sorted(grouped.items())
+        for source_execution_id, started_at_ms in invocations
     ]
     events = tuple(reconcile_system_invocations(observations))
     return SourceCohort(
         source="crontab_invocation",
         events=events,
-        eligible=len(grouped) if errors == 0 else None,
+        eligible=len(invocations) if errors == 0 else None,
         identity_observed=0,
         metric_observed=_metric_execution_count(events),
         eligibility_rule="cron_processes_in_bounded_journal_window",
@@ -1164,10 +1203,20 @@ def collect_shadow(
     if not emitter.shutdown(timeout=30):
         raise RuntimeError("Shadow emitter did not shut down cleanly")
 
-    bulk_pass = ledger.append_batch(events)
-    second_pass = ledger.append_batch(events)
+    # Fail open: a single source whose identity turned out to be unstable
+    # must not roll back every other source's facts. Conflicts are counted
+    # per source and reported instead of aborting the sweep.
+    bulk_pass = ledger.append_batch(events, on_conflict="skip")
+    second_pass = ledger.append_batch(events, on_conflict="skip")
+    conflicts_by_source: dict[str, int] = {}
+    for result, event in zip(bulk_pass, events, strict=True):
+        if result.conflicted:
+            conflicts_by_source[event.source] = (
+                conflicts_by_source.get(event.source, 0) + 1
+            )
     dedupe_by_source = {
         cohort.source: bool(cohort.events)
+        and not conflicts_by_source.get(cohort.source)
         and all(
             not result.inserted
             for result, event in zip(second_pass, events, strict=True)
@@ -1271,6 +1320,11 @@ def collect_shadow(
             snapshot.written
             + sum(result.inserted for result in bulk_pass)
         ),
+        # Non-zero means some source restated a fact under an identity it had
+        # already used. The retained fact wins and the sweep continues, but
+        # that source's identity rule is broken and must be fixed.
+        "identity_conflicts": sum(conflicts_by_source.values()),
+        "identity_conflicts_by_source": conflicts_by_source,
     }
     projection_row = final_projection.to_dict()
     evidence = _evidence_payload(

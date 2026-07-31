@@ -8,6 +8,7 @@ are marked not-applicable instead of depressing coverage or becoming zero.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,16 @@ CONTRACT_VERSION = "fleet-metrics.v1"
 DEFAULT_SENTINEL_STATUS_PATH = Path(
     "/mnt/data/hermes-observability/sentinel-status.json"
 )
+
+
+def sentinel_status_path_default() -> Path:
+    """Resolve the sentinel status file, overridable like the other stores.
+
+    Without the override every caller — including tests — reads the live
+    host file, so a real sentinel run silently changes what a test observes.
+    """
+    override = os.environ.get("HERMES_SENTINEL_STATUS_PATH")
+    return Path(override) if override else DEFAULT_SENTINEL_STATUS_PATH
 TERMINAL_TASK_STATUSES = frozenset(
     {"done", "completed", "failed", "blocked", "canceled", "archived"}
 )
@@ -113,7 +124,7 @@ def build_fleet_metrics_payload(
     sentinel = _sentinel_projection(
         Path(sentinel_status_path)
         if sentinel_status_path is not None
-        else DEFAULT_SENTINEL_STATUS_PATH,
+        else sentinel_status_path_default(),
         observed_at=observed_at,
     )
     alerts = {

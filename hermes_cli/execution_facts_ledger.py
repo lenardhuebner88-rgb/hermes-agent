@@ -126,6 +126,10 @@ class AppendResult:
     inserted: bool
     queue_lag_ms: int
     reconciliation_lag_ms: int = 0
+    # Set when the append was skipped because the idempotency key already
+    # describes a different fact. The retained fact is never overwritten;
+    # the caller is expected to surface the count rather than swallow it.
+    conflicted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,25 +306,52 @@ class ExecutionFactsLedger:
         return self.append_batch((event,))[0]
 
     def append_batch(
-        self, events: Sequence[ExecutionEvent]
+        self,
+        events: Sequence[ExecutionEvent],
+        *,
+        on_conflict: str = "raise",
     ) -> tuple[AppendResult, ...]:
+        """Append a batch; results stay positional to ``events``.
+
+        ``on_conflict="skip"`` keeps a single poisoned identity from rolling
+        back the whole batch. The retained fact still wins — the conflicting
+        event is dropped and flagged, never written over the original.
+        """
+        if on_conflict not in ("raise", "skip"):
+            raise ValueError(f"unsupported on_conflict: {on_conflict!r}")
         if not events:
             return ()
         ingested_at_ms = self._clock_ms()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                results = tuple(
-                    self._append_in_transaction(
-                        connection, event, ingested_at_ms=ingested_at_ms
-                    )
-                    for event in events
-                )
+                results: list[AppendResult] = []
+                for event in events:
+                    try:
+                        results.append(
+                            self._append_in_transaction(
+                                connection,
+                                event,
+                                ingested_at_ms=ingested_at_ms,
+                            )
+                        )
+                    except IdempotencyConflictError:
+                        if on_conflict == "raise":
+                            raise
+                        results.append(
+                            AppendResult(
+                                event.event_id,
+                                False,
+                                0,
+                                0,
+                                conflicted=True,
+                            )
+                        )
                 connection.commit()
             except BaseException:
                 connection.rollback()
                 raise
-        return results
+        return tuple(results)
 
     def _append_in_transaction(
         self,

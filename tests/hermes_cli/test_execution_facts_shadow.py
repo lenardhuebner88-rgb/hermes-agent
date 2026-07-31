@@ -12,6 +12,7 @@ from typing import Sequence
 import pytest
 
 import hermes_cli.execution_facts_shadow as execution_facts_shadow
+from hermes_cli.execution_facts_ledger import ExecutionFactsLedger
 from hermes_cli.execution_facts_readmodel import build_execution_facts_payload
 from hermes_cli.execution_facts_shadow import (
     SOURCE_CENSUS_VERSION,
@@ -647,3 +648,188 @@ def test_crontab_reads_full_window_and_fails_closed_on_parse_error() -> None:
     assert cohort.eligible is None
     assert cohort.read_errors == 1
     assert cohort.behavior_equivalent is False
+
+
+class _ScriptedJournalRunner(_FakeRunner):
+    """Serve an exact set of CRON journal records for one collection pass."""
+
+    def __init__(self, records: Sequence[tuple[str, str, int]]) -> None:
+        super().__init__()
+        self._records = tuple(records)
+
+    def run(
+        self,
+        argv: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        self.calls.append(command)
+        payload = "".join(
+            json.dumps(
+                {
+                    "_BOOT_ID": boot_id,
+                    "_PID": pid,
+                    "__REALTIME_TIMESTAMP": str(timestamp_ms * 1000),
+                }
+            )
+            + "\n"
+            for boot_id, pid, timestamp_ms in self._records
+        )
+        return subprocess.CompletedProcess(command, 0, payload, "")
+
+
+def _crontab_identities(
+    records: Sequence[tuple[str, str, int]],
+) -> dict[str, int]:
+    cohort = collect_crontab_cohort(
+        observed_at_ms=_NOW_MS,
+        window_days=30,
+        runner=_ScriptedJournalRunner(records),
+    )
+    return {
+        event.source_execution_id: event.observed_at_ms
+        for event in cohort.events
+    }
+
+
+def test_crontab_reused_pid_is_not_merged_into_one_invocation() -> None:
+    """A PID recycled days later is a second invocation, not the same one."""
+    first_run_ms = _NOW_MS - 9 * 86_400_000
+    recycled_run_ms = _NOW_MS - 86_400_000
+
+    identities = _crontab_identities(
+        [
+            ("boot-a", "4242", first_run_ms),
+            ("boot-a", "4242", first_run_ms + 120),
+            ("boot-a", "4242", recycled_run_ms),
+        ]
+    )
+
+    assert len(identities) == 2, identities
+    assert sorted(identities.values()) == [first_run_ms, recycled_run_ms]
+
+
+def test_crontab_identity_survives_journal_rotation() -> None:
+    """Losing the oldest journal record must not restate a retained fact.
+
+    The journal is rotated out from under the collector. Any invocation that
+    is still readable has to keep the exact identity *and* observed time it
+    had before, otherwise the same idempotency key describes a different fact
+    and the whole shadow batch is rejected.
+    """
+    older_run_ms = _NOW_MS - 20 * 86_400_000
+    retained_run_ms = _NOW_MS - 5 * 86_400_000
+
+    before_rotation = _crontab_identities(
+        [
+            ("boot-a", "178442", older_run_ms),
+            ("boot-a", "178442", retained_run_ms),
+            ("boot-a", "178442", retained_run_ms + 2),
+        ]
+    )
+    after_rotation = _crontab_identities(
+        [
+            ("boot-a", "178442", retained_run_ms),
+            ("boot-a", "178442", retained_run_ms + 2),
+        ]
+    )
+
+    survivors = set(before_rotation) & set(after_rotation)
+    assert survivors, "rotation dropped every identity"
+    for identity in survivors:
+        assert before_rotation[identity] == after_rotation[identity], (
+            f"{identity} changed its observed time across rotation: "
+            f"{before_rotation[identity]} -> {after_rotation[identity]}"
+        )
+
+
+def test_crontab_multiline_records_stay_one_invocation() -> None:
+    """CRON logs several lines per run; they are one execution, not many."""
+    run_ms = _NOW_MS - 3 * 86_400_000
+
+    identities = _crontab_identities(
+        [
+            ("boot-a", "77", run_ms),
+            ("boot-a", "77", run_ms + 2),
+            ("boot-a", "77", run_ms + 150),
+        ]
+    )
+
+    assert len(identities) == 1
+    assert next(iter(identities.values())) == run_ms
+
+
+def test_poisoned_identity_neither_aborts_the_sweep_nor_hides(
+    tmp_path: Path,
+) -> None:
+    """A restated identity keeps the sweep alive but stays visible.
+
+    Regression for the live failure of 2026-07-31: one crontab identity
+    restated its observed time, the batch rolled back, and 7 of 11 sources
+    silently stopped collecting for hours while the unit just looked failed.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    _seed_kanban(hermes_home / "kanban.db")
+    _seed_cron(hermes_home / "cron" / "executions.db")
+    _seed_loops(hermes_home / "loops" / "shadow" / "ledger.jsonl")
+    database = tmp_path / "execution_facts.db"
+    config = ShadowCollectionConfig(
+        database=database,
+        hermes_home=hermes_home,
+        evidence_dir=tmp_path / "evidence",
+        include_systemd=False,
+        include_crontab=False,
+    )
+
+    first = collect_shadow(
+        config, runner=_SmallTmuxRunner(), clock_ms=lambda: _NOW_MS
+    )
+    assert first.collector["identity_conflicts"] == 0
+
+    # Reproduce the live shape: the dedupe registry holds a fingerprint that
+    # no longer matches what the source now reports for the same identity.
+    ledger = ExecutionFactsLedger(database)
+    retained = next(
+        event
+        for event in ledger.iter_events()
+        if event.source == "kanban_timeline"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            UPDATE execution_event_dedupe
+               SET immutable_payload_sha256 = 'stale-fingerprint'
+             WHERE source = ? AND idempotency_key = ?
+            """,
+            (retained.source, retained.idempotency_key),
+        )
+        connection.commit()
+
+    second = collect_shadow(
+        config, runner=_SmallTmuxRunner(), clock_ms=lambda: _NOW_MS
+    )
+
+    # The conflict is real, counted, and attributed to its source...
+    assert second.collector["identity_conflicts"] >= 1
+    assert (
+        second.collector["identity_conflicts_by_source"]["kanban_timeline"]
+        >= 1
+    )
+    # ...the affected source is no longer claimed as reconciled...
+    kanban_row = next(
+        row for row in second.cohorts if row["source"] == "kanban_timeline"
+    )
+    assert kanban_row["dedupe_reconciled"] is False
+    # ...every other source still collected instead of being rolled back...
+    assert {row["source"] for row in second.cohorts} == {
+        row["source"] for row in first.cohorts
+    }
+    assert second.collector["reconciled_inserted"] >= 0
+    # ...and the retained fact was never overwritten.
+    restated = [
+        event
+        for event in ExecutionFactsLedger(database).iter_events()
+        if event.idempotency_key == retained.idempotency_key
+    ]
+    assert len(restated) == 1
+    assert restated[0].observed_at_ms == retained.observed_at_ms

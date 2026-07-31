@@ -43,6 +43,12 @@ def observability_app(tmp_path, monkeypatch):
         "HERMES_EXECUTION_FACTS_DB",
         str(tmp_path / "execution_facts.db"),
     )
+    # Point at a path that does not exist so the sentinel projection stays
+    # "unknown" instead of reading whatever the live host last wrote.
+    monkeypatch.setenv(
+        "HERMES_SENTINEL_STATUS_PATH",
+        str(tmp_path / "sentinel-status.json"),
+    )
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 

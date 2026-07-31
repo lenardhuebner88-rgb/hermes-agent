@@ -302,3 +302,54 @@ def test_post_commit_off_down_slow_and_full_never_change_source_result() -> None
     assert emitters["slow"].wait_until_idle()
     assert emitters["down"].shutdown()
     assert emitters["slow"].shutdown()
+
+
+def test_batch_conflict_does_not_discard_the_other_sources(tmp_path) -> None:
+    """One poisoned identity must not roll back an entire shadow sweep.
+
+    The shadow collector appends every source in a single batch. Before this
+    guard a single conflicting fact aborted the transaction, so unrelated
+    sources silently stopped being collected.
+    """
+    ledger = ExecutionFactsLedger(tmp_path / "facts.db")
+    ledger.initialize()
+    ledger.append(_event("poison", status="done"))
+
+    results = ledger.append_batch(
+        (
+            _event("healthy-before"),
+            _event("poison", status="restated"),
+            _event("healthy-after"),
+        ),
+        on_conflict="skip",
+    )
+
+    assert [result.inserted for result in results] == [True, False, True]
+    assert [result.conflicted for result in results] == [False, True, False]
+    assert ledger.count_events() == 3
+
+
+def test_batch_conflict_still_raises_by_default(tmp_path) -> None:
+    ledger = ExecutionFactsLedger(tmp_path / "facts.db")
+    ledger.initialize()
+    ledger.append(_event("poison", status="done"))
+
+    with pytest.raises(IdempotencyConflictError):
+        ledger.append_batch((_event("poison", status="restated"),))
+
+
+def test_skipped_conflict_never_overwrites_the_retained_fact(tmp_path) -> None:
+    ledger = ExecutionFactsLedger(tmp_path / "facts.db")
+    ledger.initialize()
+    ledger.append(_event("poison", status="done"))
+
+    ledger.append_batch(
+        (_event("poison", status="restated"),), on_conflict="skip"
+    )
+
+    retained = [
+        event for event in ledger.iter_events()
+        if event.source_execution_id == "run:poison"
+    ]
+    assert len(retained) == 1
+    assert retained[0].status == "done"
