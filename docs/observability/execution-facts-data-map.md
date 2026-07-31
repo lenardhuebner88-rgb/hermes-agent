@@ -19,17 +19,17 @@ of each invariant is in
 | question | status | number |
 |---|---|---|
 | Which execution was this? | **green** | 99.16 % exact identity |
-| What happened to it? | **green** | outcomes 100 %, 11 160 executions |
+| What happened to it? | **green** | outcomes 100 %, 11 171 executions |
 | When did it run, how long? | **green for kanban/cron**, derived for old runs | see A below |
 | Did it ship? | **green since today** | 2 491 landed, 2 472 with commit SHA |
 | Was it deployed? | **red** | no evidence at all |
 | What did it cost? | **amber** | 95 247 of 103 412 executions priced; money still needs a fee input — see B |
 | Which task did this terminal work on? | **red** | wiring exists, no data yet — see C |
-| Why did it fail? | **amber** | 13.67 % instrumented |
+| Why did it fail? | **amber** | 13.85 % instrumented |
 
 ## Identity: solved
 
-`run_identity_adoption` is **99.16 %** (17 968 of 18 120), validity `exact`.
+`run_identity_adoption` is **99.16 %** (17 973 of 18 125), validity `exact`.
 
 | source | executions | exact | derived |
 |---|---:|---:|---|
@@ -126,7 +126,7 @@ Three distinct cost concepts — do not mix them up when building a view:
      are `hermes_aux` rows with `provider = NULL`. Fixing this belongs in
      usage capture, not in pricing.
 
-### Why the cost denominator is small (378, not 18 120)
+### Why the cost denominator looks unlike the execution count
 
 Two independent reasons, both by design rather than by defect:
 
@@ -156,7 +156,7 @@ that assumes this table is populated.
 ## D) Landing and deployment
 
 **Landing is evidence-backed since today.** 2 491 executions landed, 2 472
-of them carrying a commit SHA (22.32 % of 11 160). The evidence is the git
+of them carrying a commit SHA (22.30 % of 11 171). The evidence is the git
 history itself: the landing convention names the task in the commit subject
 (`kanban(t_ab12cd34): …`), and reachability from `main` proves the work
 shipped. The landing event reuses the *kanban* execution identity, so
@@ -173,12 +173,12 @@ to a SHA. This is the largest remaining blind spot.
 
 ## E) Errors
 
-`error_rate` is `unknown`, reason `incomplete_error_instrumentation`: 1 526
-of 11 160 executions carry an error class (13.67 %). The classes that are
+`error_rate` is `unknown`, reason `incomplete_error_instrumentation`: 1 547
+of 11 171 executions carry an error class (13.85 %). The classes that are
 present are trustworthy; their *absence* means "not instrumented", not "no
 error". Do not compute an error rate from this yet.
 
-Outcomes, by contrast, are complete (11 160, 100 %, `exact`) across 16
+Outcomes, by contrast, are complete (11 171, 100 %, `exact`) across 16
 statuses: `completed` 6 863 · `reclaimed` 2 102 · `blocked` 804 ·
 `gave_up` 186 · `spawn_failed` 166 · `crashed` 127 · `timed_out` 94. The
 ~19 % `reclaimed` share is worth investigating on its own.
@@ -240,7 +240,7 @@ reader discards before concluding the data cannot support identity.
 1. **Subscription fees** (operator input) — turns tokens into money for the
    lanes where nearly all the spend is.
 2. **Deployment evidence** — the last completely dark stage of the pipeline.
-3. **Error instrumentation** — turns a 13.67 % partial signal into a rate.
+3. **Error instrumentation** — turns a 13.85 % partial signal into a rate.
 4. **Price coverage** for the 5 680 unpriced rows.
 5. **Loop run ids** — the last source without exact identity.
 6. **Task-bound terminals** — makes the terminal↔task join produce data.
