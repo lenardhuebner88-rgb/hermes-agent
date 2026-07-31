@@ -1,5 +1,9 @@
 # Execution Facts shadow runbook
 
+> Which store is authoritative per metric family (consumption / lifecycle /
+> execution identity) is binding via
+> `vault/00-Canon/decisions/2026-07-31-metrik-ssot-register.md`.
+
 This backend remains read-only relative to every source and has no ranking or
 product activation mode. The optional Shadow unit creates or updates only the
 dedicated Execution-Facts database and content-free evidence directory. It

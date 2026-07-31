@@ -1,5 +1,9 @@
 # Execution Facts validation matrix
 
+> Which store is authoritative per metric family (consumption / lifecycle /
+> execution identity) is binding via
+> `vault/00-Canon/decisions/2026-07-31-metrik-ssot-register.md`.
+
 Status reflects the current worktree plus the read-only real-source Shadow run
 from 2026-07-31. It is evidence for operating the Shadow collector, not for
 promoting telemetry into product behavior.

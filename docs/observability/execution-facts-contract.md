@@ -1,5 +1,10 @@
 # Execution Facts V1
 
+> Which store is authoritative per metric family (consumption / lifecycle /
+> execution identity) is binding via
+> `vault/00-Canon/decisions/2026-07-31-metrik-ssot-register.md`. This contract
+> only defines the schema for the execution-identity family.
+
 `execution-facts.v1` is the content-free, source-independent measurement
 contract for Hermes executions. Its default database is
 `/mnt/data/hermes-observability/execution_facts.db`, alongside the existing

@@ -59,7 +59,10 @@ reintroduce one without a new operator decision.
 and mutates neither Hermes nor Langfuse; it is the supported way to inspect
 how many worker runs are exactly correlated.
 
-`scripts/langfuse_worker_audit.py` is the source of truth for rollout coverage.
+`scripts/langfuse_worker_audit.py` is the source of truth for rollout coverage
+— scoped to how exactly usage facts join onto kanban runs. It is *not* the
+execution-identity SSOT; that is `execution_facts.db` per
+`vault/00-Canon/decisions/2026-07-31-metrik-ssot-register.md`.
 It reports explicit per-origin denominators, structural unknowns and matched
 versus unmatched board runs. A dashboard coverage ratio must not be introduced
 until the corresponding exact score is exported natively.
