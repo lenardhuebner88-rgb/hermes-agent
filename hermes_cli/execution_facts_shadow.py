@@ -534,6 +534,41 @@ def collect_loop_cohort(
     )
 
 
+def _bind_observed_task_runs(
+    adapter: TmuxReconciliationAdapter,
+    store: SqliteIdentityStore,
+    observations: Sequence[PaneObservation],
+    *,
+    observed_at_ms: int,
+) -> list[ExecutionEvent]:
+    """Record which kanban run each managed pane is currently working on.
+
+    Fail-open per pane: a terminal that was closed between the scan and this
+    call, or one whose identity is not resolvable, is skipped rather than
+    failing the whole tmux cohort. Binding is idempotent -- re-observing the
+    same pane and task re-emits the same event.
+    """
+    events: list[ExecutionEvent] = []
+    for observation in observations:
+        task_run_id = observation.metadata.get("task_run_id")
+        if not task_run_id:
+            continue
+        identity = store.get_by_pane_locator(observation.locator_key)
+        if identity is None:
+            continue
+        try:
+            events.extend(
+                adapter.bind_task_run(
+                    identity.terminal_run_id,
+                    str(task_run_id),
+                    observed_at_ms=observed_at_ms,
+                )
+            )
+        except ValueError:
+            continue
+    return events
+
+
 def _tmux_argv(server_id: str) -> list[str]:
     argv = ["tmux"]
     if server_id != "default":
@@ -546,7 +581,10 @@ def _tmux_argv(server_id: str) -> list[str]:
             (
                 "#{session_id}\x1f#{window_id}\x1f#{pane_id}\x1f"
                 "#{pane_pid}\x1f#{pane_dead}\x1f"
-                "#{@hermes_terminal_run_id}"
+                "#{@hermes_terminal_run_id}\x1f"
+                # Managed windows already carry these; without them nothing
+                # could join an execution to the task it worked on.
+                "#{@hermes_task_id}\x1f#{@hermes_run_id}"
             ),
         ]
     )
@@ -578,6 +616,14 @@ def collect_tmux_cohort(
         store.initialize()
         adapter = TmuxReconciliationAdapter(store)
         events = list(adapter.reconcile(first_observations))
+        events.extend(
+            _bind_observed_task_runs(
+                adapter,
+                store,
+                first_observations,
+                observed_at_ms=observed_at_ms,
+            )
+        )
     except (ValueError, sqlite3.Error):
         return _unknown_cohort(
             "tmux_reconciliation",
@@ -992,7 +1038,13 @@ def collect_usage_cohort(
                 connection,
                 subscription_fees=subscription_fees,
                 fee_version=fee_version,
-                limit=None if subscription_fees else sample_limit,
+                # 0 means "read every row". Fee allocation needs the full
+                # population to divide a monthly fee correctly, so supplying
+                # fees implies it -- but the full scan is independently
+                # useful and must not be reachable only as a side effect of
+                # configuring fees.
+                limit=None if (subscription_fees or sample_limit <= 0)
+                else sample_limit,
             )
         )
         metric_observed = sum(

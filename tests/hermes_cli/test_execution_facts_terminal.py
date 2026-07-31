@@ -1139,3 +1139,37 @@ def test_real_isolated_tmux_to_landed_result_end_to_end(tmp_path) -> None:
     assert payload["landing"]["sha_evidence"] == 1
     assert payload["collector"]["dropped"] == 0
     assert payload["collector"]["deduped"] == 3
+
+
+def test_pane_parser_carries_the_managed_task_binding() -> None:
+    """The pane already knows its task; the parser must not drop it.
+
+    agent_terminals sets @hermes_task_id/@hermes_run_id on managed windows,
+    but the collector's format string never asked for them, so
+    task_binding_projection stayed empty and no execution could be joined to
+    the task it worked on.
+    """
+    line = "\x1f".join(
+        ("$1", "@2", "%3", "4242", "0", "term-run-1", "t_ab12cd34", "8842")
+    )
+
+    observations = parse_tmux_list_panes(
+        line, observed_at_ms=1_000, server_id="default"
+    )
+
+    assert len(observations) == 1
+    assert observations[0].metadata["task_id"] == "t_ab12cd34"
+    assert observations[0].metadata["task_run_id"] == "8842"
+
+
+def test_pane_parser_still_accepts_panes_without_a_task() -> None:
+    """An unmanaged pane is normal, not an error."""
+    line = "\x1f".join(("$1", "@2", "%3", "4242", "0", "term-run-1", "", ""))
+
+    observations = parse_tmux_list_panes(
+        line, observed_at_ms=1_000, server_id="default"
+    )
+
+    assert len(observations) == 1
+    assert "task_id" not in observations[0].metadata
+    assert "task_run_id" not in observations[0].metadata

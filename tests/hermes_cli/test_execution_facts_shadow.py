@@ -841,3 +841,145 @@ def test_crontab_unparseable_message_stays_unknown_not_dropped() -> None:
 
     assert cohort.eligible == 0
     assert cohort.events == ()
+
+
+def test_full_usage_scan_does_not_require_configuring_fees(
+    tmp_path: Path,
+) -> None:
+    """Reading every usage row must not hinge on fee configuration.
+
+    The sample limit capped the cost denominator at 200 rows out of 109356,
+    and the only way to lift it was to supply subscription fees -- so the
+    honest population was reachable only as a side effect.
+    """
+    usage_database = tmp_path / "usage_facts.db"
+    with sqlite3.connect(usage_database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE run_usage_facts (
+                run_id TEXT PRIMARY KEY, origin TEXT, task_run_id TEXT,
+                task_id TEXT, chain_id TEXT, board TEXT, provider TEXT,
+                model TEXT, profile TEXT, billing_mode TEXT,
+                serving_tier TEXT, reasoning_effort TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER, finish_reason TEXT,
+                error_type TEXT, duration_ms REAL, captured_at TEXT,
+                source TEXT
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO run_usage_facts (run_id, origin, provider, model,"
+            " billing_mode, input_tokens, output_tokens, cache_read_tokens,"
+            " cache_write_tokens, captured_at, source) VALUES"
+            " (?, 'claude_code', 'anthropic', 'claude-sonnet-5',"
+            " 'subscription_included', 10, 5, 0, 0,"
+            " '2026-07-31T08:00:00+00:00', 'measured')",
+            [(f"run-{index}",) for index in range(25)],
+        )
+
+    capped = collect_usage_cohort(
+        usage_database, observed_at_ms=_NOW_MS, sample_limit=5
+    )
+    full = collect_usage_cohort(
+        usage_database, observed_at_ms=_NOW_MS, sample_limit=0
+    )
+
+    assert capped.observed == 5
+    assert full.observed == 25
+    assert full.eligible == 25
+
+
+class _ManagedPaneRunner(_FakeRunner):
+    """A tmux server whose panes carry the managed task binding."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+    ) -> subprocess.CompletedProcess[str]:
+        command = tuple(argv)
+        if command[0] == "tmux":
+            self.calls.append(command)
+            rows = [
+                "\x1f".join(
+                    (
+                        f"${ordinal}",
+                        f"@{ordinal}",
+                        f"%{ordinal}",
+                        str(10_000 + ordinal),
+                        "0",
+                        f"{ordinal:032x}",
+                        "t_ab12cd34" if ordinal < 2 else "",
+                        str(8800 + ordinal) if ordinal < 2 else "",
+                    )
+                )
+                for ordinal in range(4)
+            ]
+            return subprocess.CompletedProcess(
+                command, 0, "\n".join(rows), ""
+            )
+        return super().run(argv)
+
+
+def test_managed_panes_bind_to_their_kanban_run(tmp_path: Path) -> None:
+    """task_binding_projection was empty because nothing ever bound.
+
+    agent_terminals sets @hermes_task_id/@hermes_run_id on managed windows
+    and the adapter could record bindings, but no production caller connected
+    the two -- so no execution could be joined to the task it worked on.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    _seed_kanban(hermes_home / "kanban.db")
+    _seed_cron(hermes_home / "cron" / "executions.db")
+    _seed_loops(hermes_home / "loops" / "shadow" / "ledger.jsonl")
+    database = tmp_path / "execution_facts.db"
+
+    collect_shadow(
+        ShadowCollectionConfig(
+            database=database,
+            hermes_home=hermes_home,
+            evidence_dir=tmp_path / "evidence",
+            include_systemd=False,
+            include_crontab=False,
+        ),
+        runner=_ManagedPaneRunner(),
+        clock_ms=lambda: _NOW_MS,
+    )
+
+    with sqlite3.connect(database) as connection:
+        bindings = connection.execute(
+            "SELECT task_run_id FROM task_binding_projection"
+        ).fetchall()
+
+    assert {row[0] for row in bindings} == {"8800", "8801"}
+
+
+def test_unmanaged_panes_produce_no_binding(tmp_path: Path) -> None:
+    """A pane without a task is normal and must not invent a binding."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    _seed_kanban(hermes_home / "kanban.db")
+    _seed_cron(hermes_home / "cron" / "executions.db")
+    _seed_loops(hermes_home / "loops" / "shadow" / "ledger.jsonl")
+    database = tmp_path / "execution_facts.db"
+
+    collect_shadow(
+        ShadowCollectionConfig(
+            database=database,
+            hermes_home=hermes_home,
+            evidence_dir=tmp_path / "evidence",
+            include_systemd=False,
+            include_crontab=False,
+        ),
+        runner=_SmallTmuxRunner(),
+        clock_ms=lambda: _NOW_MS,
+    )
+
+    with sqlite3.connect(database) as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM task_binding_projection"
+        ).fetchone()[0]
+
+    assert count == 0

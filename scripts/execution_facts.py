@@ -351,7 +351,12 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--crontab-window-days", type=int, default=30)
     collect.add_argument("--subscription-fees", type=Path)
     collect.add_argument("--fee-version")
-    collect.add_argument("--usage-sample-limit", type=int, default=200)
+    collect.add_argument(
+        "--usage-sample-limit",
+        type=int,
+        default=200,
+        help="usage rows to read; 0 reads every row",
+    )
     collect.add_argument(
         "--repository",
         type=Path,

@@ -390,9 +390,21 @@ def parse_tmux_list_panes(
         if len(fields) == 1:
             # tmux renders C0 separators in formatted output as octal escapes.
             fields = line.split("\\037")
-        if len(fields) != 6:
-            raise ValueError("tmux pane observation must have six fields")
-        session_id, window_id, pane_id, pid, dead, marker = fields
+        # Six fields is the original identity-only shape; eight adds the task
+        # binding a managed window already carries. Both are accepted so a
+        # collector and a tmux server can be upgraded independently.
+        if len(fields) not in (6, 8):
+            raise ValueError(
+                "tmux pane observation must have six or eight fields"
+            )
+        session_id, window_id, pane_id, pid, dead, marker = fields[:6]
+        metadata: dict[str, object] = {}
+        if len(fields) == 8:
+            task_id, task_run_id = fields[6:]
+            if task_id:
+                metadata["task_id"] = task_id
+            if task_run_id:
+                metadata["task_run_id"] = task_run_id
         observations.append(
             PaneObservation(
                 server_id=server_id,
@@ -403,6 +415,7 @@ def parse_tmux_list_panes(
                 observed_at_ms=observed_at_ms,
                 dead=dead == "1",
                 durable_terminal_run_id=marker or None,
+                metadata=metadata,
             )
         )
     return observations
