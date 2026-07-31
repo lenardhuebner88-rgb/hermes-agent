@@ -334,6 +334,36 @@ def test_cli_dry_run_changes_no_ref_branch_or_worktree(git_world, capsys):
     assert not ledger_dir.exists()
 
 
+def test_cli_excludes_its_own_loop_branch_from_inventory(
+    git_world, capsys, monkeypatch
+):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    own_worktree = add_loop("landing")
+    other_worktree = add_loop("other")
+    commit_loop(own_worktree, "own-work")
+    commit_loop(other_worktree, "other-work")
+    own_head = git(repo, "rev-parse", "loop/landing").stdout.strip()
+    monkeypatch.setenv("HERMES_LOOP_STATE_DIR", str(loops_root / "landing"))
+
+    rc = main(
+        [
+            "--repo",
+            str(repo),
+            "--loops-root",
+            str(loops_root),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "loop/other" in output
+    assert "loop/landing" not in output
+    assert git(repo, "rev-parse", "loop/landing").stdout.strip() == own_head
+
+
 def test_receipt_contains_inventory_and_each_branch_outcome(git_world):
     repo, loops_root, ledger_dir, add_loop, commit_main, _commit_loop = git_world
     add_loop("empty")

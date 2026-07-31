@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -273,6 +273,7 @@ class LandingLoop:
         baseline_records: BaselineRecords | None = None,
         automation_enabled: Callable[[], bool] | None = None,
         recovery_request: Callable[[LL2Candidate], str | bool] | None = None,
+        excluded_branches: Iterable[str] = (),
         state_dir: Path | None = None,
         stop_path: Path | None = None,
         now: Callable[[], datetime] | None = None,
@@ -286,6 +287,7 @@ class LandingLoop:
         self.baseline_records = baseline_records or read_gate_records
         self.automation_enabled = automation_enabled or (lambda: True)
         self.recovery_request = recovery_request
+        self.excluded_branches = frozenset(excluded_branches)
         self.state_dir = state_dir
         self.stop_path = stop_path
         self.now = now or (lambda: datetime.now(timezone.utc))
@@ -372,7 +374,13 @@ class LandingLoop:
             "refs/heads/loop/",
             check=True,
         )
-        return tuple(sorted(line for line in result.stdout.splitlines() if line))
+        return tuple(
+            sorted(
+                line
+                for line in result.stdout.splitlines()
+                if line and line not in self.excluded_branches
+            )
+        )
 
     def _counts(self, branch: str) -> tuple[int, int]:
         result = self._git(
@@ -1311,6 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         recovery_request=None if args.dry_run else request_candidate_recovery,
+        excluded_branches=(f"loop/{state_dir.name}",) if state_dir else (),
         state_dir=state_dir,
         stop_path=stop_path,
     )
