@@ -42,6 +42,12 @@ _STASH_MESSAGE = "landing-loop: fremde Basis-Änderungen (autostash)"
 # konnten, ist der einzige Zustand, den der Loop erzeugt und nicht selbst
 # aufräumen kann — dafür stoppt die Queue (siehe _diagnose_outcome).
 _STASH_LOST_MARKER = "NICHT zurückgeholt"
+_COLLECTION_RELEVANT_NAMES = {
+    "__init__.py",
+    "conftest.py",
+    "pyproject.toml",
+    "uv.lock",
+}
 
 
 class FailureClass(str, Enum):
@@ -324,6 +330,7 @@ class LandingLoop:
         self.state_dir = state_dir
         self.stop_path = stop_path
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self._collection_proven = False
 
     def _automation_checkpoint(self) -> str | None:
         if self.dry_run:
@@ -839,9 +846,21 @@ class LandingLoop:
                 return self._park(item, f"Merge-Konflikt: {detail}")
             return self._park(item, f"Merge-Fehler: {detail}")
 
-        gate_runner = self.gate_runner or _land_gates
+        changed = self._git(
+            "diff", "--name-only", f"{pre_merge_head}..HEAD", check=True
+        ).stdout.splitlines()
+        include_collection = not self._collection_proven or any(
+            Path(path).name in _COLLECTION_RELEVANT_NAMES for path in changed
+        )
         try:
-            green, gate_report = gate_runner(self.repo, pre_merge_head)
+            if self.gate_runner is None:
+                green, gate_report = _land_gates(
+                    self.repo,
+                    pre_merge_head,
+                    include_collection=include_collection,
+                )
+            else:
+                green, gate_report = self.gate_runner(self.repo, pre_merge_head)
         except Exception as exc:  # noqa: BLE001 - a gate crash is a red gate
             green, gate_report = False, f"Gate-Ausnahme: {exc}"
         if not green:
@@ -853,8 +872,11 @@ class LandingLoop:
                 f"Gate rot; ROLLBACK FEHLGESCHLAGEN ({rollback_report}): {gate_report}",
             )
 
+        if include_collection:
+            self._collection_proven = True
+
         landed_head = self._git("rev-parse", "HEAD", check=True).stdout.strip()
-        gates = ("collection", "affected")
+        gates = (("collection",) if include_collection else ()) + ("affected",)
         if "frontend" in gate_report.lower():
             gates += ("frontend",)
         try:

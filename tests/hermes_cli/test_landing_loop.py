@@ -210,8 +210,8 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
     commit_loop(worktree, "green-work")
     calls = []
 
-    def green_gate(gate_repo: Path, base: str):
-        calls.append((gate_repo, base))
+    def green_gate(gate_repo: Path, base: str, *, include_collection: bool):
+        calls.append((gate_repo, base, include_collection))
         return True, "shared gates grün"
 
     monkeypatch.setattr(landing_module, "_land_gates", green_gate)
@@ -219,7 +219,7 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
 
     run = make_loop(repo, loops_root, ledger_dir).run()
 
-    assert calls == [(repo.resolve(), old_main)]
+    assert calls == [(repo.resolve(), old_main, True)]
     assert outcome(run, "loop/green").action == "landed"
     new_main = git(repo, "rev-parse", "main").stdout.strip()
     assert new_main != old_main
@@ -248,6 +248,50 @@ def test_landing_multiple_branches_accepts_behind_change_caused_by_this_run(
     main_head = git(repo, "rev-parse", "main").stdout.strip()
     assert git(repo, "rev-parse", "loop/a-first").stdout.strip() == main_head
     assert git(repo, "rev-parse", "loop/b-second").stdout.strip() == main_head
+
+
+def test_landing_batches_collection_after_first_candidate(git_world, monkeypatch):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    second = add_loop("b-second")
+    commit_loop(first, "first-work")
+    commit_loop(second, "second-work")
+    collection_calls: list[bool] = []
+
+    def green_gate(_repo: Path, _base: str, *, include_collection: bool):
+        collection_calls.append(include_collection)
+        return True, "gates grün"
+
+    monkeypatch.setattr(landing_module, "_land_gates", green_gate)
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert [item.action for item in run.outcomes] == ["landed", "landed"]
+    assert collection_calls == [True, False]
+
+
+def test_import_relevant_followup_merge_repeats_collection(git_world, monkeypatch):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    second = add_loop("b-second")
+    commit_loop(first, "first-work")
+    package = second / "sample_package"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    git(second, "add", "sample_package/__init__.py")
+    git(second, "commit", "-m", "import relevant work")
+    collection_calls: list[bool] = []
+
+    def green_gate(_repo: Path, _base: str, *, include_collection: bool):
+        collection_calls.append(include_collection)
+        return True, "gates grün"
+
+    monkeypatch.setattr(landing_module, "_land_gates", green_gate)
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert [item.action for item in run.outcomes] == ["landed", "landed"]
+    assert collection_calls == [True, True]
 
 
 def test_red_gate_rolls_merge_back_and_parks_branch(git_world):

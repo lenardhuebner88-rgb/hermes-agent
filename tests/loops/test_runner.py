@@ -1292,6 +1292,33 @@ def test_land_gates_custom_all_green(tmp_path, fake_engine):
     assert ok is True
 
 
+def test_shared_land_gates_can_reuse_collection_proof(
+    tmp_path, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runner_module,
+        "select_test_python",
+        lambda _repo: pytest.fail("collection interpreter must not be selected"),
+    )
+
+    ok, report = runner_module._land_gates(
+        repo, "main", include_collection=False
+    )
+
+    assert ok is True
+    assert report.startswith("affected grün")
+    assert any("run-affected.sh" in command[-2] for command in commands)
+    assert all("pytest" not in command for command in commands)
+
+
 @pytest.mark.parametrize(
     ("affected_exit_code", "expected_phrase"),
     [
