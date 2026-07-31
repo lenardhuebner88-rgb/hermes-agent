@@ -12,6 +12,7 @@ from hermes_cli.execution_facts_contract import (
     ExecutionSurface,
     LifecyclePhase,
     Validity,
+    stable_execution_id,
 )
 from hermes_cli.execution_facts_ledger import ExecutionFactsLedger
 from hermes_cli.execution_facts_reconcile import (
@@ -925,3 +926,81 @@ def test_loop_cost_without_a_rate_stays_in_its_own_currency() -> None:
 
     assert cost.attributes["currency"] == "EUR"
     assert "fx_version" not in cost.attributes
+
+
+def _usage_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE run_usage_facts (
+            run_id TEXT PRIMARY KEY, origin TEXT, task_run_id TEXT,
+            task_id TEXT, chain_id TEXT, board TEXT, provider TEXT, model TEXT,
+            profile TEXT, billing_mode TEXT, serving_tier TEXT,
+            reasoning_effort TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER, finish_reason TEXT, error_type TEXT,
+            duration_ms REAL, captured_at TEXT, source TEXT
+        )
+        """
+    )
+
+
+def test_usage_row_falls_back_to_run_id_when_it_names_a_known_task_run() -> None:
+    """Cost must attach to the run that spent it, not float off beside it.
+
+    346 live usage rows carry the kanban run in `run_id` while `task_run_id`
+    is NULL. Their cost formed a separate execution instead of joining the
+    work: on the LL-2 chain that lost $3.44 of $20.88 (16.5%).
+    """
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    _usage_schema(connection)
+    connection.execute(
+        """
+        INSERT INTO run_usage_facts VALUES (
+            '8861', 'hermes_agent', NULL, NULL, NULL, NULL,
+            'kimi-coding', 'k3', 'coder', 'subscription_included', NULL, NULL,
+            1000, 500, 0, 0, NULL, 'stop', NULL, NULL,
+            '2026-07-31T01:00:00+00:00', 'measured'
+        )
+        """
+    )
+
+    events = reconcile_usage_facts(
+        connection, known_task_run_ids={"8861"}
+    )
+    usage = next(
+        event for event in events if event.event_type.value == "usage_observed"
+    )
+
+    assert usage.execution_id == stable_execution_id(
+        "kanban_timeline", "task_run:8861"
+    )
+    assert usage.task_run_id == "8861"
+
+
+def test_unknown_run_id_is_not_claimed_as_a_task_run() -> None:
+    """Only 346 of 1720 numeric run_ids are real task runs - proof required."""
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    _usage_schema(connection)
+    connection.execute(
+        """
+        INSERT INTO run_usage_facts VALUES (
+            '999999', 'claude_code', NULL, NULL, NULL, NULL,
+            'anthropic', 'claude-sonnet-5', NULL,
+            'subscription_included', NULL, NULL,
+            1000, 500, 0, 0, NULL, 'stop', NULL, NULL,
+            '2026-07-31T01:00:00+00:00', 'measured'
+        )
+        """
+    )
+
+    events = reconcile_usage_facts(connection, known_task_run_ids={"8861"})
+    usage = next(
+        event for event in events if event.event_type.value == "usage_observed"
+    )
+
+    assert usage.execution_id != stable_execution_id(
+        "kanban_timeline", "task_run:999999"
+    )
+    assert usage.task_run_id is None

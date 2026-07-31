@@ -8,7 +8,13 @@ safe to run after source work has committed and can be repeated idempotently.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -273,6 +279,7 @@ def reconcile_usage_facts(
     subscription_fees: Mapping[str, Decimal | str] | None = None,
     fee_version: str | None = None,
     limit: int | None = None,
+    known_task_run_ids: Collection[str] | None = None,
     equivalent_estimator: Callable[..., CostResult] = estimate_equivalent_cost,
     actual_estimator: Callable[..., CostResult] = estimate_usage_cost,
 ) -> list[ExecutionEvent]:
@@ -419,6 +426,14 @@ def reconcile_usage_facts(
         )
         source_execution_id = f"usage:{origin}:{run_identity}"
         task_run_id = _safe_class(row.get("task_run_id"))
+        if task_run_id is None and known_task_run_ids and run_id in known_task_run_ids:
+            # Some writers record the kanban run in `run_id` and leave
+            # `task_run_id` empty. Without this the spend forms its own
+            # execution instead of joining the work it paid for -- 346 live
+            # rows, and 16.5% of one chain's cost. Membership in the real
+            # run set is required: only 346 of 1720 numeric run_ids are
+            # task runs, so the shape of the id proves nothing by itself.
+            task_run_id = _safe_class(run_id)
         execution_id = (
             stable_execution_id(
                 "kanban_timeline", f"task_run:{task_run_id}"

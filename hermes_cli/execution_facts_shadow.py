@@ -19,7 +19,7 @@ import re
 import sqlite3
 import subprocess
 import time
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 from urllib.parse import quote
 import uuid
 
@@ -1005,6 +1005,31 @@ def collect_crontab_cohort(
     )
 
 
+def _known_task_run_ids(kanban_database: Path) -> frozenset[str]:
+    """The real kanban run ids, so a numeric usage run_id can be trusted.
+
+    Only about a fifth of numeric run_ids in usage facts are kanban runs, so
+    the shape of an id proves nothing; membership in this set does.
+    """
+    if not kanban_database.is_file():
+        return frozenset()
+    try:
+        connection = _read_only_connection(kanban_database)
+    except sqlite3.Error:
+        return frozenset()
+    try:
+        if not _table_exists(connection, "task_runs"):
+            return frozenset()
+        return frozenset(
+            str(row[0])
+            for row in connection.execute("SELECT id FROM task_runs")
+        )
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        connection.close()
+
+
 def collect_usage_cohort(
     database: Path | None,
     *,
@@ -1012,6 +1037,7 @@ def collect_usage_cohort(
     subscription_fees: Mapping[str, object] | None = None,
     fee_version: str | None = None,
     sample_limit: int = DEFAULT_USAGE_SAMPLE_LIMIT,
+    known_task_run_ids: Collection[str] | None = None,
 ) -> SourceCohort:
     if database is None or not database.is_file():
         return _unknown_cohort(
@@ -1044,6 +1070,7 @@ def collect_usage_cohort(
                 connection,
                 subscription_fees=subscription_fees,
                 fee_version=fee_version,
+                known_task_run_ids=known_task_run_ids,
                 # 0 means "read every row". Fee allocation needs the full
                 # population to divide a monthly fee correctly, so supplying
                 # fees implies it -- but the full scan is independently
@@ -1303,6 +1330,9 @@ def collect_shadow(
                 subscription_fees=config.subscription_fees,
                 fee_version=config.fee_version,
                 sample_limit=config.usage_sample_limit,
+                known_task_run_ids=_known_task_run_ids(
+                    config.hermes_home / "kanban.db"
+                ),
             )
         )
     if config.repository is not None:
