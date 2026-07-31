@@ -401,37 +401,15 @@ def test_prepare_worker_base_routes_real_conflict_to_fixer_despite_coincidence(r
     assert "partially landed" not in diagnosis
 
 
-def test_prepare_worker_base_ignores_dirty_scope_when_branch_does_not_change_path(repo):
+def test_prepare_worker_base_rejects_live_dirty_scope_overlap(repo):
     info = kwt.ensure_worktree(repo, "t_live_dirty_scope")
     worktree = info["path"]
     recorded_head = _git(worktree, "rev-parse", "HEAD")
     (repo / "a.txt").write_text("foreign live edit\n")
 
-    result = kwt.prepare_worker_base(
-        worktree,
-        recorded_head=recorded_head,
-        merge_target="main",
-        live_checkout=repo,
-        scope_files=["a.txt"],
-    )
-
-    assert result["action"] == "current"
-    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
-    assert kwt.dirty_files(worktree) == []
-
-
-def test_prepare_worker_base_rejects_divergent_live_dirty_content(repo):
-    info = kwt.ensure_worktree(repo, "t_live_dirty_divergent")
-    worktree = info["path"]
-    (worktree / "a.txt").write_text("worker change\n")
-    _git(worktree, "add", "a.txt")
-    _git(worktree, "commit", "-m", "worker change")
-    recorded_head = _git(worktree, "rev-parse", "HEAD")
-    (repo / "a.txt").write_text("foreign live edit\n")
-
     with pytest.raises(
         kwt.WorktreeError,
-        match="dirty files in live checkout collide with worker branch content",
+        match="dirty files in live checkout overlap declared task scope",
     ) as raised:
         kwt.prepare_worker_base(
             worktree,
@@ -442,6 +420,8 @@ def test_prepare_worker_base_rejects_divergent_live_dirty_content(repo):
         )
 
     assert "a.txt" in str(raised.value)
+    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
+    assert kwt.dirty_files(worktree) == []
 
 
 def test_prepare_worker_base_logs_but_allows_missing_scope_files(
@@ -1121,10 +1101,6 @@ def test_dispatch_once_rejects_live_dirty_declared_scope_before_worker_spawn(
             scope_contract={"allowed_paths": ["a.txt"]},
         )
         kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        worker = Path(spawned[-1])
-        (worker / "a.txt").write_text("worker branch edit\n")
-        _git(worker, "add", "a.txt")
-        _git(worker, "commit", "-m", "worker branch edit")
         assert kb.reclaim_task(conn, tid, reason="prepare scoped retry")
         (repo / "a.txt").write_text("foreign live edit\n")
 
@@ -1166,10 +1142,6 @@ def test_dispatch_once_rejects_live_dirty_body_declared_scope(
             body="Scope files (allowed edit paths):\na.txt\n",
         )
         kb.dispatch_once(conn, spawn_fn=fake_spawn)
-        worker = Path(spawned[-1])
-        (worker / "a.txt").write_text("worker branch edit\n")
-        _git(worker, "add", "a.txt")
-        _git(worker, "commit", "-m", "worker branch edit")
         assert kb.reclaim_task(conn, tid, reason="prepare body-scoped retry")
         (repo / "a.txt").write_text("foreign live edit\n")
 

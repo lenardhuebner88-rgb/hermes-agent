@@ -1044,32 +1044,6 @@ def test_overlap_with_dirty_live_checkout_parks(repo):
     assert _git(repo, "log", "--merges", "--oneline") == ""
 
 
-def test_matching_dirty_live_content_is_replaced_by_merge_without_parking(repo):
-    info = _provisioned_chain(repo, "t_same", relpath="a.txt",
-                              content="same content\n")
-    (repo / "a.txt").write_text("same content\n")
-
-    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
-                              gate_runner=_ok_gate)
-
-    assert out["action"] == "merged"
-    assert (repo / "a.txt").read_text() == "same content\n"
-    assert kwt.dirty_files(repo) == []
-
-
-def test_matching_dirty_live_content_is_restored_when_gate_fails(repo):
-    info = _provisioned_chain(repo, "t_same_red", relpath="a.txt",
-                              content="same content\n")
-    (repo / "a.txt").write_text("same content\n")
-
-    out = kwt.integrate_chain(repo, info["path"], info["branch"], "main",
-                              gate_runner=_red_gate_python, cleanup=False)
-
-    assert out["action"] == "parked"
-    assert (repo / "a.txt").read_text() == "same content\n"
-    assert kwt.dirty_files(repo) == ["a.txt"]
-
-
 def test_nonoverlapping_dirty_file_does_not_park(repo):
     """Entscheidung 2: overlap check only — foreign dirty files OUTSIDE the
     branch diff don't block the merge."""

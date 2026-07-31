@@ -30,8 +30,6 @@ LANE_FIXER_IDEM_PREFIX = "lane-scope-fixer:"
 LANE_FIXER_DISPATCHED_EVENT = "lane_scope_fixer_dispatched"
 LANE_FIXER_FOR_EVENT = "lane_scope_fixer_for"
 LANE_FIXER_PARENT_RESUMED_EVENT = "lane_scope_fixer_parent_resumed"
-LANE_SCOPE_ALLOWLISTED_EVENT = "lane_scope_allowlisted"
-LANE_SCOPE_ALLOWLIST_WAIVER_EVENT = "lane_scope_allowlist_waiver"
 
 
 def _lane_fingerprint(violating_paths: Iterable[str], expected_lane: str) -> str:
@@ -176,16 +174,14 @@ def _paths_changed_since(
     if not tip or not branch or not paths:
         return set()
     try:
+        # ``git diff A..B`` with *diff* is an endpoint comparison (same as
+        # ``git diff A B``), not a commit-range walk. Net tree delta between
+        # tip and branch tip — paths changed-and-reverted to identical content
+        # do not appear.
         changed = {
             line.strip()
             for line in kwt._git(
-                repo_root,
-                "log",
-                "--format=",
-                "--name-only",
-                f"{tip}..{branch}",
-                "--",
-                *sorted(paths),
+                repo_root, "diff", "--name-only", f"{tip}..{branch}",
             ).splitlines()
             if line.strip()
         }
@@ -193,134 +189,6 @@ def _paths_changed_since(
         # Fail closed: unknown git state must not keep a permanent allowlist.
         return set(paths)
     return {path for path in paths if path in changed}
-
-
-def _latest_lane_scope_park(
-    conn: sqlite3.Connection,
-    parent_id: str,
-) -> tuple[str, str]:
-    rows = conn.execute(
-        """
-        SELECT payload FROM task_events
-        WHERE task_id = ? AND kind = 'worker_gate_blocked'
-        ORDER BY id DESC
-        """,
-        (parent_id,),
-    ).fetchall()
-    for row in rows:
-        payload = _payload_dict(row["payload"])
-        if payload.get("gate") != "lane_scope":
-            continue
-        fingerprint = _lane_fingerprint_from_scope_payload(payload)
-        if fingerprint:
-            return (
-                fingerprint,
-                str(payload.get("park_branch_tip") or "").strip(),
-            )
-    return "", ""
-
-
-def _fixer_committed_paths(
-    repo_root: Any,
-    start_tip: str,
-    end_tip: str,
-    child_id: str,
-    paths: set[str],
-) -> set[str]:
-    """Paths changed by commits explicitly attributable to *child_id*."""
-    if not start_tip or not end_tip or not child_id or not paths:
-        return set()
-    try:
-        changed = {
-            line.strip()
-            for line in kwt._git(
-                repo_root,
-                "log",
-                "--format=",
-                "--name-only",
-                "--fixed-strings",
-                f"--grep=kanban({child_id}):",
-                f"{start_tip}..{end_tip}",
-                "--",
-                *sorted(paths),
-            ).splitlines()
-            if line.strip()
-        }
-    except Exception:
-        return set()
-    return {path for path in paths if path in changed}
-
-
-def _operator_waived_paths(
-    conn: sqlite3.Connection,
-    parent_id: str,
-    fingerprint: str,
-    child_id: str,
-    branch_tip: str,
-    paths: set[str],
-) -> set[str]:
-    """Return paths covered by an explicit, attributable operator waiver."""
-    rows = conn.execute(
-        """
-        SELECT payload FROM task_events
-        WHERE task_id = ? AND kind = ?
-        ORDER BY id DESC
-        """,
-        (parent_id, LANE_SCOPE_ALLOWLIST_WAIVER_EVENT),
-    ).fetchall()
-    waived: set[str] = set()
-    for row in rows:
-        payload = _payload_dict(row["payload"])
-        if str(payload.get("fingerprint") or "") != fingerprint:
-            continue
-        if str(payload.get("child_id") or "") != child_id:
-            continue
-        if not str(payload.get("operator_id") or "").strip():
-            continue
-        if str(payload.get("branch_tip") or "").strip() != branch_tip:
-            continue
-        waived.update(
-            str(path).strip()
-            for path in payload.get("paths") or []
-            if str(path).strip() in paths
-        )
-    return waived
-
-
-def _record_allowlisted_paths(
-    conn: sqlite3.Connection,
-    parent_id: str,
-    fingerprint: str,
-    evidence: dict[str, dict[str, set[str]]],
-) -> None:
-    payloads: list[dict[str, Any]] = []
-    for child_id, sources in evidence.items():
-        for source, paths in sources.items():
-            if not paths:
-                continue
-            payloads.append(
-                {
-                    "child_id": child_id,
-                    "fingerprint": fingerprint,
-                    "paths": sorted(paths),
-                    "source": source,
-                }
-            )
-    if not payloads:
-        return
-    with kb.write_txn(conn):
-        for payload in payloads:
-            kb._append_event(
-                conn, parent_id, LANE_SCOPE_ALLOWLISTED_EVENT, payload,
-            )
-    for payload in payloads:
-        _log.warning(
-            "lane-scope allowlist parent=%s child=%s fingerprint=%s paths=%s",
-            parent_id,
-            payload["child_id"],
-            fingerprint,
-            ",".join(payload["paths"]),
-        )
 
 
 def allowlisted_paths_for_parent(
@@ -358,7 +226,7 @@ def allowlisted_paths_for_parent(
         """,
         (parent_id, LANE_FIXER_DISPATCHED_EVENT),
     ).fetchall()
-    candidates: dict[str, set[str]] = {}
+    allow: set[str] = set()
     for row in rows:
         payload = _payload_dict(row["payload"])
         child_id = str(payload.get("child_id") or "").strip()
@@ -372,12 +240,10 @@ def allowlisted_paths_for_parent(
         ).fetchone()
         if child is None or child["status"] != "done":
             continue
-        child_paths = candidates.setdefault(child_id, set())
         for path in payload.get("violating_paths") or []:
             text = str(path).strip()
             if text:
-                child_paths.add(text)
-    allow = set().union(*candidates.values()) if candidates else set()
+                allow.add(text)
     if not allow:
         return set()
 
@@ -386,67 +252,53 @@ def allowlisted_paths_for_parent(
     if not want_fp:
         return set(allow)
 
-    resume_tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
-    latest_fp, park_tip = _latest_lane_scope_park(conn, parent_id)
-    if not resume_tip and latest_fp != want_fp:
-        return set()
-
-    # Production supplies git context. Legacy direct callers retain the exact
-    # fingerprint binding, but cannot earn new audit-backed immunity.
-    if repo_root is None or not branch:
-        return allow
-    try:
-        endpoint_tip = resume_tip or str(
-            kwt._git(repo_root, "rev-parse", branch)
-        ).strip()
-    except Exception:
-        return set()
-
-    evidence: dict[str, dict[str, set[str]]] = {}
-    for child_id, child_paths in candidates.items():
-        committed = _fixer_committed_paths(
-            repo_root, park_tip, endpoint_tip, child_id, child_paths,
-        )
-        waived = _operator_waived_paths(
-            conn, parent_id, want_fp, child_id, endpoint_tip, child_paths,
-        )
-        # A fixer commit is authoritative only after the completion hook has
-        # recorded the handoff tip. Without that boundary, later parent work
-        # cannot be distinguished from the fixer's own changes.
-        if committed and resume_tip:
-            evidence.setdefault(child_id, {})["fixer_commit"] = committed
-        if waived:
-            evidence.setdefault(child_id, {})["operator_waiver"] = waived
-
-    earned = {
-        path
-        for sources in evidence.values()
-        for paths in sources.values()
-        for path in paths
-    }
-    if resume_tip and earned:
-        committed_paths = {
-            path
-            for sources in evidence.values()
-            for path in sources.get("fixer_commit", set())
-        }
-        retouched = _paths_changed_since(
-            repo_root, resume_tip, branch, committed_paths,
-        )
+    tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
+    if tip and repo_root is not None and branch:
+        retouched = _paths_changed_since(repo_root, tip, branch, allow)
         if retouched:
-            for sources in evidence.values():
-                sources.get("fixer_commit", set()).difference_update(retouched)
-            earned = {
-                path
-                for sources in evidence.values()
-                for paths in sources.values()
-                for path in paths
-            }
-    if not earned:
-        return set()
+            # New parent commits after resume on allowlisted paths re-arm the
+            # gate (Opus B5) — the fixer only covered the original park.
+            return set()
+        return allow
+    if tip:
+        # Resume recorded but no git context — keep allowlist for this fp only.
+        return allow
 
-    _record_allowlisted_paths(conn, parent_id, want_fp, evidence)
-    return earned
+    # No resume tip (operator unblock path): allow only while the *latest*
+    # lane-scope park fingerprint still matches this violation, and use the
+    # park-time branch tip as retouch basis so brand-new parent commits on the
+    # same paths re-arm the gate (Opus R2-2 residual B5). Re-complete of the
+    # same park without new commits stays allowed.
+    latest_fp = ""
+    park_tip = ""
+    park_rows = conn.execute(
+        """
+        SELECT payload FROM task_events
+        WHERE task_id = ? AND kind = 'worker_gate_blocked'
+        ORDER BY id DESC
+        """,
+        (parent_id,),
+    ).fetchall()
+    for park_row in park_rows:
+        park_payload = _payload_dict(park_row["payload"])
+        if park_payload.get("gate") != "lane_scope":
+            continue
+        latest_fp = _lane_fingerprint_from_scope_payload(park_payload)
+        if latest_fp:
+            park_tip = str(park_payload.get("park_branch_tip") or "").strip()
+            break
+    if latest_fp != want_fp:
+        # Done fixer for this fp but no matching current park and no resume:
+        # refuse permanent allowlist (Opus B5).
+        return set()
+    if park_tip and repo_root is not None and branch:
+        retouched = _paths_changed_since(repo_root, park_tip, branch, allow)
+        if retouched:
+            return set()
+        return allow
+    # Matching park without a tip (legacy events) — keep allowlist for this
+    # fingerprint only so re-complete of the original park still works.
+    return allow
 
 
 def _branch_tip_for_parent(conn: sqlite3.Connection, parent_id: str) -> str:
