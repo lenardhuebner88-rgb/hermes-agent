@@ -167,6 +167,38 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
     assert call["tool_duration_ms"] == 17
 
 
+def test_state_backfill_origin_and_provenance_round_trip(tmp_path):
+    path = tmp_path / "facts.db"
+    upsert_run_facts(
+        "hermes_state_backfill:6193",
+        {
+            "origin": "hermes_state_backfill",
+            "task_run_id": "6193",
+            "correlation_source": "session_model_usage_run",
+            "input_tokens": 199491,
+            "output_tokens": 6410,
+            "cache_read_tokens": 534528,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 3106,
+            "total_tokens": 740429,
+            "cost_status": "included",
+            "cost_source": "none",
+            "source": "measured",
+        },
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts "
+        "WHERE run_id='hermes_state_backfill:6193'",
+    )
+    assert fact["origin"] == "hermes_state_backfill"
+    assert fact["total_tokens"] == 740429
+    assert fact["cost_status"] == "included"
+    assert fact["cost_source"] == "none"
+
+
 def test_main_run_identity_wins_over_aux_regardless_of_write_order(tmp_path):
     main = {"origin": "hermes_agent", "call_kind": "main_loop"}
     auxiliary = {"origin": "hermes_aux", "call_kind": "aux"}
@@ -282,6 +314,7 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
         "cache_read_tokens": 2,
         "cache_write_tokens": 3,
         "reasoning_tokens": 4,
+        "total_tokens": 21,
         "tool_call_count": 1,
         "tool_output_chars": 5,
         "duration_ms": 20,
@@ -316,6 +349,7 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
     assert fact["cache_read_tokens"] == 4
     assert fact["cache_write_tokens"] == 6
     assert fact["reasoning_tokens"] == 8
+    assert fact["total_tokens"] == 42
     assert fact["tool_call_count"] == 2
     assert fact["tool_output_chars"] == 10
     assert fact["duration_ms"] == 40

@@ -40,6 +40,8 @@ RUN_FACT_COLUMNS = (
     "call_kind",
     "billing_mode",
     "billing_mode_source",
+    "cost_status",
+    "cost_source",
     "serving_tier",
     "reasoning_effort",
     "input_tokens",
@@ -47,6 +49,7 @@ RUN_FACT_COLUMNS = (
     "cache_read_tokens",
     "cache_write_tokens",
     "reasoning_tokens",
+    "total_tokens",
     "tool_call_count",
     "tool_output_chars",
     "finish_reason",
@@ -101,6 +104,7 @@ _VALID_ORIGINS = frozenset(
         "kimi_cli",
         "grok_cli",
         "qwen_cli",
+        "hermes_state_backfill",
     }
 )
 _SECRET_ENV_MARKERS = ("SECRET", "TOKEN", "KEY", "PASSWORD", "CREDENTIAL")
@@ -127,6 +131,8 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     call_kind TEXT,
     billing_mode TEXT,
     billing_mode_source TEXT CHECK (billing_mode_source IN ('transcript', 'access_configuration')),
+    cost_status TEXT,
+    cost_source TEXT,
     serving_tier TEXT,
     reasoning_effort TEXT,
     input_tokens INTEGER,
@@ -134,6 +140,7 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
     reasoning_tokens INTEGER,
+    total_tokens INTEGER,
     tool_call_count INTEGER,
     tool_output_chars INTEGER,
     finish_reason TEXT,
@@ -312,6 +319,9 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                             "billing_mode_source",
                             "TEXT CHECK (billing_mode_source IN ('transcript', 'access_configuration'))",
                         ),
+                        ("cost_status", "TEXT"),
+                        ("cost_source", "TEXT"),
+                        ("total_tokens", "INTEGER"),
                         ("tool_duration_ms", "INTEGER"),
                     ),
                     "run_llm_calls": (
@@ -489,6 +499,8 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS cache_write_tokens,
             CASE WHEN COUNT(reasoning_tokens)=COUNT(*) THEN SUM(reasoning_tokens) END
                 AS reasoning_tokens,
+            CASE WHEN COUNT(total_tokens)=COUNT(*) THEN SUM(total_tokens) END
+                AS total_tokens,
             CASE WHEN COUNT(tool_call_count)>0 THEN SUM(tool_call_count) END
                 AS tool_call_count,
             CASE WHEN COUNT(tool_output_chars)>0 THEN SUM(tool_output_chars) END
