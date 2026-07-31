@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Hermes Execution Facts full usage scan
+
+[Timer]
+# Early morning, away from the interactive working day: the pass runs for
+# ~7 minutes at idle IO priority.
+OnCalendar=*-*-* 04:40:00
+AccuracySec=5m
+Persistent=true
+Unit=hermes-execution-facts-fullscan.service
+
+[Install]
+WantedBy=timers.target

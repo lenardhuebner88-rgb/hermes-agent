@@ -1,0 +1,27 @@
+[Unit]
+Description=Hermes Execution Facts full usage scan (daily)
+Documentation=file:/home/piet/.hermes/hermes-agent/docs/observability/execution-facts-runbook.md
+After=default.target
+ConditionUser=piet
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/piet/.hermes/hermes-agent
+Environment=HERMES_HOME=/home/piet/.hermes
+Environment=HERMES_EXECUTION_FACTS_MODE=shadow
+# The 15-minute collector samples usage rows to stay cheap. This pass reads
+# every row so the cost denominator is the real population (103412 rather
+# than 378 executions). It takes ~7 minutes, which is why it does not belong
+# in the frequent collector.
+ExecStart=/home/piet/.hermes/hermes-agent/.venv/bin/python /home/piet/.hermes/hermes-agent/scripts/execution_facts.py collect-shadow --db /mnt/data/hermes-observability/execution_facts.db --hermes-home /home/piet/.hermes --usage-db /mnt/data/hermes-observability/usage_facts.db --evidence-dir /mnt/data/hermes-observability/execution-facts-shadow --repository /home/piet/.hermes/hermes-agent --integration-ref main --usage-sample-limit 0
+TimeoutStartSec=2700
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/data/hermes-observability
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=true
+LockPersonality=true
