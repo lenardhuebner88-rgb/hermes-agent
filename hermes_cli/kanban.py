@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from hermes_constants import get_hermes_home
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_comment_delivery
 from hermes_cli import kanban_worktrees as kwt
@@ -608,6 +609,17 @@ def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
     p_reclaim.add_argument(
         "--reason", default=None,
         help="Human-readable reason (recorded on the reclaimed event)",
+    )
+
+    p_rescue = sub.add_parser(
+        "rescue-overlap",
+        help="Save one dirty overlap as a patch, then reset the path to HEAD",
+    )
+    p_rescue.add_argument("task_id", help="Task receiving the rescue receipt event")
+    p_rescue.add_argument("path", help="Dirty repository-relative file path")
+    p_rescue.add_argument(
+        "--repo", type=Path, required=True,
+        help="Live checkout containing the dirty path",
     )
 
     p_reassign = sub.add_parser(
@@ -2983,6 +2995,28 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
     print(f"Reclaimed {args.task_id}")
     return 0
 
+
+def _cmd_rescue_overlap(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        if kb.get_task(conn, args.task_id) is None:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
+        try:
+            receipt = kwt.rescue_dirty_path(
+                args.repo,
+                args.path,
+                rescue_dir=get_hermes_home() / "rescue",
+                task_id=args.task_id,
+            )
+        except kwt.WorktreeError as exc:
+            print(f"cannot rescue overlap: {exc}", file=sys.stderr)
+            return 1
+        kb.add_event(conn, args.task_id, "overlap_rescued", receipt)
+    print(f"Rescued {receipt['path']} from {receipt['repo']}")
+    print(f"Rescue patch: {receipt['patch_path']}")
+    print(f"Restore with: git -C {receipt['repo']} apply {receipt['patch_path']}")
+    return 0
+
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
     if profile:
@@ -5247,6 +5281,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "assign":   _cmd_assign,
     "set-model": _cmd_set_model,
     "reclaim":  _cmd_reclaim,
+    "rescue-overlap": _cmd_rescue_overlap,
     "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics,
     "diag":     _cmd_diagnostics,

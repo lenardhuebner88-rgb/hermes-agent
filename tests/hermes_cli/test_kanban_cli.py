@@ -99,6 +99,43 @@ def test_run_slash_create_and_list(kanban_home):
     assert "alice" in out
 
 
+def test_run_slash_rescue_overlap_writes_reversible_patch_and_event(
+    kanban_home, tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"],
+                   cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("base\n")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True,
+                   capture_output=True)
+    (repo / "a.txt").write_text("foreign change\n")
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="rescue target", assignee="alice")
+
+    output = kc.run_slash(
+        f"rescue-overlap {task_id} a.txt --repo {repo}"
+    )
+
+    patch_path = Path(output.split("Rescue patch: ", 1)[1].splitlines()[0])
+    assert patch_path.parent == kanban_home / "rescue"
+    assert patch_path.exists()
+    assert (repo / "a.txt").read_text() == "base\n"
+    subprocess.run(["git", "apply", str(patch_path)], cwd=repo, check=True)
+    assert (repo / "a.txt").read_text() == "foreign change\n"
+    with kb.connect() as conn:
+        events = kb.list_events(conn, task_id)
+    rescued = [event for event in events if event.kind == "overlap_rescued"]
+    assert len(rescued) == 1
+    assert rescued[0].payload is not None
+    assert rescued[0].payload["path"] == "a.txt"
+    assert rescued[0].payload["patch_path"] == str(patch_path)
+
+
 def test_run_slash_create_persists_optional_evidence_freshness_stamp(kanban_home):
     out = kc.run_slash(
         "create 'reproduce red gate' --assignee alice "

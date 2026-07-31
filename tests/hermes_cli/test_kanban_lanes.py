@@ -9,11 +9,15 @@ DB; the dispatcher hot-reads the ACTIVE lane at every spawn. Precedence:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_lane_fixer as lane_fixer
+from hermes_cli import kanban_worktrees as kwt
+from tests.hermes_cli._kanban_test_helpers import _commit_in, _events, _git, _ok_gate
 
 
 @pytest.fixture
@@ -28,6 +32,295 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
     kb.init_db()
     return home
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """Real git repo used to exercise the completion-time lane guard."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "tester")
+    (root / "README.md").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "base")
+    return root
+
+
+def _complete_scoped_task(
+    conn,
+    repo,
+    root_id,
+    *,
+    assignee,
+    scope_files,
+    commits,
+    scope_contract=None,
+):
+    info = kwt.ensure_worktree(repo, root_id)
+    for relpath, content in commits:
+        _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): work")
+    body = None
+    if scope_files is not None:
+        body = (
+            "Scope files (allowed edit paths):\n"
+            + "\n".join(scope_files)
+            + "\n\n- AC-1: done\n"
+        )
+    task_id = kb.create_task(
+        conn,
+        title=f"declared scope {assignee}",
+        body=body,
+        assignee=assignee,
+        workspace_kind="dir",
+        workspace_path=str(info["path"]),
+        scope_contract=scope_contract,
+    )
+    result = kwt.maybe_integrate_on_complete(
+        conn, task_id, gate_runner=_ok_gate,
+    )
+    return task_id, result
+
+
+def _park_unscoped_parent_with_lane_fixer(conn, repo, root_id):
+    info = kwt.ensure_worktree(repo, root_id)
+    path = "web/src/control/LandingPack.tsx"
+    _commit_in(
+        info["path"],
+        path,
+        "export const LandingPack = 1\n",
+        msg=f"kanban({root_id}): work",
+    )
+    parent_id = kb.create_task(
+        conn,
+        title="unscoped backend task",
+        assignee="coder",
+        workspace_kind="dir",
+        workspace_path=str(info["path"]),
+    )
+    result = kwt.maybe_integrate_on_complete(
+        conn, parent_id, gate_runner=_ok_gate,
+    )
+    assert result is not None and result["action"] == "parked"
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+            "WHERE id = ?",
+            (parent_id,),
+        )
+        kb._append_event(
+            conn,
+            parent_id,
+            "blocked",
+            {"reason": result["reason"], "kind": "integration"},
+        )
+    dispatched = _events(
+        conn, parent_id, lane_fixer.LANE_FIXER_DISPATCHED_EVENT,
+    )
+    assert len(dispatched) == 1
+    return parent_id, dispatched[0]["child_id"], info, path, dispatched[0]
+
+
+@pytest.mark.parametrize("assignee", ["coder", "coder-frontend"])
+def test_declared_mixed_scope_overrides_binary_lane_guard(
+    repo, kanban_home, assignee,
+):
+    """Regression for t_d73f9deb: one declared task may span both lanes."""
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            f"t_mixed_{assignee}",
+            assignee=assignee,
+            scope_files=["web/src/control/**", "tests/hermes_cli/**"],
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_declared_scope_rejects_out_of_scope_path_even_when_lane_matches(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            "t_narrow_scope",
+            assignee="coder",
+            scope_files=["web/src/control/**"],
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "parked"
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "tests/hermes_cli/test_landing_pack.py",
+        ]
+
+
+def test_structured_scope_contract_also_overrides_binary_lane_guard(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        task_id, result = _complete_scoped_task(
+            conn,
+            repo,
+            "t_structured_scope",
+            assignee="coder-frontend",
+            scope_files=None,
+            scope_contract={
+                "allowed_paths": ["web/src/control/**", "tests/hermes_cli/**"],
+            },
+            commits=[
+                ("web/src/control/LandingPack.tsx", "export const LandingPack = 1\n"),
+                ("tests/hermes_cli/test_landing_pack.py", "def test_pack(): pass\n"),
+            ],
+        )
+
+        assert result is not None and result["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_guard_without_declared_scope_keeps_binary_rule(repo, kanban_home):
+    info = kwt.ensure_worktree(repo, "t_no_declared_scope")
+    _commit_in(
+        info["path"],
+        "web/src/control/LandingPack.tsx",
+        "export const LandingPack = 1\n",
+        msg="kanban(t_no_declared_scope): work",
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="unscoped backend task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+        )
+        result = kwt.maybe_integrate_on_complete(
+            conn, task_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked"
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "web/src/control/LandingPack.tsx",
+        ]
+
+
+def test_commitless_lane_fixer_does_not_allowlist_violation(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, _info, path, _dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, repo, "t_commitless_lane_fixer",
+            )
+        )
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,))
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked"
+        blocked = _events(conn, parent_id, "worker_gate_blocked")
+        assert blocked[-1]["violating_paths"] == [path]
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        ) == []
+
+
+def test_legitimate_lane_allowlist_is_audited_on_board_and_log(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, repo, "t_audited_lane_allowlist",
+            )
+        )
+        _commit_in(
+            info["path"],
+            path,
+            "export const LandingPack = 2\n",
+            msg=f"kanban({child_id}): adopt frontend path",
+        )
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,))
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        with caplog.at_level(logging.WARNING, logger=lane_fixer.__name__):
+            result = kwt.maybe_integrate_on_complete(
+                conn, parent_id, gate_runner=_ok_gate,
+            )
+
+        assert result is not None and result["action"] == "merged"
+        audited = _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        )
+        assert len(audited) == 1
+        assert audited[0] == {
+            "child_id": child_id,
+            "fingerprint": dispatch["fingerprint"],
+            "paths": [path],
+            "source": "fixer_commit",
+        }
+        assert (
+            f"lane-scope allowlist parent={parent_id} child={child_id} "
+            f"fingerprint={dispatch['fingerprint']} paths={path}"
+        ) in caplog.text
+
+
+def test_explicit_operator_waiver_can_allow_commitless_fixer(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, repo, "t_operator_lane_waiver",
+            )
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                parent_id,
+                lane_fixer.LANE_SCOPE_ALLOWLIST_WAIVER_EVENT,
+                {
+                    "branch_tip": _git(info["path"], "rev-parse", "HEAD").strip(),
+                    "child_id": child_id,
+                    "fingerprint": dispatch["fingerprint"],
+                    "operator_id": "operator:test",
+                    "paths": [path],
+                },
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "merged"
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        )[-1] == {
+            "child_id": child_id,
+            "fingerprint": dispatch["fingerprint"],
+            "paths": [path],
+            "source": "operator_waiver",
+        }
 
 
 # ---------------------------------------------------------------------------

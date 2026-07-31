@@ -23365,6 +23365,43 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
     return streak
 
 
+_INTENTIONAL_SIGKILL_REASONS = frozenset(
+    {"archive_worker_alive", "manual_reclaim_worker_alive"}
+)
+
+
+def _intentional_sigkill_marker(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+) -> Optional[dict]:
+    """Return the current run's audited archive/reclaim SIGKILL marker."""
+    if run_id is None:
+        return None
+    row = conn.execute(
+        """SELECT payload FROM task_events
+           WHERE task_id=? AND run_id=? AND kind='reclaim_deferred'
+           ORDER BY id DESC LIMIT 1""",
+        (task_id, run_id),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    termination = payload.get("termination")
+    if (
+        payload.get("reason") not in _INTENTIONAL_SIGKILL_REASONS
+        or not isinstance(termination, dict)
+        or termination.get("sigkill") is not True
+    ):
+        return None
+    return payload
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -23397,6 +23434,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    externally_terminated: list[str] = []
     transient_recovered: list[str] = []
     persistent_blocks: list[tuple[str, str, int, Optional[int]]] = []
     # Per-crash details collected inside the main txn, used after it
@@ -23500,10 +23538,31 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             if exact_exit is None and _pid_alive(row["worker_pid"]):
                 continue
             kind, code = exact_exit or _classify_worker_exit(pid)
+            intentional_termination = _intentional_sigkill_marker(
+                conn, row["id"], row["current_run_id"],
+            )
             rate_limited_exit = False
+            externally_terminated_exit = False
             recoverable_protocol_miss = False
             transient_pid_loss = False
-            if kind == "clean_exit":
+            if intentional_termination is not None:
+                protocol_violation = False
+                externally_terminated_exit = True
+                reason = intentional_termination["reason"]
+                error_text = (
+                    f"pid {pid} intentionally terminated by {reason}"
+                )
+                event_kind = "externally_terminated"
+                event_payload = {
+                    "pid": pid,
+                    "claimer": row["claim_lock"],
+                    "reason": reason,
+                    "signal": "SIGKILL",
+                    "exit_kind": kind,
+                    "exit_code": code,
+                    "requested_termination": intentional_termination["termination"],
+                }
+            elif kind == "clean_exit":
                 evidence = _deliverable_evidence_for_protocol_miss(
                     conn,
                     row["id"],
@@ -23625,7 +23684,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
                 _run_outcome = (
-                    "rate_limited"
+                    "externally_terminated"
+                    if externally_terminated_exit
+                    else "rate_limited"
                     if rate_limited_exit
                     else TRANSIENT_RETRY_OUTCOME
                     if transient_pid_loss
@@ -23648,16 +23709,16 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
-                # Quota walls are exempt from the streak breaker: the respawn
-                # guard already defers them on a cooldown and they self-heal
-                # when the quota window resets — terminal-blocking them would
-                # turn every budget wall into manual operator work. Protocol
-                # violations are likewise handled by their dedicated streak
-                # below, which preserves the per-task max_retries override and
-                # emits the gave_up contract on the terminal attempt.
+                # Intentional external terminations are not failures. Quota
+                # walls are also exempt: the respawn guard defers them on a
+                # cooldown and they self-heal when the quota window resets.
+                # Protocol violations are handled by their dedicated streak
+                # below, preserving the per-task max_retries override.
                 persistent_streak = (
                     None
-                    if rate_limited_exit or protocol_violation
+                    if externally_terminated_exit
+                    or rate_limited_exit
+                    or protocol_violation
                     else _persistent_failure_fingerprint_streak(conn, row["id"])
                 )
                 if persistent_streak is not None:
@@ -23672,7 +23733,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (row["id"], fingerprint, streak, run_id)
                     )
                     continue
-                if rate_limited_exit:
+                if externally_terminated_exit:
+                    externally_terminated.append(row["id"])
+                elif rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
                     # respawn until the window clears — WITHOUT touching
@@ -23842,9 +23905,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # and tests that destructure the result; ``dispatch_once`` reads this
     # side-channel attribute to populate ``DispatchResult.auto_blocked``.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
-    # Same side-channel for rate-limited requeues — these did NOT count a
-    # failure and are NOT crashes, so they stay out of the ``crashed`` return.
+    # Side channels for non-crash requeues that did not count a failure.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_externally_terminated = externally_terminated  # type: ignore[attr-defined]
     detect_crashed_workers._last_transient_recovered = transient_recovered  # type: ignore[attr-defined]
     return crashed
 
