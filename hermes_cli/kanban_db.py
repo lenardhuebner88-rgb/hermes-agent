@@ -22117,27 +22117,31 @@ def reap_worker_zombies() -> "list[int]":
     """Reap all zombie children of this process without blocking.
 
     Returns the list of reaped PIDs. Safe to call when there are no
-    children (returns []). No-op on Windows.
+    children (returns []). No-op on Windows (``os.WNOHANG`` does not exist
+    there), which the early return below keeps close to the waitpid call so
+    the source-level Windows guard lint can see it.
+
+    Shares the process-generation lock with Popen + handle/identity
+    registration.  Otherwise a newly spawned child can reuse the just-reaped
+    numeric PID between waitpid() and the registry write, causing the old
+    wait status to release the new generation.
     """
     reaped: "list[int]" = []
-    if os.name != "nt":
-        try:
-            # Share the process-generation lock with Popen + handle/identity
-            # registration.  Otherwise a newly spawned child can reuse the
-            # just-reaped numeric PID between waitpid() and the registry write,
-            # causing the old wait status to release the new generation.
-            with _worker_exit_registry_lock:
-                while True:
-                    try:
-                        pid, status = os.waitpid(-1, os.WNOHANG)
-                    except ChildProcessError:
-                        break
-                    if pid == 0:
-                        break
-                    _record_worker_exit(pid, status)
-                    reaped.append(pid)
-        except Exception:
-            pass
+    if os.name == "nt":
+        return reaped
+    try:
+        with _worker_exit_registry_lock:
+            while True:
+                try:
+                    pid, status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if pid == 0:
+                    break
+                _record_worker_exit(pid, status)
+                reaped.append(pid)
+    except Exception:
+        pass
     return reaped
 
 
