@@ -1281,13 +1281,15 @@ def _create_recovery_task(conn, candidate: LL2Candidate, recovery_key: str) -> s
                 f"Reparatur dort, wo der Branch lebt — im Loop-Worktree "
                 f"`~/.hermes/loops/{pack}/wt` (dort ist `{branch}` ausgecheckt):\n"
                 "1. Worktree-Status prüfen (muss sauber sein)\n"
-                "2. `git rebase main`, Konflikte auflösen\n"
-                "3. Betroffene Gates grün fahren\n"
+                f"2. `~/.hermes/loops/{pack}/STOP` und Pack-Lock respektieren\n"
+                "3. `git rebase main`, Konflikte auflösen\n"
+                "4. `scripts/run-affected.sh main` im Loop-Worktree grün fahren\n"
                 "Danach landet der nächste Landing-Loop-Lauf den Branch selbst."
             ),
             assignee="coder",
             created_by="landing_loop",
             idempotency_key=key,
+            skills=["loop-branch-repair"],
         )
 
     task_id = create(recovery_key)
