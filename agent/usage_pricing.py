@@ -1021,6 +1021,21 @@ def _usage_field_observed(container: Any, name: str) -> bool:
     return hasattr(container, name) and getattr(container, name, None) is not None
 
 
+def _usage_field_value(container: Any, name: str, default: Any = 0) -> Any:
+    """Read a usage field from a mapping payload or an object, symmetrically.
+
+    Must accept the same shapes as ``_usage_field_observed``: probing with one
+    and reading with the other is how a field gets reported as observed while
+    its value silently falls back to 0 — the exact "observed, was zero" lie that
+    the NULL/0 distinction exists to prevent.
+    """
+    if container is None:
+        return default
+    if isinstance(container, Mapping):
+        return container.get(name, default)
+    return getattr(container, name, default)
+
+
 def resolve_billing_route(
     model_name: str,
     provider: Optional[str] = None,
@@ -1336,37 +1351,31 @@ def normalize_usage(
         input_total = _to_int(getattr(response_usage, "input_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
         details = getattr(response_usage, "input_tokens_details", None)
-        cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
+        cache_read_tokens = _to_int(_usage_field_value(details, "cached_tokens"))
         cache_read_tokens_observed = _usage_field_observed(
             details, "cached_tokens"
         )
-        response_payload = response_usage
-        model_dump = getattr(response_usage, "model_dump", None)
-        if callable(model_dump):
-            response_payload = model_dump(exclude_unset=True)
-        # Primary: OpenAI-style input_tokens_details. Fallback: Anthropic-style
-        # top-level fields that non-OpenAI backends can expose while sharing
-        # the codex_responses API mode.
+        # Primary: OpenAI-style input_tokens_details.cache_write_tokens — the name
+        # the pinned SDK defines. Fallback: Anthropic-style top-level field that
+        # non-OpenAI backends can expose while sharing the codex_responses mode.
         if _usage_field_observed(details, "cache_write_tokens"):
             cache_write_tokens = _to_int(
-                getattr(details, "cache_write_tokens")
+                _usage_field_value(details, "cache_write_tokens")
             )
-        elif _usage_field_observed(
-            response_payload, "cache_creation_input_tokens"
-        ):
-            cache_write_tokens = _to_int(
-                getattr(response_usage, "cache_creation_input_tokens", 0)
-            )
+            cache_write_tokens_observed = True
         else:
-            cache_write_tokens = 0
-        cache_write_tokens_observed = any(
-            (
-                _usage_field_observed(details, "cache_write_tokens"),
-                _usage_field_observed(
-                    response_payload, "cache_creation_input_tokens"
-                ),
+            # model_dump(exclude_unset=True) keeps the set/unset distinction for
+            # a pydantic payload; a plain mapping or namespace passes through.
+            response_payload = response_usage
+            model_dump = getattr(response_usage, "model_dump", None)
+            if callable(model_dump):
+                response_payload = model_dump(exclude_unset=True)
+            cache_write_tokens_observed = _usage_field_observed(
+                response_payload, "cache_creation_input_tokens"
             )
-        )
+            cache_write_tokens = _to_int(
+                _usage_field_value(response_payload, "cache_creation_input_tokens")
+            )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
         prompt_total = _to_int(getattr(response_usage, "prompt_tokens", 0))

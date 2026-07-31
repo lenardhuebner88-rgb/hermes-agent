@@ -123,6 +123,47 @@ def test_normalize_usage_codex_responses_keeps_cached_tokens_read_side():
     assert normalized.input_tokens == 2100
 
 
+def test_normalize_usage_codex_responses_accepts_mapping_shaped_details():
+    """A mapping-shaped ``input_tokens_details`` must not crash the branch.
+
+    Not every caller objectifies its payload first: the board_facts wrapper runs
+    ``_objectify`` but the langfuse plugin hands ``response.usage`` straight to
+    ``normalize_usage``. Probing with ``_usage_field_observed`` (which accepts
+    mappings) and reading with a bare ``getattr`` raised AttributeError here.
+    """
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=400,
+        input_tokens_details={"cached_tokens": 900, "cache_write_tokens": 700},
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 700
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.cache_read_tokens == 900
+    assert normalized.input_tokens == 1400
+
+
+def test_normalize_usage_codex_responses_mapping_fallback_value_matches_observed():
+    """Reported-as-observed and the reported value must come from one source.
+
+    Reading the fallback off the object while probing the mapping produced
+    ``observed=True`` with ``cache_write_tokens=0`` — "observed, was zero",
+    which is a different and false statement from "not observed".
+    """
+    usage = {
+        "input_tokens": 3000,
+        "output_tokens": 400,
+        "cache_creation_input_tokens": 700,
+    }
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.cache_write_tokens == 700
+
+
 def test_normalize_usage_anthropic_keeps_cache_buckets_separate():
     usage = SimpleNamespace(
         input_tokens=1000,
