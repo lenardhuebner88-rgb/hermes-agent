@@ -41,6 +41,19 @@ ORIGIN = "claude_code"
 PROVIDER = "anthropic"
 NO_REQUEST_ID = "__no_request_id__"
 RUN_ID_PREFIX = "claude_code"
+_EXACT_RUN_CORRELATION_SOURCES = frozenset(
+    {
+        "claude_session_id_run",
+        "claude_parent_session_id_run",
+        "claude_worktree_path_run",
+    }
+)
+_TASK_CORRELATION_SOURCES = frozenset(
+    {
+        "claude_session_id_task",
+        "claude_parent_session_id_task",
+    }
+)
 
 # Token fields we accept from message.usage (numbers only — not cache_creation).
 _USAGE_TOKEN_KEYS = (
@@ -839,11 +852,13 @@ def recorrelate_existing_calls(
             ambiguous_predicate = (
                 "((session_id IN ("
                 f"{placeholders}) "
-                "AND correlation_source LIKE 'claude_session_id_%') "
+                "AND (correlation_source LIKE 'claude_session_id_%' "
+                "OR correlation_source='claude_worktree_path_run')) "
                 "OR (call_kind='subagent' AND lane IN ("
                 f"{placeholders}) "
-                "AND correlation_source LIKE "
-                "'claude_parent_session_id_%'))"
+                "AND (correlation_source LIKE "
+                "'claude_parent_session_id_%' OR "
+                "correlation_source='claude_worktree_path_run')))"
             )
             ambiguous_params = (ORIGIN, *chunk, *chunk)
             if dry_run:
@@ -965,7 +980,9 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
     try:
         rows = connection.execute(
             "SELECT CASE "
-            "WHEN correlation_source LIKE 'claude_parent_session_id_%' "
+            "WHEN (correlation_source LIKE 'claude_parent_session_id_%' "
+            "OR (correlation_source='claude_worktree_path_run' "
+            "AND call_kind='subagent')) "
             "AND lane IS NOT NULL AND TRIM(lane) != '' THEN lane "
             "ELSE session_id END AS correlation_session_id, "
             "correlation_source FROM run_usage_facts "
@@ -977,13 +994,7 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
             key = str(session_id).strip()
             value = str(source).strip() if source is not None else None
             previous = states.get(key)
-            if (
-                value in {
-                    "claude_session_id_run",
-                    "claude_parent_session_id_run",
-                }
-                or previous is None
-            ):
+            if value in _EXACT_RUN_CORRELATION_SOURCES or previous is None:
                 states[key] = value
         return states
     finally:
@@ -1008,54 +1019,31 @@ def _backfill_snapshot(
                 continue
             if (
                 projected_states.get(session_id)
-                in {
-                    "claude_session_id_run",
-                    "claude_parent_session_id_run",
-                }
+                in _EXACT_RUN_CORRELATION_SOURCES
                 and correlation.task_run_id is None
             ):
                 continue
-            projected_states[session_id] = (
-                "claude_session_id_run"
-                if correlation.task_run_id is not None
-                else "claude_session_id_task"
-            )
+            projected_states[session_id] = correlation.source
         exact_run = {
             session_id
             for session_id, source in projected_states.items()
-            if source
-            in {
-                "claude_session_id_run",
-                "claude_parent_session_id_run",
-            }
+            if source in _EXACT_RUN_CORRELATION_SOURCES
         }
         task_only = {
             session_id
             for session_id, source in projected_states.items()
-            if source
-            in {
-                "claude_session_id_task",
-                "claude_parent_session_id_task",
-            }
+            if source in _TASK_CORRELATION_SOURCES
         }
     else:
         exact_run = {
             session_id
             for session_id, source in states.items()
-            if source
-            in {
-                "claude_session_id_run",
-                "claude_parent_session_id_run",
-            }
+            if source in _EXACT_RUN_CORRELATION_SOURCES
         }
         task_only = {
             session_id
             for session_id, source in states.items()
-            if source
-            in {
-                "claude_session_id_task",
-                "claude_parent_session_id_task",
-            }
+            if source in _TASK_CORRELATION_SOURCES
         }
     return {
         "candidate_sessions": len(candidate_ids),
@@ -1070,18 +1058,24 @@ def backfill_existing_correlations(
     *,
     db_path: Path | str | None = None,
     kanban_paths: Optional[Sequence[Path | str]] = None,
+    projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
     apply: bool = False,
 ) -> dict[str, Any]:
-    """Preview or apply the exact-session join to existing Claude usage facts.
+    """Preview or apply exact session/path joins to existing Claude facts.
 
-    This explicit path reads no transcript contents. Its report contains only
-    aggregate counts and per-board database status/error classes.
+    This explicit path reads transcript filenames, never their contents. Its
+    report contains only aggregate counts and board status/error classes.
     """
     from hermes_cli.usage_fact_correlation import scan_claude_session_correlations
 
     resolved_db = usage_facts_db_path(db_path)
     states = _existing_claude_correlation_state(resolved_db)
-    scan = scan_claude_session_correlations(states, kanban_paths=kanban_paths)
+    transcript_paths = discover_jsonl_files(Path(projects_root))
+    scan = scan_claude_session_correlations(
+        states,
+        kanban_paths=kanban_paths,
+        transcript_paths=transcript_paths,
+    )
     before = _backfill_snapshot(
         states,
         correlations=scan.correlations,
@@ -1158,6 +1152,7 @@ def harvest(
     correlation_scan = scan_claude_session_correlations(
         candidate_session_ids,
         kanban_paths=kanban_paths,
+        transcript_paths=files,
     )
     correlations = correlation_scan.correlations
     stats.sessions_correlated = len(correlations)
@@ -1308,6 +1303,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.backfill_correlations:
         report = backfill_existing_correlations(
             db_path=args.db,
+            projects_root=args.projects_root,
             apply=args.apply,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))

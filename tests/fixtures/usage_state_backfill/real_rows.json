@@ -1,0 +1,49 @@
+{
+  "provenance": "Read-only samples from the live 2026-07-31 schemas; identifiers and values are intentionally unchanged.",
+  "claude_worktree": {
+    "transcript_path": "/home/piet/.claude/projects/-home-piet--hermes-hermes-agent--worktrees-kanban-review-t-c8adf037-r8896-8cf9d99d322c/c4d56aa4-e19e-47ae-98be-f8747476b75e.jsonl",
+    "session_id": "c4d56aa4-e19e-47ae-98be-f8747476b75e",
+    "task_run": {
+      "id": 8896,
+      "task_id": "t_c8adf037",
+      "profile": "reviewer",
+      "metadata": {
+        "claude_session_id": "eddcbeb2-f4c1-4ca1-97ec-29c39b3d8a0a"
+      }
+    }
+  },
+  "state_usage": {
+    "source_db": "/home/piet/.hermes/profiles/admin/state.db",
+    "task_run": {
+      "id": 6193,
+      "task_id": "t_82551b06",
+      "profile": "admin",
+      "input_tokens": 190122,
+      "output_tokens": 6189,
+      "metadata": {
+        "worker_session_id": "20260704_210211_6760f0"
+      }
+    },
+    "session_model_usage": {
+      "session_id": "20260704_210211_6760f0",
+      "model": "gpt-5.4-mini",
+      "billing_provider": "openai-codex",
+      "billing_base_url": "https://chatgpt.com/backend-api/codex",
+      "billing_mode": "subscription_included",
+      "task": "",
+      "api_call_count": 23,
+      "input_tokens": 199491,
+      "output_tokens": 6410,
+      "cache_read_tokens": 534528,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 3106,
+      "estimated_cost_usd": 0.0,
+      "actual_cost_usd": 0.0,
+      "cost_status": "included",
+      "cost_source": "none",
+      "first_seen": 1783191733.7058184,
+      "last_seen": 1783191733.7058184
+    },
+    "expected_total_tokens": 740429
+  }
+}

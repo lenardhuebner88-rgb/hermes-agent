@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections import defaultdict
 from contextlib import closing
@@ -25,6 +26,11 @@ _CHAIN_KEYS = (
     "workflow_id",
 )
 _SQLITE_PARAMETER_BATCH = 500
+_CLAUDE_WORKTREE_RUN_RE = re.compile(
+    r"(?<![0-9A-Za-z])kanban(?:-|/)review(?:-|/)"
+    r"t(?:-|_)(?P<task_hex>[0-9a-fA-F]{8})(?:-|_)"
+    r"r(?P<task_run_id>[0-9]+)(?![0-9])"
+)
 
 
 def _text(value: object) -> str | None:
@@ -48,7 +54,7 @@ def _metadata(value: object) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class WorkerCorrelation:
-    """A correlation proven by one exact session identifier."""
+    """A correlation proven by one exact session or worktree identifier."""
 
     session_id: str
     task_id: str
@@ -108,6 +114,65 @@ class DatabaseScanResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _WorktreeRunAnchor:
+    """One run identity encoded in a Claude project/transcript path."""
+
+    session_id: str
+    task_id: str
+    task_run_id: str
+
+
+def _transcript_session_id(path: Path) -> str | None:
+    """Return the correlation identity carried by a transcript path.
+
+    Main transcripts use their filename stem. Subagent transcripts are charged
+    through the exact parent-session directory, matching the harvester's
+    existing ``lane`` contract.
+    """
+    parts = path.parts
+    if path.parent.name == "subagents" and len(parts) >= 3:
+        return _text(parts[-3])
+    return _text(path.stem)
+
+
+def _worktree_run_anchors(
+    transcript_paths: Iterable[Path | str],
+    *,
+    wanted_session_ids: set[str],
+) -> tuple[dict[str, _WorktreeRunAnchor], frozenset[str]]:
+    """Extract only unique ``session -> (task, run)`` path anchors."""
+    candidates: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for raw_path in transcript_paths:
+        path = Path(raw_path)
+        session_id = _transcript_session_id(path)
+        if session_id is None or session_id not in wanted_session_ids:
+            continue
+        matches = {
+            (
+                f"t_{match.group('task_hex').lower()}",
+                match.group("task_run_id"),
+            )
+            for match in _CLAUDE_WORKTREE_RUN_RE.finditer(str(path))
+        }
+        candidates[session_id].update(matches)
+
+    anchors: dict[str, _WorktreeRunAnchor] = {}
+    ambiguous: set[str] = set()
+    for session_id, matches in candidates.items():
+        if len(matches) != 1:
+            if matches:
+                ambiguous.add(session_id)
+            continue
+        task_id, task_run_id = next(iter(matches))
+        anchors[session_id] = _WorktreeRunAnchor(
+            session_id=session_id,
+            task_id=task_id,
+            task_run_id=task_run_id,
+        )
+    return anchors, frozenset(ambiguous)
+
+
 def discover_kanban_databases(
     paths: Sequence[Path | str] | None = None,
 ) -> tuple[Path, ...]:
@@ -159,18 +224,32 @@ def scan_claude_session_correlations(
     session_ids: Iterable[str],
     *,
     kanban_paths: Sequence[Path | str] | None = None,
+    transcript_paths: Iterable[Path | str] = (),
 ) -> CorrelationScan:
-    """Resolve only unambiguous Claude session → worker relationships.
+    """Resolve only unambiguous Claude session/path → worker relationships.
 
     Multiple continuations may legitimately reuse a session for one task. In
     that case the task link remains exact but ``task_run_id`` stays NULL.
-    Sessions spanning tasks or boards are excluded completely.
+    When metadata has no session link, an encoded review-worktree path may
+    provide an exact run anchor. The path anchor is accepted only after the
+    board row proves that the run exists and belongs to the encoded task.
+    Sessions spanning tasks, runs, or boards are excluded completely.
     """
     wanted = sorted({_text(value) for value in session_ids} - {None})
     if not wanted:
         return CorrelationScan({}, frozenset(), 0, 0, ())
 
+    wanted_set = set(wanted)
+    path_anchors, path_anchor_ambiguities = _worktree_run_anchors(
+        transcript_paths,
+        wanted_session_ids=wanted_set,
+    )
+    anchors_by_run: dict[str, list[_WorktreeRunAnchor]] = defaultdict(list)
+    for anchor in path_anchors.values():
+        anchors_by_run[anchor.task_run_id].append(anchor)
+
     matches: dict[str, list[dict[str, str | None]]] = defaultdict(list)
+    path_matches: dict[str, list[dict[str, str | None]]] = defaultdict(list)
     database_paths = discover_kanban_databases(kanban_paths)
     databases_scanned = 0
     databases_failed = 0
@@ -211,6 +290,41 @@ def scan_claude_session_correlations(
                             "board_key": board_key,
                             "profile": _text(row["profile"]),
                         })
+                for chunk in _chunks(sorted(anchors_by_run)):
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows = connection.execute(
+                        "SELECT id, task_id, profile, metadata FROM task_runs "
+                        f"WHERE id IN ({placeholders})",
+                        tuple(chunk),
+                    )
+                    for row in rows:
+                        task_run_id = _text(row["id"])
+                        task_id = _text(row["task_id"])
+                        if task_run_id is None or task_id is None:
+                            continue
+                        metadata = _metadata(row["metadata"])
+                        chain_id = next(
+                            (
+                                normalized
+                                for key in _CHAIN_KEYS
+                                if (
+                                    normalized := _text(metadata.get(key))
+                                )
+                                is not None
+                            ),
+                            None,
+                        )
+                        for anchor in anchors_by_run.get(task_run_id, ()):
+                            if anchor.task_id != task_id:
+                                continue
+                            path_matches[anchor.session_id].append({
+                                "task_run_id": task_run_id,
+                                "task_id": task_id,
+                                "chain_id": chain_id,
+                                "board": board,
+                                "board_key": board_key,
+                                "profile": _text(row["profile"]),
+                            })
             databases_scanned += 1
             database_results.append(
                 DatabaseScanResult(str(path), board, "ok")
@@ -226,20 +340,22 @@ def scan_claude_session_correlations(
             )
             continue
 
-    resolved: dict[str, WorkerCorrelation] = {}
-    ambiguous_session_ids: set[str] = set()
-    for session_id, rows in matches.items():
+    def resolve_rows(
+        session_id: str,
+        rows: Sequence[Mapping[str, str | None]],
+        *,
+        source_prefix: str,
+    ) -> WorkerCorrelation | None:
         task_ids = {row["task_id"] for row in rows if row["task_id"]}
         board_keys = {row["board_key"] for row in rows if row["board_key"]}
         if len(task_ids) != 1 or len(board_keys) != 1:
-            ambiguous_session_ids.add(session_id)
-            continue
+            return None
         task_run_ids = {row["task_run_id"] for row in rows if row["task_run_id"]}
         chain_ids = {row["chain_id"] for row in rows if row["chain_id"]}
         profiles = {row["profile"] for row in rows if row["profile"]}
         boards = {row["board"] for row in rows if row["board"]}
         exact_run = next(iter(task_run_ids)) if len(task_run_ids) == 1 else None
-        resolved[session_id] = WorkerCorrelation(
+        return WorkerCorrelation(
             session_id=session_id,
             task_id=next(iter(task_ids)),
             board=next(iter(boards)) if len(boards) == 1 else None,
@@ -247,11 +363,45 @@ def scan_claude_session_correlations(
             chain_id=next(iter(chain_ids)) if len(chain_ids) == 1 else None,
             profile=next(iter(profiles)) if len(profiles) == 1 else None,
             source=(
-                "claude_session_id_run"
+                f"{source_prefix}_run"
                 if exact_run is not None
-                else "claude_session_id_task"
+                else f"{source_prefix}_task"
             ),
         )
+
+    resolved: dict[str, WorkerCorrelation] = {}
+    ambiguous_session_ids: set[str] = set()
+    for session_id, rows in matches.items():
+        correlation = resolve_rows(
+            session_id,
+            rows,
+            source_prefix="claude_session_id",
+        )
+        if correlation is None:
+            ambiguous_session_ids.add(session_id)
+            continue
+        resolved[session_id] = correlation
+
+    for session_id in wanted:
+        # Metadata is the stronger, already-established exact anchor. The path
+        # fallback is intentionally considered only when metadata is silent.
+        if session_id in resolved or session_id in ambiguous_session_ids:
+            continue
+        if session_id in path_anchor_ambiguities:
+            ambiguous_session_ids.add(session_id)
+            continue
+        rows = path_matches.get(session_id, ())
+        if not rows:
+            continue
+        correlation = resolve_rows(
+            session_id,
+            rows,
+            source_prefix="claude_worktree_path",
+        )
+        if correlation is None or correlation.task_run_id is None:
+            ambiguous_session_ids.add(session_id)
+            continue
+        resolved[session_id] = correlation
     return CorrelationScan(
         correlations=resolved,
         ambiguous_session_ids=frozenset(ambiguous_session_ids),

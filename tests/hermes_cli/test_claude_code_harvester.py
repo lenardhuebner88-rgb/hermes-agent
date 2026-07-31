@@ -28,6 +28,14 @@ FIXTURES = (
 )
 PROJECTS = FIXTURES / "projects"
 GOLDEN = json.loads((FIXTURES / "golden" / "expected.json").read_text(encoding="utf-8"))
+REAL_ROWS = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "usage_state_backfill"
+        / "real_rows.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture()
@@ -285,6 +293,89 @@ def test_hwm_skipped_transcript_is_recorrelated_after_task_metadata_lands(
     assert second.files_skipped_hwm >= 1
     assert second.calls_recorrelated >= 1
     assert tuple(row) == ("42", "task-late", "claude_session_id_run")
+
+
+def test_real_review_worktree_path_backfills_exact_run_without_session_match(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    fixture = REAL_ROWS["claude_worktree"]
+    transcript_path = Path(fixture["transcript_path"])
+    project = tmp_path / transcript_path.parent.name
+    project.mkdir()
+    (project / transcript_path.name).touch()
+
+    task_run = fixture["task_run"]
+    kanban = tmp_path / "kanban.db"
+    with sqlite3.connect(kanban) as connection:
+        connection.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO task_runs VALUES (?, ?, ?, ?)",
+            (
+                task_run["id"],
+                task_run["task_id"],
+                task_run["profile"],
+                json.dumps(task_run["metadata"]),
+            ),
+        )
+    upsert_run_facts(
+        "claude-real-path",
+        {
+            "origin": "claude_code",
+            "session_id": fixture["session_id"],
+            "captured_at": "2026-07-31T09:15:00Z",
+        },
+        path=db_path,
+    )
+
+    report = harvester_mod.backfill_existing_correlations(
+        db_path=db_path,
+        kanban_paths=[kanban],
+        projects_root=tmp_path,
+        apply=True,
+    )
+
+    with _connect(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_run_id, task_id, correlation_source "
+            "FROM run_usage_facts WHERE run_id='claude-real-path'"
+        ).fetchone()
+    assert tuple(row) == (
+        "8896",
+        "t_c8adf037",
+        "claude_worktree_path_run",
+    )
+    assert report["updated_facts"] == 1
+
+
+def test_worktree_path_requires_matching_run_and_task(tmp_path: Path) -> None:
+    from hermes_cli.usage_fact_correlation import scan_claude_session_correlations
+
+    fixture = REAL_ROWS["claude_worktree"]
+    transcript = Path(fixture["transcript_path"])
+    task_run = fixture["task_run"]
+    kanban = tmp_path / "kanban.db"
+    with sqlite3.connect(kanban) as connection:
+        connection.execute(
+            "CREATE TABLE task_runs ("
+            "id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO task_runs VALUES (?, ?, ?, ?)",
+            (task_run["id"], "t_deadbeef", task_run["profile"], "{}"),
+        )
+
+    scan = scan_claude_session_correlations(
+        [fixture["session_id"]],
+        kanban_paths=[kanban],
+        transcript_paths=[transcript],
+    )
+
+    assert scan.correlations == {}
+    assert scan.ambiguous_session_ids == frozenset()
 
 
 def test_discovery_uses_shared_kanban_home_and_never_invents_custom_board(
@@ -750,7 +841,13 @@ def test_backfill_cli_is_explicit_and_preview_only_by_default(
     monkeypatch.setattr(harvester_mod, "backfill_existing_correlations", fake_backfill)
 
     assert harvester_mod.main(["--backfill-correlations"]) == 0
-    assert calls == [{"db_path": None, "apply": False}]
+    assert calls == [
+        {
+            "db_path": None,
+            "projects_root": harvester_mod.DEFAULT_PROJECTS_ROOT,
+            "apply": False,
+        }
+    ]
     assert json.loads(capsys.readouterr().out) == {
         "applied": False,
         "updated_facts": 7,
