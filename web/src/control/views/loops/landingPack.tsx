@@ -60,6 +60,14 @@ function lastResultLabel(value: string | null | undefined): string {
   return t.landingResultUnknown;
 }
 
+function baselineSourceLabel(
+  source: LoopPackSummary["baseline_source"],
+): string {
+  if (source === "nightly") return t.landingBaselineSourceNightly;
+  if (source === "landing") return t.landingBaselineSourceLanding;
+  return t.landingBaselineSourceNone;
+}
+
 // ── Karten-Sektion ──────────────────────────────────────────────────────────
 
 export function LandingCardSection({
@@ -161,6 +169,14 @@ export function LandingCardSection({
             {baseline.text}
           </dd>
         </div>
+        {pack.baseline_reason ? (
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+            <dt>{t.landingBaselineEvidenceLabel}</dt>
+            <dd className="min-w-0 break-words" style={{ color: "var(--ln-ink)" }}>
+              {baselineSourceLabel(pack.baseline_source)}: {pack.baseline_reason}
+            </dd>
+          </div>
+        ) : null}
         <div className="flex flex-wrap items-baseline gap-x-2">
           <dt>{t.landingNextTriggerLabel}</dt>
           <dd className="font-data" style={{ color: "var(--ln-ink)" }}>

@@ -1218,6 +1218,30 @@ def test_record_gate_result_rejects_invalid_result(state_dir):
         vm.record_gate_result("green")
 
 
+def test_landing_gate_evidence_never_enters_nightly_dispositions(state_dir):
+    vm.record_gate_result(
+        "pass",
+        ts="2026-07-30T03:00:00+00:00",
+        head_sha="nightly-sha",
+    )
+    nightly_before = vm.read_gate_records()
+
+    written = vm.record_landing_gate_pass(
+        "landing-sha",
+        ["collection", "affected"],
+        "loop/example",
+        ts="2026-07-30T06:15:00+00:00",
+    )
+
+    assert written["source"] == "landing_loop"
+    assert vm.landing_gate_ledger_path() != vm.gate_ledger_path()
+    assert vm.read_gate_records() == nightly_before
+    assert vm.read_landing_gate_records() == [written]
+    assert vm.classify_gate_nights(vm.read_gate_records()) == {
+        "2026-07-30": vm.NIGHT_GREEN
+    }
+
+
 # ---------------------------------------------------------------------------
 # record-gate-result: machine-readable first-failure forensics
 # (GREEN-GATE-FAIL-FORENSICS-S1)

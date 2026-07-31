@@ -44,7 +44,7 @@ def test_pack_branch_recovery_creates_one_task_and_requests(kanban_home):
 
     with kb.connect() as conn:
         tasks = conn.execute(
-            "SELECT id, idempotency_key, title, body FROM tasks "
+            "SELECT id, idempotency_key, title, body, skills FROM tasks "
             "WHERE idempotency_key LIKE 'landing-recovery:%'"
         ).fetchall()
         assert len(tasks) == 1
@@ -53,14 +53,17 @@ def test_pack_branch_recovery_creates_one_task_and_requests(kanban_home):
         )
         assert "loop/error-sweep" in tasks[0]["title"]
         assert "git rebase main" in tasks[0]["body"]
+        assert "scripts/run-affected.sh main" in tasks[0]["body"]
+        assert "Pack-Lock" in tasks[0]["body"]
+        import json
+
+        assert json.loads(tasks[0]["skills"]) == ["loop-branch-repair"]
         rows = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? "
             "AND kind = 'landing_recovery_requested'",
             (tasks[0]["id"],),
         ).fetchall()
     assert len(rows) == 1
-    import json
-
     payload = json.loads(rows[0]["payload"])
     assert payload["failure_class"] == "merge_conflict"
     assert payload["failing_gate"] == "merge"

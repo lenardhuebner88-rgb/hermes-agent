@@ -81,6 +81,8 @@ def make_loop(repo: Path, loops_root: Path, ledger_dir: Path, **kwargs) -> Landi
             }
         ],
     )
+    kwargs.setdefault("landing_baseline_records", lambda: [])
+    kwargs.setdefault("landing_evidence_writer", lambda *_args: None)
     return LandingLoop(
         repo,
         loops_root,
@@ -208,8 +210,8 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
     commit_loop(worktree, "green-work")
     calls = []
 
-    def green_gate(gate_repo: Path, base: str):
-        calls.append((gate_repo, base))
+    def green_gate(gate_repo: Path, base: str, *, include_collection: bool):
+        calls.append((gate_repo, base, include_collection))
         return True, "shared gates grün"
 
     monkeypatch.setattr(landing_module, "_land_gates", green_gate)
@@ -217,7 +219,7 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
 
     run = make_loop(repo, loops_root, ledger_dir).run()
 
-    assert calls == [(repo.resolve(), old_main)]
+    assert calls == [(repo.resolve(), old_main, True)]
     assert outcome(run, "loop/green").action == "landed"
     new_main = git(repo, "rev-parse", "main").stdout.strip()
     assert new_main != old_main
@@ -248,6 +250,50 @@ def test_landing_multiple_branches_accepts_behind_change_caused_by_this_run(
     assert git(repo, "rev-parse", "loop/b-second").stdout.strip() == main_head
 
 
+def test_landing_batches_collection_after_first_candidate(git_world, monkeypatch):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    second = add_loop("b-second")
+    commit_loop(first, "first-work")
+    commit_loop(second, "second-work")
+    collection_calls: list[bool] = []
+
+    def green_gate(_repo: Path, _base: str, *, include_collection: bool):
+        collection_calls.append(include_collection)
+        return True, "gates grün"
+
+    monkeypatch.setattr(landing_module, "_land_gates", green_gate)
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert [item.action for item in run.outcomes] == ["landed", "landed"]
+    assert collection_calls == [True, False]
+
+
+def test_import_relevant_followup_merge_repeats_collection(git_world, monkeypatch):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    second = add_loop("b-second")
+    commit_loop(first, "first-work")
+    package = second / "sample_package"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    git(second, "add", "sample_package/__init__.py")
+    git(second, "commit", "-m", "import relevant work")
+    collection_calls: list[bool] = []
+
+    def green_gate(_repo: Path, _base: str, *, include_collection: bool):
+        collection_calls.append(include_collection)
+        return True, "gates grün"
+
+    monkeypatch.setattr(landing_module, "_land_gates", green_gate)
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert [item.action for item in run.outcomes] == ["landed", "landed"]
+    assert collection_calls == [True, True]
+
+
 def test_red_gate_rolls_merge_back_and_parks_branch(git_world):
     repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
     worktree = add_loop("red")
@@ -267,6 +313,33 @@ def test_red_gate_rolls_merge_back_and_parks_branch(git_world):
     assert "zurückgerollt" in item.reason
     assert git(repo, "rev-parse", "main").stdout.strip() == pre_merge_main
     assert git(repo, "rev-parse", "loop/red").stdout.strip() == branch_head
+    assert git(repo, "status", "--porcelain").stdout == ""
+
+
+def test_unwritable_landing_evidence_rolls_merge_back_and_parks_branch(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("evidence-red")
+    branch_head = commit_loop(worktree, "evidence-work")
+    pre_merge_main = git(repo, "rev-parse", "main").stdout.strip()
+
+    def fail_evidence(*_args):
+        raise OSError("disk full")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "collection + affected grün"),
+        landing_evidence_writer=fail_evidence,
+    ).run()
+
+    item = outcome(run, "loop/evidence-red")
+    assert item.action == "parked"
+    assert "Landing-Evidenz nicht schreibbar" in item.reason
+    assert "disk full" in item.reason
+    assert "zurückgerollt" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == pre_merge_main
+    assert git(repo, "rev-parse", "loop/evidence-red").stdout.strip() == branch_head
     assert git(repo, "status", "--porcelain").stdout == ""
 
 
@@ -332,6 +405,34 @@ def test_cli_dry_run_changes_no_ref_branch_or_worktree(git_world, capsys):
     for worktree, status in before_statuses.items():
         assert git(worktree, "status", "--porcelain").stdout == status
     assert not ledger_dir.exists()
+
+
+def test_cli_excludes_its_own_loop_branch_from_inventory(
+    git_world, capsys
+):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    own_worktree = add_loop("landing")
+    other_worktree = add_loop("other")
+    commit_loop(own_worktree, "own-work")
+    commit_loop(other_worktree, "other-work")
+    own_head = git(repo, "rev-parse", "loop/landing").stdout.strip()
+    rc = main(
+        [
+            "--repo",
+            str(repo),
+            "--loops-root",
+            str(loops_root),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--dry-run",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert rc == 0
+    assert "loop/other" in output
+    assert "loop/landing" not in output
+    assert git(repo, "rev-parse", "loop/landing").stdout.strip() == own_head
 
 
 def test_receipt_contains_inventory_and_each_branch_outcome(git_world):
@@ -611,6 +712,83 @@ def test_baseline_probe_matches_short_sha_pass_record():
     )
 
     assert probe.green is True
+    assert probe.source == "nightly"
+
+
+def test_baseline_probe_accepts_landing_pass_but_prefers_nightly():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    landing = {
+        "result": "pass",
+        "head_sha": baseline,
+        "source": "landing_loop",
+    }
+
+    landing_probe = BaselineProbe.from_records(baseline, [], [landing])
+    nightly_probe = BaselineProbe.from_records(
+        baseline,
+        [{"result": "pass", "head_sha": baseline}],
+        [landing],
+    )
+
+    assert landing_probe.green is True
+    assert landing_probe.source == "landing"
+    assert "Landing-Gate" in landing_probe.reason
+    assert nightly_probe.source == "nightly"
+
+
+def test_nightly_fail_for_same_sha_overrides_landing_pass():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    landing = {
+        "result": "pass",
+        "head_sha": baseline,
+        "source": "landing_loop",
+    }
+
+    probe = BaselineProbe.from_records(
+        baseline,
+        [{"result": "fail", "head_sha": baseline}],
+        [landing],
+    )
+
+    assert probe.green is False
+    assert probe.failure_class is FailureClass.MAIN_RED
+    assert probe.source == "nightly"
+    assert "rot" in probe.reason
+
+
+def test_two_runs_land_consecutively_from_dedicated_landing_evidence(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first_worktree = add_loop("first")
+    commit_loop(first_worktree, "first")
+    nightly_head = git(repo, "rev-parse", "main").stdout.strip()
+    landing_ledger = ledger_dir / "landing-gate-ledger.jsonl"
+
+    def write_evidence(head, gates, candidate, ts):
+        return landing_module.record_landing_gate_pass(
+            head, gates, candidate, ts=ts, path=landing_ledger
+        )
+
+    common = {
+        "baseline_records": lambda: [
+            {"result": "pass", "head_sha": nightly_head}
+        ],
+        "landing_baseline_records": lambda: landing_module.read_landing_gate_records(
+            landing_ledger
+        ),
+        "landing_evidence_writer": write_evidence,
+        "gate_runner": lambda _repo, _base: (True, "collection + affected grün"),
+    }
+    first_run = make_loop(repo, loops_root, ledger_dir, **common).run()
+    second_worktree = add_loop("second")
+    commit_loop(second_worktree, "second")
+    second_run = make_loop(repo, loops_root, ledger_dir, **common).run()
+
+    assert outcome(first_run, "loop/first").action == "landed"
+    assert second_run.plan.baseline.source == "landing"
+    assert outcome(second_run, "loop/second").action == "landed"
+    assert (repo / "first.txt").is_file()
+    assert (repo / "second.txt").is_file()
+    assert len(landing_module.read_landing_gate_records(landing_ledger)) == 2
 
 
 def test_baseline_probe_rejects_foreign_and_degenerate_shas():

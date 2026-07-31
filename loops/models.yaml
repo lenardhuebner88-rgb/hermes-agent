@@ -12,9 +12,11 @@
 #     von scripts/sync_model_catalog.py (Drift ist gate-rot)
 # Die Einträge müssen `claude --model <id>` akzeptieren (`claude -p` = Max-Abo-Lane).
 # Die Reihenfolge ist die Anzeigereihenfolge in den Dropdowns.
-# Codex-Modell 2026-07-09 gegen `~/.codex/config.toml` geprüft:
-# default_model = "gpt-5.6-sol"; gpt-5.5/gpt-5.3-codex bleiben als bewiesene
-# Fallbacks im Katalog.
+# Codex-Modell 2026-07-31 live gegen Codex CLI 0.145.0 geprüft:
+# `codex exec -m gpt-5.6-luna -c model_reasoning_effort=low "ping"` → exit 0;
+# `codex exec -m gpt-5.6-terra -c model_reasoning_effort=medium "ping"` → exit 0.
+# Sol bleibt zuerst; Terra/Luna sind die konservativen First-Pass-/Sweep-Lanes,
+# gpt-5.5/gpt-5.3-codex bleiben als bewiesene Fallbacks im Katalog.
 # neuralwatt-Modelle: vollständige auf diesem Host konfigurierte Auswahl
 # (`model_catalog.providers.neuralwatt.extra_models`, geprüft 2026-07-12).
 engines:
@@ -38,7 +40,7 @@ engines:
     # (codex ↔ openai-codex), deshalb hier als Daten deklariert. Alle anderen
     # Engines finden ihre Provider über die Namensverwandtschaft von selbst.
     inventory_providers: [openai-codex]
-    models: [gpt-5.6-sol, gpt-5.5, gpt-5.3-codex]
+    models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.3-codex]
   hermes:
     # "Modell" = Hermes-PROFIL; das Profil trägt die Provider-/Modell-Bindung.
     # reviewer → glm-5.2 @ NeuralWatt · coder → Codex-Pool (live verifiziert 2026-07-02).

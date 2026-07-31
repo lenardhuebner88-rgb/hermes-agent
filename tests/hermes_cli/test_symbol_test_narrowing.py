@@ -145,7 +145,9 @@ def test_real_reference_channels_are_indexed(
     assert test_path in symbol_index.by_channel[channel][symbol]
 
 
-def test_all_31_objpatch_only_symbols_remain_tested(real_indexes) -> None:
+def test_exact_objpatch_only_symbol_set_remains_tested_after_channel_growth(
+    real_indexes,
+) -> None:
     _, symbol_index = real_indexes
     symbols = {
         channel: set(symbol_index.by_channel[channel])
@@ -155,8 +157,52 @@ def test_all_31_objpatch_only_symbols_remain_tested(real_indexes) -> None:
         symbols["attr"] | symbols["strpatch"] | symbols["direct"]
     )
 
-    assert len(objpatch_only) == 31
-    assert "_launch_worker_process" in objpatch_only
+    assert objpatch_only == {
+        "KANBAN_ARTIFACT_TREE_MAX_ENTRIES",
+        "KANBAN_ATTACHMENT_MAX_BYTES",
+        "_CORRUPT_BACKUP_RETENTION",
+        "_INIT_LOCK_TIMEOUT_SECONDS",
+        "_IS_WINDOWS",
+        "_active_lane_entry_for_profile_from_conn",
+        "_attach_or_reap_spawned_worker",
+        "_attempt_index_reindex_repair",
+        "_budget_extension_config",
+        "_evidence_freshness_preflight_enabled",
+        "_git_commit_distance",
+        "_git_head_sha_for_workspace",
+        "_is_claude_cli_runtime",
+        "_lane_provider_model_for_profile",
+        "_persisted_spawn_identity",
+        "_profile_model_provider_for_spawn",
+        "_read_profile_provider",
+        "_release_freigabe_hold_root_in_txn",
+        "_render_knowledge_pointers",
+        "_resolve_dispatch_workspace",
+        "_run_is_claude_cli",
+        "_skill_available_for_home",
+        "_systemd_scope_usable",
+        "_worker_brief_input",
+        "_worker_process_group_alive",
+        "_worker_project_context_cwd",
+        "_workspace_release_state",
+        "estimate_equivalent_cost_amount",
+        "estimate_equivalent_cost_amounts",
+        "validate_spawnable_assignee",
+        "vault_memory_links_for_task",
+    }
+    # 860dbfe178 added real ``kb._launch_worker_process(...)`` calls.  The
+    # launcher is still covered through objpatch references, but is no longer
+    # objpatch-only because the new runtime-facts regression tests exercise the
+    # production attribute directly.  Pin both channels so a future count
+    # change cannot be "fixed" by silently deleting either form of evidence.
+    assert "_launch_worker_process" not in objpatch_only
+    assert symbol_index.by_channel["attr"]["_launch_worker_process"] == (
+        "tests/hermes_cli/test_kanban_runtime_facts.py",
+    )
+    assert set(symbol_index.by_channel["objpatch"]["_launch_worker_process"]) == {
+        "tests/hermes_cli/test_kanban_db_tokens_workspace.py",
+        "tests/hermes_cli/test_kanban_provider_override_dispatch_fork.py",
+    }
     for symbol in objpatch_only:
         assert symbol_index.by_channel["objpatch"][symbol]
         assert symbol_index.by_symbol[symbol]

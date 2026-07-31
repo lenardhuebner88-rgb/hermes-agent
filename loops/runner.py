@@ -730,6 +730,8 @@ def _land_gates(
     repo: Path,
     base: str,
     land_gates: list[str] | None = None,
+    *,
+    include_collection: bool = True,
 ) -> tuple[bool, str]:
     """Shared post-merge landing proof.
 
@@ -759,30 +761,34 @@ def _land_gates(
                 return False, f"{command} rot (rc={res.returncode}):\n{tail}"
         return True, "land_gates grün (" + ", ".join(land_gates) + ")"
 
-    py, why = select_test_python(repo)
-    if py is None:
-        return False, f"kein Test-Python fuer den Collection-Sweep:\n{why}"
-    steps: list[tuple[str, list[str], Path]] = [
-        (
-            "collection",
-            [
-                str(py),
-                "-m",
-                "pytest",
-                "--co",
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "tests/",
-            ],
-            repo,
-        ),
+    steps: list[tuple[str, list[str], Path]] = []
+    if include_collection:
+        py, why = select_test_python(repo)
+        if py is None:
+            return False, f"kein Test-Python fuer den Collection-Sweep:\n{why}"
+        steps.append(
+            (
+                "collection",
+                [
+                    str(py),
+                    "-m",
+                    "pytest",
+                    "--co",
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    "tests/",
+                ],
+                repo,
+            )
+        )
+    steps.append(
         (
             "affected",
             ["bash", str(repo / "scripts" / "run-affected.sh"), base],
             repo,
-        ),
-    ]
+        )
+    )
     touched = subprocess.run(
         [
             "git",
@@ -837,7 +843,9 @@ def _land_gates(
                 return False, f"affected unmapped (rc=4):\n{tail}"
             return False, f"{label} rot (rc={res.returncode}):\n{tail}"
     suffix = " + frontend" if touched_web else ""
-    return True, f"collection + affected{suffix} grün"
+    prefix = "collection + affected" if include_collection else "affected"
+    batched = " (Collection im Lauf bereits bewiesen)" if not include_collection else ""
+    return True, f"{prefix}{suffix} grün{batched}"
 
 
 # Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht

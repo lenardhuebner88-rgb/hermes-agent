@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -25,18 +25,29 @@ from hermes_cli.control_loops import (
     get_landing_automation_enabled,
     write_landing_runtime_status,
 )
-from hermes_cli.vision_metrics import read_gate_records
+from hermes_cli.vision_metrics import (
+    read_gate_records,
+    read_landing_gate_records,
+    record_landing_gate_pass,
+)
 from loops.runner import _land_gates
 
 Action = Literal["landed", "cleaned", "parked"]
 GateRunner = Callable[[Path, str], tuple[bool, str]]
 BaselineRecords = Callable[[], list[dict[str, object]]]
+LandingEvidenceWriter = Callable[[str, tuple[str, ...], str, str], object]
 
 _STASH_MESSAGE = "landing-loop: fremde Basis-Änderungen (autostash)"
 # Ein Stash, den wir selbst angelegt haben und nicht mehr zurückholen
 # konnten, ist der einzige Zustand, den der Loop erzeugt und nicht selbst
 # aufräumen kann — dafür stoppt die Queue (siehe _diagnose_outcome).
 _STASH_LOST_MARKER = "NICHT zurückgeholt"
+_COLLECTION_RELEVANT_NAMES = {
+    "__init__.py",
+    "conftest.py",
+    "pyproject.toml",
+    "uv.lock",
+}
 
 
 class FailureClass(str, Enum):
@@ -82,6 +93,7 @@ class BaselineProbe:
     green: bool
     failure_class: FailureClass
     reason: str
+    source: Literal["nightly", "landing", "none"] = "none"
 
     @staticmethod
     def sha_matches(record_sha: str, baseline_sha: str) -> bool:
@@ -103,25 +115,56 @@ class BaselineProbe:
     def from_records(
         cls,
         baseline_sha: str,
-        records: list[dict[str, object]],
+        nightly_records: list[dict[str, object]],
+        landing_records: list[dict[str, object]] | None = None,
     ) -> BaselineProbe:
-        proven_pass = any(
-            cls.sha_matches(str(record.get("head_sha", "")), baseline_sha)
-            and str(record.get("result", "")).lower() == "pass"
-            for record in records
+        latest_nightly = next(
+            (
+                str(record.get("result", "")).lower()
+                for record in reversed(nightly_records)
+                if cls.sha_matches(
+                    str(record.get("head_sha", "")), baseline_sha
+                )
+                and str(record.get("result", "")).lower() in {"pass", "fail"}
+            ),
+            None,
         )
-        if proven_pass:
+        if latest_nightly == "pass":
             return cls(
                 baseline_sha,
                 True,
                 FailureClass.CLEAN_LAND,
-                "Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "Nightly-Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "nightly",
+            )
+        if latest_nightly == "fail":
+            return cls(
+                baseline_sha,
+                False,
+                FailureClass.MAIN_RED,
+                "Nightly-Full-Gate ist für den aktuellen main-SHA rot",
+                "nightly",
+            )
+        landing_pass = any(
+            cls.sha_matches(str(record.get("head_sha", "")), baseline_sha)
+            and str(record.get("result", "")).lower() == "pass"
+            and str(record.get("source", "")) == "landing_loop"
+            for record in (landing_records or [])
+        )
+        if landing_pass:
+            return cls(
+                baseline_sha,
+                True,
+                FailureClass.CLEAN_LAND,
+                "Landing-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
+                "landing",
             )
         return cls(
             baseline_sha,
             False,
             FailureClass.MAIN_RED,
-            "Kein grüner Full-Gate-Nachweis für den aktuellen main-SHA",
+            "Weder Nightly- noch Landing-Gate-Nachweis für den aktuellen main-SHA",
+            "none",
         )
 
 
@@ -271,8 +314,11 @@ class LandingLoop:
         dry_run: bool = False,
         gate_runner: GateRunner | None = None,
         baseline_records: BaselineRecords | None = None,
+        landing_baseline_records: BaselineRecords | None = None,
+        landing_evidence_writer: LandingEvidenceWriter | None = None,
         automation_enabled: Callable[[], bool] | None = None,
         recovery_request: Callable[[LL2Candidate], str | bool] | None = None,
+        excluded_branches: Iterable[str] = (),
         state_dir: Path | None = None,
         stop_path: Path | None = None,
         now: Callable[[], datetime] | None = None,
@@ -284,11 +330,21 @@ class LandingLoop:
         self.dry_run = dry_run
         self.gate_runner = gate_runner
         self.baseline_records = baseline_records or read_gate_records
+        self.landing_baseline_records = (
+            landing_baseline_records or read_landing_gate_records
+        )
+        self.landing_evidence_writer = landing_evidence_writer or (
+            lambda head, gates, candidate, ts: record_landing_gate_pass(
+                head, gates, candidate, ts=ts
+            )
+        )
         self.automation_enabled = automation_enabled or (lambda: True)
         self.recovery_request = recovery_request
+        self.excluded_branches = frozenset(excluded_branches)
         self.state_dir = state_dir
         self.stop_path = stop_path
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self._collection_proven = False
 
     def _automation_checkpoint(self) -> str | None:
         if self.dry_run:
@@ -316,6 +372,8 @@ class LandingLoop:
             {
                 "baseline_sha": baseline.baseline_sha,
                 "baseline_ok": baseline.green,
+                "baseline_reason": baseline.reason,
+                "baseline_source": baseline.source,
                 "queue_summary": {
                     "total": len(inventory),
                     "landed": sum(item.action == "landed" for item in outcomes),
@@ -372,7 +430,13 @@ class LandingLoop:
             "refs/heads/loop/",
             check=True,
         )
-        return tuple(sorted(line for line in result.stdout.splitlines() if line))
+        return tuple(
+            sorted(
+                line
+                for line in result.stdout.splitlines()
+                if line and line not in self.excluded_branches
+            )
+        )
 
     def _counts(self, branch: str) -> tuple[int, int]:
         result = self._git(
@@ -798,9 +862,21 @@ class LandingLoop:
                 return self._park(item, f"Merge-Konflikt: {detail}")
             return self._park(item, f"Merge-Fehler: {detail}")
 
-        gate_runner = self.gate_runner or _land_gates
+        changed = self._git(
+            "diff", "--name-only", f"{pre_merge_head}..HEAD", check=True
+        ).stdout.splitlines()
+        include_collection = not self._collection_proven or any(
+            Path(path).name in _COLLECTION_RELEVANT_NAMES for path in changed
+        )
         try:
-            green, gate_report = gate_runner(self.repo, pre_merge_head)
+            if self.gate_runner is None:
+                green, gate_report = _land_gates(
+                    self.repo,
+                    pre_merge_head,
+                    include_collection=include_collection,
+                )
+            else:
+                green, gate_report = self.gate_runner(self.repo, pre_merge_head)
         except Exception as exc:  # noqa: BLE001 - a gate crash is a red gate
             green, gate_report = False, f"Gate-Ausnahme: {exc}"
         if not green:
@@ -810,6 +886,34 @@ class LandingLoop:
             return self._park(
                 item,
                 f"Gate rot; ROLLBACK FEHLGESCHLAGEN ({rollback_report}): {gate_report}",
+            )
+
+        if include_collection:
+            self._collection_proven = True
+
+        landed_head = self._git("rev-parse", "HEAD", check=True).stdout.strip()
+        gates = (("collection",) if include_collection else ()) + ("affected",)
+        if "frontend" in gate_report.lower():
+            gates += ("frontend",)
+        try:
+            self.landing_evidence_writer(
+                landed_head,
+                gates,
+                item.branch,
+                self.now().isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001 - missing proof is fail-closed
+            rolled_back, rollback_report = self._rollback(pre_merge_head)
+            if rolled_back:
+                return self._park(
+                    item,
+                    "Landing-Evidenz nicht schreibbar; "
+                    f"{rollback_report}: {_one_line(str(exc))}",
+                )
+            return self._park(
+                item,
+                "Landing-Evidenz nicht schreibbar; "
+                f"ROLLBACK FEHLGESCHLAGEN ({rollback_report}): {_one_line(str(exc))}",
             )
 
         # The loop worktree was clean immediately before the merge and the repo
@@ -921,7 +1025,11 @@ class LandingLoop:
         started_at = self.now()
         inventory = self.inventory()
         baseline_sha = self._git("rev-parse", self.base, check=True).stdout.strip()
-        baseline = BaselineProbe.from_records(baseline_sha, self.baseline_records())
+        baseline = BaselineProbe.from_records(
+            baseline_sha,
+            self.baseline_records(),
+            self.landing_baseline_records(),
+        )
         candidates = tuple(LL2Candidate(item.branch, item.head) for item in inventory)
         plan = plan_queue(candidates, baseline)
         if after_inventory is not None:
@@ -1189,13 +1297,15 @@ def _create_recovery_task(conn, candidate: LL2Candidate, recovery_key: str) -> s
                 f"Reparatur dort, wo der Branch lebt — im Loop-Worktree "
                 f"`~/.hermes/loops/{pack}/wt` (dort ist `{branch}` ausgecheckt):\n"
                 "1. Worktree-Status prüfen (muss sauber sein)\n"
-                "2. `git rebase main`, Konflikte auflösen\n"
-                "3. Betroffene Gates grün fahren\n"
+                f"2. `~/.hermes/loops/{pack}/STOP` und Pack-Lock respektieren\n"
+                "3. `git rebase main`, Konflikte auflösen\n"
+                "4. `scripts/run-affected.sh main` im Loop-Worktree grün fahren\n"
                 "Danach landet der nächste Landing-Loop-Lauf den Branch selbst."
             ),
             assignee="coder",
             created_by="landing_loop",
             idempotency_key=key,
+            skills=["loop-branch-repair"],
         )
 
     task_id = create(recovery_key)
@@ -1298,6 +1408,9 @@ def main(argv: list[str] | None = None) -> int:
     stop_path_value = os.environ.get("HERMES_LOOP_STOP_PATH")
     state_dir = Path(state_dir_value) if state_dir_value else None
     stop_path = Path(stop_path_value) if stop_path_value else None
+    excluded_branches = {"loop/landing"}
+    if state_dir is not None:
+        excluded_branches.add(f"loop/{state_dir.name}")
 
     loop = LandingLoop(
         args.repo,
@@ -1311,6 +1424,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         recovery_request=None if args.dry_run else request_candidate_recovery,
+        excluded_branches=tuple(sorted(excluded_branches)),
         state_dir=state_dir,
         stop_path=stop_path,
     )

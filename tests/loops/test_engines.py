@@ -650,3 +650,15 @@ def test_models_yaml_lists_kimi_k3_and_alibaba_qwen():
     engines_cat = data["engines"]
     assert "k3" in engines_cat["kimi"]["models"]
     assert engines_cat["alibaba-token-plan"]["models"] == ["qwen3.8-max-preview"]
+
+
+def test_models_yaml_orders_codex_sol_before_terra_and_luna():
+    from loops.runner import MODELS_FILE
+
+    data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8"))
+
+    assert data["engines"]["codex"]["models"][:3] == [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]

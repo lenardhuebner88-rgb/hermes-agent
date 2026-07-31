@@ -8,8 +8,9 @@ stability: stable
 repo: /home/piet/.hermes/hermes-agent
 phases:
   round:
-    engine: claude
-    model: claude-sonnet-5
+    engine: codex
+    model: gpt-5.6-terra
+    effort: medium
     timeout: 2700
     prompt: ROUND-PROMPT.md
 stop:
