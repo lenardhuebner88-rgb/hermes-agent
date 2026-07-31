@@ -2058,8 +2058,7 @@ def test_never_ran_root_not_auto_closed_when_it_has_task_runs(
 def test_lane_scope_allowlist_prevents_repark_after_fixer(
     repo, kanban_home, monkeypatch,
 ):
-    """V7 loop trap: after fixer is done, parent re-check must not re-park
-    solely for the fixer's allowlisted paths."""
+    """A fixer commit earns an allowlist and prevents a parent re-park."""
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     from hermes_cli import kanban_lane_fixer as lane_fixer
 
@@ -2077,11 +2076,31 @@ def test_lane_scope_allowlist_prevents_repark_after_fixer(
         assert len(fixer_events) == 1
         child_id = fixer_events[0]["child_id"]
 
-        # Mark fixer done (successful corrective handoff).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+                "WHERE id = ?",
+                (task_id,),
+            )
+            kb._append_event(
+                conn,
+                task_id,
+                "blocked",
+                {"reason": out["reason"], "kind": "integration"},
+            )
+
+        # A successful corrective handoff includes a fixer-owned commit.
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({child_id}): adopt frontend path",
+        )
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
             )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
         allow = lane_fixer.allowlisted_paths_for_parent(
             conn,
             task_id,
@@ -2103,7 +2122,7 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
     repo, kanban_home, monkeypatch,
 ):
     """B5: after a successful fixer resume, NEW parent commits on a formerly
-    allowlisted path must re-arm the lane gate (not permanently disable it)."""
+    allowlisted path must re-arm the gate even when the content is reverted."""
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     from hermes_cli import kanban_lane_fixer as lane_fixer
 
@@ -2144,6 +2163,12 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
                 },
             )
 
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({child_id}): adopt frontend path",
+        )
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
@@ -2157,8 +2182,14 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
         _commit_in(
             info["path"],
             "web/src/control/Foo.tsx",
-            "export const Foo = 2\n",
+            "export const Foo = 3\n",
             msg=f"kanban({task_id}): new work after fixer",
+        )
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({task_id}): revert content after fixer",
         )
         assert _git(info["path"], "rev-parse", "HEAD").strip() != tip_before
 
