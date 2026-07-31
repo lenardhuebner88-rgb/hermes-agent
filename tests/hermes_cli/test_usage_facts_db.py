@@ -40,6 +40,12 @@ def test_schema_contains_complete_contract(tmp_path):
 
     assert run_columns == {"run_id", *RUN_FACT_COLUMNS}
     assert call_columns == {"run_id", "call_index", *LLM_CALL_COLUMNS}
+    cache_write_split_columns = {
+        "cache_write_1h_tokens",
+        "cache_write_5m_tokens",
+    }
+    assert cache_write_split_columns <= run_columns
+    assert cache_write_split_columns <= call_columns
     assert trace_columns == {
         "run_id",
         "call_index",
@@ -329,6 +335,8 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
     common = {
         "cache_read_tokens": 2,
         "cache_write_tokens": 3,
+        "cache_write_1h_tokens": 2,
+        "cache_write_5m_tokens": 1,
         "reasoning_tokens": 4,
         "total_tokens": 21,
         "tool_call_count": 1,
@@ -364,6 +372,8 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
     assert fact["output_tokens"] == 13
     assert fact["cache_read_tokens"] == 4
     assert fact["cache_write_tokens"] == 6
+    assert fact["cache_write_1h_tokens"] == 4
+    assert fact["cache_write_5m_tokens"] == 2
     assert fact["reasoning_tokens"] == 8
     assert fact["total_tokens"] == 42
     assert fact["tool_call_count"] == 2
@@ -387,6 +397,8 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
             "output_tokens": 4,
             "cache_read_tokens": 2,
             "cache_write_tokens": 0,
+            "cache_write_1h_tokens": 0,
+            "cache_write_5m_tokens": 0,
             "reasoning_tokens": 0,
             "tool_call_count": 1,
             "tool_output_chars": 4,
@@ -396,6 +408,8 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
             "output_tokens": 5,
             "cache_read_tokens": 3,
             "cache_write_tokens": 0,
+            "cache_write_1h_tokens": 0,
+            "cache_write_5m_tokens": 0,
             "reasoning_tokens": 0,
             "tool_call_count": 1,
             "tool_output_chars": 6,
@@ -421,7 +435,135 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
     assert fact["output_tokens"] == 15
     assert fact["cache_read_tokens"] is None
     assert fact["cache_write_tokens"] is None
+    # The TTL split follows cache_write_tokens, not the tool counters: one
+    # unobserved call makes the run-level split unobserved too.
+    assert fact["cache_write_1h_tokens"] is None
+    assert fact["cache_write_5m_tokens"] is None
     assert fact["reasoning_tokens"] is None
+
+
+def test_ttl_split_tracks_cache_write_tokens_on_multi_call_runs(tmp_path):
+    """The run-level split must never disagree with ``cache_write_tokens``.
+
+    Live data has 738 multi-call runs (all ``hermes_agent``), so a run whose
+    calls are not uniformly observed is a real shape. The split therefore uses
+    the same ``=COUNT(*)`` aggregation rule as ``cache_write_tokens`` — not the
+    ``>0`` rule of the tool counters, which would publish a partial sum.
+
+    Known, pre-existing and deliberately not addressed here: aggregates are
+    written with ``COALESCE(?, column)``, so a value observed by an earlier
+    call survives a later NULL aggregate. That order dependence already applies
+    to ``cache_read_tokens`` and ``reasoning_tokens`` alike and is a property of
+    ``_refresh_run_aggregates``, not of the TTL split.
+    """
+    path = tmp_path / "facts.db"
+    calls = (
+        # Cache write fully observed, including its lifetime split.
+        {
+            "input_tokens": 5,
+            "cache_write_tokens": 1000,
+            "cache_write_1h_tokens": 700,
+            "cache_write_5m_tokens": 300,
+        },
+        # A call that reported no cache write at all — the realistic shape.
+        {"input_tokens": 7},
+    )
+    for call_index, fields in enumerate(calls, start=1):
+        record_llm_call(
+            "run-partial-ttl-split",
+            call_index,
+            fields,
+            run_fields={"source": "measured"},
+            path=path,
+        )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-partial-ttl-split'",
+    )
+    assert (
+        fact["cache_write_1h_tokens"] + fact["cache_write_5m_tokens"]
+        == fact["cache_write_tokens"]
+    )
+
+    # The per-call observation stays exact and is what costs are derived from.
+    call = _row(
+        path,
+        "SELECT * FROM run_llm_calls "
+        "WHERE run_id='run-partial-ttl-split' AND call_index=1",
+    )
+    assert call["cache_write_1h_tokens"] == 700
+    assert call["cache_write_5m_tokens"] == 300
+    assert (
+        call["cache_write_1h_tokens"] + call["cache_write_5m_tokens"]
+        == call["cache_write_tokens"]
+    )
+
+
+def test_ttl_split_stays_null_when_the_first_call_is_unobserved(tmp_path):
+    """Unobserved-first ordering must not invent a split for the run."""
+    path = tmp_path / "facts.db"
+    record_llm_call(
+        "run-unobserved-first",
+        1,
+        {"input_tokens": 7},
+        run_fields={"source": "measured"},
+        path=path,
+    )
+    record_llm_call(
+        "run-unobserved-first",
+        2,
+        {
+            "input_tokens": 5,
+            "cache_write_tokens": 1000,
+            "cache_write_1h_tokens": 700,
+            "cache_write_5m_tokens": 300,
+        },
+        run_fields={"source": "measured"},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-unobserved-first'",
+    )
+    assert fact["cache_write_tokens"] is None
+    assert fact["cache_write_1h_tokens"] is None
+    assert fact["cache_write_5m_tokens"] is None
+
+
+def test_non_claude_origins_never_invent_cache_write_lifetimes(tmp_path):
+    path = tmp_path / "facts.db"
+    origins = (
+        "hermes_agent",
+        "hermes_aux",
+        "codex_cli",
+        "kimi_cli",
+        "grok_cli",
+        "qwen_cli",
+    )
+    for call_index, origin in enumerate(origins):
+        run_id = f"{origin}-cache-write-unknown"
+        record_llm_call(
+            run_id,
+            call_index,
+            {
+                "origin": origin,
+                "cache_write_tokens": 10 + call_index,
+            },
+            run_fields={"origin": origin, "source": "measured"},
+            path=path,
+        )
+
+    with sqlite3.connect(path) as conn:
+        for table in ("run_llm_calls", "run_usage_facts"):
+            rows = conn.execute(
+                f"SELECT cache_write_tokens, cache_write_1h_tokens, "
+                f"cache_write_5m_tokens FROM {table} ORDER BY run_id"
+            ).fetchall()
+            assert len(rows) == len(origins)
+            assert all(row[0] is not None for row in rows)
+            assert all(row[1] is None and row[2] is None for row in rows)
 
 
 def test_first_token_uses_earliest_available_call_measurement(tmp_path):
@@ -450,7 +592,12 @@ def test_refresh_aggregates_never_replaces_an_observation_with_null(tmp_path):
     path = tmp_path / "facts.db"
     upsert_run_facts(
         "run-preserved-observation",
-        {"duration_ms": 4321, "source": "measured"},
+        {
+            "duration_ms": 4321,
+            "cache_write_1h_tokens": 99,
+            "cache_write_5m_tokens": 1,
+            "source": "measured",
+        },
         path=path,
     )
 
@@ -463,10 +610,13 @@ def test_refresh_aggregates_never_replaces_an_observation_with_null(tmp_path):
 
     fact = _row(
         path,
-        "SELECT duration_ms FROM run_usage_facts "
+        "SELECT duration_ms, cache_write_1h_tokens, cache_write_5m_tokens "
+        "FROM run_usage_facts "
         "WHERE run_id='run-preserved-observation'",
     )
     assert fact["duration_ms"] == 4321
+    assert fact["cache_write_1h_tokens"] == 99
+    assert fact["cache_write_5m_tokens"] == 1
 
 
 def test_schema_initialization_is_cached_per_database_file(
@@ -725,6 +875,12 @@ def test_fresh_schema_includes_event_time_and_parent_binding_columns(tmp_path):
     }
     assert parent_binding_columns <= call_columns
     assert parent_binding_columns <= run_columns
+    cache_write_split_columns = {
+        "cache_write_1h_tokens",
+        "cache_write_5m_tokens",
+    }
+    assert cache_write_split_columns <= call_columns
+    assert cache_write_split_columns <= run_columns
     assert call_columns == {"run_id", "call_index", *LLM_CALL_COLUMNS}
     assert run_columns == {"run_id", *RUN_FACT_COLUMNS}
 
@@ -768,6 +924,12 @@ def test_migration_matches_fresh_schema_with_parent_binding_columns(tmp_path):
 
     assert migrated_calls == fresh_calls
     assert migrated_runs == fresh_runs
+    cache_write_split_columns = {
+        "cache_write_1h_tokens",
+        "cache_write_5m_tokens",
+    }
+    assert cache_write_split_columns <= migrated_calls
+    assert cache_write_split_columns <= migrated_runs
     assert "occurred_at" in migrated_calls
     assert {"first_call_at", "last_call_at"} <= migrated_runs
     parent_binding_columns = {

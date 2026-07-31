@@ -52,6 +52,8 @@ RUN_FACT_COLUMNS = (
     "output_tokens",
     "cache_read_tokens",
     "cache_write_tokens",
+    "cache_write_1h_tokens",
+    "cache_write_5m_tokens",
     "reasoning_tokens",
     "total_tokens",
     "tool_call_count",
@@ -90,6 +92,8 @@ LLM_CALL_COLUMNS = (
     "output_tokens",
     "cache_read_tokens",
     "cache_write_tokens",
+    "cache_write_1h_tokens",
+    "cache_write_5m_tokens",
     "reasoning_tokens",
     "total_tokens",
     "finish_reason",
@@ -154,6 +158,8 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     output_tokens INTEGER,
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
+    cache_write_1h_tokens INTEGER,
+    cache_write_5m_tokens INTEGER,
     reasoning_tokens INTEGER,
     total_tokens INTEGER,
     tool_call_count INTEGER,
@@ -196,6 +202,8 @@ CREATE TABLE IF NOT EXISTS run_llm_calls (
     output_tokens INTEGER,
     cache_read_tokens INTEGER,
     cache_write_tokens INTEGER,
+    cache_write_1h_tokens INTEGER,
+    cache_write_5m_tokens INTEGER,
     reasoning_tokens INTEGER,
     total_tokens INTEGER,
     finish_reason TEXT,
@@ -348,6 +356,8 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                         ("parent_session_id", "TEXT"),
                         ("spawn_depth", "INTEGER"),
                         ("total_tokens", "INTEGER"),
+                        ("cache_write_1h_tokens", "INTEGER"),
+                        ("cache_write_5m_tokens", "INTEGER"),
                         ("tool_duration_ms", "INTEGER"),
                         ("first_call_at", "TEXT"),
                         ("last_call_at", "TEXT"),
@@ -361,6 +371,8 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                         ("parent_agent_id", "TEXT"),
                         ("parent_session_id", "TEXT"),
                         ("spawn_depth", "INTEGER"),
+                        ("cache_write_1h_tokens", "INTEGER"),
+                        ("cache_write_5m_tokens", "INTEGER"),
                         ("tool_duration_ms", "INTEGER"),
                         ("occurred_at", "TEXT"),
                     ),
@@ -530,6 +542,15 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS cache_read_tokens,
             CASE WHEN COUNT(cache_write_tokens)=COUNT(*) THEN SUM(cache_write_tokens) END
                 AS cache_write_tokens,
+            -- Must match cache_write_tokens' =COUNT(*) rule, not the >0 rule used
+            -- for tool counters: a partial sum here would silently break the
+            -- invariant 1h + 5m == cache_write_tokens on multi-call runs.
+            CASE WHEN COUNT(cache_write_1h_tokens)=COUNT(*)
+                THEN SUM(cache_write_1h_tokens) END
+                AS cache_write_1h_tokens,
+            CASE WHEN COUNT(cache_write_5m_tokens)=COUNT(*)
+                THEN SUM(cache_write_5m_tokens) END
+                AS cache_write_5m_tokens,
             CASE WHEN COUNT(reasoning_tokens)=COUNT(*) THEN SUM(reasoning_tokens) END
                 AS reasoning_tokens,
             CASE WHEN COUNT(total_tokens)=COUNT(*) THEN SUM(total_tokens) END

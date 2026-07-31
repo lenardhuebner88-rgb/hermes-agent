@@ -59,7 +59,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 6
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 7
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -86,11 +86,99 @@ def test_streaming_fragments_merge_without_double_counting_tokens() -> None:
     assert draft.input_tokens == expected["input_tokens"]
     assert draft.cache_read_tokens == expected["cache_read_input_tokens"]
     assert draft.cache_write_tokens == expected["cache_creation_input_tokens"]
+    assert draft.cache_write_1h_tokens == expected["cache_creation_input_tokens"]
+    assert draft.cache_write_5m_tokens == 0
     # Must not sum the two identical usage blobs (would be 528).
     assert draft.output_tokens != expected["output_tokens"] * 2
     assert draft.tool_call_count == 1
     assert draft.tool_output_chars == 32
     assert stats.calls_merged >= 1
+
+
+def test_cache_write_split_preserves_observed_zero_and_literal_values(
+    db_path: Path,
+) -> None:
+    draft = merge_assistant_fragment(
+        None,
+        {
+            "type": "assistant",
+            "requestId": "req_cache_ttl",
+            "message": {
+                "id": "msg_cache_ttl",
+                "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                    "cache_creation_input_tokens": 22356,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 22356,
+                        "ephemeral_5m_input_tokens": 0,
+                    },
+                },
+            },
+        },
+    )
+    assert draft is not None
+    assert draft.cache_write_tokens == 22356
+    assert draft.cache_write_1h_tokens == 22356
+    assert draft.cache_write_5m_tokens == 0
+
+    harvester_mod.write_call(draft, db_path=db_path)
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT cache_write_tokens, cache_write_1h_tokens, "
+            "cache_write_5m_tokens FROM run_llm_calls WHERE run_id=?",
+            (draft.run_id,),
+        ).fetchone()
+        run = conn.execute(
+            "SELECT cache_write_tokens, cache_write_1h_tokens, "
+            "cache_write_5m_tokens FROM run_usage_facts WHERE run_id=?",
+            (draft.run_id,),
+        ).fetchone()
+    assert tuple(call) == (22356, 22356, 0)
+    assert tuple(run) == (22356, 22356, 0)
+
+
+def test_missing_cache_creation_object_keeps_split_null(
+    db_path: Path,
+) -> None:
+    draft = merge_assistant_fragment(
+        None,
+        {
+            "type": "assistant",
+            "requestId": "req_no_cache_split",
+            "message": {
+                "id": "msg_no_cache_split",
+                "model": "claude-opus-4-8",
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "cache_read_input_tokens": 4,
+                    "cache_creation_input_tokens": 22356,
+                },
+            },
+        },
+    )
+    assert draft is not None
+    assert draft.cache_write_tokens == 22356
+    assert draft.cache_write_1h_tokens is None
+    assert draft.cache_write_5m_tokens is None
+
+    harvester_mod.write_call(draft, db_path=db_path)
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT cache_write_tokens, cache_write_1h_tokens, "
+            "cache_write_5m_tokens FROM run_llm_calls WHERE run_id=?",
+            (draft.run_id,),
+        ).fetchone()
+        run = conn.execute(
+            "SELECT cache_write_tokens, cache_write_1h_tokens, "
+            "cache_write_5m_tokens FROM run_usage_facts WHERE run_id=?",
+            (draft.run_id,),
+        ).fetchone()
+    assert tuple(call) == (22356, None, None)
+    assert tuple(run) == (22356, None, None)
 
 
 def test_golden_file_harvest_writes_expected_measured_fields(db_path: Path, tmp_path: Path) -> None:
@@ -122,6 +210,10 @@ def test_golden_file_harvest_writes_expected_measured_fields(db_path: Path, tmp_
     assert call["output_tokens"] == expected["output_tokens"]
     assert call["cache_read_tokens"] == expected["cache_read_input_tokens"]
     assert call["cache_write_tokens"] == expected["cache_creation_input_tokens"]
+    assert call["cache_write_1h_tokens"] == expected["cache_creation_input_tokens"]
+    assert call["cache_write_5m_tokens"] == 0
+    assert run["cache_write_1h_tokens"] == expected["cache_creation_input_tokens"]
+    assert run["cache_write_5m_tokens"] == 0
     assert call["finish_reason"] == expected["stop_reason"]
     assert call["serving_tier"] == expected["service_tier"]
     assert call["tool_call_count"] == 1
@@ -137,6 +229,28 @@ def test_golden_file_harvest_writes_expected_measured_fields(db_path: Path, tmp_
     assert run["billing_mode"] == "unknown"
     assert run["billing_mode_source"] is None
     assert run["session_id"] == expected["session_id"]
+
+
+def test_every_fixture_cache_write_split_equals_total() -> None:
+    observed = 0
+    for path in harvester_mod.discover_jsonl_files(PROJECTS):
+        drafts, _stats = parse_transcript_file(path, projects_root=PROJECTS)
+        for draft in drafts.values():
+            has_split = (
+                draft.cache_write_1h_tokens is not None
+                or draft.cache_write_5m_tokens is not None
+            )
+            if not has_split:
+                continue
+            observed += 1
+            assert draft.cache_write_1h_tokens is not None
+            assert draft.cache_write_5m_tokens is not None
+            assert draft.cache_write_tokens is not None
+            assert (
+                draft.cache_write_1h_tokens + draft.cache_write_5m_tokens
+                == draft.cache_write_tokens
+            )
+    assert observed > 0
 
 
 def test_exact_claude_session_correlation_is_persisted(
@@ -1100,6 +1214,304 @@ def test_timestamp_backfill_cli_preview_by_default(
         }
     ]
     assert json.loads(capsys.readouterr().out)["calls_to_fill"] == 3
+
+
+def _seed_cache_write_backfill_rows(db_path: Path) -> dict[str, str]:
+    expected = GOLDEN["flat_streaming"]
+    run_ids = {
+        "main": make_run_id(expected["message_id"], expected["request_id"]),
+        "resume": make_run_id(
+            GOLDEN["resume_message_id"],
+            "req_011CcmMi5RFh7weZDBfh3KKr",
+        ),
+        "no_split": make_run_id(
+            "msg_parent_binding_fixture", "req_parent_binding_fixture"
+        ),
+        "foreign": make_run_id(
+            GOLDEN["missing_request_id_message_id"], NO_REQUEST_ID
+        ),
+    }
+    rows = (
+        (run_ids["main"], "claude_code", 27000, 10),
+        (run_ids["resume"], "claude_code", 19274, 20),
+        (run_ids["no_split"], "claude_code", 13, 30),
+        (run_ids["foreign"], "codex_cli", 0, 40),
+    )
+    with _connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO run_usage_facts "
+            "(run_id, origin, cache_write_tokens, input_tokens, captured_at, "
+            "first_call_at, last_call_at, task_id, correlation_source, source) "
+            "VALUES (?, ?, ?, ?, '2026-07-31T12:01:00Z', "
+            "'2026-07-31T12:00:00Z', '2026-07-31T12:00:00Z', "
+            "'task-preserve', 'correlation-preserve', 'measured')",
+            rows,
+        )
+        conn.executemany(
+            "INSERT INTO run_llm_calls "
+            "(run_id, call_index, origin, cache_write_tokens, input_tokens, "
+            "occurred_at, parent_session_id) VALUES (?, 0, ?, ?, ?, "
+            "'2026-07-31T12:00:00Z', 'parent-preserve')",
+            rows,
+        )
+        # An existing observation wins even if the transcript differs.
+        conn.execute(
+            "UPDATE run_llm_calls SET cache_write_1h_tokens=27111 "
+            "WHERE run_id=?",
+            (run_ids["main"],),
+        )
+        conn.commit()
+    return run_ids
+
+
+def _cache_write_backfill_snapshot(
+    db_path: Path,
+    *,
+    exclude_split: bool = False,
+) -> dict[str, list[tuple[object, ...]]]:
+    excluded = {
+        "cache_write_1h_tokens",
+        "cache_write_5m_tokens",
+    }
+    snapshot: dict[str, list[tuple[object, ...]]] = {}
+    with _connect(db_path) as conn:
+        for table, order_by in (
+            ("run_llm_calls", "run_id, call_index"),
+            ("run_usage_facts", "run_id"),
+        ):
+            columns = [
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})")
+                if not exclude_split or str(row[1]) not in excluded
+            ]
+            snapshot[table] = [
+                tuple(row)
+                for row in conn.execute(
+                    f"SELECT {', '.join(columns)} FROM {table} "
+                    f"ORDER BY {order_by}"
+                )
+            ]
+    return snapshot
+
+
+def _cache_write_row_and_token_totals(
+    db_path: Path,
+) -> dict[str, tuple[object, ...]]:
+    with _connect(db_path) as conn:
+        return {
+            table: tuple(
+                conn.execute(
+                    f"SELECT COUNT(*), SUM(cache_write_tokens), "
+                    f"SUM(input_tokens) FROM {table}"
+                ).fetchone()
+            )
+            for table in ("run_llm_calls", "run_usage_facts")
+        }
+
+
+def test_cache_write_backfill_preview_is_read_only_and_reports_fillable_rows(
+    db_path: Path,
+) -> None:
+    _seed_cache_write_backfill_rows(db_path)
+    before = _cache_write_backfill_snapshot(db_path)
+    before_totals = _cache_write_row_and_token_totals(db_path)
+
+    report = harvester_mod.backfill_cache_write_splits(
+        db_path=db_path,
+        projects_root=PROJECTS,
+        apply=False,
+    )
+
+    assert _cache_write_backfill_snapshot(db_path) == before
+    assert _cache_write_row_and_token_totals(db_path) == before_totals
+    assert report["applied"] is False
+    assert report["run_llm_calls"] == {
+        "rows_to_fill": 2,
+        "rows_filled": 0,
+        "cache_write_1h_rows_to_fill": 1,
+        "cache_write_1h_rows_filled": 0,
+        "cache_write_1h_tokens_to_fill": 19274,
+        "cache_write_5m_rows_to_fill": 2,
+        "cache_write_5m_rows_filled": 0,
+        "cache_write_5m_tokens_to_fill": 0,
+    }
+    assert report["run_usage_facts"] == {
+        "rows_to_fill": 2,
+        "rows_filled": 0,
+        "cache_write_1h_rows_to_fill": 2,
+        "cache_write_1h_rows_filled": 0,
+        "cache_write_1h_tokens_to_fill": 46274,
+        "cache_write_5m_rows_to_fill": 2,
+        "cache_write_5m_rows_filled": 0,
+        "cache_write_5m_tokens_to_fill": 0,
+    }
+
+
+def test_cache_write_backfill_preview_does_not_migrate_legacy_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.db"
+    expected = GOLDEN["flat_streaming"]
+    run_id = make_run_id(expected["message_id"], expected["request_id"])
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE run_usage_facts (
+                run_id TEXT PRIMARY KEY,
+                origin TEXT,
+                cache_write_tokens INTEGER
+            );
+            CREATE TABLE run_llm_calls (
+                run_id TEXT,
+                call_index INTEGER,
+                origin TEXT,
+                cache_write_tokens INTEGER,
+                PRIMARY KEY (run_id, call_index)
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO run_usage_facts VALUES (?, 'claude_code', 27000)",
+            (run_id,),
+        )
+        conn.execute(
+            "INSERT INTO run_llm_calls VALUES (?, 0, 'claude_code', 27000)",
+            (run_id,),
+        )
+        conn.commit()
+        schema_before = {
+            table: tuple(
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+            )
+            for table in ("run_llm_calls", "run_usage_facts")
+        }
+
+    report = harvester_mod.backfill_cache_write_splits(
+        db_path=path,
+        projects_root=PROJECTS / "flat-project",
+        apply=False,
+    )
+
+    with sqlite3.connect(path) as conn:
+        schema_after = {
+            table: tuple(
+                row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+            )
+            for table in ("run_llm_calls", "run_usage_facts")
+        }
+    assert schema_after == schema_before
+    assert all(
+        "cache_write_1h_tokens" not in columns
+        and "cache_write_5m_tokens" not in columns
+        for columns in schema_after.values()
+    )
+    assert report["run_llm_calls"]["rows_to_fill"] == 1
+    assert report["run_usage_facts"]["rows_to_fill"] == 1
+
+
+def test_cache_write_backfill_apply_changes_only_split_columns_and_is_idempotent(
+    db_path: Path,
+) -> None:
+    run_ids = _seed_cache_write_backfill_rows(db_path)
+    protected_before = _cache_write_backfill_snapshot(
+        db_path, exclude_split=True
+    )
+    totals_before = _cache_write_row_and_token_totals(db_path)
+
+    report = harvester_mod.backfill_cache_write_splits(
+        db_path=db_path,
+        projects_root=PROJECTS,
+        apply=True,
+    )
+
+    assert report["applied"] is True
+    assert report["run_llm_calls"]["rows_filled"] == 2
+    assert report["run_usage_facts"]["rows_filled"] == 2
+    assert report["totals"]["rows_filled"] == 4
+    assert _cache_write_backfill_snapshot(
+        db_path, exclude_split=True
+    ) == protected_before
+    assert _cache_write_row_and_token_totals(db_path) == totals_before
+
+    with _connect(db_path) as conn:
+        calls = {
+            row["run_id"]: row
+            for row in conn.execute(
+                "SELECT run_id, origin, cache_write_tokens, "
+                "cache_write_1h_tokens, cache_write_5m_tokens "
+                "FROM run_llm_calls"
+            )
+        }
+        runs = {
+            row["run_id"]: row
+            for row in conn.execute(
+                "SELECT run_id, origin, cache_write_tokens, "
+                "cache_write_1h_tokens, cache_write_5m_tokens "
+                "FROM run_usage_facts"
+            )
+        }
+
+    assert tuple(calls[run_ids["main"]]) == (
+        run_ids["main"],
+        "claude_code",
+        27000,
+        27111,
+        0,
+    )
+    assert tuple(runs[run_ids["main"]]) == (
+        run_ids["main"],
+        "claude_code",
+        27000,
+        27000,
+        0,
+    )
+    for table_rows in (calls, runs):
+        assert tuple(table_rows[run_ids["resume"]])[2:] == (19274, 19274, 0)
+        assert tuple(table_rows[run_ids["no_split"]])[2:] == (13, None, None)
+        assert tuple(table_rows[run_ids["foreign"]])[1:] == (
+            "codex_cli",
+            0,
+            None,
+            None,
+        )
+
+    second = harvester_mod.backfill_cache_write_splits(
+        db_path=db_path,
+        projects_root=PROJECTS,
+        apply=True,
+    )
+    for table in ("run_llm_calls", "run_usage_facts", "totals"):
+        assert second[table]["rows_to_fill"] == 0
+        assert all(
+            value == 0
+            for key, value in second[table].items()
+            if key.endswith("_filled")
+        )
+
+
+def test_cache_write_backfill_cli_previews_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_backfill(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"applied": kwargs["apply"], "totals": {"rows_to_fill": 4}}
+
+    monkeypatch.setattr(
+        harvester_mod, "backfill_cache_write_splits", fake_backfill
+    )
+
+    assert harvester_mod.main(["--backfill-cache-writes"]) == 0
+    assert calls == [
+        {
+            "db_path": None,
+            "projects_root": harvester_mod.DEFAULT_PROJECTS_ROOT,
+            "apply": False,
+        }
+    ]
+    assert json.loads(capsys.readouterr().out)["applied"] is False
 
 
 def _seed_parent_binding_backfill_rows(db_path: Path) -> dict[str, str]:
