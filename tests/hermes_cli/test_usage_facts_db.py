@@ -435,9 +435,101 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
     assert fact["output_tokens"] == 15
     assert fact["cache_read_tokens"] is None
     assert fact["cache_write_tokens"] is None
-    assert fact["cache_write_1h_tokens"] == 0
-    assert fact["cache_write_5m_tokens"] == 0
+    # The TTL split follows cache_write_tokens, not the tool counters: one
+    # unobserved call makes the run-level split unobserved too.
+    assert fact["cache_write_1h_tokens"] is None
+    assert fact["cache_write_5m_tokens"] is None
     assert fact["reasoning_tokens"] is None
+
+
+def test_ttl_split_tracks_cache_write_tokens_on_multi_call_runs(tmp_path):
+    """The run-level split must never disagree with ``cache_write_tokens``.
+
+    Live data has 738 multi-call runs (all ``hermes_agent``), so a run whose
+    calls are not uniformly observed is a real shape. The split therefore uses
+    the same ``=COUNT(*)`` aggregation rule as ``cache_write_tokens`` — not the
+    ``>0`` rule of the tool counters, which would publish a partial sum.
+
+    Known, pre-existing and deliberately not addressed here: aggregates are
+    written with ``COALESCE(?, column)``, so a value observed by an earlier
+    call survives a later NULL aggregate. That order dependence already applies
+    to ``cache_read_tokens`` and ``reasoning_tokens`` alike and is a property of
+    ``_refresh_run_aggregates``, not of the TTL split.
+    """
+    path = tmp_path / "facts.db"
+    calls = (
+        # Cache write fully observed, including its lifetime split.
+        {
+            "input_tokens": 5,
+            "cache_write_tokens": 1000,
+            "cache_write_1h_tokens": 700,
+            "cache_write_5m_tokens": 300,
+        },
+        # A call that reported no cache write at all — the realistic shape.
+        {"input_tokens": 7},
+    )
+    for call_index, fields in enumerate(calls, start=1):
+        record_llm_call(
+            "run-partial-ttl-split",
+            call_index,
+            fields,
+            run_fields={"source": "measured"},
+            path=path,
+        )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-partial-ttl-split'",
+    )
+    assert (
+        fact["cache_write_1h_tokens"] + fact["cache_write_5m_tokens"]
+        == fact["cache_write_tokens"]
+    )
+
+    # The per-call observation stays exact and is what costs are derived from.
+    call = _row(
+        path,
+        "SELECT * FROM run_llm_calls "
+        "WHERE run_id='run-partial-ttl-split' AND call_index=1",
+    )
+    assert call["cache_write_1h_tokens"] == 700
+    assert call["cache_write_5m_tokens"] == 300
+    assert (
+        call["cache_write_1h_tokens"] + call["cache_write_5m_tokens"]
+        == call["cache_write_tokens"]
+    )
+
+
+def test_ttl_split_stays_null_when_the_first_call_is_unobserved(tmp_path):
+    """Unobserved-first ordering must not invent a split for the run."""
+    path = tmp_path / "facts.db"
+    record_llm_call(
+        "run-unobserved-first",
+        1,
+        {"input_tokens": 7},
+        run_fields={"source": "measured"},
+        path=path,
+    )
+    record_llm_call(
+        "run-unobserved-first",
+        2,
+        {
+            "input_tokens": 5,
+            "cache_write_tokens": 1000,
+            "cache_write_1h_tokens": 700,
+            "cache_write_5m_tokens": 300,
+        },
+        run_fields={"source": "measured"},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-unobserved-first'",
+    )
+    assert fact["cache_write_tokens"] is None
+    assert fact["cache_write_1h_tokens"] is None
+    assert fact["cache_write_5m_tokens"] is None
 
 
 def test_non_claude_origins_never_invent_cache_write_lifetimes(tmp_path):

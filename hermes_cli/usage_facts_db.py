@@ -542,9 +542,14 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS cache_read_tokens,
             CASE WHEN COUNT(cache_write_tokens)=COUNT(*) THEN SUM(cache_write_tokens) END
                 AS cache_write_tokens,
-            CASE WHEN COUNT(cache_write_1h_tokens)>0 THEN SUM(cache_write_1h_tokens) END
+            -- Must match cache_write_tokens' =COUNT(*) rule, not the >0 rule used
+            -- for tool counters: a partial sum here would silently break the
+            -- invariant 1h + 5m == cache_write_tokens on multi-call runs.
+            CASE WHEN COUNT(cache_write_1h_tokens)=COUNT(*)
+                THEN SUM(cache_write_1h_tokens) END
                 AS cache_write_1h_tokens,
-            CASE WHEN COUNT(cache_write_5m_tokens)>0 THEN SUM(cache_write_5m_tokens) END
+            CASE WHEN COUNT(cache_write_5m_tokens)=COUNT(*)
+                THEN SUM(cache_write_5m_tokens) END
                 AS cache_write_5m_tokens,
             CASE WHEN COUNT(reasoning_tokens)=COUNT(*) THEN SUM(reasoning_tokens) END
                 AS reasoning_tokens,
