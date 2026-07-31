@@ -43,6 +43,10 @@ if [ -z "${FILES// /}" ]; then
   echo "run-affected: no applicable Python production paths for this diff — skipping pytest (targeted scope; full suite is nightly only)"
   exit 0
 fi
+# Fail before pytest when a selected test persists a fixed timestamp that
+# production expiry logic compares with the real wall clock. Such tests can be
+# green during review and turn permanently red minutes later.
+python3 "$DIR/check_test_wallclock_expiry.py" --root "$DIR/.." $FILES
 run_output=$(mktemp)
 stamp_state=$(mktemp)
 trap 'rm -f "$run_output" "$stamp_state"' EXIT

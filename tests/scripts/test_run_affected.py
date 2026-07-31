@@ -19,7 +19,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 # The real scripts under test (copied verbatim); run_tests.sh is stubbed.
-_REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
+_REAL = (
+    "run-affected.sh",
+    "affected-tests.sh",
+    "affected_tests.py",
+    "check_test_wallclock_expiry.py",
+)
 _MAPPING_MODULES = (
     "affected_test_budget.py",
     "affected_test_mapping.py",
@@ -374,3 +379,34 @@ def test_targeted_rerun_exit_code_is_the_wrapper_exit_code(tmp_path: Path) -> No
             "tests/pkg/test_foo.py",
             "tests/pkg/test_foo.py",
         ]
+
+
+def test_fixed_expiring_timestamp_fails_before_pytest(tmp_path: Path) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "pkg" / "preview.py").write_text(
+        "from datetime import datetime, timezone\n\n"
+        "def preview_status(state):\n"
+        "    started = datetime.fromisoformat(state['started_at'])\n"
+        "    return (datetime.now(timezone.utc) - started).total_seconds() < 900\n"
+    )
+    test_path = repo / "tests" / "pkg" / "test_preview.py"
+    test_path.write_text("def test_preview():\n    assert True\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add preview")
+    test_path.write_text(
+        "import json\n"
+        "from datetime import datetime, timezone\n\n"
+        "def test_preview(tmp_path):\n"
+        "    started_at = datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc)\n"
+        "    (tmp_path / 'state.json').write_text(\n"
+        "        json.dumps({'started_at': started_at.isoformat()})\n"
+        "    )\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "add expiring fixture")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 1
+    assert "fixed timestamp for 'started_at'" in proc.stderr
+    assert not sentinel.exists(), "pytest must not run after the mechanical check fails"
