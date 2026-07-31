@@ -68,6 +68,19 @@ Evidenz: modul.py:42 wirft bei leerem Input.
 Guard einbauen + Regressionstest.
 """
 
+
+def test_doc_sweep_routes_low_reasoning_luna_and_is_catalog_valid(tmp_path):
+    pack = load_pack(PACKS_DIR, "doc-sweep")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner._validate_effective_phase_catalog()
+    phase = runner.phase_cfg("round")
+
+    assert pack.type == "sweep"
+    assert phase.engine == "codex"
+    assert phase.model == "gpt-5.6-luna"
+    assert phase.effort == "low"
+
 # Echte, live gebounct(e) Frontmatter-Fallgrube (2026-07-12): `title:` beginnt mit
 # einem nackten `"` und läuft dann unquotiert weiter — invalides YAML. Wortgleich
 # aus dem geernteten Original-Plan
