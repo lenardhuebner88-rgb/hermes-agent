@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,51 @@ def test_preview_result(tmp_path):
     finished_at = datetime(2026, 7, 31, 5, 1, tzinfo=timezone.utc).isoformat()
     (tmp_path / "done.json").write_text(
         json.dumps({"finished_at": finished_at}), encoding="utf-8"
+    )
+''',
+    )
+
+    assert checker.find_wallclock_expiry_hazards(tmp_path, [path]) == []
+
+
+def test_ignores_product_code_copied_into_foreign_worktree(checker, tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    tracked = tmp_path / "hermes_cli" / "placeholder.py"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "hermes_cli/placeholder.py"],
+        check=True,
+    )
+
+    foreign_product = (
+        tmp_path
+        / ".worktrees"
+        / "stale-branch"
+        / "hermes_cli"
+        / "control_loops.py"
+    )
+    foreign_product.parent.mkdir(parents=True)
+    foreign_product.write_text(
+        '''from datetime import datetime, timezone
+
+
+def _landing_preview_status(state):
+    started = datetime.fromisoformat(str(state.get("started_at")))
+    return datetime.now(timezone.utc) > started
+''',
+        encoding="utf-8",
+    )
+    path = _write_test(
+        tmp_path,
+        '''import json
+from datetime import datetime, timezone
+
+
+def test_preview(tmp_path):
+    started_at = datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc).isoformat()
+    (tmp_path / "state.json").write_text(
+        json.dumps({"started_at": started_at}), encoding="utf-8"
     )
 ''',
     )
