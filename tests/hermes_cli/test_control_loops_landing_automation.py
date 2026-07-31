@@ -241,7 +241,13 @@ def test_landing_preview_route_lifecycle(tmp_path, monkeypatch):
     client, state = _landing_api_client(tmp_path, monkeypatch)
 
     def fake_spawn(root):
-        started_at = datetime(2026, 7, 31, 5, 0, tzinfo=timezone.utc).isoformat()
+        # Bewusst die AKTUELLE Zeit, nicht ein festes Datum: _landing_preview_status
+        # bekommt hier keine Uhr injiziert, sondern vergleicht started_at gegen
+        # datetime.now() und stuft alles aelter als LANDING_PREVIEW_STALE_SECONDS
+        # (900 s) als verwaist ein. Ein fixer Zeitstempel laesst den Test genau bis
+        # started_at + 900 s gruen sein und danach dauerhaft kippen — er war bei
+        # Worker- und Verifier-Lauf gruen und beim Merge rot (2026-07-31).
+        started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         # Spiegelt das mkdir aus _spawn_landing_preview (control_loops.py),
         # das im Fake sonst umgangen waere.
         root.mkdir(parents=True, exist_ok=True)
