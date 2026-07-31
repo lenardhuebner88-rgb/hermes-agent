@@ -822,3 +822,50 @@ def _seed_board_fixture(path: Path) -> None:
                 ),
             ],
         )
+
+
+def test_attributed_payload_survives_rows_without_captured_at(
+    tmp_path: Path,
+) -> None:
+    """A fact row may carry no capture timestamp; the rollup must still build.
+
+    Live shape as of 2026-07-31: 445 rows (401 ``hermes_agent`` + 44
+    ``hermes_aux``) have ``captured_at IS NULL`` and ``source='unknown'``.
+    ``upsert_run_facts`` stamps a default, so the NULL is written directly
+    here to reproduce what those older rows actually look like on disk.
+    Before the fix the whole payload raised ``AttributeError`` instead of
+    reporting an unknown age.
+    """
+
+    usage_path = tmp_path / "usage.db"
+    upsert_run_facts(
+        "unstamped-run",
+        {
+            "origin": "hermes_agent",
+            "task_run_id": "9001",
+            "task_id": "task-unstamped",
+            "chain_id": "chain-unstamped",
+            "board": "main",
+            "provider": "fixture-provider",
+            "model": "fixture-model",
+            "billing_mode": "subscription_included",
+            "input_tokens": 462,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 60,
+            "source": "unknown",
+        },
+        path=usage_path,
+    )
+    with sqlite3.connect(usage_path) as connection:
+        connection.execute("UPDATE run_usage_facts SET captured_at = NULL")
+
+    payload = readmodel.build_attributed_usage_payload(
+        usage_path,
+        generated_at="2026-07-31T12:00:00+00:00",
+    )
+
+    bucket = payload["tasks"]["buckets"][0]
+    assert bucket["key"]["task_id"] == "task-unstamped"
+    assert bucket["freshness"]["latest_captured_at"] is None
+    assert bucket["freshness"]["age_seconds"] is None
