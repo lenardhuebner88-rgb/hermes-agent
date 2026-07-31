@@ -797,6 +797,18 @@ export function editorRows(
     // the toggle's availability with it (spawn-gate truth per model row).
     const fastSupport = effectiveModel?.fast_supported ?? p.fast_supported ?? false;
     const profileFast: "fast" | null = p.service_tier === "fast" ? "fast" : null;
+    // The backend's `locked` describes the profile's CONFIG DEFAULT runtime
+    // (claude-cli is excluded from this slice). A lane entry may point that same
+    // profile at a hermes model — then the row is no longer a claude-cli row and
+    // the exclusion must not apply, or the operator is locked out of the very pin
+    // they set. Live 2026-07-31: lane `api-standard` pinned reviewer/critic/
+    // premium to k3; their model selects rendered hard `disabled` with no visible
+    // reason, and the claude-cli carve-out for Reasoning/Fast
+    // (`locked && worker_runtime !== "claude-cli"`) missed precisely BECAUSE the
+    // row was no longer claude-cli. Any OTHER lock the backend may send (e.g. a
+    // catalog-locked custom-lane entry) is passed through untouched.
+    const claudeCliLock = p.locked === true && p.worker_runtime === "claude-cli";
+    const locked = claudeCliLock ? runtime === "claude-cli" : p.locked === true;
     return {
       touched: false,
       initialChoice: choiceFromEntry(entry),
@@ -811,8 +823,8 @@ export function editorRows(
       provider: runtime === "claude-cli" ? null : entry?.provider ?? null,
       model: entry?.model ?? null,
       fallbackProviders: runtime === "claude-cli" ? [] : cloneFallbacks(entry?.fallback_providers ?? p.fallback_providers),
-      locked: p.locked === true,
-      lockedReason: p.locked_reason ?? null,
+      locked,
+      lockedReason: locked ? p.locked_reason ?? null : null,
       choice: choiceFromEntry(entry),
       reasoningSupport: support,
       reasoningHint,

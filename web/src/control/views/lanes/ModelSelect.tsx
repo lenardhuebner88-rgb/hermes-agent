@@ -56,6 +56,12 @@ export function ModelSelect({
   const listRef = useRef<HTMLDivElement>(null);
   // useId: unique per mounted row, no ref access during render (lint).
   const uid = `ms-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
+  // A disabled control without a visible reason is indistinguishable from a
+  // broken one — that is exactly how this reached the operator on 2026-07-31
+  // ("nur grau, nicht anpassbar"). The backend already ships `locked_reason`;
+  // surface it the way FastControl surfaces its own (title + hint line) instead
+  // of greying out silently. Only shown for a real lock, never invented.
+  const lockNote = disabled && row.locked ? row.lockedReason : null;
 
   const selected = row.model
     ? models.find((m) => m.id === row.model && m.runtime === row.worker_runtime) ??
@@ -186,6 +192,7 @@ export function ModelSelect({
         aria-controls={open ? `${uid}-list` : undefined}
         aria-activedescendant={open && activeIdx >= 0 ? flat[activeIdx]?.domId : undefined}
         aria-label={`Modell für ${row.profile}`}
+        title={lockNote ?? undefined}
         onClick={() => (open ? close() : openList())}
         onKeyDown={onTriggerKeyDown}
         className={cn(
@@ -205,6 +212,8 @@ export function ModelSelect({
         )}
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-3 transition-transform duration-150", open && !flipUp && "rotate-180", open && flipUp && "rotate-0")} />
       </button>
+
+      {lockNote ? <p className="mt-1 text-micro text-ink-2">{lockNote}</p> : null}
 
       {open ? (
         <>

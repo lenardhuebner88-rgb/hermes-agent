@@ -390,6 +390,44 @@ describe("editor rows", () => {
     expect(coder.reasoningHint ?? null).toBeNull();
   });
 
+  // Live-Bug 2026-07-31: die aktive Lane `api-standard` zeigt reviewer/critic/
+  // premium bewusst auf hermes-Modelle (k3). `locked` kam aber aus dem Profil-
+  // DEFAULT (claude-cli), waehrend `worker_runtime` den effektiven Lane-Eintrag
+  // (hermes) trug. Folge im Dashboard: Modell-Select hart `disabled`, und die
+  // claude-cli-Ausnahme fuer Reasoning/Fast
+  // (`row.locked && row.worker_runtime !== "claude-cli"`) griff ins Leere,
+  // gerade WEIL die Zeile nicht mehr claude-cli war. Der Operator konnte den
+  // Pin nie wieder aendern und sah nur graue Regler ohne Begruendung.
+  const claudeCliLockedCatalog: LaneCatalogProfile[] = [
+    {
+      name: "premium",
+      worker_runtime: "claude-cli",
+      default_model: "claude-fable-5",
+      description: "",
+      locked: true,
+      locked_reason: "Claude-CLI / claude -p excluded from this slice",
+    },
+  ];
+
+  it("claude-cli profile pinned to a hermes model by the lane is NOT locked (lock follows the EFFECTIVE runtime)", () => {
+    const hermesPinned: Lane = {
+      ...lane,
+      profiles: { premium: { worker_runtime: "hermes", model: "gpt-5.5" } },
+    };
+    const [row] = editorRows(hermesPinned, claudeCliLockedCatalog, MODELS);
+    expect(row.worker_runtime).toBe("hermes");
+    expect(row.locked).toBe(false);
+    expect(row.lockedReason).toBeNull();
+  });
+
+  it("claude-cli profile without a lane override stays locked and keeps its reason", () => {
+    const noOverride: Lane = { ...lane, profiles: {} };
+    const [row] = editorRows(noOverride, claudeCliLockedCatalog, MODELS);
+    expect(row.worker_runtime).toBe("claude-cli");
+    expect(row.locked).toBe(true);
+    expect(row.lockedReason).toBe("Claude-CLI / claude -p excluded from this slice");
+  });
+
   it("profilesFromEditorRows drops default rows and keeps explicit ones", () => {
     const rows = editorRows(lane, catalog, MODELS).map((row) => ({ ...row, touched: true }));
     expect(profilesFromEditorRows(rows)).toEqual({
