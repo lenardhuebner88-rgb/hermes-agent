@@ -409,6 +409,7 @@ def test_candidate_fingerprint_is_stable_and_uses_closed_failure_class():
     assert len(candidate.fingerprint) == 64
     assert set(FailureClass) == {
         FailureClass.CANDIDATE_REGRESSION,
+        FailureClass.MERGE_CONFLICT,
         FailureClass.MAIN_RED,
         FailureClass.INFRA,
         FailureClass.UNCLEAR,
@@ -595,3 +596,530 @@ def test_stop_file_holds_at_safe_checkpoint(git_world, tmp_path):
 
     assert outcome(run, "loop/stopped").action == "parked"
     assert "STOP angefordert" in outcome(run, "loop/stopped").reason
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — BaselineProbe: prefix-tolerant SHA match (ledger stores short SHAs)
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_probe_matches_short_sha_pass_record():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    probe = BaselineProbe.from_records(
+        baseline,
+        [{"result": "pass", "head_sha": baseline[:9]}],
+    )
+
+    assert probe.green is True
+
+
+def test_baseline_probe_rejects_foreign_and_degenerate_shas():
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    foreign = BaselineProbe.from_records(
+        baseline,
+        [{"result": "pass", "head_sha": "deadbeef1"}],
+    )
+    empty = BaselineProbe.from_records(baseline, [{"result": "pass"}])
+    fragment = BaselineProbe.from_records(
+        baseline, [{"result": "pass", "head_sha": "3cc"}]
+    )
+    red_same_sha = BaselineProbe.from_records(
+        baseline,
+        [{"result": "fail", "head_sha": baseline}],
+    )
+
+    assert foreign.green is False
+    assert empty.green is False
+    assert fragment.green is False
+    assert red_same_sha.green is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — merge conflicts are recoverable candidates, not policy holds
+# ---------------------------------------------------------------------------
+
+
+def _conflicting_loop(add_loop, repo):
+    worktree = add_loop("conflict")
+    (worktree / "README.md").write_text("branch version\n", encoding="utf-8")
+    git(worktree, "add", "README.md")
+    git(worktree, "commit", "-m", "branch conflict")
+    (repo / "README.md").write_text("main version\n", encoding="utf-8")
+    git(repo, "add", "README.md")
+    git(repo, "commit", "-m", "main conflict")
+    return worktree
+
+
+def test_merge_conflict_is_candidate_local_and_requests_recovery(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _conflicting_loop(add_loop, repo)
+    clean = add_loop("z-clean")
+    (clean / "clean.txt").write_text("clean\n", encoding="utf-8")
+    git(clean, "add", "clean.txt")
+    git(clean, "commit", "-m", "clean work")
+    recovery_calls = []
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "gates grün"),
+        recovery_request=lambda candidate: (
+            recovery_calls.append(candidate) or "requested"
+        ),
+    ).run()
+
+    conflict_diag = next(
+        item
+        for item in run.diagnostics
+        if item.candidate.task_or_branch_id == "loop/conflict"
+    )
+    assert conflict_diag.failure_class is FailureClass.MERGE_CONFLICT
+    assert conflict_diag.candidate.failing_gate == "merge"
+    assert conflict_diag.stop_rest is False
+    assert outcome(run, "loop/conflict").action == "parked"
+    # Die Queue läuft weiter: der saubere Kandidat landet danach noch.
+    assert outcome(run, "loop/z-clean").action == "landed"
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0].failure_class is FailureClass.MERGE_CONFLICT
+
+
+def test_recovery_exception_never_aborts_the_run(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _conflicting_loop(add_loop, repo)
+
+    def broken_recovery(_candidate):
+        raise RuntimeError("kanban weg")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "gates grün"),
+        recovery_request=broken_recovery,
+    ).run()
+
+    item = outcome(run, "loop/conflict")
+    assert item.action == "parked"
+    assert "Recovery fehlgeschlagen" in item.reason
+    assert "kanban weg" in item.reason
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — disjoint foreign dirt is stash-protected instead of blocking
+# ---------------------------------------------------------------------------
+
+
+def _landable_loop(add_loop):
+    worktree = add_loop("land")
+    (worktree / "landed.txt").write_text("work\n", encoding="utf-8")
+    git(worktree, "add", "landed.txt")
+    git(worktree, "commit", "-m", "landable work")
+    return worktree
+
+
+def test_disjoint_foreign_dirt_survives_green_landing_via_stash(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "foreign.txt").write_text("untracked fremd\n", encoding="utf-8")
+    (repo / "README.md").write_text("tracked fremd\n", encoding="utf-8")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "gates grün"),
+    ).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "landed"
+    assert "gestasht und zurückgeholt" in item.reason
+    assert (repo / "landed.txt").is_file()
+    assert (repo / "foreign.txt").read_text(encoding="utf-8") == "untracked fremd\n"
+    assert (repo / "README.md").read_text(encoding="utf-8") == "tracked fremd\n"
+    assert git(repo, "stash", "list").stdout == ""
+
+
+def test_overlapping_dirty_path_parks_before_any_stash_or_merge(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    worktree = _landable_loop(add_loop)
+    (worktree / "README.md").write_text("branch readme\n", encoding="utf-8")
+    git(worktree, "add", "README.md")
+    git(worktree, "commit", "-m", "branch readme")
+    pre_main = git(repo, "rev-parse", "main").stdout.strip()
+    (repo / "README.md").write_text("fremde arbeit\n", encoding="utf-8")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: pytest.fail("gate darf nicht laufen"),
+    ).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "parked"
+    assert "kreuzen den Merge" in item.reason
+    assert "README.md" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == pre_main
+    assert git(repo, "stash", "list").stdout == ""
+    assert (repo / "README.md").read_text(encoding="utf-8") == "fremde arbeit\n"
+
+
+def test_red_gate_rollback_preserves_disjoint_foreign_dirt(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    pre_main = git(repo, "rev-parse", "main").stdout.strip()
+    (repo / "foreign.txt").write_text("untracked fremd\n", encoding="utf-8")
+    (repo / "README.md").write_text("tracked fremd\n", encoding="utf-8")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (False, "FAILED tests/test_x.py"),
+    ).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "parked"
+    assert "Gate rot" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == pre_main
+    assert not (repo / "landed.txt").exists()
+    assert (repo / "foreign.txt").read_text(encoding="utf-8") == "untracked fremd\n"
+    assert (repo / "README.md").read_text(encoding="utf-8") == "tracked fremd\n"
+    assert git(repo, "stash", "list").stdout == ""
+
+
+def test_dry_run_reports_stash_protection_for_disjoint_dirt(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "foreign.txt").write_text("untracked fremd\n", encoding="utf-8")
+
+    run = make_loop(repo, loops_root, ledger_dir, dry_run=True).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "landed"
+    assert "Stash-Schutz" in item.reason
+    assert git(repo, "stash", "list").stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# Review-Nacharbeit (Opus): Anker-Stash, Rename-Vollständigkeit, Fremd-Eingriff
+# ---------------------------------------------------------------------------
+
+
+def test_parse_porcelain_paths_includes_rename_source_and_target():
+    blob = "R  renamed.txt\0orig.txt\0 M dirty.txt\0?? loose.txt\0"
+
+    paths = LandingLoop._parse_porcelain_paths(blob)
+
+    assert paths == ["orig.txt", "renamed.txt", "dirty.txt", "loose.txt"]
+
+
+def test_untracked_dir_overlapping_merge_path_parks(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    worktree = add_loop("dirconflict")
+    (worktree / "fremd").mkdir()
+    (worktree / "fremd" / "inside.txt").write_text("branch\n", encoding="utf-8")
+    git(worktree, "add", "fremd/inside.txt")
+    git(worktree, "commit", "-m", "branch adds fremd/inside.txt")
+    pre_main = git(repo, "rev-parse", "main").stdout.strip()
+    (repo / "fremd").mkdir()
+    (repo / "fremd" / "operator.txt").write_text("operator\n", encoding="utf-8")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: pytest.fail("gate darf nicht laufen"),
+    ).run()
+
+    item = outcome(run, "loop/dirconflict")
+    assert item.action == "parked"
+    assert "kreuzen den Merge" in item.reason
+    assert "fremd/" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == pre_main
+    assert git(repo, "stash", "list").stdout == ""
+
+
+def test_staged_rename_is_stashed_and_restored_with_index(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    git(repo, "mv", "README.md", "renamed.txt")
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (True, "gates grün"),
+    ).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "landed"
+    assert (repo / "renamed.txt").is_file()
+    assert not (repo / "README.md").exists()
+    # --index: der Rename liegt wieder GESTAGED vor, nicht als delete+untracked.
+    assert git(repo, "status", "--porcelain").stdout.startswith("R ")
+    assert git(repo, "stash", "list").stdout == ""
+
+
+def test_foreign_stash_during_gates_is_never_popped(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "ours.txt").write_text("unsere fremde arbeit\n", encoding="utf-8")
+
+    def foreign_stash_gate(gate_repo: Path, _base: str):
+        # Fremdsession stasht mitten im Gate-Fenster ihre eigene Arbeit.
+        (gate_repo / "foreign.txt").write_text("fremd\n", encoding="utf-8")
+        git(
+            gate_repo,
+            "stash",
+            "push",
+            "--include-untracked",
+            "--quiet",
+            "-m",
+            "fremdsession",
+            "--",
+            "foreign.txt",
+        )
+        return True, "gates grün"
+
+    run = make_loop(repo, loops_root, ledger_dir, gate_runner=foreign_stash_gate).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "landed"
+    # Unser Dirt ist zurück, der FREMDE Stash liegt unangetastet oben.
+    assert (repo / "ours.txt").read_text(encoding="utf-8") == "unsere fremde arbeit\n"
+    stash_list = git(repo, "stash", "list").stdout
+    assert "fremdsession" in stash_list
+    assert "autostash" not in stash_list
+
+
+def test_foreign_rewrite_during_gates_blocks_pop_and_keeps_stash(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "ours.txt").write_text("original\n", encoding="utf-8")
+
+    def rewriting_gate(gate_repo: Path, _base: str):
+        # Fremdsession schreibt denselben Pfad erneut, während unser Stash liegt.
+        (gate_repo / "ours.txt").write_text("neu geschrieben\n", encoding="utf-8")
+        return True, "gates grün"
+
+    run = make_loop(repo, loops_root, ledger_dir, gate_runner=rewriting_gate).run()
+
+    item = outcome(run, "loop/land")
+    assert item.action == "parked"
+    assert "erneut geschrieben" in item.reason
+    # Der Stash bleibt erhalten, die neue Fremd-Datei wird nicht überschrieben.
+    assert "autostash" in git(repo, "stash", "list").stdout
+    assert (repo / "ours.txt").read_text(encoding="utf-8") == "neu geschrieben\n"
+
+
+def test_merge_failure_without_content_conflict_is_not_merge_conflict(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    add_loop("infra")
+    loop = make_loop(repo, loops_root, ledger_dir)
+    item = landing_module.BranchInventory(
+        branch="loop/infra", ahead=1, behind=0,
+        worktree=loops_root / "infra" / "wt", head="deadbeef",
+    )
+    locked = landing_module.BranchOutcome(
+        "loop/infra", "parked",
+        "Merge-Fehler: Unable to create .git/index.lock: File exists",
+    )
+    timed_out = landing_module.BranchOutcome(
+        "loop/infra", "parked", "Merge-Fehler: command timed out after 300s"
+    )
+
+    unclear = loop._diagnose_outcome(item, locked, "0" * 40)
+    infra = loop._diagnose_outcome(item, timed_out, "0" * 40)
+
+    assert unclear.failure_class is FailureClass.UNCLEAR
+    assert unclear.stop_rest is True
+    assert infra.failure_class is FailureClass.INFRA
+    assert infra.stop_rest is True
+
+
+def test_dry_run_guard_blocks_recovery_even_with_conflict_class(git_world, monkeypatch):
+    """Mutationssicher: _land erzeugt echt eine MERGE_CONFLICT-Diagnose —
+    nur der dry-run-Guard verhindert die Recovery."""
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("conflict")
+    commit_loop(worktree, "work")
+    monkeypatch.setattr(
+        LandingLoop,
+        "_land",
+        lambda self, item: landing_module.BranchOutcome(
+            item.branch, "parked", "Merge-Konflikt: simuliert"
+        ),
+    )
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        dry_run=True,
+        recovery_request=lambda _c: pytest.fail("recovery im dry-run verboten"),
+    ).run()
+
+    assert run.diagnostics[0].failure_class is FailureClass.MERGE_CONFLICT
+
+
+def test_lost_stash_preserves_classification_recovers_and_stops_queue(git_world):
+    """N1: Ein nicht zurückgeholter Stash darf weder die Klassifikation
+    entwerten noch die Queue weiterlaufen lassen."""
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    commit_loop(first, "first-work")
+    second = add_loop("b-second")
+    second_head = commit_loop(second, "second-work")
+    (repo / "ours.txt").write_text("original\n", encoding="utf-8")
+    recovery_calls = []
+
+    def red_rewriting_gate(gate_repo: Path, _base: str):
+        (gate_repo / "ours.txt").write_text("neu\n", encoding="utf-8")
+        return False, "FAILED tests/test_x.py"
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=red_rewriting_gate,
+        recovery_request=lambda candidate: (
+            recovery_calls.append(candidate) or "requested"
+        ),
+    ).run()
+
+    diag = run.diagnostics[0]
+    assert diag.candidate.task_or_branch_id == "loop/a-first"
+    assert diag.failure_class is FailureClass.CANDIDATE_REGRESSION
+    assert diag.stop_rest is True
+    reason = outcome(run, "loop/a-first").reason
+    assert "Gate rot" in reason
+    assert "NICHT zurückgeholt" in reason
+    assert len(recovery_calls) == 1
+    queued = outcome(run, "loop/b-second")
+    assert queued.action == "parked"
+    assert "Rest-Queue gestoppt" in queued.reason
+    assert git(repo, "rev-parse", "loop/b-second").stdout.strip() == second_head
+    assert "autostash" in git(repo, "stash", "list").stdout
+
+
+# ---------------------------------------------------------------------------
+# Review Runde 3 (N5/N6/N7): Anker-Verifikation, Fail-closed, Stopp-Invariante
+# ---------------------------------------------------------------------------
+
+
+def test_find_own_stash_ignores_foreign_tip_entry(git_world):
+    repo, loops_root, ledger_dir, _add_loop, _commit_main, _commit_loop = git_world
+    loop = make_loop(repo, loops_root, ledger_dir)
+    (repo / "ours.txt").write_text("uns\n", encoding="utf-8")
+    git(repo, "stash", "push", "--include-untracked", "--quiet",
+        "-m", landing_module._STASH_MESSAGE)
+    own_sha = git(repo, "rev-parse", "-q", "--verify", "refs/stash").stdout.strip()
+    (repo / "foreign.txt").write_text("fremd\n", encoding="utf-8")
+    git(repo, "stash", "push", "--include-untracked", "--quiet", "-m", "fremd")
+
+    found = loop._find_own_stash()
+
+    assert found == own_sha  # Fremdspitze darf den Anker nie verdecken
+
+
+def test_unreadable_status_before_pop_is_fail_closed(git_world, monkeypatch):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "ours.txt").write_text("uns\n", encoding="utf-8")
+    loop = make_loop(repo, loops_root, ledger_dir)
+    problem, stash_sha = loop._stash_foreign_dirt(["ours.txt"])
+    assert problem is None and stash_sha is not None
+    monkeypatch.setattr(LandingLoop, "_main_dirty_paths", lambda self: None)
+
+    pop_problem = loop._pop_foreign_stash(stash_sha, ["ours.txt"])
+
+    assert pop_problem is not None
+    assert "nicht lesbar" in pop_problem
+    # Fail-closed: der Stash wurde nicht angefasst.
+    assert "autostash" in git(repo, "stash", "list").stdout
+
+
+def test_stash_left_behind_always_stops_the_queue(git_world):
+    """N7-Invariante: JEDER Pfad, der unseren Stash liegen lässt, trägt den
+    Marker und stoppt die Queue."""
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    add_loop("x")
+    loop = make_loop(repo, loops_root, ledger_dir)
+    item = landing_module.BranchInventory(
+        branch="loop/x", ahead=1, behind=0,
+        worktree=loops_root / "x" / "wt", head="deadbeef",
+    )
+    reasons = [
+        f"fremde Änderungen {landing_module._STASH_LOST_MARKER}: Stash-Anker "
+        "nicht verifizierbar (Betreff-Match fehlgeschlagen) — fail-closed",
+        f"Basis-Worktree nach Stash nicht sauber; fremde Änderungen "
+        f"{landing_module._STASH_LOST_MARKER} (pop fehlgeschlagen) — MANUELL",
+        f"Gate rot; Merge zurückgerollt: FAILED t; fremde Änderungen "
+        f"{landing_module._STASH_LOST_MARKER}: erneut geschrieben",
+    ]
+
+    for reason in reasons:
+        diagnosed = loop._diagnose_outcome(
+            item, landing_module.BranchOutcome("loop/x", "parked", reason), "0" * 40
+        )
+        assert diagnosed.stop_rest is True, reason
+
+
+def test_unverifiable_stash_anchor_parks_with_marker(git_world, monkeypatch):
+    """Deckt die Marker-Erzeugung im Anker-Pfad (Opus-Anmerkung Runde 4)."""
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    _landable_loop(add_loop)
+    (repo / "ours.txt").write_text("uns\n", encoding="utf-8")
+    loop = make_loop(repo, loops_root, ledger_dir)
+    monkeypatch.setattr(LandingLoop, "_find_own_stash", lambda self: None)
+
+    problem, stash_sha = loop._stash_foreign_dirt(["ours.txt"])
+
+    assert stash_sha is None
+    assert landing_module._STASH_LOST_MARKER in problem
+    assert "autostash" in git(repo, "stash", "list").stdout
+    git(repo, "stash", "pop", "--quiet")  # Welt aufräumen
+
+
+def test_red_baseline_still_cleans_leerstaende_but_holds_candidates(git_world):
+    """Leerstände brauchen keine grüne Baseline — nur Landungen."""
+    repo, loops_root, ledger_dir, add_loop, commit_main, commit_loop = git_world
+    empty = add_loop("a-empty")
+    main_head = commit_main("advanced")
+    candidate = add_loop("b-candidate")
+    candidate_head = commit_loop(candidate, "work")
+
+    run = make_loop(repo, loops_root, ledger_dir, baseline_records=lambda: []).run()
+
+    cleaned = outcome(run, "loop/a-empty")
+    assert cleaned.action == "cleaned"
+    assert git(repo, "rev-parse", "loop/a-empty").stdout.strip() == main_head
+    held = outcome(run, "loop/b-candidate")
+    assert held.action == "parked"
+    assert "Rest-Queue gestoppt" in held.reason
+    assert git(repo, "rev-parse", "loop/b-candidate").stdout.strip() == candidate_head
+
+
+def test_operator_checkpoint_holds_leerstaende_too(git_world, tmp_path):
+    """Der harte Operator-Halt (STOP-Datei) gilt auch für Leerstände."""
+    repo, loops_root, ledger_dir, add_loop, commit_main, _commit_loop = git_world
+    empty = add_loop("empty")
+    commit_main("advanced")
+    empty_head = git(repo, "rev-parse", "loop/empty").stdout.strip()
+    stop_path = tmp_path / "STOP"
+    stop_path.touch()
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        baseline_records=lambda: [],
+        stop_path=stop_path,
+    ).run()
+
+    item = outcome(run, "loop/empty")
+    assert item.action == "parked"
+    assert "STOP angefordert" in item.reason
+    assert git(repo, "rev-parse", "loop/empty").stdout.strip() == empty_head
