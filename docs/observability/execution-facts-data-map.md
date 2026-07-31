@@ -110,10 +110,20 @@ Three distinct cost concepts — do not mix them up when building a view:
    rather than guessed. Supply `--fx-rates '{"EUR": "1.08"}' --fx-version
    <tag>`. Note the 238 EUR events already in the append-only ledger keep
    their currency; only newly reconciled events convert.
-3. **Price coverage for 5 680 rows** that currently get no price at all:
-   `qwen3.8-max-preview` / `qwen3.7-*` recorded under provider `anthropic`
-   (a router label mismatch), `grok_cli` rows with `model = NULL`, and
-   `hermes_aux` rows with `provider = NULL`.
+3. **Price coverage for 7 083 unpriced rows** — but note what this does and
+   does not cost us, now that subscription rows are free at the margin:
+   * **6 805 are subscription rows.** Their marginal cost is 0 regardless, so
+     nothing is mis-stated; only `api_equivalent_cost` (the "what would the
+     API have charged" figure) is missing. Largest groups:
+     `qwen3.8-max-preview` / `qwen3.7-max` recorded under provider
+     `anthropic` — a router label mismatch, most likely MoA advisor calls —
+     and `xai` rows with `model = NULL`.
+   * **278 are not marked as subscription**, and these are the real gap. The
+     cause is a missing field rather than a missing price: 277 are
+     `hermes_agent`/`openai-codex`/`gpt-5.6-sol` with `billing_mode = NULL`
+     even though `openai-codex` is a subscription lane, and most of the rest
+     are `hermes_aux` rows with `provider = NULL`. Fixing this belongs in
+     usage capture, not in pricing.
 
 ### Why the cost denominator is small (378, not 18 120)
 
