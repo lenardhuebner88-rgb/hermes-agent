@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 import agent.usage_pricing as usage_pricing
+from openai._models import construct_type
+from openai.types.responses.response_usage import ResponseUsage
 from agent.usage_pricing import (
     CanonicalUsage,
     PricingEntry,
@@ -11,6 +13,21 @@ from agent.usage_pricing import (
     normalize_usage,
     resolve_billing_route,
 )
+
+
+def _construct_codex_response_usage(
+    input_tokens_details: dict[str, int],
+    **extra_usage: int,
+) -> ResponseUsage:
+    payload = {
+        "input_tokens": 3000,
+        "input_tokens_details": input_tokens_details,
+        "output_tokens": 400,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 3400,
+        **extra_usage,
+    }
+    return construct_type(value=payload, type_=ResponseUsage)
 
 
 def test_normalize_usage_tracks_missing_and_explicit_zero_optional_buckets():
@@ -45,6 +62,106 @@ def test_normalize_usage_tracks_missing_and_explicit_zero_optional_buckets():
     assert explicit_zero.cache_read_tokens_observed is True
     assert explicit_zero.cache_write_tokens_observed is True
     assert explicit_zero.reasoning_tokens_observed is True
+
+
+def test_normalize_usage_codex_responses_reads_cache_write_tokens():
+    usage = _construct_codex_response_usage(
+        {"cached_tokens": 900, "cache_write_tokens": 1500}
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 1500
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.input_tokens == 600
+
+
+def test_normalize_usage_codex_responses_preserves_missing_cache_write():
+    usage = _construct_codex_response_usage({"cached_tokens": 900})
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 0
+    assert normalized.cache_write_tokens_observed is False
+    assert normalized.input_tokens == 2100
+
+
+def test_normalize_usage_codex_responses_observes_explicit_zero_cache_write():
+    usage = _construct_codex_response_usage(
+        {"cached_tokens": 900, "cache_write_tokens": 0}
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 0
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.input_tokens == 2100
+
+
+def test_normalize_usage_codex_responses_reads_anthropic_cache_write_fallback():
+    usage = _construct_codex_response_usage(
+        {"cached_tokens": 900},
+        cache_creation_input_tokens=700,
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 700
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.input_tokens == 1400
+
+
+def test_normalize_usage_codex_responses_keeps_cached_tokens_read_side():
+    usage = _construct_codex_response_usage(
+        {"cached_tokens": 900, "cache_write_tokens": 0}
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_read_tokens == 900
+    assert normalized.cache_read_tokens_observed is True
+    assert normalized.input_tokens == 2100
+
+
+def test_normalize_usage_codex_responses_accepts_mapping_shaped_details():
+    """A mapping-shaped ``input_tokens_details`` must not crash the branch.
+
+    Not every caller objectifies its payload first: the board_facts wrapper runs
+    ``_objectify`` but the langfuse plugin hands ``response.usage`` straight to
+    ``normalize_usage``. Probing with ``_usage_field_observed`` (which accepts
+    mappings) and reading with a bare ``getattr`` raised AttributeError here.
+    """
+    usage = SimpleNamespace(
+        input_tokens=3000,
+        output_tokens=400,
+        input_tokens_details={"cached_tokens": 900, "cache_write_tokens": 700},
+    )
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens == 700
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.cache_read_tokens == 900
+    assert normalized.input_tokens == 1400
+
+
+def test_normalize_usage_codex_responses_mapping_fallback_value_matches_observed():
+    """Reported-as-observed and the reported value must come from one source.
+
+    Reading the fallback off the object while probing the mapping produced
+    ``observed=True`` with ``cache_write_tokens=0`` — "observed, was zero",
+    which is a different and false statement from "not observed".
+    """
+    usage = {
+        "input_tokens": 3000,
+        "output_tokens": 400,
+        "cache_creation_input_tokens": 700,
+    }
+
+    normalized = normalize_usage(usage, api_mode="codex_responses")
+
+    assert normalized.cache_write_tokens_observed is True
+    assert normalized.cache_write_tokens == 700
 
 
 def test_normalize_usage_anthropic_keeps_cache_buckets_separate():
