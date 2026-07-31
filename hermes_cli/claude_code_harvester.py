@@ -36,7 +36,8 @@ from hermes_cli.usage_facts_db import (
 # parent-session links replace previously unresolved rows.
 # v6 stores every observed parent-binding field independently and restores
 # ``model_source`` to the provenance of the model name itself.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 6
+# v7 stores Anthropic's observed cache-write split by 1h and 5m lifetime.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 7
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -108,6 +109,8 @@ class _CallDraft:
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
     cache_write_tokens: Optional[int] = None
+    cache_write_1h_tokens: Optional[int] = None
+    cache_write_5m_tokens: Optional[int] = None
     tool_use_ids: set[str] = field(default_factory=set)
     tool_output_chars: int = 0
     call_kind: str = "main"
@@ -345,6 +348,15 @@ def _apply_usage(draft: _CallDraft, usage: Mapping[str, Any]) -> None:
         value = _int(usage.get(src))
         if value is not None:
             setattr(draft, dest, value)
+    cache_creation = usage.get("cache_creation")
+    if isinstance(cache_creation, Mapping):
+        for src, dest in (
+            ("ephemeral_1h_input_tokens", "cache_write_1h_tokens"),
+            ("ephemeral_5m_input_tokens", "cache_write_5m_tokens"),
+        ):
+            value = _int(cache_creation.get(src))
+            if value is not None:
+                setattr(draft, dest, value)
     tier = _text(usage.get("service_tier"))
     if tier is not None:
         draft.service_tier = tier
@@ -614,6 +626,8 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "output_tokens": draft.output_tokens,
         "cache_read_tokens": draft.cache_read_tokens,
         "cache_write_tokens": draft.cache_write_tokens,
+        "cache_write_1h_tokens": draft.cache_write_1h_tokens,
+        "cache_write_5m_tokens": draft.cache_write_5m_tokens,
         "total_tokens": total,
         "finish_reason": draft.stop_reason,
         "tool_call_count": draft.tool_call_count,
@@ -1252,6 +1266,197 @@ def backfill_occurred_at(
         connection.close()
 
 
+_CACHE_WRITE_SPLIT_COLUMNS = (
+    "cache_write_1h_tokens",
+    "cache_write_5m_tokens",
+)
+
+
+def _transcript_cache_write_splits_by_run_id(
+    projects_root: Path,
+) -> dict[str, dict[str, int]]:
+    """Map run_id to cache-write lifetimes observed in transcript usage."""
+    root = Path(projects_root)
+    splits: dict[str, dict[str, int]] = {}
+    for path in discover_jsonl_files(root):
+        drafts, _stats = parse_transcript_file(path, projects_root=root)
+        for run_id, draft in drafts.items():
+            observed = {
+                column: value
+                for column, value in (
+                    ("cache_write_1h_tokens", draft.cache_write_1h_tokens),
+                    ("cache_write_5m_tokens", draft.cache_write_5m_tokens),
+                )
+                if value is not None
+            }
+            if observed:
+                splits.setdefault(run_id, {}).update(observed)
+    return splits
+
+
+def _empty_cache_write_split_backfill_report(
+    *, apply: bool
+) -> dict[str, Any]:
+    table_report = {
+        "rows_to_fill": 0,
+        "rows_filled": 0,
+        "cache_write_1h_rows_to_fill": 0,
+        "cache_write_1h_rows_filled": 0,
+        "cache_write_1h_tokens_to_fill": 0,
+        "cache_write_5m_rows_to_fill": 0,
+        "cache_write_5m_rows_filled": 0,
+        "cache_write_5m_tokens_to_fill": 0,
+    }
+    return {
+        "applied": apply,
+        "run_llm_calls": dict(table_report),
+        "run_usage_facts": dict(table_report),
+        "totals": dict(table_report),
+    }
+
+
+def _cache_write_split_candidates(
+    connection: sqlite3.Connection,
+    table: str,
+    source_splits: Mapping[str, Mapping[str, int]],
+) -> list[dict[str, Any]]:
+    if table not in {"run_llm_calls", "run_usage_facts"}:
+        raise ValueError(f"unsupported cache-write backfill table: {table}")
+    columns = {
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+    }
+    keys = ("run_id", "call_index") if table == "run_llm_calls" else ("run_id",)
+    select_columns = [*keys]
+    select_columns.extend(
+        column if column in columns else f"NULL AS {column}"
+        for column in _CACHE_WRITE_SPLIT_COLUMNS
+    )
+    call_filter = " AND call_index=0" if table == "run_llm_calls" else ""
+    rows = connection.execute(
+        f"SELECT {', '.join(select_columns)} FROM {table} "
+        f"WHERE origin=?{call_filter}",
+        (ORIGIN,),
+    ).fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        observed = source_splits.get(str(row["run_id"]))
+        if observed is None:
+            continue
+        updates = {
+            column: observed[column]
+            for column in _CACHE_WRITE_SPLIT_COLUMNS
+            if row[column] is None and observed.get(column) is not None
+        }
+        if updates:
+            candidates.append(
+                {
+                    "key": tuple(row[key] for key in keys),
+                    "updates": updates,
+                }
+            )
+    return candidates
+
+
+def _summarize_cache_write_split_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> dict[str, int]:
+    summary = _empty_cache_write_split_backfill_report(apply=False)[
+        "run_llm_calls"
+    ]
+    summary["rows_to_fill"] = len(candidates)
+    for candidate in candidates:
+        for column, value in candidate["updates"].items():
+            prefix = column.removesuffix("_tokens")
+            summary[f"{prefix}_rows_to_fill"] += 1
+            summary[f"{column}_to_fill"] += int(value)
+    return summary
+
+
+def backfill_cache_write_splits(
+    *,
+    db_path: Path | str | None = None,
+    projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Preview or apply observed 1h/5m cache-write token lifetimes.
+
+    Only Claude Code rows and NULL target cells are eligible. Preview opens the
+    database read-only, including pre-migration databases without the columns.
+    """
+    resolved_db = usage_facts_db_path(db_path)
+    report = _empty_cache_write_split_backfill_report(apply=apply)
+    if not resolved_db.is_file():
+        return report
+
+    source_splits = _transcript_cache_write_splits_by_run_id(Path(projects_root))
+    if apply:
+        connection = usage_facts_db_mod._connect(resolved_db)
+        connection.execute("BEGIN IMMEDIATE")
+    else:
+        connection = sqlite3.connect(
+            f"file:{quote(str(resolved_db.expanduser().resolve()), safe='/')}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+    connection.row_factory = sqlite3.Row
+
+    try:
+        table_candidates = {
+            table: _cache_write_split_candidates(
+                connection, table, source_splits
+            )
+            for table in ("run_llm_calls", "run_usage_facts")
+        }
+        for table, candidates in table_candidates.items():
+            report[table] = _summarize_cache_write_split_candidates(candidates)
+
+        if apply:
+            for table, candidates in table_candidates.items():
+                keys = (
+                    ("run_id", "call_index")
+                    if table == "run_llm_calls"
+                    else ("run_id",)
+                )
+                key_where = " AND ".join(f"{key}=?" for key in keys)
+                for candidate in candidates:
+                    values = [
+                        candidate["updates"].get(column)
+                        for column in _CACHE_WRITE_SPLIT_COLUMNS
+                    ]
+                    cursor = connection.execute(
+                        f"UPDATE {table} SET "
+                        "cache_write_1h_tokens="
+                        "COALESCE(cache_write_1h_tokens, ?), "
+                        "cache_write_5m_tokens="
+                        "COALESCE(cache_write_5m_tokens, ?) "
+                        f"WHERE {key_where} AND origin=? AND "
+                        "(cache_write_1h_tokens IS NULL OR "
+                        "cache_write_5m_tokens IS NULL)",
+                        (*values, *candidate["key"], ORIGIN),
+                    )
+                    if cursor.rowcount <= 0:
+                        continue
+                    report[table]["rows_filled"] += 1
+                    for column in candidate["updates"]:
+                        prefix = column.removesuffix("_tokens")
+                        report[table][f"{prefix}_rows_filled"] += 1
+            connection.commit()
+
+        total_keys = tuple(report["totals"])
+        report["totals"] = {
+            key: sum(report[table][key] for table in table_candidates)
+            for key in total_keys
+        }
+        return report
+    except Exception:
+        if apply:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 _PARENT_BINDING_COLUMNS = (
     "parent_tool_use_id",
     "parent_agent_id",
@@ -1697,6 +1902,14 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--backfill-cache-writes",
+        action="store_true",
+        help=(
+            "Preview filling NULL 1h/5m cache-write token columns from "
+            "transcript usage.cache_creation observations"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -1730,6 +1943,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.backfill_correlations,
             args.backfill_timestamps,
             args.backfill_parent_bindings,
+            args.backfill_cache_writes,
         )
     )
     if backfill_modes > 1:
@@ -1754,6 +1968,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
     if args.backfill_parent_bindings:
         report = backfill_parent_bindings(
+            db_path=args.db,
+            projects_root=args.projects_root,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.backfill_cache_writes:
+        report = backfill_cache_write_splits(
             db_path=args.db,
             projects_root=args.projects_root,
             apply=args.apply,
