@@ -125,6 +125,10 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
         {
             "origin": "claude_code",
             "tool_duration_ms": 17,
+            "parent_tool_use_id": "tool-use-42",
+            "parent_agent_id": "parent-agent-42",
+            "parent_session_id": "parent-session-42",
+            "spawn_depth": 0,
         },
         run_fields={
             "origin": "claude_code",
@@ -138,6 +142,10 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
             "wall_ms": 1234,
             "call_kind": "main_loop",
             "tool_duration_ms": 17,
+            "parent_tool_use_id": "tool-use-42",
+            "parent_agent_id": "parent-agent-42",
+            "parent_session_id": "parent-session-42",
+            "spawn_depth": 0,
             "source": "measured",
         },
         path=path,
@@ -163,8 +171,16 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
     assert fact["wall_ms"] == 1234
     assert fact["call_kind"] == "main_loop"
     assert fact["tool_duration_ms"] == 17
+    assert fact["parent_tool_use_id"] == "tool-use-42"
+    assert fact["parent_agent_id"] == "parent-agent-42"
+    assert fact["parent_session_id"] == "parent-session-42"
+    assert fact["spawn_depth"] == 0
     assert call["origin"] == "claude_code"
     assert call["tool_duration_ms"] == 17
+    assert call["parent_tool_use_id"] == "tool-use-42"
+    assert call["parent_agent_id"] == "parent-agent-42"
+    assert call["parent_session_id"] == "parent-session-42"
+    assert call["spawn_depth"] == 0
 
 
 def test_state_backfill_origin_and_provenance_round_trip(tmp_path):
@@ -686,7 +702,7 @@ CREATE TABLE IF NOT EXISTS run_traces (
 """
 
 
-def test_fresh_schema_includes_event_time_columns(tmp_path):
+def test_fresh_schema_includes_event_time_and_parent_binding_columns(tmp_path):
     path = tmp_path / "fresh.db"
     initialize_usage_facts_db(path)
 
@@ -701,11 +717,19 @@ def test_fresh_schema_includes_event_time_columns(tmp_path):
     assert "occurred_at" in call_columns
     assert "first_call_at" in run_columns
     assert "last_call_at" in run_columns
+    parent_binding_columns = {
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+    }
+    assert parent_binding_columns <= call_columns
+    assert parent_binding_columns <= run_columns
     assert call_columns == {"run_id", "call_index", *LLM_CALL_COLUMNS}
     assert run_columns == {"run_id", *RUN_FACT_COLUMNS}
 
 
-def test_migration_adds_event_time_columns_matching_fresh_schema(tmp_path):
+def test_migration_matches_fresh_schema_with_parent_binding_columns(tmp_path):
     old_path = tmp_path / "old.db"
     with sqlite3.connect(old_path) as conn:
         conn.executescript(_PRE_OCCURRED_AT_SCHEMA)
@@ -746,6 +770,14 @@ def test_migration_adds_event_time_columns_matching_fresh_schema(tmp_path):
     assert migrated_runs == fresh_runs
     assert "occurred_at" in migrated_calls
     assert {"first_call_at", "last_call_at"} <= migrated_runs
+    parent_binding_columns = {
+        "parent_tool_use_id",
+        "parent_agent_id",
+        "parent_session_id",
+        "spawn_depth",
+    }
+    assert parent_binding_columns <= migrated_calls
+    assert parent_binding_columns <= migrated_runs
 
 
 def test_occurred_at_round_trips_and_null_stays_null(tmp_path):
