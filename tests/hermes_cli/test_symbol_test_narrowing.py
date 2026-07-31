@@ -145,7 +145,9 @@ def test_real_reference_channels_are_indexed(
     assert test_path in symbol_index.by_channel[channel][symbol]
 
 
-def test_all_31_objpatch_only_symbols_remain_tested(real_indexes) -> None:
+def test_all_31_objpatch_only_symbols_remain_tested_after_channel_growth(
+    real_indexes,
+) -> None:
     _, symbol_index = real_indexes
     symbols = {
         channel: set(symbol_index.by_channel[channel])
@@ -156,7 +158,19 @@ def test_all_31_objpatch_only_symbols_remain_tested(real_indexes) -> None:
     )
 
     assert len(objpatch_only) == 31
-    assert "_launch_worker_process" in objpatch_only
+    # 860dbfe178 added real ``kb._launch_worker_process(...)`` calls.  The
+    # launcher is still covered through objpatch references, but is no longer
+    # objpatch-only because the new runtime-facts regression tests exercise the
+    # production attribute directly.  Pin both channels so a future count
+    # change cannot be "fixed" by silently deleting either form of evidence.
+    assert "_launch_worker_process" not in objpatch_only
+    assert symbol_index.by_channel["attr"]["_launch_worker_process"] == (
+        "tests/hermes_cli/test_kanban_runtime_facts.py",
+    )
+    assert set(symbol_index.by_channel["objpatch"]["_launch_worker_process"]) == {
+        "tests/hermes_cli/test_kanban_db_tokens_workspace.py",
+        "tests/hermes_cli/test_kanban_provider_override_dispatch_fork.py",
+    }
     for symbol in objpatch_only:
         assert symbol_index.by_channel["objpatch"][symbol]
         assert symbol_index.by_symbol[symbol]
