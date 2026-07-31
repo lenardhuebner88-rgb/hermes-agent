@@ -7,19 +7,197 @@ this entry point, records its stdout, and propagates its exit code.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Literal
 
 from hermes_constants import get_hermes_home
+from hermes_cli.control_loops import (
+    get_landing_automation_enabled,
+    write_landing_runtime_status,
+)
+from hermes_cli.vision_metrics import read_gate_records
 from loops.runner import _land_gates
 
 Action = Literal["landed", "cleaned", "parked"]
 GateRunner = Callable[[Path, str], tuple[bool, str]]
+BaselineRecords = Callable[[], list[dict[str, object]]]
+
+
+class FailureClass(str, Enum):
+    CANDIDATE_REGRESSION = "candidate_regression"
+    MAIN_RED = "main_red"
+    INFRA = "infra"
+    UNCLEAR = "unclear"
+    CLEAN_LAND = "clean_land"
+    HELD_ESCALATED = "held_escalated"
+
+
+class GateStage(str, Enum):
+    BASELINE = "baseline"
+    AFFECTED = "affected"
+    FULL = "full"
+    POST_MERGE = "post_merge"
+
+
+@dataclass(frozen=True)
+class LL2Candidate:
+    task_or_branch_id: str
+    candidate_commit: str
+    failing_gate: str = "pending"
+    failure_class: FailureClass = FailureClass.UNCLEAR
+
+    @property
+    def fingerprint(self) -> str:
+        payload = "|".join(
+            (
+                self.task_or_branch_id,
+                self.candidate_commit,
+                self.failing_gate,
+                self.failure_class.value,
+            )
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class BaselineProbe:
+    baseline_sha: str
+    green: bool
+    failure_class: FailureClass
+    reason: str
+
+    @classmethod
+    def from_records(
+        cls,
+        baseline_sha: str,
+        records: list[dict[str, object]],
+    ) -> BaselineProbe:
+        exact_pass = any(
+            str(record.get("head_sha", "")) == baseline_sha
+            and str(record.get("result", "")).lower() == "pass"
+            for record in records
+        )
+        if exact_pass:
+            return cls(
+                baseline_sha,
+                True,
+                FailureClass.CLEAN_LAND,
+                "Full-Gate-Nachweis stimmt exakt mit aktuellem main-SHA überein",
+            )
+        return cls(
+            baseline_sha,
+            False,
+            FailureClass.MAIN_RED,
+            "Kein grüner Full-Gate-Nachweis für exakt aktuellen main-SHA",
+        )
+
+
+@dataclass(frozen=True)
+class RunPlan:
+    baseline: BaselineProbe
+    candidates: tuple[LL2Candidate, ...]
+    gate_stages: tuple[GateStage, ...]
+    isolate: tuple[str, ...]
+    stop_after: str | None
+    stop_rest: bool
+
+
+@dataclass(frozen=True)
+class CandidateOutcome:
+    candidate: LL2Candidate
+    action: Action
+    reason: str
+    stop_rest: bool = False
+
+    @property
+    def failure_class(self) -> FailureClass:
+        return self.candidate.failure_class
+
+    @property
+    def fingerprint(self) -> str:
+        return self.candidate.fingerprint
+
+
+def classify_failure(
+    gate_name: str,
+    output: str,
+    baseline_sha: str,
+    candidate_sha: str,
+) -> FailureClass:
+    """Classify a gate failure conservatively; unknown evidence stops the queue."""
+    del candidate_sha  # reserved for stronger commit-specific evidence in LL2-S2
+    text = f"{gate_name} {output}".lower()
+    if gate_name.lower() == GateStage.BASELINE.value or (
+        baseline_sha.lower() in text and ("main" in text or "baseline" in text)
+    ):
+        return FailureClass.MAIN_RED
+    if any(token in text for token in ("held", "escalat")):
+        return FailureClass.HELD_ESCALATED
+    if any(
+        token in text
+        for token in (
+            "timed out",
+            "timeout",
+            "no space left",
+            "command not found",
+            "connection reset",
+            "connection refused",
+            "gate-ausnahme",
+            "killed",
+        )
+    ):
+        return FailureClass.INFRA
+    if any(
+        token in text
+        for token in ("failed ", " failed", "failure", "assertion", "tests/", " rot")
+    ):
+        return FailureClass.CANDIDATE_REGRESSION
+    return FailureClass.UNCLEAR
+
+
+def plan_queue(
+    candidates: tuple[LL2Candidate, ...],
+    baseline: BaselineProbe,
+) -> RunPlan:
+    ordered = tuple(sorted(candidates, key=lambda item: item.task_or_branch_id))
+    isolated: list[str] = []
+    planned: list[LL2Candidate] = []
+    stop_after: str | None = None
+    if baseline.green:
+        for candidate in ordered:
+            planned.append(candidate)
+            if candidate.failure_class is FailureClass.CANDIDATE_REGRESSION:
+                isolated.append(candidate.task_or_branch_id)
+            elif candidate.failure_class in (
+                FailureClass.MAIN_RED,
+                FailureClass.INFRA,
+                FailureClass.UNCLEAR,
+            ) and candidate.failing_gate != "pending":
+                stop_after = candidate.task_or_branch_id
+                break
+    return RunPlan(
+        baseline=baseline,
+        candidates=tuple(planned),
+        gate_stages=(
+            GateStage.BASELINE,
+            GateStage.AFFECTED,
+            GateStage.FULL,
+            GateStage.POST_MERGE,
+        ),
+        isolate=tuple(isolated),
+        stop_after=stop_after,
+        stop_rest=not baseline.green or stop_after is not None,
+    )
 
 
 class LandingLoopError(RuntimeError):
@@ -49,6 +227,8 @@ class LandingRun:
     dry_run: bool
     inventory: tuple[BranchInventory, ...]
     outcomes: tuple[BranchOutcome, ...]
+    plan: RunPlan
+    diagnostics: tuple[CandidateOutcome, ...]
     ledger_path: Path | None = None
 
     def count(self, action: Action) -> int:
@@ -67,6 +247,11 @@ class LandingLoop:
         base: str = "main",
         dry_run: bool = False,
         gate_runner: GateRunner | None = None,
+        baseline_records: BaselineRecords | None = None,
+        automation_enabled: Callable[[], bool] | None = None,
+        recovery_request: Callable[[LL2Candidate], str | bool] | None = None,
+        state_dir: Path | None = None,
+        stop_path: Path | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.repo = repo.resolve()
@@ -75,7 +260,61 @@ class LandingLoop:
         self.base = base
         self.dry_run = dry_run
         self.gate_runner = gate_runner
+        self.baseline_records = baseline_records or read_gate_records
+        self.automation_enabled = automation_enabled or (lambda: True)
+        self.recovery_request = recovery_request
+        self.state_dir = state_dir
+        self.stop_path = stop_path
         self.now = now or (lambda: datetime.now(timezone.utc))
+
+    def _automation_checkpoint(self) -> str | None:
+        if self.dry_run:
+            return None
+        if self.stop_path is not None and self.stop_path.exists():
+            return "kooperativer STOP angefordert"
+        try:
+            enabled = self.automation_enabled()
+        except Exception:
+            enabled = False
+        if not enabled:
+            return "Landing-Automatik deaktiviert"
+        return None
+
+    def _write_runtime_status(
+        self,
+        *,
+        baseline: BaselineProbe,
+        inventory: tuple[BranchInventory, ...],
+        outcomes: tuple[BranchOutcome, ...],
+    ) -> None:
+        if self.state_dir is None or self.dry_run:
+            return
+        write_landing_runtime_status(
+            {
+                "baseline_sha": baseline.baseline_sha,
+                "baseline_ok": baseline.green,
+                "queue_summary": {
+                    "total": len(inventory),
+                    "landed": sum(item.action == "landed" for item in outcomes),
+                    "cleaned": sum(item.action == "cleaned" for item in outcomes),
+                    "parked": sum(item.action == "parked" for item in outcomes),
+                },
+                "last_result": "green"
+                if all(item.action != "parked" for item in outcomes)
+                else "held",
+                "candidates": [
+                    {
+                        "branch": item.branch,
+                        "head": item.head,
+                        "ahead": item.ahead,
+                        "behind": item.behind,
+                    }
+                    for item in inventory
+                ],
+                "updated_at": self.now().isoformat(),
+            },
+            state_dir=self.state_dir,
+        )
 
     def _git(
         self,
@@ -363,6 +602,41 @@ class LandingLoop:
             )
         return result
 
+    def _diagnose_outcome(
+        self,
+        item: BranchInventory,
+        result: BranchOutcome,
+        baseline_sha: str,
+    ) -> CandidateOutcome:
+        if result.action in ("landed", "cleaned"):
+            failure_class = FailureClass.CLEAN_LAND
+            failing_gate = "none"
+        elif "Gate rot" in result.reason:
+            failing_gate = GateStage.POST_MERGE.value
+            failure_class = classify_failure(
+                failing_gate,
+                result.reason,
+                baseline_sha,
+                item.head,
+            )
+        else:
+            # Policy holds stay candidate-local and do not invent a new action.
+            failure_class = FailureClass.HELD_ESCALATED
+            failing_gate = "policy"
+        candidate = LL2Candidate(
+            item.branch,
+            item.head,
+            failing_gate,
+            failure_class,
+        )
+        return CandidateOutcome(
+            candidate,
+            result.action,
+            result.reason,
+            stop_rest=failure_class
+            in (FailureClass.MAIN_RED, FailureClass.INFRA, FailureClass.UNCLEAR),
+        )
+
     def run(
         self,
         *,
@@ -371,23 +645,86 @@ class LandingLoop:
         self._validate()
         started_at = self.now()
         inventory = self.inventory()
+        baseline_sha = self._git("rev-parse", self.base, check=True).stdout.strip()
+        baseline = BaselineProbe.from_records(baseline_sha, self.baseline_records())
+        candidates = tuple(LL2Candidate(item.branch, item.head) for item in inventory)
+        plan = plan_queue(candidates, baseline)
         if after_inventory is not None:
             after_inventory(inventory)
-        outcomes = tuple(
-            self._cleanup(item) if item.ahead == 0 else self._land(item)
-            for item in inventory
-        )
+        outcomes_list: list[BranchOutcome] = []
+        diagnostics_list: list[CandidateOutcome] = []
+        stop_reason: str | None = baseline.reason if plan.stop_rest else None
+        for item in inventory:
+            checkpoint_reason = self._automation_checkpoint()
+            if checkpoint_reason is not None:
+                stop_reason = checkpoint_reason
+            if stop_reason is not None:
+                result = self._park(item, f"Rest-Queue gestoppt: {stop_reason}")
+                failure_class = (
+                    FailureClass.MAIN_RED
+                    if not baseline.green
+                    else FailureClass.HELD_ESCALATED
+                )
+                candidate = LL2Candidate(
+                    item.branch,
+                    item.head,
+                    GateStage.BASELINE.value if not baseline.green else "queue",
+                    failure_class,
+                )
+                diagnosed = CandidateOutcome(
+                    candidate,
+                    result.action,
+                    result.reason,
+                    stop_rest=not baseline.green,
+                )
+            else:
+                result = self._cleanup(item) if item.ahead == 0 else self._land(item)
+                diagnosed = self._diagnose_outcome(item, result, baseline_sha)
+                if (
+                    diagnosed.failure_class is FailureClass.CANDIDATE_REGRESSION
+                    and self.recovery_request is not None
+                    and self._automation_checkpoint() is None
+                ):
+                    recovery_result = self.recovery_request(diagnosed.candidate)
+                    if recovery_result in (False, "exhausted"):
+                        result = BranchOutcome(
+                            result.branch,
+                            result.action,
+                            f"{result.reason}; Recovery held_escalated",
+                        )
+                        diagnosed = CandidateOutcome(
+                            diagnosed.candidate,
+                            diagnosed.action,
+                            result.reason,
+                            stop_rest=diagnosed.stop_rest,
+                        )
+                if diagnosed.stop_rest:
+                    stop_reason = (
+                        f"{diagnosed.failure_class.value} bei {item.branch} "
+                        f"({diagnosed.fingerprint[:12]})"
+                    )
+            outcomes_list.append(result)
+            diagnostics_list.append(diagnosed)
+        outcomes = tuple(outcomes_list)
+        diagnostics = tuple(diagnostics_list)
         if not self.dry_run:
             outcomes = tuple(
                 self._freshen_completed(item, result)
                 for item, result in zip(inventory, outcomes, strict=True)
             )
+        self._write_runtime_status(
+            baseline=baseline,
+            inventory=inventory,
+            outcomes=outcomes,
+        )
         run = LandingRun(
             started_at=started_at,
             finished_at=self.now(),
             dry_run=self.dry_run,
             inventory=inventory,
             outcomes=outcomes,
+            plan=plan,
+            diagnostics=diagnostics,
         )
         if self.dry_run:
             return run
@@ -398,6 +735,8 @@ class LandingLoop:
             dry_run=False,
             inventory=run.inventory,
             outcomes=run.outcomes,
+            plan=run.plan,
+            diagnostics=run.diagnostics,
             ledger_path=ledger_path,
         )
 
@@ -458,6 +797,21 @@ def render_receipt(run: LandingRun) -> str:
         lines.append(f"- {item.branch}: **{item.action}** — {item.reason}")
     if not run.outcomes:
         lines.append("- Keine `loop/*`-Branches vorhanden.")
+    lines += ["", "## LL-2 Diagnose", ""]
+    lines.append(
+        f"- Baseline `{run.plan.baseline.baseline_sha}`: "
+        f"**{'green' if run.plan.baseline.green else 'main_red'}** — "
+        f"{run.plan.baseline.reason}"
+    )
+    lines.append(
+        "- Gate-Matrix: "
+        + " → ".join(stage.value for stage in run.plan.gate_stages)
+    )
+    for item in run.diagnostics:
+        lines.append(
+            f"- `{item.fingerprint}` {item.candidate.task_or_branch_id}: "
+            f"**{item.failure_class.value}** ({item.candidate.failing_gate})"
+        )
     lines += ["", "## Discord", "", render_discord(run), ""]
     return "\n".join(lines)
 
@@ -480,6 +834,45 @@ def notify_discord(
         check=False,
     )
     return result.returncode == 0
+
+
+def request_candidate_recovery(candidate: LL2Candidate) -> str:
+    """Request one idempotent same-card recovery for a task-backed candidate."""
+    task_id = candidate.task_or_branch_id.rsplit("/", 1)[-1]
+    if re.fullmatch(r"t_[a-z0-9]+", task_id) is None:
+        return "not_applicable"
+    from hermes_cli import kanban_db
+
+    with kanban_db.connect() as conn:
+        created = kanban_db.request_landing_recovery(
+            conn,
+            task_id,
+            fingerprint=candidate.fingerprint,
+            candidate_commit=candidate.candidate_commit,
+            failure_class=candidate.failure_class.value,
+            failing_gate=candidate.failing_gate,
+            blocking_findings=[
+                f"Candidate regression in {candidate.failing_gate} at "
+                f"{candidate.candidate_commit}"
+            ],
+            required_verification=[candidate.failing_gate],
+        )
+        if created:
+            return "requested"
+        rows = conn.execute(
+            "SELECT kind, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'landing_recovery_exhausted' "
+            "ORDER BY id DESC LIMIT 10",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if payload.get("fingerprint") == candidate.fingerprint:
+                return "exhausted"
+    return "deduplicated"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -506,12 +899,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
+    state_dir_value = os.environ.get("HERMES_LOOP_STATE_DIR")
+    stop_path_value = os.environ.get("HERMES_LOOP_STOP_PATH")
+    state_dir = Path(state_dir_value) if state_dir_value else None
+    stop_path = Path(stop_path_value) if stop_path_value else None
+
     loop = LandingLoop(
         args.repo,
         args.loops_root,
         args.ledger_dir,
         base=args.base,
         dry_run=args.dry_run,
+        automation_enabled=(
+            (lambda: get_landing_automation_enabled(state_dir))
+            if state_dir is not None
+            else None
+        ),
+        recovery_request=request_candidate_recovery,
+        state_dir=state_dir,
+        stop_path=stop_path,
     )
     try:
         result = loop.run()

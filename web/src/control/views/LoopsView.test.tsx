@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LoopsGrid, type LoopsGridProps } from "./LoopsView";
@@ -212,6 +213,8 @@ const noopHandlers = {
   onSaveTimerSchedule: vi.fn(),
   onSaveFile: vi.fn(),
   onDuplicate: vi.fn(),
+  onToggleAutomation: vi.fn(),
+  onPreview: vi.fn(),
 };
 
 function renderGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) {
@@ -1393,5 +1396,198 @@ describe("Workshop-Datei-Tabs — Touch-Target-Boden (W3-5 Codex-P1)", () => {
     const tab = html.match(/<button[^>]*>[^<]*pack\.yaml/);
     expect(tab).not.toBeNull();
     expect(tab![0]).toContain("min-h-12");
+  });
+});
+
+// ── Landing-Pack (deterministic, LL2-S5) ─────────────────────────────────────
+// Vertrag: control_loops._landing_control_payload (Summary) + pack_detail
+// (Drawer). Karte: Automatik-Schalter, Queue, Baseline, Trigger, Ergebnis,
+// Vorschau. Drawer: Kandidaten, Gate-Stufen, Recovery, Trigger-Historie.
+const landingPack: LoopPackSummary = {
+  ...idleSweepWithCommits,
+  name: "landing",
+  type: "deterministic",
+  queue: null,
+  commits_ahead: 0,
+  timer_enabled: false,
+  timer_next_run: null,
+  automation_enabled: false,
+  baseline_sha: "abc1234def5678",
+  baseline_ok: true,
+  queue_summary: { total: 2, landed: 1, cleaned: 0, parked: 0 },
+  next_trigger_at: "2026-07-31T01:00:00+00:00",
+  last_result: "held",
+  collection_window: null,
+  candidates: [
+    { branch: "loop/t_abc123", head: "deadbeefcafe01", ahead: 3, behind: 1 },
+    { branch: "loop/manual", head: null, ahead: 1, behind: 0 },
+  ],
+} as LoopPackSummary;
+
+const landingDetail: LoopDetailResponse = {
+  ...landingPack,
+  ledger_tail: [],
+  queue_entries: null,
+  commits: [],
+  overrides: {},
+  phase_usage: [],
+  gate_stages: ["baseline", "affected", "full", "post_merge"],
+  trigger_history: ["review:t_1", "ready:t_2"],
+  followup_pending: true,
+  recovery: [
+    {
+      task_id: "t_abc123",
+      fingerprint: "fp-deadbeef1234",
+      failure_class: "verify",
+      failing_gate: "affected",
+      candidate_commit: "cafe123",
+      state: "started",
+      requested_at: "2026-07-31T00:00:00+00:00",
+      started_at: "2026-07-31T00:01:00+00:00",
+    },
+  ],
+  preview: {
+    running: false,
+    started_at: "2026-07-31T00:05:00+00:00",
+    finished_at: "2026-07-31T00:06:00+00:00",
+    rc: 0,
+    output_tail: "Landing-Loop dry-run: 2 Kandidaten",
+  },
+};
+
+/** Drawer-Inhalte enthalten react-router-Links (Ursprungskarten) — daher
+ *  immer unter einem MemoryRouter rendern. */
+function renderLandingDetailGrid(detail: LoopDetailResponse) {
+  return renderToStaticMarkup(
+    <MemoryRouter>
+      <LoopsGrid
+        packs={[landingPack]}
+        models={models}
+        selectedPack="landing"
+        detail={detail}
+        detailLoading={false}
+        detailError={null}
+        busyPack={null}
+        actionErrorByPack={{}}
+        landNoteByPack={{}}
+        startOpenPack={null}
+        pendingStopPack={null}
+        pendingLandPack={null}
+        workshopOpenPack={null}
+        files={null}
+        filesLoading={false}
+        filesError={null}
+        fileSaveBusy={false}
+        fileSaveError={null}
+        duplicateBusy={false}
+        duplicateError={null}
+        {...noopHandlers}
+      />
+    </MemoryRouter>,
+  );
+}
+
+describe("LoopsGrid — Landing-Pack-Karte (LL2-S5, AC-3)", () => {
+  it("rendert Automatik-Schalter aus (fail-closed Default), Queue, Baseline, Trigger, Ergebnis", () => {
+    const html = renderGrid([landingPack]);
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('aria-checked="false"');
+    expect(html).toContain("Automatik: aus");
+    expect(html).toContain("2 · gelandet 1 · bereinigt 0 · geparkt 0");
+    expect(html).toContain("abc1234");
+    expect(html).toContain("grün");
+    expect(html).toContain("zurückgehalten");
+    expect(html).toContain("Vorschau");
+  });
+
+  it("zeigt eingeschaltete Automatik als aria-checked mit Textlabel", () => {
+    const html = renderGrid([{ ...landingPack, automation_enabled: true }]);
+    expect(html).toContain('aria-checked="true"');
+    expect(html).toContain("Automatik: an");
+  });
+
+  it("zeigt fehlgeschlagene Baseline als Text (nicht farballeinig)", () => {
+    const html = renderGrid([{ ...landingPack, baseline_ok: false }]);
+    expect(html).toContain("nicht grün");
+  });
+
+  it("Switch-Klick meldet den Zielzustand — Server-Confirm bleibt dem Container", () => {
+    const onToggleAutomation = vi.fn();
+    renderInteractiveGrid([landingPack], { onToggleAutomation });
+    fireEvent.click(screen.getByRole("switch", { name: "Automatik" }));
+    expect(onToggleAutomation).toHaveBeenCalledWith(true);
+  });
+
+  it("Vorschau-Button löst onPreview aus", () => {
+    const onPreview = vi.fn();
+    renderInteractiveGrid([landingPack], { onPreview });
+    fireEvent.click(screen.getByRole("button", { name: /Vorschau/ }));
+    expect(onPreview).toHaveBeenCalledOnce();
+  });
+
+  it("typ-badged deterministic statt das Pack fallen zu lassen", () => {
+    const html = renderGrid([landingPack]);
+    expect(html).toContain("Deterministisch");
+  });
+
+  it("390px-Smoke: Karte bleibt im Mobile-Stack vollständig erreichbar (AC-5)", () => {
+    // jsdom wendet keine Media-Queries an; der Test pinnt den Vertrag, dass
+    // die Landing-Karte keine Breiten-abhängige Conditional-Renders nutzt —
+    // bei 390px stackt das Grid (Basis: einspaltig, md:grid-cols-2) und alle
+    // AC-3-Elemente bleiben per Tastatur/Screenreader erreichbar.
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    try {
+      renderInteractiveGrid([landingPack]);
+      // getByRole wirft, wenn das Element fehlt — Anwesenheit ist damit Assertion.
+      screen.getByRole("switch", { name: "Automatik" });
+      screen.getByRole("button", { name: /Vorschau/ });
+      // Laufstatus ist als aria-live-Region (role=status) angekündigt.
+      expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
+    } finally {
+      Object.defineProperty(window, "innerWidth", { value: originalWidth, configurable: true });
+    }
+  });
+});
+
+describe("LoopsGrid — Landing-Drawer (LL2-S5, AC-4)", () => {
+  it("zeigt Kandidaten mit Ursprungskarten-Link, Gate-Stufen, Recovery, Trigger-Historie, Vorschau", () => {
+    const html = renderLandingDetailGrid(landingDetail);
+    expect(html).toContain("loop/t_abc123");
+    expect(html).toContain("/control/fleet?task=t_abc123");
+    expect(html).toContain("+3/−1");
+    expect(html).toContain("post_merge");
+    expect(html).toContain("gestartet");
+    expect(html).toContain("Versuch 1");
+    expect(html).toContain("fp-dead");
+    expect(html).toContain("affected");
+    expect(html).toContain("review:t_1");
+    expect(html).toContain("Folgelauf vorgemerkt");
+    expect(html).toContain("Vorschau beendet · Exit 0");
+    expect(html).toContain("Landing-Loop dry-run: 2 Kandidaten");
+  });
+
+  it("bleibt ohne Landing-Daten lesbar (Empty-States)", () => {
+    const html = renderLandingDetailGrid({
+      ...landingDetail,
+      candidates: [],
+      gate_stages: [],
+      recovery: [],
+      trigger_history: [],
+      followup_pending: false,
+      preview: null,
+    });
+    expect(html).toContain("Keine Kandidaten in der Queue.");
+    expect(html).toContain("Keine Recovery-Anfragen.");
+    expect(html).toContain("Keine Trigger-Signale.");
+    expect(html).toContain("Noch keine Vorschau gestartet.");
+  });
+
+  it("rendert laufende Vorschau als Statuszeile", () => {
+    const html = renderLandingDetailGrid({
+      ...landingDetail,
+      preview: { running: true, started_at: "2026-07-31T00:05:00+00:00", output_tail: "" },
+    });
+    expect(html).toContain("Vorschau läuft …");
   });
 });

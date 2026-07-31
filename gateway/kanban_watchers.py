@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import json
 import logging
 import os
 import sqlite3
@@ -27,6 +28,201 @@ from agent.i18n import t
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
+
+LANDING_RECOVERY_RECONCILE_FAILED_EVENT = "landing_recovery_reconcile_failed"
+_LANDING_RECOVERY_REQUIRED_REQUEST_FIELDS = (
+    "fingerprint",
+    "candidate_commit",
+    "failure_class",
+    "failing_gate",
+    "blocking_findings",
+    "required_verification",
+)
+
+
+@dataclass(frozen=True)
+class LandingRecoveryReconcileResult:
+    """Deterministic, secret-free summary of one reconciler pass."""
+
+    enabled: bool
+    scanned: int = 0
+    started: tuple[tuple[str, str], ...] = ()
+    failed: tuple[tuple[str, str, str], ...] = ()
+    failed_request_ids: tuple[int, ...] = ()
+
+
+def reconcile_landing_recoveries(
+    conn: sqlite3.Connection,
+    *,
+    automation_enabled: bool,
+    limit: int,
+    manual_override: bool = False,
+) -> LandingRecoveryReconcileResult:
+    """Start open recovery requests in stable event order.
+
+    ``manual_override`` is intentionally an invocation-only capability. The
+    gateway never enables it; the authenticated control API may do so. A
+    malformed request is terminally annotated instead of mutating its task or
+    being retried on every gateway tick.
+    """
+    from hermes_cli import kanban_db as _kb
+
+    if limit < 1:
+        raise ValueError("landing recovery reconcile limit must be positive")
+    enabled = bool(automation_enabled or manual_override)
+    if not enabled:
+        return LandingRecoveryReconcileResult(enabled=False)
+
+    terminal_fingerprints: set[tuple[str, str]] = set()
+    failed_request_ids: set[int] = set()
+    terminal_rows = conn.execute(
+        """
+        SELECT task_id, kind, payload
+          FROM task_events
+         WHERE kind IN (?, ?, ?)
+         ORDER BY id
+        """,
+        (
+            _kb.LANDING_RECOVERY_STARTED_EVENT,
+            _kb.LANDING_RECOVERY_EXHAUSTED_EVENT,
+            LANDING_RECOVERY_RECONCILE_FAILED_EVENT,
+        ),
+    ).fetchall()
+    for row in terminal_rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        fingerprint = payload.get("fingerprint")
+        if isinstance(fingerprint, str) and fingerprint:
+            terminal_fingerprints.add((row["task_id"], fingerprint))
+        if row["kind"] == LANDING_RECOVERY_RECONCILE_FAILED_EVENT:
+            request_id = payload.get("requested_event_id")
+            if isinstance(request_id, int):
+                failed_request_ids.add(request_id)
+
+    requested_rows = conn.execute(
+        """
+        SELECT id, task_id, payload
+          FROM task_events
+         WHERE kind = ?
+         ORDER BY id
+        """,
+        (_kb.LANDING_RECOVERY_REQUESTED_EVENT,),
+    ).fetchall()
+    scanned = 0
+    started: list[tuple[str, str]] = []
+    failed: list[tuple[str, str, str]] = []
+    newly_failed_request_ids: list[int] = []
+
+    def _record_failure(
+        row: sqlite3.Row,
+        *,
+        fingerprint: str,
+        failure_class: str,
+        error_type: str,
+    ) -> None:
+        request_id = int(row["id"])
+        _kb.add_event(
+            conn,
+            row["task_id"],
+            LANDING_RECOVERY_RECONCILE_FAILED_EVENT,
+            {
+                "requested_event_id": request_id,
+                "fingerprint": fingerprint,
+                "failure_class": failure_class,
+                "error_type": error_type,
+                "source": "gateway_reconciler",
+            },
+        )
+        failed.append((row["task_id"], fingerprint, failure_class))
+        newly_failed_request_ids.append(request_id)
+
+    for row in requested_rows:
+        request_id = int(row["id"])
+        if request_id in failed_request_ids:
+            continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            payload = None
+        fingerprint = (
+            payload.get("fingerprint", "") if isinstance(payload, dict) else ""
+        )
+        if isinstance(fingerprint, str) and (
+            row["task_id"], fingerprint
+        ) in terminal_fingerprints:
+            continue
+        if scanned >= limit:
+            break
+        scanned += 1
+        if (
+            not isinstance(payload, dict)
+            or not isinstance(fingerprint, str)
+            or not fingerprint
+            or any(
+                field not in payload
+                for field in _LANDING_RECOVERY_REQUIRED_REQUEST_FIELDS
+            )
+        ):
+            _record_failure(
+                row,
+                fingerprint=fingerprint if isinstance(fingerprint, str) else "",
+                failure_class="unclear",
+                error_type="invalid_requested_payload",
+            )
+            continue
+        try:
+            did_start = _kb.start_landing_recovery_revision(
+                conn,
+                row["task_id"],
+                fingerprint=fingerprint,
+                source="gateway_reconciler",
+            )
+        except Exception as exc:
+            _record_failure(
+                row,
+                fingerprint=fingerprint,
+                failure_class="infra",
+                error_type=type(exc).__name__,
+            )
+            continue
+        if did_start:
+            started.append((row["task_id"], fingerprint))
+
+    return LandingRecoveryReconcileResult(
+        enabled=True,
+        scanned=scanned,
+        started=tuple(started),
+        failed=tuple(failed),
+        failed_request_ids=tuple(newly_failed_request_ids),
+    )
+
+
+def _landing_recovery_automation_enabled() -> bool:
+    """Read the S4 kill switch without making gateway startup depend on S4."""
+    try:
+        from hermes_cli import control_loops
+    except ImportError:
+        return False
+    reader = getattr(control_loops, "get_landing_automation_enabled", None)
+    if reader is None:
+        return False
+    try:
+        return bool(reader())
+    except Exception as exc:
+        logger.warning(
+            "landing recovery automation state unreadable; failing closed",
+            extra={
+                "event": "landing_recovery_automation_state_failed",
+                "failure_class": "infra",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return False
+
 
 _COMPLETED_HANDOFF_LIMIT = 1600
 
@@ -2709,6 +2905,40 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifications_watcher` and issue #21378.
+                try:
+                    recovery_limit = max(
+                        1,
+                        int(
+                            kanban_cfg.get(
+                                "landing_recovery_reconcile_limit", 32
+                            )
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    recovery_limit = 32
+                recovery = reconcile_landing_recoveries(
+                    conn,
+                    automation_enabled=_landing_recovery_automation_enabled(),
+                    limit=recovery_limit,
+                )
+                if recovery.started or recovery.failed:
+                    logger.info(
+                        "landing recovery reconcile tick",
+                        extra={
+                            "event": "landing_recovery_reconciled",
+                            "board": slug,
+                            "automation_enabled": recovery.enabled,
+                            "scanned": recovery.scanned,
+                            "started_count": len(recovery.started),
+                            "failed_count": len(recovery.failed),
+                            "started_task_ids": [
+                                task_id for task_id, _ in recovery.started
+                            ],
+                            "failed_task_ids": [
+                                task_id for task_id, _, _ in recovery.failed
+                            ],
+                        },
+                    )
                 _dispatch_result = _kb.dispatch_once(
                     conn,
                     board=slug,

@@ -7,7 +7,16 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import landing_loop as landing_module
-from hermes_cli.landing_loop import LandingLoop, main, render_discord
+from hermes_cli.landing_loop import (
+    BaselineProbe,
+    FailureClass,
+    LL2Candidate,
+    LandingLoop,
+    classify_failure,
+    main,
+    plan_queue,
+    render_discord,
+)
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -63,6 +72,15 @@ def git_world(tmp_path):
 
 def make_loop(repo: Path, loops_root: Path, ledger_dir: Path, **kwargs) -> LandingLoop:
     fixed = datetime(2026, 7, 29, 4, 0, tzinfo=timezone.utc)
+    kwargs.setdefault(
+        "baseline_records",
+        lambda: [
+            {
+                "result": "pass",
+                "head_sha": git(repo, "rev-parse", "main").stdout.strip(),
+            }
+        ],
+    )
     return LandingLoop(
         repo,
         loops_root,
@@ -377,3 +395,203 @@ def test_worktree_on_a_foreign_branch_is_parked_without_reset(git_world):
     assert "bar" in outcome.reason and "erwartet loop/foo" in outcome.reason
     # Entscheidend: die fremde Arbeit lebt noch.
     assert git(worktree, "rev-parse", "HEAD").stdout.strip() == fremd
+
+
+def test_candidate_fingerprint_is_stable_and_uses_closed_failure_class():
+    candidate = LL2Candidate(
+        task_or_branch_id="loop/example",
+        candidate_commit="abc123",
+        failing_gate="affected",
+        failure_class=FailureClass.CANDIDATE_REGRESSION,
+    )
+
+    assert candidate.fingerprint == candidate.fingerprint
+    assert len(candidate.fingerprint) == 64
+    assert set(FailureClass) == {
+        FailureClass.CANDIDATE_REGRESSION,
+        FailureClass.MAIN_RED,
+        FailureClass.INFRA,
+        FailureClass.UNCLEAR,
+        FailureClass.CLEAN_LAND,
+        FailureClass.HELD_ESCALATED,
+    }
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "output", "expected"),
+    [
+        ("affected", "FAILED tests/test_feature.py::test_case", FailureClass.CANDIDATE_REGRESSION),
+        ("affected", "command timed out after 300s", FailureClass.INFRA),
+        ("baseline", "green receipt missing for baseline abc", FailureClass.MAIN_RED),
+        ("policy", "candidate held and escalated", FailureClass.HELD_ESCALATED),
+        ("affected", "unexpected gate response", FailureClass.UNCLEAR),
+    ],
+)
+def test_classify_failure_uses_explicit_heuristics_and_unclear_default(
+    gate_name, output, expected
+):
+    assert classify_failure(gate_name, output, "abc", "def") is expected
+
+
+def test_plan_queue_stops_without_exact_green_baseline_and_sorts_candidates():
+    candidates = (
+        LL2Candidate("loop/z", "2"),
+        LL2Candidate("loop/a", "1"),
+    )
+
+    stopped = plan_queue(
+        candidates,
+        BaselineProbe("main-sha", False, FailureClass.MAIN_RED, "missing"),
+    )
+    green = plan_queue(
+        candidates,
+        BaselineProbe("main-sha", True, FailureClass.CLEAN_LAND, "exact pass"),
+    )
+
+    assert stopped.candidates == ()
+    assert stopped.stop_rest is True
+    assert [item.task_or_branch_id for item in green.candidates] == ["loop/a", "loop/z"]
+    assert green.stop_rest is False
+
+
+def test_plan_queue_marks_candidate_isolation_and_global_stop():
+    candidates = (
+        LL2Candidate(
+            "loop/a-regression",
+            "1",
+            "affected",
+            FailureClass.CANDIDATE_REGRESSION,
+        ),
+        LL2Candidate("loop/b-infra", "2", "affected", FailureClass.INFRA),
+        LL2Candidate("loop/c-not-run", "3"),
+    )
+    baseline = BaselineProbe("main", True, FailureClass.CLEAN_LAND, "exact pass")
+
+    plan = plan_queue(candidates, baseline)
+
+    assert plan.isolate == ("loop/a-regression",)
+    assert plan.stop_after == "loop/b-infra"
+    assert plan.stop_rest is True
+    assert [item.task_or_branch_id for item in plan.candidates] == [
+        "loop/a-regression",
+        "loop/b-infra",
+    ]
+
+
+def test_missing_baseline_proof_stops_queue_without_touching_refs(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("blocked")
+    commit_loop(worktree, "candidate")
+    before = refs(repo)
+
+    run = make_loop(repo, loops_root, ledger_dir, baseline_records=lambda: []).run()
+
+    assert run.plan.stop_rest is True
+    assert run.diagnostics[0].failure_class is FailureClass.MAIN_RED
+    assert outcome(run, "loop/blocked").action == "parked"
+    assert refs(repo) == before
+
+
+def test_infra_failure_stops_rest_queue_but_candidate_regression_isolates(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-first")
+    second = add_loop("b-second")
+    commit_loop(first, "first")
+    second_head = commit_loop(second, "second")
+    calls: list[str] = []
+
+    def infra_gate(_repo: Path, _base: str):
+        calls.append("gate")
+        return False, "command timed out after 300s"
+
+    run = make_loop(repo, loops_root, ledger_dir, gate_runner=infra_gate).run()
+
+    assert calls == ["gate"]
+    assert run.diagnostics[0].failure_class is FailureClass.INFRA
+    assert run.diagnostics[0].stop_rest is True
+    assert outcome(run, "loop/b-second").action == "parked"
+    assert "Rest-Queue gestoppt" in outcome(run, "loop/b-second").reason
+    assert git(repo, "rev-parse", "loop/b-second").stdout.strip() == second_head
+
+
+def test_candidate_regression_isolated_and_next_candidate_rebased_on_main(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    first = add_loop("a-regression")
+    second = add_loop("b-clean")
+    commit_loop(first, "regression")
+    second_head = commit_loop(second, "clean")
+    reports = iter(((False, "FAILED tests/test_feature.py"), (True, "all green")))
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: next(reports),
+    ).run()
+
+    assert run.diagnostics[0].failure_class is FailureClass.CANDIDATE_REGRESSION
+    assert run.diagnostics[0].stop_rest is False
+    assert outcome(run, "loop/a-regression").action == "parked"
+    assert outcome(run, "loop/b-clean").action == "landed"
+    assert git(repo, "rev-parse", "main").stdout.strip() == second_head
+
+
+def test_automation_off_holds_queue_without_recovery_or_gate(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("t_disabled")
+    head = commit_loop(worktree, "candidate")
+    gate_calls: list[str] = []
+    recovery_calls = []
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        automation_enabled=lambda: False,
+        gate_runner=lambda _repo, _base: gate_calls.append("gate") or (True, "green"),
+        recovery_request=lambda candidate: recovery_calls.append(candidate) or "requested",
+    ).run()
+
+    assert gate_calls == []
+    assert recovery_calls == []
+    assert outcome(run, "loop/t_disabled").action == "parked"
+    assert "Landing-Automatik deaktiviert" in outcome(run, "loop/t_disabled").reason
+    assert git(repo, "rev-parse", "loop/t_disabled").stdout.strip() == head
+
+
+def test_candidate_regression_requests_exactly_one_recovery(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("t_recovery")
+    commit_loop(worktree, "regression")
+    recovery_calls = []
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        gate_runner=lambda _repo, _base: (False, "FAILED tests/test_feature.py"),
+        recovery_request=lambda candidate: recovery_calls.append(candidate) or "requested",
+    ).run()
+
+    assert run.diagnostics[0].failure_class is FailureClass.CANDIDATE_REGRESSION
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0] == run.diagnostics[0].candidate
+
+
+def test_stop_file_holds_at_safe_checkpoint(git_world, tmp_path):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("stopped")
+    commit_loop(worktree, "candidate")
+    stop_path = tmp_path / "STOP"
+    stop_path.touch()
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        stop_path=stop_path,
+        gate_runner=lambda _repo, _base: pytest.fail("gate must not run after STOP"),
+    ).run()
+
+    assert outcome(run, "loop/stopped").action == "parked"
+    assert "STOP angefordert" in outcome(run, "loop/stopped").reason

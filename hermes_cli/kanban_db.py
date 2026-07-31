@@ -154,6 +154,12 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 KANBAN_ARTIFACT_TREE_MAX_ENTRIES = 4096
+
+# Landing recovery is an audited event ledger, not a wait_for.event_seen API.
+# These names therefore intentionally do not belong to VALID_WAIT_EVENT_KINDS.
+LANDING_RECOVERY_REQUESTED_EVENT = "landing_recovery_requested"
+LANDING_RECOVERY_STARTED_EVENT = "landing_recovery_started"
+LANDING_RECOVERY_EXHAUSTED_EVENT = "landing_recovery_exhausted"
 VALID_BLOCK_KINDS = frozenset(
     {
         "needs_input",
@@ -7316,6 +7322,223 @@ def _append_event(
         board=lambda: board_slug_for_conn(conn),
     )
     return event_id
+
+
+def _landing_recovery_events_for_fingerprint(
+    conn: sqlite3.Connection, task_id: str, fingerprint: str
+) -> list[tuple[int, str, dict]]:
+    rows = conn.execute(
+        """
+        SELECT id, kind, payload
+          FROM task_events
+         WHERE task_id = ?
+           AND kind IN (?, ?, ?)
+         ORDER BY id
+        """,
+        (
+            task_id,
+            LANDING_RECOVERY_REQUESTED_EVENT,
+            LANDING_RECOVERY_STARTED_EVENT,
+            LANDING_RECOVERY_EXHAUSTED_EVENT,
+        ),
+    ).fetchall()
+    events: list[tuple[int, str, dict]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("fingerprint") == fingerprint:
+            events.append((int(row["id"]), str(row["kind"]), payload))
+    return events
+
+
+def _validate_landing_recovery_request_payload(payload: dict) -> None:
+    """Fail closed before a malformed recovery record reaches the event ledger."""
+    for field in (
+        "fingerprint",
+        "candidate_commit",
+        "failure_class",
+        "failing_gate",
+        "source",
+    ):
+        if not isinstance(payload.get(field), str) or not payload[field].strip():
+            raise ValueError(f"landing recovery {field} must be a non-empty string")
+    for field in ("blocking_findings", "required_verification"):
+        values = payload.get(field)
+        if not isinstance(values, list) or not values or not all(
+            isinstance(value, str) and value.strip() for value in values
+        ):
+            raise ValueError(
+                f"landing recovery {field} must be a non-empty list of strings"
+            )
+
+
+def request_landing_recovery(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    fingerprint: str,
+    candidate_commit: str,
+    failure_class: str,
+    failing_gate: str,
+    blocking_findings: list[str],
+    required_verification: list[str],
+    source: str = "landing_loop",
+) -> bool:
+    """Materialize one open recovery request per task/fingerprint.
+
+    A fingerprint that has already started is permanently spent. Re-requesting
+    it records one canonical exhausted/held marker and never opens another cycle.
+    """
+    payload = {
+        "fingerprint": fingerprint,
+        "candidate_commit": candidate_commit,
+        "failure_class": failure_class,
+        "failing_gate": failing_gate,
+        "blocking_findings": list(blocking_findings),
+        "required_verification": list(required_verification),
+        "source": source,
+    }
+    _validate_landing_recovery_request_payload(payload)
+    with write_txn(conn):
+        if get_task(conn, task_id) is None:
+            return False
+        events = _landing_recovery_events_for_fingerprint(conn, task_id, fingerprint)
+        kinds = {kind for _event_id, kind, _payload in events}
+        if LANDING_RECOVERY_STARTED_EVENT in kinds:
+            if LANDING_RECOVERY_EXHAUSTED_EVENT not in kinds:
+                _append_event(
+                    conn,
+                    task_id,
+                    LANDING_RECOVERY_EXHAUSTED_EVENT,
+                    {
+                        "fingerprint": fingerprint,
+                        "held": True,
+                        "escalated": True,
+                        "source": source,
+                    },
+                )
+            return False
+        if LANDING_RECOVERY_REQUESTED_EVENT in kinds:
+            return False
+        _append_event(conn, task_id, LANDING_RECOVERY_REQUESTED_EVENT, payload)
+    return True
+
+
+def start_landing_recovery_revision(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    fingerprint: str,
+    source: str = "gateway",
+) -> bool:
+    """Privileged DB transition from an open request to same-card revision.
+
+    Unlike ``block_task``, this entry point is not exposed to worker tools. It
+    creates the blocked/review_revision shape consumed by the existing bounded
+    auto-retry path while preserving assignment and workspace fields.
+    """
+    if not isinstance(fingerprint, str) or not fingerprint.strip():
+        raise ValueError("landing recovery fingerprint must be a non-empty string")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("landing recovery source must be a non-empty string")
+    with write_txn(conn):
+        events = _landing_recovery_events_for_fingerprint(conn, task_id, fingerprint)
+        if any(kind == LANDING_RECOVERY_STARTED_EVENT for _, kind, _ in events):
+            return False
+        requested = next(
+            (
+                (event_id, payload)
+                for event_id, kind, payload in reversed(events)
+                if kind == LANDING_RECOVERY_REQUESTED_EVENT
+            ),
+            None,
+        )
+        if requested is None:
+            return False
+        requested_event_id, request_payload = requested
+        _validate_landing_recovery_request_payload(request_payload)
+        task = get_task(conn, task_id)
+        if task is None or task.status not in {"ready", "review", "done"}:
+            return False
+
+        reason = "landing recovery requested: " + "; ".join(
+            request_payload["blocking_findings"]
+        )
+        reviewer_metadata = {
+            "blocking_findings": request_payload["blocking_findings"],
+            "required_verification": request_payload["required_verification"],
+            "landing_recovery": {
+                "fingerprint": fingerprint,
+                "requested_event_id": requested_event_id,
+                "source": source,
+            },
+        }
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'blocked',
+                   claim_lock = NULL,
+                   claim_expires = NULL,
+                   worker_pid = NULL,
+                   current_run_id = NULL,
+                   block_kind = 'review_revision',
+                   block_recurrences = 1,
+                   auto_retry_count = 0,
+                   wait_for = NULL
+             WHERE id = ?
+               AND status IN ('ready', 'review', 'done')
+            """,
+            (task_id,),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _synthesize_ended_run(
+            conn,
+            task_id,
+            outcome="blocked",
+            summary=reason,
+            metadata=reviewer_metadata,
+        )
+        review_revision = {
+            "review_tier": "standard",
+            "resume_stage": 0,
+            "reviewed_commit": request_payload["candidate_commit"],
+            "blocking_findings": request_payload["blocking_findings"],
+            "required_verification": request_payload["required_verification"],
+            "source": "landing_recovery",
+        }
+        watermark = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            {
+                "reason": reason,
+                "kind": "review_revision",
+                "recurrences": 1,
+                "status": "blocked",
+                "comment_id_watermark": int(watermark),
+                "review_revision": review_revision,
+            },
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            LANDING_RECOVERY_STARTED_EVENT,
+            {
+                "fingerprint": fingerprint,
+                "requested_event_id": requested_event_id,
+                "source": source,
+            },
+            run_id=run_id,
+        )
+    return True
 
 
 def _emit_operator_escalation(

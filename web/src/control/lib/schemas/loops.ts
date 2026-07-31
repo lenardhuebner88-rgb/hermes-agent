@@ -42,9 +42,52 @@ export const LoopHeartbeatSchema = z.object({
   last: z.array(LoopHeartbeatHistoryEntrySchema).catch([]),
 });
 
+// ── Landing-Pack (deterministic) — Vertrag: control_loops._landing_control_payload
+// Alle Felder additiv-optional: ältere Backends liefern sie nicht, das Schema
+// darf das Pack deshalb nicht verwerfen.
+export const LoopLandingQueueSummarySchema = z.object({
+  total: z.coerce.number().optional(),
+  landed: z.coerce.number().optional(),
+  cleaned: z.coerce.number().optional(),
+  parked: z.coerce.number().optional(),
+});
+
+export const LoopLandingCollectionWindowSchema = z.object({
+  opened_at: z.string().nullable().optional(),
+  closes_at: z.string().nullable().optional(),
+});
+
+export const LoopLandingCandidateSchema = z.object({
+  branch: z.string(),
+  head: z.string().nullable().optional(),
+  ahead: z.coerce.number().optional(),
+  behind: z.coerce.number().optional(),
+});
+
+export const LoopLandingRecoveryState = z.enum(["requested", "started", "exhausted"]);
+
+export const LoopLandingRecoveryEntrySchema = z.object({
+  task_id: z.string(),
+  fingerprint: z.string().optional(),
+  failure_class: z.string().optional(),
+  failing_gate: z.string().optional(),
+  candidate_commit: z.string().optional(),
+  state: LoopLandingRecoveryState,
+  requested_at: z.string().nullable().optional(),
+  started_at: z.string().nullable().optional(),
+});
+
+export const LoopLandingPreviewSchema = z.object({
+  running: z.boolean().optional(),
+  started_at: z.string().nullable().optional(),
+  finished_at: z.string().nullable().optional(),
+  rc: z.coerce.number().nullable().optional(),
+  output_tail: z.string().optional(),
+});
+
 export const LoopPackSummarySchema = z.object({
   name: z.string(),
-  type: z.enum(["pipeline", "sweep"]),
+  type: z.enum(["pipeline", "sweep", "deterministic"]),
   // Infrastruktur-Fehler einer Teil-Probe (z.B. git-Timeout beim commits_ahead-
   // Zählen, control_loops.py). Die Summary bleibt vollständig — nur diese eine
   // Zahl ist unzuverlässig. Ohne dieses Feld würde zod den Schlüssel still
@@ -79,6 +122,15 @@ export const LoopPackSummarySchema = z.object({
   timer_enabled: z.boolean().catch(false),
   timer_schedule: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/).catch("23:37"),
   timer_next_run: z.string().nullable().catch(null),
+  // Landing-Pack (deterministic) — additiv, siehe _landing_control_payload.
+  automation_enabled: z.boolean().optional(),
+  baseline_sha: z.string().nullable().optional(),
+  baseline_ok: z.boolean().nullable().optional(),
+  queue_summary: LoopLandingQueueSummarySchema.optional(),
+  next_trigger_at: z.string().nullable().optional(),
+  last_result: z.string().nullable().optional(),
+  collection_window: LoopLandingCollectionWindowSchema.nullable().optional(),
+  candidates: z.array(LoopLandingCandidateSchema).optional(),
   token_usage: z.object({
     total_tokens: z.coerce.number().nullable().catch(null),
     metered_cost_eur: z.coerce.number().nullable().catch(null),
@@ -124,6 +176,13 @@ export const LoopDetailResponseSchema = LoopPackSummarySchema.extend({
     billing: z.enum(["subscription", "unknown"]).catch("unknown"),
     metered_cost_eur: z.coerce.number().optional(),
   })).catch([]),
+  // Landing-Pack Detail — additiv (control_loops.pack_detail, LL2-S5).
+  gate_stages: z.array(z.string()).optional(),
+  trigger_history: z.array(z.string()).optional(),
+  followup_pending: z.boolean().optional(),
+  recovery: z.array(LoopLandingRecoveryEntrySchema).optional(),
+  // Backend sendet null, solange nie eine Vorschau lief.
+  preview: LoopLandingPreviewSchema.nullable().optional(),
 });
 
 export const LoopQueueFileResponseSchema = z.object({

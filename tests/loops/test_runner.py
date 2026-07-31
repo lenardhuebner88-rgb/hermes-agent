@@ -554,6 +554,10 @@ def test_shipped_landing_pack_has_deterministic_command_contract():
     run = pack.phases["run"]
     assert run.command[:3] == ("python3", "-m", "hermes_cli.landing_loop")
     assert run.timeout == 7200
+    assert pack.params["collection_window_seconds"] == "600"
+    assert pack.params["daily_reconciliation_at"] == "06:00"
+    assert pack.params["daily_reconciliation_timezone"] == "Europe/Berlin"
+    assert pack.params["timer_activation"] == "operator_after_approval"
 
 
 def test_shipped_landing_pack_remains_readable_by_existing_loop_catalog(
