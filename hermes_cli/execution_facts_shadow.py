@@ -44,6 +44,12 @@ from hermes_cli.execution_facts_ledger import (
     NonBlockingEmitter,
     emitter_snapshot_event,
 )
+from hermes_cli.execution_facts_landing import (
+    DEFAULT_INTEGRATION_REF,
+    read_landing_observations,
+    reconcile_landing,
+    task_runs_by_task,
+)
 from hermes_cli.execution_facts_projection import rebuild_projections
 from hermes_cli.execution_facts_reconcile import (
     SystemInvocationObservation,
@@ -155,6 +161,8 @@ class ShadowCollectionConfig:
     subscription_fees: Mapping[str, object] | None = None
     fee_version: str | None = None
     usage_sample_limit: int = DEFAULT_USAGE_SAMPLE_LIMIT
+    repository: Path | None = None
+    integration_ref: str = DEFAULT_INTEGRATION_REF
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,6 +818,68 @@ def _crontab_job_scope(message: str) -> str | None:
     return f"crontab:{user}-{label or 'job'}-{digest}"
 
 
+def collect_landing_cohort(
+    repository: Path,
+    kanban_database: Path,
+    *,
+    observed_at_ms: int,
+    integration_ref: str = DEFAULT_INTEGRATION_REF,
+) -> SourceCohort:
+    """Bind shipped commits to the executions that produced them."""
+    if not kanban_database.is_file():
+        return _unknown_cohort(
+            "git_landing",
+            eligibility_rule="tasks_reachable_from_integration_ref",
+            observed_at_ms=observed_at_ms,
+        )
+    observations = read_landing_observations(
+        repository, integration_ref=integration_ref
+    )
+    if observations is None:
+        return _unknown_cohort(
+            "git_landing",
+            eligibility_rule="tasks_reachable_from_integration_ref",
+            observed_at_ms=observed_at_ms,
+        )
+    connection = _read_only_connection(kanban_database)
+    try:
+        if not _table_exists(connection, "task_runs"):
+            return _unknown_cohort(
+                "git_landing",
+                eligibility_rule="tasks_reachable_from_integration_ref",
+                observed_at_ms=observed_at_ms,
+            )
+        runs_by_task = task_runs_by_task(
+            connection, (item.task_id for item in observations)
+        )
+    finally:
+        connection.close()
+    events = tuple(reconcile_landing(observations, runs_by_task))
+    # The cohort counts executions, not tasks: one shipped task can have
+    # several runs. A task proven to have shipped but with no recorded run
+    # contributes nothing here -- there is no execution to attach it to.
+    attachable = sum(
+        len(runs_by_task.get(item.task_id, ())) for item in observations
+    )
+    return SourceCohort(
+        source="git_landing",
+        events=events,
+        eligible=attachable,
+        identity_observed=attachable,
+        metric_observed=_metric_execution_count(events),
+        eligibility_rule="tasks_reachable_from_integration_ref",
+        store_count=1,
+        read_errors=0,
+        window_start_ms=min(
+            (item.landed_at_ms for item in observations),
+            default=observed_at_ms,
+        ),
+        window_end_ms=observed_at_ms,
+        behavior_equivalent=True,
+        behavior_proof="fixed_read_only_commands",
+    )
+
+
 def collect_crontab_cohort(
     *,
     observed_at_ms: int,
@@ -1170,6 +1240,15 @@ def collect_shadow(
                 subscription_fees=config.subscription_fees,
                 fee_version=config.fee_version,
                 sample_limit=config.usage_sample_limit,
+            )
+        )
+    if config.repository is not None:
+        cohorts.append(
+            collect_landing_cohort(
+                config.repository,
+                config.hermes_home / "kanban.db",
+                observed_at_ms=now_ms,
+                integration_ref=config.integration_ref,
             )
         )
 

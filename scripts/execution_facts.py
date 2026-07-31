@@ -352,6 +352,12 @@ def _parser() -> argparse.ArgumentParser:
     collect.add_argument("--subscription-fees", type=Path)
     collect.add_argument("--fee-version")
     collect.add_argument("--usage-sample-limit", type=int, default=200)
+    collect.add_argument(
+        "--repository",
+        type=Path,
+        help="git checkout supplying landing evidence (omit to skip)",
+    )
+    collect.add_argument("--integration-ref", default="main")
 
     proof = commands.add_parser(
         "record-shadow-proof",
@@ -437,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
                 subscription_fees=fees,
                 fee_version=args.fee_version,
                 usage_sample_limit=args.usage_sample_limit,
+                repository=args.repository,
+                integration_ref=args.integration_ref,
             )
         )
         _print(result.to_dict())
