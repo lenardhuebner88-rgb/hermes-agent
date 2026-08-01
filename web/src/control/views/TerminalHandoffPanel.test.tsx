@@ -172,7 +172,15 @@ describe("TerminalHandoffPanel", () => {
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Kanban-Triage/ }));
     fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
-    await waitFor(() => screen.getByLabelText("Triage-Aufgabentext"));
+    // The textarea itself renders unconditionally once mode === "kanban" — it
+    // exists before doCapture's async chain has populated taskBody. Waiting on
+    // its presence alone (as this line used to) can resolve before the value
+    // is set, leaving the "Triage-Task anlegen" button (gated on non-empty
+    // taskBody) disabled when clicked below, so the click silently no-ops and
+    // the fetchJSONMock waitFor after it never resolves. Wait for the VALUE,
+    // same fix as the sibling "PlanSpec-Draft" waits above (kanban(t_0475de65)).
+    const taskTextarea = screen.getByLabelText("Triage-Aufgabentext") as HTMLTextAreaElement;
+    await waitFor(() => expect(taskTextarea.value).not.toBe(""));
 
     fireEvent.click(screen.getByRole("button", { name: /Triage-Task anlegen/ }));
 
