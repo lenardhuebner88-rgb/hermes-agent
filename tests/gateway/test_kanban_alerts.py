@@ -215,6 +215,113 @@ def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
     assert repeat == []
 
 
+def _escalate(conn, tid, payload):
+    with kb.write_txn(conn):
+        kb._append_event(conn, tid, kb.OPERATOR_ESCALATION_EVENT, payload)
+
+
+# The verbatim shape of event 92732 (2026-08-01) — the escalation that woke the
+# orchestrator, which then deployed a chain carrying `live_test_depth: ui-real`
+# without anyone approving it.
+_PARKED_RELEASE_GATE = {
+    "task": {
+        "id": "t_fe6ab9b2",
+        "title": "[Release-Gate] Dashboard build + runtime activation check",
+        "status": "blocked",
+        "assignee": "verifier",
+    },
+    "why_now": "settled block (last run outcome: blocked) with no operator_escalation",
+    "attempts_already_made": 0,
+    "evidence": {
+        "trigger_outcome": "blocked",
+        "last_error": "awaiting release-gate GO",
+        "blocked_kind": "needs_input",
+        "source": "silent_block_sweep",
+        "release_gate_candidate": True,
+    },
+    "recommended_human_action": "run `hermes kanban release-gate t_fe6ab9b2`",
+    "escalation_class": "operator-gated",
+}
+
+
+@pytest.mark.parametrize(
+    ("payload", "injectable"),
+    [
+        (_PARKED_RELEASE_GATE, False),
+        # Older parked gates predate the class field and carry only the
+        # evidence marker — 24 of the 32 measured ones look like this.
+        (
+            {
+                "task": {"id": "t_old", "title": "[Release-Gate] legacy"},
+                "evidence": {"release_gate_candidate": True},
+            },
+            False,
+        ),
+        # The class alone gates too: 28 measured events carry it without the
+        # evidence marker.
+        (
+            {"task": {"id": "t_gated", "title": "needs a human"},
+             "escalation_class": "operator-gated"},
+            False,
+        ),
+        # Everything else keeps today's behaviour — 87 % of measured events.
+        (
+            {"task": {"id": "t_flaky", "title": "retry me"},
+             "evidence": {"last_error": "boom"}, "escalation_class": "transient"},
+            True,
+        ),
+        (
+            {"task": {"id": "t_bug", "title": "real bug"},
+             "escalation_class": "real-bug"},
+            True,
+        ),
+        # No classification at all (337 of 466 measured events) stays injectable.
+        ({"task": {"id": "t_plain", "title": "unclassified"}}, True),
+    ],
+    ids=["parked-release-gate", "legacy-evidence-only", "class-only",
+         "transient", "real-bug", "unclassified"],
+)
+def test_operator_gated_escalations_are_not_orchestrator_injectable(
+    kanban_home, payload, injectable,
+):
+    """A release gate waiting on a human must not be handed to the orchestrator
+    as a synthetic turn; an ordinary escalation still is."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="escalating task")
+        state = _primed_state(conn)
+        _escalate(conn, tid, payload)
+        alerts = evaluate_alerts(
+            conn, _acfg(escalation_channel_id="999"), state, now=NOW + 1
+        )
+
+    assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
+    assert alerts[0]["orchestrator_injectable"] is injectable
+
+
+def test_gated_escalation_past_the_listing_limit_still_blocks_injection(
+    kanban_home,
+):
+    """One alert summarises every pending escalation but lists only the first
+    five. Classifying just the listed ones would wave a parked release gate
+    through whenever five ordinary escalations happen to precede it."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="escalating task")
+        state = _primed_state(conn)
+        for i in range(6):
+            _escalate(conn, tid, {"task": {"id": f"t_noise{i}", "title": f"noise {i}"},
+                                  "escalation_class": "transient"})
+        _escalate(conn, tid, _PARKED_RELEASE_GATE)
+        alerts = evaluate_alerts(
+            conn, _acfg(escalation_channel_id="999"), state, now=NOW + 1
+        )
+
+    assert len(alerts) == 1
+    # The gate is past the listing limit, so it is invisible in the text …
+    assert "Release-Gate" not in alerts[0]["text"]
+    # … but it must still block the synthetic orchestrator turn.
+    assert alerts[0]["orchestrator_injectable"] is False
+
+
 def test_operator_escalation_falls_back_to_task_row_when_payload_sparse(
     kanban_home,
 ):

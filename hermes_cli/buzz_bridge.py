@@ -182,6 +182,16 @@ class BuzzReleaseGateBridge:
         event_id = payload.get("event_id") if isinstance(payload, dict) else None
         if not isinstance(event_id, str) or _HEX64_RE.fullmatch(event_id) is None:
             raise BuzzBridgeError("buzz messages send returned no valid event_id")
+        # `normalize_write_response` (buzz-cli/src/client.rs:1420) reports
+        # `accepted` alongside the id and defaults it to false when the relay
+        # omits it, so this cannot be a hard failure. Log it: a request the
+        # relay never stored yields no reactions, and without this line that
+        # looks exactly like "nobody approved yet" until the timeout expires.
+        if isinstance(payload, dict) and payload.get("accepted") is not True:
+            logger.warning(
+                "buzz release gate: relay did not confirm the request as accepted; "
+                "polling continues but the event may not be stored"
+            )
         self.event_id = event_id.lower()
         return self.event_id
 

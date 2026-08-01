@@ -336,6 +336,26 @@ def _confirm_or_defer(
     return None
 
 
+def _is_operator_gated(payload: dict) -> bool:
+    """Is this escalation bound to a human decision by construction?
+
+    Such a case must never reach the orchestrator as a synthetic turn: on
+    2026-08-01 exactly that path let a chain carrying ``live_test_depth:
+    ui-real`` deploy without anyone approving it (event 92732).
+
+    Both markers are read because they do not coincide. Measured over all 466
+    stored ``operator_escalation`` events: 36 carry ``escalation_class ==
+    "operator-gated"``, 32 carry ``evidence.release_gate_candidate``, and only
+    8 carry both — the older parked release gates predate the class field.
+    Their union is 60 events; the remaining 87 % (transient, real-bug,
+    capacity, flaky, unclassified) keep today's triage-inject behaviour.
+    """
+    if str(payload.get("escalation_class") or "").strip() == "operator-gated":
+        return True
+    evidence = payload.get("evidence")
+    return isinstance(evidence, dict) and evidence.get("release_gate_candidate") is True
+
+
 def _rule_operator_escalation(
     conn: sqlite3.Connection,
     acfg: dict,
@@ -389,6 +409,11 @@ def _rule_operator_escalation(
     if len(rows) > _MAX_FAILURES_LISTED:
         lines.append(f"… und {len(rows) - _MAX_FAILURES_LISTED} weitere")
     alert = {"rule": _OPERATOR_ESCALATION_EVENT, "text": "\n".join(lines)}
+    # Classify over *every* row, not just the listed ones: the alert summarises
+    # all of them, so a gated escalation beyond _MAX_FAILURES_LISTED would
+    # otherwise be waved through unseen.
+    if any(_is_operator_gated(_payload_dict(r["payload"])) for r in rows):
+        alert["orchestrator_injectable"] = False
     if acfg.get("escalation_channel_id"):
         alert["channel_id"] = acfg["escalation_channel_id"]
     return _confirm_or_defer(
