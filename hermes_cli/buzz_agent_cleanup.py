@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -300,17 +301,15 @@ class CleanupService:
         timer = self.runner.run([
             "systemctl",
             "--user",
-            "show",
+            "list-timers",
             _TIMER_UNIT,
-            "--property=NextElapseUSecRealtime",
+            "--all",
+            "--output=json",
             "--no-pager",
         ])
-        next_timer_run = None
-        if timer.returncode == 0:
-            for line in timer.stdout.splitlines():
-                if line.startswith("NextElapseUSecRealtime="):
-                    next_timer_run = line.partition("=")[2] or None
-                    break
+        next_timer_run = (
+            _parse_next_timer_run(timer.stdout) if timer.returncode == 0 else None
+        )
         return {
             "target_sets_equal": targets.equal,
             "units": list(targets.units),
@@ -446,6 +445,34 @@ def _optional_nonnegative_int(value: str | None) -> int | None:
     if value is None or not value.isdigit():
         return None
     return int(value)
+
+
+def _parse_next_timer_run(output: str) -> str | None:
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("unit") != _TIMER_UNIT:
+            continue
+        value = row.get("next")
+        if value in (None, "", "n/a"):
+            return None
+        try:
+            timestamp_us = int(value)
+        except (TypeError, ValueError):
+            return None
+        if timestamp_us <= 0:
+            return None
+        seconds, microseconds = divmod(timestamp_us, 1_000_000)
+        try:
+            timestamp = datetime.fromtimestamp(seconds, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+        return timestamp.replace(microsecond=microseconds).isoformat()
+    return None
 
 
 def _read_cgroup_process_count(control_group: str) -> int | None:

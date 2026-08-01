@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from hermes_cli.buzz_agent_cleanup import (
     CleanupService,
     CommandResult,
+    _parse_next_timer_run,
     register_buzz_agent_cleanup_routes,
 )
 
@@ -40,9 +41,17 @@ class FakeRunner:
             )
             rows.append("buzz-agent@alpha.service.bak loaded inactive dead backup")
             return CommandResult(0, "\n".join(rows), "")
-        if args[:3] == ["systemctl", "--user", "show"] and args[3].endswith(".timer"):
+        if args[:3] == ["systemctl", "--user", "list-timers"]:
             return CommandResult(
-                0, "NextElapseUSecRealtime=Sun 2026-08-02 04:01:49 CEST\n", ""
+                0,
+                json.dumps([
+                    {
+                        "next": 1785636029805599,
+                        "unit": "buzz-agents-nightly-restart.timer",
+                        "activates": "buzz-agents-nightly-restart.service",
+                    }
+                ]),
+                "",
             )
         if args[:3] == ["systemctl", "--user", "show"]:
             unit = args[3]
@@ -240,6 +249,25 @@ def test_receipt_is_atomic_persistent_and_action_log_is_append_only(
     assert service.read_last_receipt() == second
 
 
+def test_parse_next_timer_run_converts_systemd_json_and_handles_missing_values() -> (
+    None
+):
+    real_output = (
+        '[{"next":1785636029805599,"left":1785636029805599,"last":0,'
+        '"passed":0,"unit":"buzz-agents-nightly-restart.timer",'
+        '"activates":"buzz-agents-nightly-restart.service"}]'
+    )
+
+    assert _parse_next_timer_run(real_output) == "2026-08-02T02:00:29.805599+00:00"
+    assert _parse_next_timer_run("[]") is None
+    assert (
+        _parse_next_timer_run(
+            '[{"unit":"buzz-agents-nightly-restart.timer","next":"n/a"}]'
+        )
+        is None
+    )
+
+
 def test_status_reconstructs_receipt_and_reports_honest_totals(tmp_path: Path) -> None:
     runner = FakeRunner(("buzz-agent@alpha.service", "buzz-agent@beta.service"))
     service = _service(tmp_path, runner)
@@ -256,7 +284,7 @@ def test_status_reconstructs_receipt_and_reports_honest_totals(tmp_path: Path) -
 
     assert status["target_sets_equal"] is True
     assert status["total_memory_current"] == sum(runner.memory.values())
-    assert status["next_timer_run"] == "Sun 2026-08-02 04:01:49 CEST"
+    assert status["next_timer_run"] == "2026-08-02T02:00:29.805599+00:00"
     assert status["running"] is False
     assert status["last_receipt"] == receipt
 
