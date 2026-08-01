@@ -18,7 +18,11 @@ changed_files() {
   fi
 
   local base
-  base="$(git -C "$REPO_ROOT" merge-base HEAD main 2>/dev/null || true)"
+  base="$(python3 "$SCRIPT_DIR/gate_diff_base.py" --repo-root "$REPO_ROOT" || true)"
+  if [[ -z "$base" ]]; then
+    base="$(git -C "$REPO_ROOT" merge-base HEAD main 2>/dev/null || true)"
+  fi
+  export HERMES_GATE_DIFF_BASE="${base:-HEAD}"
   git -C "$REPO_ROOT" diff --name-only "${base:-HEAD}"
   git -C "$REPO_ROOT" ls-files --others --exclude-standard
 }

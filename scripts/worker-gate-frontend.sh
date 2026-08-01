@@ -7,7 +7,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+BASE="$(python3 "$SCRIPT_DIR/gate_diff_base.py" --repo-root "$ROOT" || true)"
+if [[ -z "$BASE" ]]; then
+    BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+fi
+export HERMES_GATE_DIFF_BASE="$BASE"
 
 mapfile -t _raw_changed < <(
     git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null
