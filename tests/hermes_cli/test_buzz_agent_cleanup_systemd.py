@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -15,6 +16,8 @@ def _read(path: Path) -> str:
 def test_nightly_service_runs_versioned_cleanup_worker_without_fixed_targets() -> None:
     service = _read(_SERVICE_PATH)
 
+    assert "Description=Buzz ACP agents: safe nightly restart" in service
+    assert re.search(r"orphan(?:ed)?|verwaist", service, re.IGNORECASE) is None
     assert (
         "ExecStart=%h/.hermes/hermes-agent/venv/bin/python "
         "-m hermes_cli.buzz_agent_cleanup"
