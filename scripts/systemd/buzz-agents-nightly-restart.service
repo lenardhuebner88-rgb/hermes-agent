@@ -2,7 +2,7 @@
 # operator procedure in scripts/buzz_agent_cleanup.WIRING.md.
 
 [Unit]
-Description=Buzz ACP agents: safe nightly cleanup of orphaned sessions
+Description=Buzz ACP agents: safe nightly restart
 
 [Service]
 Type=oneshot
