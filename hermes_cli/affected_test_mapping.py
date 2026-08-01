@@ -403,9 +403,13 @@ def _default_diff_base(repo_root: Path) -> str:
     except (OSError, subprocess.SubprocessError):
         completed = None
     if completed is not None and completed.returncode == 0:
+        # Return the base, do NOT publish it into os.environ: a library helper
+        # that mutates process env leaks the first caller's slice base into
+        # every later caller in the same process — including the next test in
+        # a shared pytest process, where the repo's per-file isolation would
+        # not catch it.
         resolved = completed.stdout.strip()
         if resolved:
-            os.environ.setdefault("HERMES_GATE_DIFF_BASE", resolved)
             return resolved
 
     try:

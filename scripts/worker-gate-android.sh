@@ -22,7 +22,11 @@ changed_files() {
   if [[ -z "$base" ]]; then
     base="$(git -C "$REPO_ROOT" merge-base HEAD main 2>/dev/null || true)"
   fi
-  export HERMES_GATE_DIFF_BASE="${base:-HEAD}"
+  # Only a real commit is handed down — never the literal "HEAD" fallback, which
+  # a child reading HERMES_GATE_DIFF_BASE would turn into "uncommitted only".
+  if [[ -n "$base" && "$base" != "HEAD" ]]; then
+    export HERMES_GATE_DIFF_BASE="$base"
+  fi
   git -C "$REPO_ROOT" diff --name-only "${base:-HEAD}"
   git -C "$REPO_ROOT" ls-files --others --exclude-standard
 }
