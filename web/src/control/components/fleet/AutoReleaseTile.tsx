@@ -62,45 +62,7 @@ export function AutoReleaseTile({ onOpenTask, compact = false }: { onOpenTask?: 
   const anchors = data?.anchors ?? [];
   const lastAnchor = anchors.length > 0 ? anchors[anchors.length - 1] : null;
 
-  // Neuestes gehaltenes Release-Ereignis (generisch ueber held_*), gesucht in
-  // der ungekuerzten Liste — ein juengeres deployed-Ereignis verdrängt den
-  // geparkten Gate-Hinweis nicht. Endpoint liefert neueste zuerst.
-  const held = (data?.recent ?? []).find(
-    (ev) => typeof ev.payload?.outcome === "string" && ev.payload.outcome.startsWith("held_"),
-  );
-
   if (compact) {
-    if (held) {
-      const heldOutcome = typeof held.payload?.outcome === "string" ? held.payload.outcome : "unbekannt";
-      const heldTitle = held.task_title?.trim() ? held.task_title : held.task_id;
-      const heldDetail = typeof held.payload?.detail === "string" && held.payload.detail.trim()
-        ? held.payload.detail
-        : heldOutcome;
-      const heldLine = `${held.task_id} · ${fmtRelativeTime(held.created_at)} · ${heldDetail}`;
-      return (
-        <div
-          className="fleet-auto-release-compact flex-wrap py-1.5"
-          role="status"
-          aria-label={`Auto-Release-Status, Kette gehalten: ${heldTitle}`}
-        >
-          <span>Auto-Release</span>
-          {/* div statt span: die Mobile-Regel in fleet.css blendet span/small im
-              Compact-Tile aus; der Gehalten-Hinweis muss bei 390px sichtbar bleiben. */}
-          <div className="grid min-w-0 flex-1 basis-40 gap-0.5 border-l border-status-warn/40 pl-2">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <div className="shrink-0 rounded border border-status-warn/30 bg-status-warn/10 px-1.5 text-status-warn">
-                Gehalten
-              </div>
-              <div className="min-w-0 truncate text-ink-2" title={heldTitle}>{heldTitle}</div>
-            </div>
-            <div className="flex min-w-0 items-baseline gap-1.5" title={heldLine}>
-              <div className="shrink-0 font-mono text-ink-3">{`${held.task_id} · ${fmtRelativeTime(held.created_at)} ·`}</div>
-              <div className="min-w-0 truncate text-ink-3">{heldDetail}</div>
-            </div>
-          </div>
-        </div>
-      );
-    }
     return (
       <div className="fleet-auto-release-compact" role="status" aria-label="Auto-Release-Status">
         <span>Auto-Release</span>
