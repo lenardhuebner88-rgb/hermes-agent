@@ -162,7 +162,7 @@ def _skill_doc_has_diff(proposal: dict[str, Any]) -> bool:
 
 def _task_for_idempotency(conn, idem: str) -> str | None:
     row = conn.execute(
-        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' ORDER BY created_at DESC, rowid DESC LIMIT 1",
         (idem,),
     ).fetchone()
     return row["id"] if row else None

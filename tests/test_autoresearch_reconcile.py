@@ -204,6 +204,45 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert [row["kind"] for row in outcome_events] == ["outcome_contract_registered", "unblocked"]
 
 
+def test_task_for_idempotency_prefers_latest_rowid_when_created_at_ties(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    idempotency_key = "autoresearch:F-CREATED-AT-TIE"
+    tied_created_at = 1_700_000_000
+    with kb.connect() as conn:
+        first_id = kb.create_task(
+            conn,
+            title="First task",
+            assignee="coder",
+            created_by="autoresearch",
+            idempotency_key=f"{idempotency_key}:first",
+            kind="code",
+        )
+        second_id = kb.create_task(
+            conn,
+            title="Second task",
+            assignee="coder",
+            created_by="autoresearch",
+            idempotency_key=f"{idempotency_key}:second",
+            kind="code",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET idempotency_key = ?, created_at = ? WHERE id IN (?, ?)",
+                (idempotency_key, tied_created_at, first_id, second_id),
+            )
+        rows = conn.execute(
+            "SELECT rowid, id, created_at, status FROM tasks "
+            "WHERE idempotency_key = ? ORDER BY rowid",
+            (idempotency_key,),
+        ).fetchall()
+
+        assert [row["id"] for row in rows] == [first_id, second_id]
+        assert {row["created_at"] for row in rows} == {tied_created_at}
+        assert all(row["status"] != "archived" for row in rows)
+        assert reconcile._task_for_idempotency(conn, idempotency_key) == second_id
+
+
 def test_contract_failure_leaves_task_blocked_and_next_run_recovers(reconcile_env, monkeypatch):
     from hermes_cli import autoresearch_reconcile as reconcile
 
