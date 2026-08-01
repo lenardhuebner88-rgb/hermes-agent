@@ -394,6 +394,59 @@ def test_real_additive_web_route_registration_selects_registered_module_test(
     )
 
 
+def test_real_additive_registration_with_blank_separator_still_narrows(
+    real_indexes,
+) -> None:
+    """The registration block separates its pairs with blank lines.
+
+    Measured against the real file: the two-line shape narrowed 66 -> 2 while
+    the three-line shape a slice actually writes fell back to the full fan-out,
+    because a blank line belongs to no AST node.
+    """
+    test_index, _ = real_indexes
+    lines = (REPO_ROOT / WEB_PATH).read_text(encoding="utf-8").splitlines()
+    line_number = lines.index("mount_spa(app)") + 1
+    additions = (
+        "",
+        "from hermes_cli.buzz_agent_cleanup import register_probe_routes",
+        "register_probe_routes(app)",
+    )
+    lines[line_number - 1 : line_number - 1] = additions
+    hunk = (
+        f"@@ -{line_number - 1},0 +{line_number},{len(additions)} @@\n"
+        + "".join(f"+{line}\n" for line in additions)
+    )
+
+    result = _narrow_real_web_source_diff(
+        test_index,
+        source="\n".join(lines) + "\n",
+        diff=hunk,
+    )
+
+    assert result.applied is True
+    assert result.reason == "module_registration_matches"
+    assert result.tests == ("tests/hermes_cli/test_buzz_agent_cleanup.py",)
+
+
+def test_blank_lines_alone_do_not_narrow(real_indexes) -> None:
+    """Blank lines are excused, never a reason to narrow on their own."""
+    test_index, _ = real_indexes
+    lines = (REPO_ROOT / WEB_PATH).read_text(encoding="utf-8").splitlines()
+    line_number = lines.index("mount_spa(app)") + 1
+    lines[line_number - 1 : line_number - 1] = ("", "")
+    hunk = f"@@ -{line_number - 1},0 +{line_number},2 @@\n+\n+\n"
+
+    result = _narrow_real_web_source_diff(
+        test_index,
+        source="\n".join(lines) + "\n",
+        diff=hunk,
+    )
+
+    assert result.applied is False
+    assert result.reason == "no_changed_symbols"
+    assert len(result.tests) == 66
+
+
 @pytest.mark.parametrize("change", ["delete", "modify"])
 def test_real_module_level_route_removal_or_change_stays_broad(
     real_indexes,
