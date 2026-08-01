@@ -207,6 +207,7 @@ def test_operator_escalation_alert_uses_event_cursor_and_escalation_channel(
         repeat = evaluate_alerts(conn, _acfg(escalation_channel_id="999"), state, now=NOW + 2)
 
     assert [a["rule"] for a in alerts] == [kb.OPERATOR_ESCALATION_EVENT]
+    assert alerts[0]["orchestrator_injectable"] is True
     assert alerts[0]["channel_id"] == "999"
     assert "Human needs to decide" in alerts[0]["text"]
     assert "retry ladder exhausted" in alerts[0]["text"]
@@ -266,6 +267,7 @@ def test_auto_release_rolled_back_alerts_with_task_id_and_detail(kanban_home):
             )
         alerts = evaluate_alerts(conn, _acfg(), state, now=NOW)
     assert [a["rule"] for a in alerts] == ["auto_release_attention"]
+    assert alerts[0]["orchestrator_injectable"] is False
     text = alerts[0]["text"]
     assert "rolled_back" in text
     assert tid in text

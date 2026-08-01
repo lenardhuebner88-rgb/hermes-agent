@@ -301,6 +301,8 @@ def _confirm_or_defer(
     stop retrying: write a backstop entry (default :func:`_default_send_backstop`)
     and commit the cursor anyway — documented, not lost forever.
     """
+    if alert is not None:
+        alert.setdefault("orchestrator_injectable", True)
     if alert is None or send_fn is None:
         state[cursor_key] = new_cursor
         return alert
@@ -470,7 +472,11 @@ def _rule_auto_release_attention(
     alert = None
     if lines:
         lines.append("Details: /control Fleet → Plan-Tab, Auto-Release-Kachel.")
-        alert = {"rule": "auto_release_attention", "text": "\n".join(lines)}
+        alert = {
+            "rule": "auto_release_attention",
+            "text": "\n".join(lines),
+            "orchestrator_injectable": False,
+        }
         # Operator-attention alert: prefer the escalation channel (same
         # routing as operator_escalation) so it delivers even when only that
         # channel is set.
@@ -666,4 +672,6 @@ def evaluate_alerts(
             continue
         if alert is not None:
             alerts.append(alert)
+    for alert in alerts:
+        alert.setdefault("orchestrator_injectable", True)
     return alerts

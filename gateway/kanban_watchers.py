@@ -2470,6 +2470,7 @@ class GatewayKanbanWatchersMixin:
                 # for confirmed operator_escalation alerts (AC-2).
                 if (
                     acfg.get("escalation_triage_inject")
+                    and alert.get("orchestrator_injectable", True)
                     and alert["rule"] == "operator_escalation"
                     and adapter is not None
                 ):
