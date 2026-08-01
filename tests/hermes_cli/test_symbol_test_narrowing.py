@@ -30,6 +30,8 @@ from hermes_cli.symbol_test_narrowing import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 KANBAN_MODULE = "hermes_cli.kanban_db"
 KANBAN_PATH = "hermes_cli/kanban_db.py"
+WEB_MODULE = "hermes_cli.web_server"
+WEB_PATH = "hermes_cli/web_server.py"
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -97,6 +99,33 @@ def _narrow(
         threshold=SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
         diff_spec=diff_spec,
         run_git=_run_git,
+        git_error_type=MappingError,
+        git_timeout_error_type=GitTimeoutError,
+    )
+
+
+def _narrow_real_web_source_diff(
+    test_index,
+    *,
+    source: str,
+    diff: str,
+) -> SymbolNarrowingResult:
+    def run_git(_repo_root: Path, *args: str) -> str:
+        if args[0] == "diff":
+            return diff
+        if args[0] == "show":
+            return source
+        raise AssertionError(f"unexpected git call: {args}")
+
+    return narrow_imported_tests(
+        repo_root=REPO_ROOT,
+        source_path=WEB_PATH,
+        module_import=WEB_MODULE,
+        imported_tests=test_index.imports[WEB_MODULE],
+        all_test_paths=test_index.paths,
+        threshold=SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
+        diff_spec=SymbolDiffSpec(ref="before", right="after"),
+        run_git=run_git,
         git_error_type=MappingError,
         git_timeout_error_type=GitTimeoutError,
     )
@@ -272,8 +301,12 @@ def test_ref_right_ref_only_and_default_diff_use_after_version(
         assert len(result.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
 
 
-def test_cli_passes_its_ref_to_symbol_narrowing(tmp_path: Path) -> None:
+def test_cli_passes_its_ref_to_symbol_narrowing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _create_fanout_repo(tmp_path)
+    monkeypatch.setenv("HERMES_AFFECTED_BUDGET_OK", "1")
     (tmp_path / "pkg" / "runtime.py").write_text(
         "def target():\n"
         "    return 2\n",
@@ -338,6 +371,85 @@ def test_changed_lines_outside_symbols_do_not_narrow_real_commit(
     assert result.reason == "no_changed_symbols"
     assert result.changed_symbols == ()
     assert result.tests == imported
+
+
+def test_real_additive_web_route_registration_selects_registered_module_test(
+    real_indexes,
+) -> None:
+    test_index, _ = real_indexes
+
+    result = _narrow(
+        REPO_ROOT,
+        module_import=WEB_MODULE,
+        source_path=WEB_PATH,
+        diff_spec=SymbolDiffSpec(ref="aae51569e8^", right="aae51569e8"),
+        imported_tests=test_index.imports[WEB_MODULE],
+    )
+
+    assert len(test_index.imports[WEB_MODULE]) == 66
+    assert result == SymbolNarrowingResult(
+        tests=("tests/hermes_cli/test_buzz_agent_cleanup.py",),
+        applied=True,
+        reason="module_registration_matches",
+    )
+
+
+@pytest.mark.parametrize("change", ["delete", "modify"])
+def test_real_module_level_route_removal_or_change_stays_broad(
+    real_indexes,
+    change: str,
+) -> None:
+    test_index, _ = real_indexes
+    lines = (REPO_ROOT / WEB_PATH).read_text(encoding="utf-8").splitlines()
+    line_number = lines.index("register_buzz_agent_cleanup_routes(app)") + 1
+    old_line = lines[line_number - 1]
+    if change == "delete":
+        del lines[line_number - 1]
+        hunk = f"@@ -{line_number},1 +{line_number - 1},0 @@\n-{old_line}\n"
+    else:
+        new_line = "register_buzz_agent_cleanup_routes(app, enabled=True)"
+        lines[line_number - 1] = new_line
+        hunk = (
+            f"@@ -{line_number},1 +{line_number},1 @@\n"
+            f"-{old_line}\n+{new_line}\n"
+        )
+
+    result = _narrow_real_web_source_diff(
+        test_index,
+        source="\n".join(lines) + "\n",
+        diff=hunk,
+    )
+
+    assert result.applied is False
+    assert result.reason == "no_changed_symbols"
+    assert len(result.tests) == 66
+
+
+def test_additive_registration_without_module_test_stays_broad(
+    real_indexes,
+) -> None:
+    test_index, _ = real_indexes
+    lines = (REPO_ROOT / WEB_PATH).read_text(encoding="utf-8").splitlines()
+    line_number = lines.index("mount_spa(app)") + 1
+    additions = (
+        "from hermes_cli.uncovered_routes import register_uncovered_routes",
+        "register_uncovered_routes(app)",
+    )
+    lines[line_number - 1 : line_number - 1] = additions
+    hunk = (
+        f"@@ -{line_number - 1},0 +{line_number},{len(additions)} @@\n"
+        + "".join(f"+{line}\n" for line in additions)
+    )
+
+    result = _narrow_real_web_source_diff(
+        test_index,
+        source="\n".join(lines) + "\n",
+        diff=hunk,
+    )
+
+    assert result.applied is False
+    assert result.reason == "no_changed_symbols"
+    assert len(result.tests) == 66
 
 
 def test_unparseable_after_ast_does_not_narrow(tmp_path: Path) -> None:

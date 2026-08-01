@@ -16,6 +16,7 @@ REFERENCE_CHANNELS = ("attr", "objpatch", "strpatch", "direct")
 _HUNK_HEADER_RE = re.compile(
     r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@"
 )
+_ROUTE_REGISTRATION_RE = re.compile(r"register_[A-Za-z0-9_]+_routes")
 
 
 class GitRunner(Protocol):
@@ -301,6 +302,110 @@ def _changed_after_lines(diff: str) -> set[int]:
     return lines
 
 
+def _pure_added_after_lines(diff: str) -> set[int] | None:
+    """Return exact after-lines only when every hunk change is an addition."""
+
+    added: set[int] = set()
+    after_line: int | None = None
+    for line in diff.splitlines():
+        match = _HUNK_HEADER_RE.match(line)
+        if match is not None:
+            after_line = int(match.group("start"))
+            continue
+        if after_line is None or line.startswith("\\ No newline"):
+            continue
+        if line.startswith("+"):
+            added.add(after_line)
+            after_line += 1
+        elif line.startswith("-"):
+            return None
+        elif line.startswith(" "):
+            after_line += 1
+    return added or None
+
+
+def _module_registration_targets(
+    source: str,
+    added_lines: set[int],
+) -> tuple[str, ...] | None:
+    """Resolve the strict module-level import/route-registration allowlist."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    imported_bindings: dict[str, set[str]] = defaultdict(set)
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        for alias in node.names:
+            if alias.name != "*":
+                imported_bindings[alias.asname or alias.name].add(node.module)
+
+    covered_lines: set[int] = set()
+    target_modules: set[str] = set()
+    for node in tree.body:
+        node_lines = set(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        if not (node_lines & added_lines):
+            continue
+        if not node_lines <= added_lines:
+            return None
+        covered_lines.update(node_lines)
+
+        if isinstance(node, ast.Import):
+            target_modules.update(alias.name for alias in node.names)
+            continue
+        if isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                return None
+            target_modules.add(node.module)
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            function = call.func
+            if (
+                not isinstance(function, ast.Name)
+                or _ROUTE_REGISTRATION_RE.fullmatch(function.id) is None
+                or len(call.args) != 1
+                or not isinstance(call.args[0], ast.Name)
+                or call.args[0].id != "app"
+                or call.keywords
+            ):
+                return None
+            modules = imported_bindings.get(function.id, set())
+            if len(modules) != 1:
+                return None
+            target_modules.update(modules)
+            continue
+        return None
+
+    if covered_lines != added_lines or not target_modules:
+        return None
+    return tuple(sorted(target_modules))
+
+
+def _module_reference_tests(
+    repo_root: Path,
+    modules: Iterable[str],
+    test_paths: Iterable[str],
+) -> dict[str, tuple[str, ...]] | None:
+    """Return tests with concrete references to each module, or fail broad."""
+
+    wanted = set(modules)
+    matches: dict[str, set[str]] = {module: set() for module in wanted}
+    for relative in sorted(set(test_paths)):
+        references = _test_symbol_references(repo_root / relative)
+        if references is None:
+            return None
+        for module in {reference.module for reference in references} & wanted:
+            matches[module].add(relative)
+    return {
+        module: tuple(sorted(paths))
+        for module, paths in sorted(matches.items())
+    }
+
+
 def _broad(
     imported: tuple[str, ...],
     reason: str,
@@ -407,6 +512,32 @@ def narrow_imported_tests(
         )
     }
     if not changed_symbols:
+        added_lines = _pure_added_after_lines(diff)
+        target_modules = (
+            _module_registration_targets(source, added_lines)
+            if added_lines is not None
+            else None
+        )
+        if target_modules is not None:
+            module_tests = _module_reference_tests(
+                repo_root,
+                target_modules,
+                all_test_paths,
+            )
+            if module_tests is not None and all(module_tests.values()):
+                return SymbolNarrowingResult(
+                    tests=tuple(
+                        sorted(
+                            {
+                                test
+                                for tests in module_tests.values()
+                                for test in tests
+                            }
+                        )
+                    ),
+                    applied=True,
+                    reason="module_registration_matches",
+                )
         return _broad(imported, "no_changed_symbols")
 
     symbol_index = build_symbol_test_index(
