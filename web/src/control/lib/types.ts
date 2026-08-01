@@ -1076,6 +1076,16 @@ export interface PressureStatusResponse {
   errors: string[];
 }
 
+/* Buzz-Agent-Cleanup (BAC-3): kanonische TS-Oberfläche lebt als z.infer bei
+ * den Laufzeit-Schemas (lib/schemas/systemReleaseHealth.ts) und wird hier
+ * nur re-exportiert, damit bestehende `lib/types`-Importe weiter funktionieren. */
+export type {
+  BuzzCleanupStatus,
+  BuzzCleanupReceipt,
+  BuzzCleanupUnitMetrics,
+  BuzzCleanupRunAccepted,
+} from "./schemas/systemReleaseHealth";
+
 export type Priority = "high" | "med" | "low";
 
 export type AutoresearchState = "idle" | "running" | "stopping" | "crashed";

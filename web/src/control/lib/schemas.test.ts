@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AccountUsageResponseSchema, BacklogDetailSchema, BacklogResponseSchema,
   BlockedCompletionsResponseSchema, BoardArchiveResponseSchema, BoardResponseSchema,
+  BuzzCleanupReceiptSchema, BuzzCleanupRunAcceptedSchema, BuzzCleanupStatusSchema,
   ChainCostsResponseSchema, ChainGraphResponseSchema, CronObservabilityResponseSchema,
   DecisionQueueResponseSchema, FlowReleaseResponseSchema, LanesCatalogResponseSchema,
   LiveEventsResponseSchema, LoopDuplicateResultSchema, LoopFilesResponseSchema,
@@ -1780,5 +1781,115 @@ describe("TaskDeliverablesResponseSchema — Fleet Karten-Detail-Drawer /tasks/{
   it("degrades to empty deliverables on completely broken payload", () => {
     const parsed = parseOrThrow(TaskDeliverablesResponseSchema, {}, "task-deliverables/broken");
     expect(parsed.deliverables).toEqual([]);
+  });
+});
+
+describe("BuzzCleanup schemas (BAC-3)", () => {
+  // Fixture im realen Backend-Quittungsformat (schema_version=1), wie
+  // hermes_cli/buzz_agent_cleanup.py `_base_receipt`/`persist` es schreibt.
+  const RECEIPT_FIXTURE = {
+    schema_version: 1,
+    run_id: "f6b63342-c0b1-4e4e-9b52-2f6f0d2b1a10",
+    started_at: "2026-08-01T02:00:00+00:00",
+    finished_at: "2026-08-01T02:06:37+00:00",
+    targets: ["buzz-agent@alpha.service", "buzz-agent@beta.service"],
+    mode: "all",
+    before: {
+      "buzz-agent@alpha.service": {
+        main_pid: 4101,
+        memory_current: 654_311_424,
+        cgroup_process_count: 7,
+        active_state: "active",
+      },
+      "buzz-agent@beta.service": {
+        main_pid: 4202,
+        memory_current: null,
+        cgroup_process_count: null,
+        active_state: "active",
+      },
+    },
+    after: {
+      "buzz-agent@alpha.service": {
+        main_pid: 8811,
+        memory_current: 41_943_040,
+        cgroup_process_count: 0,
+        active_state: "active",
+      },
+      "buzz-agent@beta.service": {
+        main_pid: 8822,
+        memory_current: 39_845_888,
+        cgroup_process_count: 0,
+        active_state: "active",
+      },
+    },
+    total_memory_current_before: 654_311_424,
+    total_memory_current_after: 81_788_928,
+    failed_units: [],
+    exit_code: 0,
+  };
+
+  it("parses the real backend receipt format verbatim", () => {
+    const receipt = BuzzCleanupReceiptSchema.parse(RECEIPT_FIXTURE);
+    expect(receipt.schema_version).toBe(1);
+    expect(receipt.mode).toBe("all");
+    expect(receipt.exit_code).toBe(0);
+    expect(receipt.targets).toHaveLength(2);
+    expect(receipt.before["buzz-agent@beta.service"].memory_current).toBeNull();
+    expect(receipt.after["buzz-agent@alpha.service"].main_pid).toBe(8811);
+  });
+
+  it("keeps unknown numeric metrics null instead of inventing zero", () => {
+    const status = BuzzCleanupStatusSchema.parse({
+      target_sets_equal: true,
+      units: ["buzz-agent@alpha.service"],
+      config_stems: ["alpha"],
+      units_without_config: [],
+      configs_without_unit: [],
+      total_memory_current: null,
+      unit_metrics: {},
+      next_timer_run: null,
+      running: false,
+      last_receipt: null,
+    });
+    expect(status.total_memory_current).toBeNull();
+    expect(status.next_timer_run).toBeNull();
+
+    const skewed = BuzzCleanupReceiptSchema.parse({
+      ...RECEIPT_FIXTURE,
+      total_memory_current_before: undefined,
+      total_memory_current_after: undefined,
+    });
+    expect(skewed.total_memory_current_before).toBeNull();
+    expect(skewed.total_memory_current_after).toBeNull();
+  });
+
+  it("fails safe on an unreadable target-set state (start stays locked)", () => {
+    const status = BuzzCleanupStatusSchema.parse({ running: true });
+    expect(status.target_sets_equal).toBe(false);
+    expect(status.units).toEqual([]);
+    expect(status.running).toBe(true);
+    expect(status.last_receipt).toBeNull();
+  });
+
+  it("parses error receipts (exit_code=1, error statt mode)", () => {
+    const receipt = BuzzCleanupReceiptSchema.parse({
+      ...RECEIPT_FIXTURE,
+      mode: undefined,
+      exit_code: 1,
+      failed_units: [],
+      error: { code: "target_mismatch" },
+    });
+    expect(receipt.mode).toBeUndefined();
+    expect(receipt.error?.code).toBe("target_mismatch");
+    expect(receipt.exit_code).toBe(1);
+  });
+
+  it("parses the 202 run-accepted response", () => {
+    const res = BuzzCleanupRunAcceptedSchema.parse({
+      accepted: true,
+      targets: ["buzz-agent@alpha.service"],
+    });
+    expect(res.accepted).toBe(true);
+    expect(res.targets).toEqual(["buzz-agent@alpha.service"]);
   });
 });
