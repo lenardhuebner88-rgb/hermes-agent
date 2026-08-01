@@ -15,8 +15,16 @@ Options:
   --seed FILE        Apply a JSON seed fixture to the isolated HERMES_HOME first.
   --self-test        Equivalent to route /control when no routes are supplied.
   --viewports SPEC   Override the default viewport trio, e.g. "390x844,tablet-lg=840x1118".
-  --interactive      Additionally run the click/dialog check (buzz-agent cleanup dialog on
-                     the first route) and write artifacts to <output-dir>/dialog-interactive/.
+  --interactive      Additionally run a generic click/dialog check on the first route and
+                     write artifacts to <output-dir>/dialog-interactive/.
+                     Requires --dialog-trigger.
+  --dialog-trigger "<name>"   Accessible name of the button that opens the dialog.
+  --dialog-name "<name>"      Accessible name of the dialog (default: first role=dialog).
+  --dialog-ack "<text>"       Label text that unlocks the confirm button (checked disabled
+                     before the click, enabled after).
+  --dialog-confirm "<name>"   Accessible name of the confirm button (default "Bestätigen").
+                     Never clicked; the dialog is cancelled instead.
+  --dialog-cancel "<name>"    Accessible name of the cancel button (default "Abbrechen").
 EOF
 }
 
@@ -27,6 +35,11 @@ seed_file=""
 self_test=0
 viewports_spec=""
 interactive=0
+dialog_trigger=""
+dialog_name=""
+dialog_ack=""
+dialog_confirm=""
+dialog_cancel=""
 routes=()
 server_pid=""
 tmp_home=""
@@ -83,6 +96,26 @@ while [[ $# -gt 0 ]]; do
       interactive=1
       shift
       ;;
+    --dialog-trigger)
+      dialog_trigger="${2:-}"
+      shift 2
+      ;;
+    --dialog-name)
+      dialog_name="${2:-}"
+      shift 2
+      ;;
+    --dialog-ack)
+      dialog_ack="${2:-}"
+      shift 2
+      ;;
+    --dialog-confirm)
+      dialog_confirm="${2:-}"
+      shift 2
+      ;;
+    --dialog-cancel)
+      dialog_cancel="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -99,6 +132,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${interactive}" -eq 1 && -z "${dialog_trigger}" ]]; then
+  echo '--interactive requires --dialog-trigger "<Accessible Name>"' >&2
+  exit 2
+fi
+
 if [[ "${self_test}" -eq 1 && "${#routes[@]}" -eq 0 ]]; then
   routes=("/control")
 fi
@@ -113,9 +151,9 @@ if [[ -z "${output_dir}" ]]; then
   output_dir="${reports_root}/${task_id}/$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 
-# Hinweis auf fruehere Evidenz desselben Tasks: ein Folgerun soll wissen, dass
-# es sie gibt (Run 8912 hat sie gesucht, nicht gefunden und alles neu erzeugt).
-# Nur eine Zeile — keine Wiederverwendung, kein Ueberspringen von Arbeit.
+# Point a follow-up run at prior evidence for the same task (run 8912 searched
+# for it, did not find it, and rebuilt everything). One line only — no reuse,
+# no copying, no skipped work.
 evidence_parent="${reports_root}/${task_id}"
 if [[ -d "${evidence_parent}" ]]; then
   output_dir_abs="$(realpath -m "${output_dir}")"
@@ -127,7 +165,7 @@ if [[ -d "${evidence_parent}" ]]; then
     fi
   done < <(find "${evidence_parent}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
   if [[ -n "${previous_run}" ]]; then
-    echo "visual-verify: fruehere Evidenz fuer Task ${task_id}: ${previous_run}"
+    echo "visual-verify: prior evidence for task ${task_id}: ${previous_run}"
   fi
 fi
 
@@ -225,7 +263,11 @@ if [[ -n "${viewports_spec}" ]]; then
   runner_args+=(--viewports "${viewports_spec}")
 fi
 if [[ "${interactive}" -eq 1 ]]; then
-  runner_args+=(--interactive)
+  runner_args+=(--interactive --dialog-trigger "${dialog_trigger}")
+  [[ -n "${dialog_name}" ]] && runner_args+=(--dialog-name "${dialog_name}")
+  [[ -n "${dialog_ack}" ]] && runner_args+=(--dialog-ack "${dialog_ack}")
+  [[ -n "${dialog_confirm}" ]] && runner_args+=(--dialog-confirm "${dialog_confirm}")
+  [[ -n "${dialog_cancel}" ]] && runner_args+=(--dialog-cancel "${dialog_cancel}")
 fi
 runner_args+=("${routes[@]}")
 
