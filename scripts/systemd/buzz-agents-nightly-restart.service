@@ -1,0 +1,16 @@
+# Versioned replacement for the existing user unit. Install only via the
+# operator procedure in scripts/buzz_agent_cleanup.WIRING.md.
+
+[Unit]
+Description=Buzz ACP agents: safe nightly cleanup of orphaned sessions
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.hermes/hermes-agent
+Environment=XDG_RUNTIME_DIR=%t
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python -m hermes_cli.buzz_agent_cleanup
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

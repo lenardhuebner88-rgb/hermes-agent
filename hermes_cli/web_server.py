@@ -91,6 +91,7 @@ from hermes_cli.agent_terminals import (
     InvalidTarget,
     TmuxAgentSessionService,
 )
+from hermes_cli.buzz_agent_cleanup import register_buzz_agent_cleanup_routes
 from hermes_cli.error_sanitize import safe_detail, scrub_detail
 from hermes_cli.stats_config import load_stats_config
 from plugins.memory.config_schema import (
@@ -22697,6 +22698,7 @@ if _VOICE_WEB_ENABLED:
         )
     )
 
+register_buzz_agent_cleanup_routes(app)
 mount_spa(app)
 
 

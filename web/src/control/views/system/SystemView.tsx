@@ -7,6 +7,7 @@ import { usePressureStatus } from "../../hooks/systemReleaseHealth";
 import { usePulseData } from "../../hooks/usePulseData";
 import type { PressureOverall, Proposal, TailnetPressureState, ToneName } from "../../lib/types";
 import { PressureContent } from "./PressureContent";
+import { BuzzAgentCleanup } from "./BuzzAgentCleanup";
 import { OpsRadarContent } from "./OpsRadarContent";
 import { PulseTally, PulseTimeline } from "./PulsePanels";
 
@@ -139,6 +140,8 @@ export function SystemView({ proposals, proposalsLastUpdated }: Props) {
           <PulseTally summary={pulse.summary} />
         </div>
       </Card>
+
+      <BuzzAgentCleanup />
 
       <SectionHeader label="Druck · Zugang · Druckquellen" meta={p ? overallLabel[overall] : undefined} />
       <PressureContent embedded data={pressure.data} lastUpdated={pressure.lastUpdated} isStale={pressure.isStale} error={pressure.error} />

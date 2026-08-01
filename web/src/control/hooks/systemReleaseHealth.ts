@@ -8,11 +8,14 @@ import {
   PressureStatusResponseSchema,
   ReleaseStatusResponseSchema,
   ReleaseModeResponseSchema,
+  BuzzCleanupRunAcceptedSchema,
+  BuzzCleanupStatusSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { DictateStatusResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
+import type { DictateStatusResponse, ReleaseStatusResponse, ReleaseModeResponse, BuzzCleanupStatus } from "../lib/schemas";
 import type { MetricsLiteResponse, PressureStatusResponse, SystemHealthResponse, VaultProvenanceResponse } from "../lib/types";
 import { usePolling, extractDetail } from "./internal";
+import { refresh, setIntervalScale } from "./pollingStore";
 
 /** Health chrome poll cadence. Keep in sync with OfflineStaleBanner freshness. */
 export const HEALTH_POLL_INTERVAL_MS = 15_000;
@@ -181,5 +184,110 @@ export function useReleaseConcurrencyWrite() {
     }
   }, []);
   return { busy, error, run };
+}
+
+/* -------------------------------------------------------------------------
+ * Buzz-Agent-Cleanup (BAC-3)
+ * GET-Status läuft über den geteilten pollingStore (Dedup + stale-while-error
+ * kommen von usePolling); der POST geht über einen separaten Write-Hook. Das
+ * Backend akzeptiert bewusst keine Ziel-Parameter — der Client sendet weder
+ * Unit-Namen noch eine Auswahl (AC-6).
+ * ------------------------------------------------------------------------- */
+
+const BUZZ_CLEANUP_KEY = "buzz-agent-cleanup/status";
+
+/** Basis-Kadenz während eines Laufs; im Leerlauf streckt setIntervalScale
+ *  auf die ruhige Kadenz (gleiches Muster wie useLiveEvents). */
+export const BUZZ_CLEANUP_POLL_ACTIVE_MS = 2_500;
+export const BUZZ_CLEANUP_POLL_CALM_MS = 30_000;
+const BUZZ_CLEANUP_IDLE_SCALE = BUZZ_CLEANUP_POLL_CALM_MS / BUZZ_CLEANUP_POLL_ACTIVE_MS;
+
+export function useBuzzCleanupStatus() {
+  const status = usePolling<BuzzCleanupStatus>(
+    BUZZ_CLEANUP_KEY,
+    async (signal) =>
+      parseOrThrow(
+        BuzzCleanupStatusSchema,
+        await fetchJSON<unknown>("/api/buzz-agent-cleanup/status", { signal }),
+        BUZZ_CLEANUP_KEY,
+      ),
+    BUZZ_CLEANUP_POLL_ACTIVE_MS,
+  );
+  const running = status.data?.running === true;
+  // Kadenz-Sync mit dem externen Store: eng während active, ruhig danach.
+  useEffect(() => {
+    setIntervalScale(BUZZ_CLEANUP_KEY, running ? 1 : BUZZ_CLEANUP_IDLE_SCALE);
+    return () => setIntervalScale(BUZZ_CLEANUP_KEY, 1);
+  }, [running]);
+  return status;
+}
+
+export type BuzzCleanupRunErrorCode =
+  | "already_running"
+  | "target_mismatch"
+  | "no_targets"
+  | "worker_start_failed"
+  | "http"
+  | "network";
+
+export interface BuzzCleanupRunResult {
+  ok: boolean;
+  code: BuzzCleanupRunErrorCode | null;
+  /** Serverseitig ermittelte Ziele (202) — niemals clientseitig gewählt. */
+  targets: string[] | null;
+  detail: string | null;
+}
+
+/** fetchJSON wirft `Error("<status>: <body>")`. Die Detail-Codes des
+ *  Backends (`{"detail":{"code": …}}`) werden daraus klassifiziert, damit
+ *  409 in denselben Status-Poll mündet statt in einen zweiten Start. */
+export function classifyBuzzCleanupRunError(err: unknown): {
+  code: BuzzCleanupRunErrorCode;
+  detail: string | null;
+} {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = /^(\d{3}):\s*(.*)$/s.exec(message);
+  if (!match) return { code: "network", detail: message || null };
+  const status = Number(match[1]);
+  let apiCode: string | null = null;
+  try {
+    const body = JSON.parse(match[2]) as { detail?: { code?: unknown } };
+    if (typeof body?.detail?.code === "string") apiCode = body.detail.code;
+  } catch {
+    /* Body nicht als JSON lesbar — der HTTP-Status entscheidet. */
+  }
+  if (status === 409 || apiCode === "already_running") {
+    return { code: "already_running", detail: apiCode };
+  }
+  if (apiCode === "target_mismatch" || apiCode === "no_targets" || apiCode === "worker_start_failed") {
+    return { code: apiCode, detail: apiCode };
+  }
+  return { code: "http", detail: message };
+}
+
+export function useBuzzCleanupRun() {
+  const [starting, setStarting] = useState(false);
+  const start = useCallback(async (): Promise<BuzzCleanupRunResult> => {
+    setStarting(true);
+    try {
+      // Kein Body, keine Unit-Auswahl: das Backend entdeckt die Zielmenge
+      // ausschließlich serverseitig (AC-6).
+      const res = await fetchJSON<unknown>("/api/buzz-agent-cleanup/run", { method: "POST" });
+      const parsed = BuzzCleanupRunAcceptedSchema.parse(res);
+      void refresh(BUZZ_CLEANUP_KEY);
+      return { ok: true, code: null, targets: parsed.targets, detail: null };
+    } catch (err) {
+      const { code, detail } = classifyBuzzCleanupRunError(err);
+      if (code === "already_running") {
+        // 409 = bereits laufender Cleanup: in denselben Status-Poll münden,
+        // kein zweiter Start (AC-5).
+        void refresh(BUZZ_CLEANUP_KEY);
+      }
+      return { ok: false, code, targets: null, detail };
+    } finally {
+      setStarting(false);
+    }
+  }, []);
+  return { start, starting };
 }
 

@@ -253,3 +253,70 @@ export const PressureStatusResponseSchema = z.object({
   }).catch({ class: "unknown", pct: null }),
   errors: z.array(z.string()).catch([]),
 });
+
+/* -------------------------------------------------------------------------
+ * Buzz-Agent-Cleanup (BAC-3): Wartungsleiste + Quittung in /control/system.
+ * Backend: hermes_cli/buzz_agent_cleanup.py —
+ *   GET  /api/buzz-agent-cleanup/status
+ *   POST /api/buzz-agent-cleanup/run
+ * Doctrine "unknown stays unknown": optionale Messgrößen bleiben `null`,
+ * wenn das Backend sie nicht liefert — nie per catch(0) erfinden
+ * (00-Canon rule 3 / AGENTS.md). Ausnahme Fail-safe: ein unlesbarer
+ * `target_sets_equal` sperrt den Start (false), statt ihn freizugeben.
+ * ------------------------------------------------------------------------- */
+
+export const BuzzCleanupUnitMetricsSchema = z.object({
+  main_pid: z.number().int().nullable().catch(null),
+  memory_current: z.number().int().nonnegative().nullable().catch(null),
+  cgroup_process_count: z.number().int().nonnegative().nullable().catch(null),
+  active_state: z.string().catch("unknown"),
+});
+
+export type BuzzCleanupUnitMetrics = z.infer<typeof BuzzCleanupUnitMetricsSchema>;
+
+/** Quittung schema_version=1, exakt das Format, das
+ *  `buzz_agent_cleanup._base_receipt`/`persist` schreibt. Fehler-Quittungen
+ *  (exit_code=1) tragen `error` statt `mode`; Teilerfolg (exit_code=2)
+ *  trägt `failed_units`. */
+export const BuzzCleanupReceiptSchema = z.object({
+  schema_version: z.number().int().catch(0),
+  run_id: z.string().catch(""),
+  started_at: z.string().catch(""),
+  finished_at: z.string().nullable().catch(null),
+  targets: z.array(z.string()).catch([]),
+  mode: z.enum(["canary", "all"]).optional(),
+  before: z.record(z.string(), BuzzCleanupUnitMetricsSchema).catch({}),
+  after: z.record(z.string(), BuzzCleanupUnitMetricsSchema).catch({}),
+  total_memory_current_before: z.number().int().nonnegative().nullable().catch(null),
+  total_memory_current_after: z.number().int().nonnegative().nullable().catch(null),
+  failed_units: z.array(z.string()).catch([]),
+  exit_code: z.number().int().nullable().catch(null),
+  error: z.object({ code: z.string().catch("") }).nullable().catch(null),
+});
+
+export type BuzzCleanupReceipt = z.infer<typeof BuzzCleanupReceiptSchema>;
+
+export const BuzzCleanupStatusSchema = z.object({
+  target_sets_equal: z.boolean().catch(false),
+  units: z.array(z.string()).catch([]),
+  config_stems: z.array(z.string()).catch([]),
+  units_without_config: z.array(z.string()).catch([]),
+  configs_without_unit: z.array(z.string()).catch([]),
+  total_memory_current: z.number().int().nonnegative().nullable().catch(null),
+  unit_metrics: z.record(z.string(), BuzzCleanupUnitMetricsSchema).catch({}),
+  next_timer_run: z.string().nullable().catch(null),
+  running: z.boolean().catch(false),
+  last_receipt: BuzzCleanupReceiptSchema.nullable().catch(null),
+});
+
+export type BuzzCleanupStatus = z.infer<typeof BuzzCleanupStatusSchema>;
+
+/** Antwort von POST /api/buzz-agent-cleanup/run (202). Das Backend akzeptiert
+ *  bewusst keine Ziel-Parameter — der Client sendet weder Unit-Namen noch
+ *  eine Auswahl (AC-6). */
+export const BuzzCleanupRunAcceptedSchema = z.object({
+  accepted: z.boolean().catch(false),
+  targets: z.array(z.string()).catch([]),
+});
+
+export type BuzzCleanupRunAccepted = z.infer<typeof BuzzCleanupRunAcceptedSchema>;
