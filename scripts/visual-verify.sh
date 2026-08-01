@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/visual-verify.sh [--skip-build] [--output-dir DIR] [--seed fixture.json] [--self-test] [--viewports SPEC] <route> [<route>...]
+Usage: scripts/visual-verify.sh [--skip-build] [--output-dir DIR] [--seed fixture.json] [--self-test] [--viewports SPEC] [--interactive] <route> [<route>...]
 
 Starts an auth-free disposable Hermes Web UI on 127.0.0.1:0 with an isolated
 HERMES_HOME, captures screenshots at 390px, 820px, and desktop widths, and
@@ -15,6 +15,8 @@ Options:
   --seed FILE        Apply a JSON seed fixture to the isolated HERMES_HOME first.
   --self-test        Equivalent to route /control when no routes are supplied.
   --viewports SPEC   Override the default viewport trio, e.g. "390x844,tablet-lg=840x1118".
+  --interactive      Additionally run the click/dialog check (buzz-agent cleanup dialog on
+                     the first route) and write artifacts to <output-dir>/dialog-interactive/.
 EOF
 }
 
@@ -24,6 +26,7 @@ output_dir=""
 seed_file=""
 self_test=0
 viewports_spec=""
+interactive=0
 routes=()
 server_pid=""
 tmp_home=""
@@ -76,6 +79,10 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --interactive)
+      interactive=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -100,11 +107,30 @@ if [[ "${#routes[@]}" -eq 0 ]]; then
   exit 2
 fi
 
+reports_root="${HERMES_REPORTS_ROOT:-${HOME}/.hermes/reports}"
+task_id="${HERMES_KANBAN_TASK:-local}"
 if [[ -z "${output_dir}" ]]; then
-  task_id="${HERMES_KANBAN_TASK:-local}"
-  reports_root="${HERMES_REPORTS_ROOT:-${HOME}/.hermes/reports}"
   output_dir="${reports_root}/${task_id}/$(date -u +%Y%m%dT%H%M%SZ)"
 fi
+
+# Hinweis auf fruehere Evidenz desselben Tasks: ein Folgerun soll wissen, dass
+# es sie gibt (Run 8912 hat sie gesucht, nicht gefunden und alles neu erzeugt).
+# Nur eine Zeile — keine Wiederverwendung, kein Ueberspringen von Arbeit.
+evidence_parent="${reports_root}/${task_id}"
+if [[ -d "${evidence_parent}" ]]; then
+  output_dir_abs="$(realpath -m "${output_dir}")"
+  previous_run=""
+  while IFS= read -r candidate; do
+    if [[ "$(realpath -m "${candidate}")" != "${output_dir_abs}" ]]; then
+      previous_run="${candidate}"
+      break
+    fi
+  done < <(find "${evidence_parent}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+  if [[ -n "${previous_run}" ]]; then
+    echo "visual-verify: fruehere Evidenz fuer Task ${task_id}: ${previous_run}"
+  fi
+fi
+
 mkdir -p "${output_dir}"
 output_dir="$(cd "${output_dir}" && pwd)"
 
@@ -197,6 +223,9 @@ runner_args=(
 )
 if [[ -n "${viewports_spec}" ]]; then
   runner_args+=(--viewports "${viewports_spec}")
+fi
+if [[ "${interactive}" -eq 1 ]]; then
+  runner_args+=(--interactive)
 fi
 runner_args+=("${routes[@]}")
 

@@ -13,7 +13,7 @@ const DEFAULT_VIEWPORTS = [
 function usage() {
   process.stderr.write(
     "usage: visual_verify_runner.mjs --base-url URL --output-dir DIR --git-head SHA "
-    + "[--viewports WxH[,name=WxH...]] [--scenario terminal_bridge] <route> [<route>...]\n",
+    + "[--viewports WxH[,name=WxH...]] [--scenario terminal_bridge] [--interactive] <route> [<route>...]\n",
   );
 }
 
@@ -63,6 +63,7 @@ function parseArgs(argv) {
   let gitHead = "";
   let viewportsSpec = null;
   let scenario = "default";
+  let interactive = false;
   const routes = [];
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -76,6 +77,8 @@ function parseArgs(argv) {
       viewportsSpec = argv[++index] || "";
     } else if (arg === "--scenario") {
       scenario = argv[++index] || "";
+    } else if (arg === "--interactive") {
+      interactive = true;
     } else if (arg === "--help" || arg === "-h") {
       usage();
       process.exit(0);
@@ -100,7 +103,7 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
-  return { baseUrl, outputDir, gitHead, routes, viewports, scenario };
+  return { baseUrl, outputDir, gitHead, routes, viewports, scenario, interactive };
 }
 
 function routeUrl(baseUrl, route) {
@@ -357,8 +360,125 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport, scenario) 
   };
 }
 
+// --interactive: Klick-/Dialog-Check fuer den Buzz-Agenten-Cleanup-Dialog,
+// portiert aus dem Ad-hoc-Skript /tmp/buzz-dialog-check.mjs des Laufs
+// t_626713b9 (2026-08-01). Artefakte: <outputDir>/dialog-interactive/ mit
+// dialog-<viewport>.png und dialog-check-summary.json. Der finale Start wird
+// bewusst NICHT geklickt (wuerde Agenten neu starten) — der Dialog wird
+// abgebrochen, final_start_clicked bleibt false.
+const DIALOG_INTERACTIVE_VIEWPORTS = [
+  { name: "mobile-390", width: 390, height: 844 },
+  { name: "desktop-1366", width: 1366, height: 900 },
+];
+const DIALOG_WARNING =
+  "Laufende Antworten können verloren gehen. Jeder Agent kann rund 45 Sekunden Nachrichten verpassen.";
+
+async function runDialogInteractionCheck(browser, baseUrl, outputDir, route) {
+  const dialogDir = path.join(outputDir, "dialog-interactive");
+  await fs.mkdir(dialogDir, { recursive: true });
+  const checks = [];
+  for (const viewport of DIALOG_INTERACTIVE_VIEWPORTS) {
+    const check = { viewport: viewport.name, passed: true, findings: [], console_errors: [] };
+    const fail = (message) => {
+      check.passed = false;
+      check.findings.push(message);
+    };
+    const context = await browser.newContext({
+      viewport: { width: viewport.width, height: viewport.height },
+    });
+    try {
+      const page = await context.newPage();
+      page.on("console", (message) => {
+        if (message.type() === "error") check.console_errors.push(message.text());
+      });
+      page.on("pageerror", (error) => check.console_errors.push(String(error)));
+
+      await page.goto(routeUrl(baseUrl, route), { waitUntil: "networkidle", timeout: CONNECT_TIMEOUT_MS });
+      const startButton = page.getByRole("button", { name: "Agenten aufräumen" });
+      await startButton.waitFor({ state: "visible", timeout: 20_000 });
+      if (!(await startButton.isEnabled())) fail("Start-Knopf auf Leiste nicht aktiv");
+
+      await startButton.click();
+      const dialog = page.getByRole("dialog", { name: "Buzz-Agenten aufräumen bestätigen" });
+      await dialog.waitFor({ state: "visible", timeout: 10_000 });
+
+      if (!(await dialog.getByText("Buzz-Agenten aufräumen?").count())) {
+        fail("Dialog-Titel fehlt");
+      }
+
+      const targetsHeadline = await dialog
+        .locator("p", { hasText: "Ziele · seriell" })
+        .first()
+        .textContent();
+      const expectedCount = Number((targetsHeadline || "").match(/(\d+)\s+Ziele/)?.[1]);
+      const listItems = await dialog.locator("ul li").allTextContents();
+      if (!expectedCount || listItems.length !== expectedCount) {
+        fail(`Zielanzahl passt nicht: Kopf=${targetsHeadline}, Liste=${listItems.length}`);
+      }
+      check.targets = listItems;
+
+      if (!(await dialog.getByText(DIALOG_WARNING).count())) {
+        fail("Warnwortlaut (AC-4) nicht wörtlich gefunden");
+      }
+
+      const confirmButton = dialog.getByRole("button", { name: "Start bestätigen" });
+      const cancelButton = dialog.getByRole("button", { name: "Abbrechen" });
+      if (await confirmButton.isEnabled()) fail("Start bestätigen vor Checkbox aktiv");
+
+      for (const [label, locator] of [
+        ["Start bestätigen", confirmButton],
+        ["Abbrechen", cancelButton],
+        ["Checkbox-Zeile", dialog.locator("label", { hasText: "Warnung gelesen" })],
+      ]) {
+        const box = await locator.first().boundingBox();
+        if (!box || box.height < 44 || box.width < 44) {
+          fail(`Touchziel ${label} zu klein: ${JSON.stringify(box)}`);
+        }
+      }
+
+      await dialog.getByText("Ich habe die Warnung gelesen.").click();
+      if (!(await confirmButton.isEnabled())) {
+        fail("Start bestätigen nach Checkbox weiterhin gesperrt");
+      }
+
+      const overflow = await page.evaluate(
+        () => document.documentElement.scrollWidth - window.innerWidth,
+      );
+      if (overflow > 0) fail(`Horizontaler Overflow: ${overflow}px`);
+
+      await page.screenshot({
+        path: path.join(dialogDir, `dialog-${viewport.name}.png`),
+        fullPage: false,
+      });
+
+      await cancelButton.click();
+      await dialog.waitFor({ state: "detached", timeout: 5_000 }).catch(async () => {
+        if (await dialog.count()) fail("Dialog nach Abbrechen noch offen");
+      });
+
+      if (check.console_errors.length) fail("Konsolenfehler vorhanden");
+    } catch (caught) {
+      fail(`Ausnahme: ${String(caught).slice(0, 500)}`);
+    } finally {
+      await context.close().catch(() => {});
+    }
+    checks.push(check);
+  }
+  const summary = {
+    base_url: baseUrl,
+    warning_wortlaut: DIALOG_WARNING,
+    final_start_clicked: false,
+    checks,
+    passed: checks.every((entry) => entry.passed),
+  };
+  const summaryPath = path.join(dialogDir, "dialog-check-summary.json");
+  await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
+  process.stdout.write(`${summaryPath}\n`);
+  return summary.passed;
+}
+
 async function main() {
-  const { baseUrl, outputDir, gitHead, routes, viewports, scenario } = parseArgs(process.argv);
+  const { baseUrl, outputDir, gitHead, routes, viewports, scenario, interactive } = parseArgs(process.argv);
   await fs.mkdir(outputDir, { recursive: true });
   const chromium = requirePlaywrightChromium();
   const browser = await chromium.launch({
@@ -367,11 +487,15 @@ async function main() {
     args: ["--no-sandbox"],
   });
   const results = [];
+  let interactivePassed = true;
   try {
     for (const route of routes) {
       for (const viewport of viewports) {
         results.push(await checkOne(browser, baseUrl, outputDir, route, viewport, scenario));
       }
+    }
+    if (interactive) {
+      interactivePassed = await runDialogInteractionCheck(browser, baseUrl, outputDir, routes[0]);
     }
   } finally {
     await browser.close().catch(() => {});
@@ -390,7 +514,7 @@ async function main() {
   const summaryPath = path.join(outputDir, "summary.json");
   await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
   process.stdout.write(`${summaryPath}\n`);
-  return summary.ok ? 0 : 1;
+  return summary.ok && interactivePassed ? 0 : 1;
 }
 
 process.exitCode = await main().catch((error) => {
