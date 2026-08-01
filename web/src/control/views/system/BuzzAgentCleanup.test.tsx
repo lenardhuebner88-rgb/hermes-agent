@@ -100,11 +100,11 @@ async function renderLoaded() {
 }
 
 describe("A-Wartungsleiste (AC-2)", () => {
-  it("zeigt Zielmenge, Gesamt-RSS, nächsten Lauf und genau eine primäre Aktion", async () => {
+  it("zeigt Zielmenge, MemoryCurrent, nächsten Lauf und genau eine primäre Aktion", async () => {
     await renderLoaded();
     expect(screen.getByText("Zielmenge")).toBeTruthy();
     expect(screen.getByText("2")).toBeTruthy();
-    expect(screen.getByText("Gesamt-RSS")).toBeTruthy();
+    expect(screen.getByText("MemoryCurrent")).toBeTruthy();
     expect(screen.getByText("1,1 GB")).toBeTruthy();
     expect(screen.getByText("Nächster Lauf")).toBeTruthy();
     expect(screen.getByText(/in 6h 1\dm/)).toBeTruthy();

@@ -21,7 +21,7 @@ import { cn } from "@/lib/utils";
 
 /** Wörtliche Warnung im Bestätigungsdialog (AC-4). */
 export const BUZZ_CLEANUP_WARNING =
-  "Laufende Antworten können verloren gehen. Jeder Agent kann rund 45 Sekunden keine Nachrichten empfangen.";
+  "Laufende Antworten können verloren gehen. Jeder Agent kann rund 45 Sekunden Nachrichten verpassen.";
 
 const PRIMARY_ACTION_CLASS = cn(
   "inline-flex min-h-[44px] w-full items-center justify-center gap-2 rounded-full border px-4 text-sm font-medium transition",
@@ -304,7 +304,7 @@ export function BuzzAgentCleanup() {
                 suffix={effectiveStatus ? (effectiveStatus.units.length === 1 ? "Unit" : "Units") : undefined}
               />
               <KpiTile
-                label="Gesamt-RSS"
+                label="MemoryCurrent"
                 value={fmtBuzzBytes(effectiveStatus?.total_memory_current ?? null)}
               />
               <KpiTile
