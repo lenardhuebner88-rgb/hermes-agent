@@ -10,6 +10,7 @@ import ast
 import json
 import os
 import subprocess
+import sys
 import warnings
 from dataclasses import asdict, dataclass, replace
 from datetime import date
@@ -162,6 +163,7 @@ EXPLICIT_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
         "tests/scripts/test_run_affected_exit_codes.py",
         "tests/test_check_branch_age.py",
     ),
+    "scripts/gate_diff_base.py": ("tests/scripts/test_gate_diff_base.py",),
     "scripts/run-affected.sh": (
         "tests/hermes_cli/test_run_affected_mapping.py",
         "tests/scripts/test_run_affected*.py",
@@ -387,6 +389,29 @@ def tracked_and_untracked_python_paths(repo_root: Path) -> list[str]:
 
 
 def _default_diff_base(repo_root: Path) -> str:
+    resolver = repo_root / "scripts" / "gate_diff_base.py"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(resolver), "--repo-root", str(repo_root)],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        # Return the base, do NOT publish it into os.environ: a library helper
+        # that mutates process env leaks the first caller's slice base into
+        # every later caller in the same process — including the next test in
+        # a shared pytest process, where the repo's per-file isolation would
+        # not catch it.
+        resolved = completed.stdout.strip()
+        if resolved:
+            return resolved
+
     try:
         base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
     except GitTimeoutError:

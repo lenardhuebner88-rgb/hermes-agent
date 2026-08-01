@@ -17,14 +17,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ---------------------------------------------------------------------------
-# 2. Collect affected .py files (diff relative to merge-base with main)
+# 2. Collect affected .py files (slice base when available, else merge-base)
 #    File selection happens BEFORE the ruff probe so we can exit 0 early
 #    when there are no Python files to lint (avoids a spurious "ruff not found"
 #    error on worktrees that only touched non-.py files).
 # ---------------------------------------------------------------------------
-BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+BASE="$(python3 "$SCRIPT_DIR/gate_diff_base.py" --repo-root "$ROOT" || true)"
+if [[ -z "$BASE" ]]; then
+    BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+fi
+# Hand the resolved base down to child processes ONLY when it is a real commit.
+# The literal "HEAD" emergency fallback must never be exported: a child that
+# reads HERMES_GATE_DIFF_BASE would diff against HEAD and silently drop every
+# committed change of this slice from its own gate.
+if [[ -n "$BASE" && "$BASE" != "HEAD" ]]; then
+    export HERMES_GATE_DIFF_BASE="$BASE"
+fi
 
-# Committed + uncommitted changes vs merge-base, plus untracked files
+# Committed + uncommitted changes vs resolved base, plus untracked files
 mapfile -t _raw_changed < <(
     git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null
     git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null

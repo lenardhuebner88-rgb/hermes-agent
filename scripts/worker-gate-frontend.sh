@@ -7,7 +7,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+BASE="$(python3 "$SCRIPT_DIR/gate_diff_base.py" --repo-root "$ROOT" || true)"
+if [[ -z "$BASE" ]]; then
+    BASE="$(git -C "$ROOT" merge-base HEAD main 2>/dev/null || echo HEAD)"
+fi
+# Only a real commit is handed down — never the literal "HEAD" fallback, which
+# a child reading HERMES_GATE_DIFF_BASE would turn into "uncommitted only".
+if [[ -n "$BASE" && "$BASE" != "HEAD" ]]; then
+    export HERMES_GATE_DIFF_BASE="$BASE"
+fi
 
 mapfile -t _raw_changed < <(
     git -C "$ROOT" diff --name-only "$BASE" 2>/dev/null
