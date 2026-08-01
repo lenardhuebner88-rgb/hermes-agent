@@ -308,6 +308,32 @@ def test_missing_task_anchor_preserves_merge_base_selection(
     assert affected.stdout.strip() == "tests/pkg/test_backend.py"
 
 
+def test_landed_slice_clamps_stale_first_run_base_to_fork_point(
+    slice_repo: SliceRepo,
+) -> None:
+    # Simulate an external ref recovery: the branch (including its first-run
+    # base) landed on main, so the pinned first-run base is an ancestor of the
+    # fork point. Everything between them is mainline churn, not slice content.
+    _git(slice_repo.root, "checkout", "-q", "main")
+    _git(slice_repo.root, "merge", "-q", "--no-ff", "chain", "-m", "land chain")
+    _git(slice_repo.root, "checkout", "-q", "chain")
+    env = _gate_env(slice_repo)
+
+    resolved = _run(slice_repo, "gate_diff_base.py", env=env)
+
+    assert resolved.returncode == 0
+    assert resolved.stdout.strip() == slice_repo.frontend_head
+    assert "predates the fork point" in resolved.stderr
+
+    # An explicit operator override is never clamped.
+    env["HERMES_GATE_DIFF_BASE"] = slice_repo.first_run_base
+    explicit = _run(slice_repo, "gate_diff_base.py", env=env)
+
+    assert explicit.returncode == 0
+    assert explicit.stdout.strip() == slice_repo.first_run_base
+    assert explicit.stderr == ""
+
+
 def test_mixed_slice_runs_python_ruff_and_frontend_gates(
     slice_repo: SliceRepo,
 ) -> None:

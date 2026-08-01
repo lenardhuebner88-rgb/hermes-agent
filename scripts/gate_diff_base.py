@@ -75,6 +75,54 @@ def _verified_commit(repo_root: Path, candidate: str) -> str:
     return completed.stdout.strip()
 
 
+def _git_output(repo_root: Path, *args: str) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout.strip()
+
+
+def _git_ok(repo_root: Path, *args: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _clamp_to_fork_point(repo_root: Path, resolved: str) -> str:
+    """Advance a stale first-run base forward to the fork point with main.
+
+    When main has moved past the pinned base (branch rebased, landed, or
+    externally recovered), everything between the pinned base and the
+    merge-base is mainline churn, never slice content. The base may only
+    move forward, never backward: clamp solely when the pinned base is an
+    ancestor of the merge-base, so genuine slice work always stays in scope.
+    """
+    merge_base = _git_output(repo_root, "merge-base", "HEAD", "main")
+    if not merge_base or merge_base == resolved:
+        return resolved
+    if _git_ok(repo_root, "merge-base", "--is-ancestor", resolved, merge_base):
+        return merge_base
+    return resolved
+
+
 def resolve(repo_root: Path) -> str:
     explicit = os.environ.get("HERMES_GATE_DIFF_BASE", "").strip()
     candidate = explicit or _candidate_from_first_run()
@@ -83,7 +131,16 @@ def resolve(repo_root: Path) -> str:
 
     resolved = _verified_commit(repo_root, candidate)
     if resolved:
-        return resolved
+        if explicit:
+            return resolved
+        clamped = _clamp_to_fork_point(repo_root, resolved)
+        if clamped != resolved:
+            print(
+                f"gate-diff-base: first task run base {resolved[:12]} predates "
+                f"the fork point with main; using merge-base {clamped[:12]}",
+                file=sys.stderr,
+            )
+        return clamped
 
     source = "HERMES_GATE_DIFF_BASE" if explicit else "first task run"
     print(
