@@ -221,6 +221,35 @@ def test_route_returns_json(tmp_path, monkeypatch):
     assert data["items"][0]["excerpt"] == "Ziel"  # first readable body line after ## Ziel
 
 
+def test_route_skips_non_utf8_file_and_keeps_valid_items(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.orchestration_backlog_view import register_orchestration_backlog_routes
+
+    monkeypatch.setenv("ORCHESTRATION_BACKLOG_DIR", str(tmp_path))
+    monkeypatch.delenv("ORCHESTRATION_BACKLOG_REF", raising=False)
+    _write(tmp_path, "f-valid.md", id="f-valid", title="Valid", status="todo",
+           priority="high", dependsOn="[]", planGate="false", created="2026-06-01")
+    (tmp_path / "f-broken.md").write_bytes(
+        b"---\ntitle: broken\nstatus: todo\n---\n\xff\xfe body\n"
+    )
+
+    app = FastAPI()
+    register_orchestration_backlog_routes(app)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/api/orchestration/backlog")
+
+    assert response.status_code == 200
+    item_ids = {item["id"] for item in response.json()["items"]}
+    assert "f-valid" in item_ids
+    assert "f-broken" not in item_ids
+
+
 def test_detail_route_returns_item_body_gate_and_root(tmp_path, monkeypatch):
     try:
         from starlette.testclient import TestClient
