@@ -4220,7 +4220,11 @@ def _auto_complete_decompose_root(
 
     now = int(time.time())
     branch = outcome.get("branch", chain_branch(root_id))
-    if outcome.get("merge_commit") is None:
+    # ``already_integrated`` is the authoritative discriminator: that outcome now
+    # also carries a merge_commit (the target-reachable branch tip the release
+    # gate validates at), so a missing commit alone no longer identifies it — and
+    # a root receipt must never call an operator integration a system merge.
+    if outcome.get("already_integrated") or outcome.get("merge_commit") is None:
         summary = (
             "auto-completed decomposed root after all children completed; "
             f"`{branch}` was already integrated"
@@ -6058,7 +6062,20 @@ def _integrate_empty_or_already_merged(
     """Handle ``ahead == 0``: reintegrate-after-revert, already-integrated, or empty."""
     already_integrated = _branch_is_ancestor(repo_root, branch, cur)
     diff_files: list[str] = []
+    # Release candidate for the already-integrated path: the branch tip is an
+    # ancestor of ``cur`` by definition here, so it is a real, target-reachable
+    # commit the release gate can validate at. Without it the parked gate event
+    # carries no commit and its first attempt fails closed with "release
+    # validation commit missing" before any gate command runs. Resolve it NOW —
+    # ``remove_worktree`` below deletes the branch, after which the ref is gone.
+    integrated_commit: Optional[str] = None
     if already_integrated:
+        try:
+            integrated_commit = _git(
+                repo_root, "rev-parse", f"{branch}^{{commit}}",
+            )
+        except WorktreeError:
+            integrated_commit = None
         merged_commits = _first_parent_merges_reaching_branch(
             repo_root, branch, cur
         )
@@ -6200,6 +6217,7 @@ def _integrate_empty_or_already_merged(
             "branch": branch,
             "target": cur,
             "already_integrated": True,
+            "merge_commit": integrated_commit,
             "reason": f"chain branch already reachable from {cur}",
             "changed_files": diff_files,
         }

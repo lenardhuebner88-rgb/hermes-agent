@@ -468,6 +468,47 @@ def test_complete_task_ff_integrated_web_branch_creates_release_gate(
     assert child is not None and child.status == "blocked"
 
 
+def test_ff_integrated_web_gate_parks_at_validatable_commit(
+    kanban_home, repo, monkeypatch,
+):
+    """The already-integrated path must park the gate at a REAL commit.
+
+    Regression: the ``clean``/``already_integrated`` outcome carried no
+    ``merge_commit``, so the parked event stored ``None`` and
+    ``execute_release_gate`` attempt 0 failed closed with "release validation
+    commit missing" — before a single gate command ever ran.
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
+        _commit_in(
+            ws,
+            "web/src/control/ReleaseCandidate.tsx",
+            "export const releaseCandidate = true\n",
+            msg=f"kanban({tid}): web work integrated by hand",
+        )
+
+    _git(repo, "merge", "--ff-only", f"kanban/{tid}")
+    # Resolve before completion: integration deletes the chain branch.
+    branch_tip = _git(repo, "rev-parse", f"kanban/{tid}")
+
+    with kb.connect() as conn:
+        assert kb.complete_task(conn, tid, result="done")
+        clean_events = _events(conn, tid, "integration_clean")
+        release_events = _events(conn, tid, "release_gate_created")
+        child_id = release_events[0]["child_id"]
+        ctx = kwt._release_gate_context(conn, child_id)
+
+    assert clean_events[0]["already_integrated"] is True
+    assert clean_events[0]["merge_commit"] == branch_tip
+    # This is exactly what execute_release_gate consumes on attempt 0.
+    assert ctx is not None
+    assert ctx["merge_commit"] == branch_tip
+    # ...and it must be reachable from the merge target, so the gate can check
+    # it out in a clean detached validation worktree.
+    assert kwt._branch_is_ancestor(repo, branch_tip, "main")
+
+
 def test_complete_task_ff_integrated_non_web_branch_skips_release_gate(
     kanban_home, repo, monkeypatch,
 ):
@@ -529,6 +570,54 @@ def test_auto_complete_decompose_root_receipt_marks_already_integrated(
         "`kanban/manual` was already integrated"
     )
     assert len(auto_events) == 1
+
+
+def test_auto_complete_decompose_root_receipt_keeps_already_integrated_wording(
+    kanban_home,
+):
+    """An already-integrated root keeps its wording once it carries a commit.
+
+    The already-integrated outcome now records the target-reachable branch tip,
+    so ``merge_commit is None`` alone no longer identifies it; the receipt must
+    still not claim the integrator merged the branch.
+    """
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "completed child", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        (child,) = child_ids
+        kb.claim_task(conn, child)
+        assert kb.complete_task(conn, child, result="done")
+
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=child,
+            outcome={
+                "action": "clean",
+                "already_integrated": True,
+                "branch": "kanban/manual",
+                "merge_commit": "a" * 40,
+            },
+        )
+        root_task = kb.get_task(conn, root)
+        merged_events = _events(conn, root, "integration_merged")
+
+    assert root_task is not None
+    assert root_task.result == (
+        "auto-completed decomposed root after all children completed; "
+        "`kanban/manual` was already integrated"
+    )
+    # A clean/already-integrated outcome is not a system merge witness.
+    assert merged_events == []
 
 
 def test_complete_task_rebase_conflict_returns_to_coder(kanban_home, repo, monkeypatch):
