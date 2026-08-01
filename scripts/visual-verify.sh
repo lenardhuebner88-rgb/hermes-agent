@@ -11,7 +11,7 @@ writes PNGs plus summary.json to the output directory.
 
 Options:
   --skip-build       Serve the existing web/dist instead of running npm build.
-  --output-dir DIR   Evidence directory (default: visual-verify-output/<timestamp>).
+  --output-dir DIR   Evidence directory (default: ${HERMES_REPORTS_ROOT:-$HOME/.hermes/reports}/<task_id>/<UTC-timestamp>/).
   --seed FILE        Apply a JSON seed fixture to the isolated HERMES_HOME first.
   --self-test        Equivalent to route /control when no routes are supplied.
   --viewports SPEC   Override the default viewport trio, e.g. "390x844,tablet-lg=840x1118".
@@ -101,7 +101,9 @@ if [[ "${#routes[@]}" -eq 0 ]]; then
 fi
 
 if [[ -z "${output_dir}" ]]; then
-  output_dir="${repo_root}/visual-verify-output/$(date -u +%Y%m%dT%H%M%SZ)"
+  task_id="${HERMES_KANBAN_TASK:-local}"
+  reports_root="${HERMES_REPORTS_ROOT:-${HOME}/.hermes/reports}"
+  output_dir="${reports_root}/${task_id}/$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 mkdir -p "${output_dir}"
 output_dir="$(cd "${output_dir}" && pwd)"

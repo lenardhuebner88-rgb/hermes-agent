@@ -8,6 +8,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -502,6 +503,74 @@ def test_visual_verify_output_still_accuses_a_backend_lane_correctly():
     )
     assert violations == ["web/src/control/views/fleet/BoardTab.tsx"]
     assert expected_lane == "coder-frontend"
+
+
+def test_visual_verify_script_defaults_to_task_reports_root(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "scripts" / "visual-verify.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-m" ]]; then
+  printf 'HERMES_DASHBOARD_READY port=43210\\n'
+  exec sleep 30
+elif [[ "${1:-}" == "-" ]]; then
+  printf '43210\\n'
+else
+  exit 99
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    fake_node = fake_bin / "node"
+    fake_node.write_text(
+        """#!/usr/bin/env bash
+output_dir=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--output-dir" ]]; then
+    output_dir="${2:-}"
+    break
+  fi
+  shift
+done
+[[ -n "${output_dir}" ]]
+printf '{"ok":true}\\n' >"${output_dir}/summary.json"
+""",
+        encoding="utf-8",
+    )
+    fake_node.chmod(0o755)
+
+    reports_root = tmp_path / "reports"
+    task_id = "t_visual_verify_default"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_KANBAN_TASK": task_id,
+            "HERMES_REPORTS_ROOT": str(reports_root),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    subprocess.run(
+        [str(script), "--skip-build", "--self-test"],
+        cwd=repo_root,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    task_runs = list((reports_root / task_id).iterdir())
+    assert len(task_runs) == 1
+    assert re.fullmatch(r"\d{8}T\d{6}Z", task_runs[0].name)
+    assert (task_runs[0] / "server.log").is_file()
+    assert json.loads((task_runs[0] / "summary.json").read_text()) == {"ok": True}
 
 
 def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypatch):
