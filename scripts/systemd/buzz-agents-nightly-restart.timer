@@ -1,0 +1,14 @@
+# Versioned replacement for the existing user timer. It deliberately remains
+# non-persistent: a missed 04:00 run is not replayed after login or boot.
+
+[Unit]
+Description=Schedule safe nightly Buzz agent cleanup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=5min
+Persistent=false
+Unit=buzz-agents-nightly-restart.service
+
+[Install]
+WantedBy=timers.target
