@@ -216,6 +216,31 @@ def test_route_returns_json(tmp_path, monkeypatch):
     assert data["items"][0]["title"] == "A"
 
 
+def test_route_skips_non_utf8_file_in_fs_fallback(tmp_path, monkeypatch):
+    try:
+        from starlette.testclient import TestClient
+    except ImportError:
+        pytest.skip("fastapi/starlette not installed")
+    from fastapi import FastAPI
+
+    from hermes_cli.family_organizer_view import register_backlog_routes
+
+    monkeypatch.setenv("FAMILY_ORGANIZER_BACKLOG_DIR", str(tmp_path))
+    _write(tmp_path, "0001-intact.md", id="0001", title="Intact item", status="done")
+    (tmp_path / "0002-broken.md").write_bytes(
+        b"---\ntitle: kaputt\nstatus: todo\n---\n\xff\xfe\n"
+    )
+
+    app = FastAPI()
+    register_backlog_routes(app)
+    response = TestClient(app, raise_server_exceptions=False).get(
+        "/api/family-organizer/backlog"
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == ["0001"]
+
+
 def test_detail_route_returns_body_from_git_source(monkeypatch):
     client = _detail_client(monkeypatch, [
         ("0001-a.md", _source_text(id="0001", title="A", status="done",

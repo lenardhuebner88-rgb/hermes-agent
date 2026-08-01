@@ -156,7 +156,7 @@ def _read_sources_from_fs(base: Path) -> list[tuple[str, str]]:
             continue
         try:
             sources.append((path.name, rp.read_text(encoding="utf-8")))
-        except OSError:
+        except (OSError, ValueError):
             continue
     return sources
 
