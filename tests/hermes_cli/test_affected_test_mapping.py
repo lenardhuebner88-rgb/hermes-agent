@@ -7,7 +7,10 @@ import subprocess
 import pytest
 
 import hermes_cli.affected_test_mapping as affected_test_mapping
-from hermes_cli.affected_test_budget import check_affected_test_budget
+from hermes_cli.affected_test_budget import (
+    AFFECTED_BUDGET_OVERRIDE_ENV,
+    check_affected_test_budget,
+)
 from hermes_cli.affected_test_mapping import (
     AFFECTED_TIME_BUDGET_EXIT_CODE,
     AffectedTestBudgetExceeded,
@@ -34,6 +37,7 @@ def _isolate_mapping_contracts_from_operational_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1000000")
+    monkeypatch.setenv(AFFECTED_BUDGET_OVERRIDE_ENV, "1")
 
 
 @pytest.fixture(scope="module")

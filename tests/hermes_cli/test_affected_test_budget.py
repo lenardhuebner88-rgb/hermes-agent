@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from hermes_cli.affected_test_budget import (
+    AFFECTED_BUDGET_OVERRIDE_ENV,
     AFFECTED_TIME_BUDGET_ENV,
     AffectedTestBudgetConfigError,
     AffectedTestTimeEstimate,
@@ -31,6 +33,58 @@ REAL_DURATION_FRAGMENT = {
 def _write_cache(path: Path, payload: object) -> Path:
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def _git_repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    main_checkout = tmp_path / "main"
+    worktree = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "init", "--quiet", str(main_checkout)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (main_checkout / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(main_checkout), "add", "tracked.txt"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(main_checkout),
+            "-c",
+            "user.name=Hermes Test",
+            "-c",
+            "user.email=hermes-test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(main_checkout),
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            str(worktree),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return main_checkout, worktree
 
 
 def test_real_duration_fragment_filters_absolute_junk_and_counts_unknown(
@@ -72,7 +126,7 @@ def test_real_duration_fragment_filters_absolute_junk_and_counts_unknown(
         ("broken.json", "{definitely not JSON", "JSONDecodeError"),
     ],
 )
-def test_missing_or_corrupt_cache_skips_budget_check_visibly(
+def test_missing_or_corrupt_explicit_cache_fails_closed_with_fix(
     tmp_path: Path,
     cache_name: str,
     contents: str | None,
@@ -82,17 +136,79 @@ def test_missing_or_corrupt_cache_skips_budget_check_visibly(
     if contents is not None:
         cache.write_text(contents, encoding="utf-8")
 
-    check = check_affected_test_budget(
-        tmp_path,
-        ["tests/test_selected.py"],
-        durations_path=cache,
-        env={AFFECTED_TIME_BUDGET_ENV: "1"},
+    with pytest.raises(AffectedTestBudgetConfigError) as exc_info:
+        check_affected_test_budget(
+            tmp_path,
+            ["tests/test_selected.py"],
+            durations_path=cache,
+            env={AFFECTED_TIME_BUDGET_ENV: "1"},
+        )
+
+    message = str(exc_info.value)
+    assert str(cache) in message
+    assert reason in message
+    assert "Fix: provide a readable test_durations.json" in message
+    assert f"{AFFECTED_BUDGET_OVERRIDE_ENV}=1" in message
+
+
+def test_worktree_uses_main_checkout_duration_cache(tmp_path: Path) -> None:
+    main_checkout, worktree = _git_repo_with_worktree(tmp_path)
+    _write_cache(
+        main_checkout / "test_durations.json",
+        REAL_DURATION_FRAGMENT,
     )
 
-    assert check.estimate is None
-    assert "time-budget check skipped" in check.note
-    assert reason in check.note
-    assert "complete selection retained (1 file)" in check.note
+    check = check_affected_test_budget(
+        worktree,
+        ["tests/hermes_cli/test_web_server.py"],
+        env={AFFECTED_TIME_BUDGET_ENV: "1200"},
+    )
+
+    assert not (worktree / "test_durations.json").exists()
+    assert check.note == ""
+    assert check.estimate is not None
+    assert check.estimate.missing_forecast_count == 0
+    assert check.estimate.predicted_seconds == pytest.approx(
+        96.902 * LOADED_HOST_DILATION
+    )
+
+
+def test_missing_worktree_and_main_caches_fail_then_override(
+    tmp_path: Path,
+) -> None:
+    main_checkout, worktree = _git_repo_with_worktree(tmp_path)
+    selected = ["tests/test_selected.py"]
+
+    with pytest.raises(AffectedTestBudgetConfigError) as exc_info:
+        check_affected_test_budget(
+            worktree,
+            selected,
+            env={AFFECTED_TIME_BUDGET_ENV: "1200"},
+        )
+
+    message = str(exc_info.value)
+    assert f"duration cache missing at {worktree / 'test_durations.json'}" in message
+    assert (
+        f"duration cache missing at {main_checkout / 'test_durations.json'}"
+        in message
+    )
+    assert "no test selection will run without a runtime estimate" in message
+    assert f"use {AFFECTED_BUDGET_OVERRIDE_ENV}=1" in message
+
+    override_check = check_affected_test_budget(
+        worktree,
+        selected,
+        env={
+            AFFECTED_TIME_BUDGET_ENV: "1200",
+            AFFECTED_BUDGET_OVERRIDE_ENV: "1",
+        },
+    )
+
+    assert override_check.estimate is None
+    assert f"via deliberate {AFFECTED_BUDGET_OVERRIDE_ENV}=1 override" in (
+        override_check.note
+    )
+    assert "complete selection retained (1 file)" in override_check.note
 
 
 def test_over_budget_message_names_complete_actionable_forecast(

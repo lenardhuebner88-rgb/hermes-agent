@@ -1,20 +1,22 @@
 """Runtime-budget estimation for complete affected-test selections.
 
-The duration cache is an operational hint, not repository truth.  Missing or
-unreadable caches therefore disable this check visibly; a readable cache keeps
-unknown selected tests explicit by assigning them a conservative duration.
+The duration cache is an operational hint, not repository truth.  A readable
+cache keeps unknown selected tests explicit by assigning them a conservative
+duration; unavailable caches fail closed unless explicitly overridden.
 """
 from __future__ import annotations
 
 import json
 import math
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Sequence
 
 
 AFFECTED_TIME_BUDGET_ENV = "HERMES_AFFECTED_TIME_BUDGET"
+AFFECTED_BUDGET_OVERRIDE_ENV = "HERMES_AFFECTED_BUDGET_OK"
 DEFAULT_AFFECTED_TIME_BUDGET_SECONDS = 1200.0
 DEFAULT_TEST_WORKERS = 8
 LOADED_HOST_DILATION = 3.5
@@ -124,6 +126,68 @@ def load_test_durations(path: Path) -> tuple[dict[str, float] | None, str]:
     return durations, ""
 
 
+def _main_checkout_duration_cache(
+    repo_root: Path,
+) -> tuple[Path | None, str]:
+    command = [
+        "git",
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, (
+            f"main-checkout duration cache path unresolved from {repo_root}: "
+            f"git rev-parse failed with {type(exc).__name__}"
+        )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return None, (
+            f"main-checkout duration cache path unresolved from {repo_root}: "
+            f"git rev-parse exited {completed.returncode}{suffix}"
+        )
+    common_dir = (completed.stdout or "").strip()
+    if not common_dir:
+        return None, (
+            f"main-checkout duration cache path unresolved from {repo_root}: "
+            "git rev-parse returned an empty git common directory"
+        )
+    try:
+        common_path = Path(common_dir).resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, (
+            f"main-checkout duration cache path unresolved from {repo_root}: "
+            f"{type(exc).__name__}"
+        )
+    main_checkout = (
+        common_path.parent if common_path.name == ".git" else common_path
+    )
+    return main_checkout / TEST_DURATIONS_FILENAME, ""
+
+
+def _unavailable_cache_message(errors: Sequence[str]) -> str:
+    return (
+        "affected-test time-budget check unavailable: "
+        + "; ".join(errors)
+        + "; no test selection will run without a runtime estimate. "
+        "Fix: provide a readable test_durations.json at one of the paths "
+        "above; for a deliberate no-cache override use "
+        f"{AFFECTED_BUDGET_OVERRIDE_ENV}=1"
+    )
+
+
 def _positive_finite_env_seconds(
     env: Mapping[str, str],
     name: str,
@@ -179,25 +243,48 @@ def check_affected_test_budget(
     durations_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> AffectedTestBudgetCheck:
-    """Estimate a complete selection, or visibly skip when no cache is usable."""
+    """Estimate a complete selection, failing closed when no cache is usable."""
     selected_files = _selected_test_files(repo_root, selected_targets)
     if not selected_files:
         return AffectedTestBudgetCheck(estimate=None)
 
+    active_env = os.environ if env is None else env
+    cache_errors: list[str] = []
     cache_path = durations_path or repo_root / TEST_DURATIONS_FILENAME
     durations, cache_error = load_test_durations(cache_path)
+    if (
+        durations is None
+        and durations_path is None
+        and cache_error == f"duration cache missing at {cache_path}"
+    ):
+        cache_errors.append(cache_error)
+        main_cache_path, resolution_error = _main_checkout_duration_cache(
+            repo_root
+        )
+        if resolution_error:
+            cache_errors.append(resolution_error)
+        elif main_cache_path is not None and (
+            main_cache_path.resolve() != cache_path.resolve()
+        ):
+            cache_path = main_cache_path
+            durations, cache_error = load_test_durations(cache_path)
     if durations is None:
+        if cache_error not in cache_errors:
+            cache_errors.append(cache_error)
         selected_noun = "file" if len(selected_files) == 1 else "files"
+        unavailable_message = _unavailable_cache_message(cache_errors)
+        if active_env.get(AFFECTED_BUDGET_OVERRIDE_ENV) != "1":
+            raise AffectedTestBudgetConfigError(unavailable_message)
         return AffectedTestBudgetCheck(
             estimate=None,
             note=(
-                "affected-test time-budget check skipped: "
-                f"{cache_error}; complete selection retained "
+                "affected-test time-budget check skipped via deliberate "
+                f"{AFFECTED_BUDGET_OVERRIDE_ENV}=1 override: "
+                f"{'; '.join(cache_errors)}; complete selection retained "
                 f"({len(selected_files)} {selected_noun})"
             ),
         )
 
-    active_env = os.environ if env is None else env
     budget_seconds = _positive_finite_env_seconds(
         active_env,
         AFFECTED_TIME_BUDGET_ENV,
