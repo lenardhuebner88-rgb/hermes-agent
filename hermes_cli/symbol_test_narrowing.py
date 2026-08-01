@@ -335,6 +335,17 @@ def _module_registration_targets(
     except SyntaxError:
         return None
 
+    # The registration block separates its import/call pairs with blank lines,
+    # so a real slice adds three lines, not two. A blank line belongs to no AST
+    # node and would fail the coverage check below as an unexplained edit — yet
+    # it can carry no behaviour, so it is accounted for here instead.
+    source_lines = source.splitlines()
+    blank_added = {
+        line
+        for line in added_lines
+        if 1 <= line <= len(source_lines) and not source_lines[line - 1].strip()
+    }
+
     imported_bindings: dict[str, set[str]] = defaultdict(set)
     for node in tree.body:
         if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
@@ -380,7 +391,7 @@ def _module_registration_targets(
             continue
         return None
 
-    if covered_lines != added_lines or not target_modules:
+    if covered_lines | blank_added != added_lines or not target_modules:
         return None
     return tuple(sorted(target_modules))
 
