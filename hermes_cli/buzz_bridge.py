@@ -1,10 +1,11 @@
-"""Buzz approval bridge for operator-held Kanban release gates.
+"""Buzz bridges for operator-held release gates and task work markers.
 
 The bridge posts one approval request, polls the relay's stored reaction
 state through ``buzz reactions get``, and invokes the existing release-gate
-CLI only for the configured emoji from an allowlisted public key.  The Buzz
-private key is inherited by the subprocess from ``BUZZ_PRIVATE_KEY`` and is
-never read, copied, or logged here.
+CLI only for the configured emoji from an allowlisted public key.  Work markers
+use a tagged NIP-23 note for the task and the same author's online presence for
+liveness.  The Buzz private key is inherited by the subprocess from
+``BUZZ_PRIVATE_KEY`` and is never read, copied, or logged here.
 """
 
 from __future__ import annotations
@@ -30,7 +31,11 @@ DEFAULT_EMOJI = "✅"
 DEFAULT_POLL_INTERVAL_SECONDS = 10.0
 DEFAULT_TIMEOUT_SECONDS = 3600.0
 DEFAULT_BUZZ_BINARY = "/mnt/data/services/buzz/target/release/buzz"
+WORK_MARKER_SLUG = "work-marker"
+WORK_MARKER_TAG = "work-marker"
+WORK_MARKER_TITLE = "Hermes Work Marker"
 _HEX64_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_WORK_MARKER_RE = re.compile(r"^working:([A-Za-z0-9][A-Za-z0-9._-]*)$")
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,176 @@ class SubprocessRunner:
         return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+class BuzzBridgeError(RuntimeError):
+    """Safe bridge failure whose message never includes subprocess output."""
+
+
+@dataclass(frozen=True)
+class WorkMarker:
+    pubkey: str
+    display_name: str
+    task_id: str
+    alive: bool
+    stale: bool
+
+
+def _run_buzz(runner: Runner, args: list[str], operation: str) -> CommandResult:
+    result = runner.run(args)
+    if result.returncode != 0:
+        raise BuzzBridgeError(f"{operation} failed with exit code {result.returncode}")
+    return result
+
+
+def set_work_marker(
+    task_id: str,
+    *,
+    runner: Runner | None = None,
+    buzz_binary: str = DEFAULT_BUZZ_BINARY,
+) -> None:
+    """Upsert this Buzz identity's single task marker note."""
+
+    content = f"working:{task_id}"
+    if _WORK_MARKER_RE.fullmatch(content) is None:
+        raise BuzzBridgeError("task_id cannot be encoded as a work marker")
+    _run_buzz(
+        runner or SubprocessRunner(),
+        [
+            buzz_binary,
+            "notes",
+            "set",
+            "--name",
+            WORK_MARKER_SLUG,
+            "--title",
+            WORK_MARKER_TITLE,
+            "--tag",
+            WORK_MARKER_TAG,
+            "--content",
+            content,
+        ],
+        "buzz notes set",
+    )
+
+
+def clear_work_marker(
+    *,
+    runner: Runner | None = None,
+    buzz_binary: str = DEFAULT_BUZZ_BINARY,
+) -> None:
+    """Remove this Buzz identity's task marker note."""
+
+    _run_buzz(
+        runner or SubprocessRunner(),
+        [buzz_binary, "notes", "rm", "--name", WORK_MARKER_SLUG],
+        "buzz notes rm",
+    )
+
+
+def _work_marker_names(config: Mapping[str, Any] | None) -> dict[str, str]:
+    root = config if isinstance(config, Mapping) else load_config()
+    kanban = root.get("kanban") if isinstance(root, Mapping) else None
+    work_marker = kanban.get("work_marker") if isinstance(kanban, Mapping) else None
+    if not isinstance(work_marker, Mapping):
+        return {}
+    nested_names = work_marker.get("names")
+    sources = [work_marker]
+    if isinstance(nested_names, Mapping):
+        sources.append(nested_names)
+    names: dict[str, str] = {}
+    for source in sources:
+        names.update(
+            {
+                pubkey.lower(): name.strip()
+                for pubkey, name in source.items()
+                if isinstance(pubkey, str)
+                and _HEX64_RE.fullmatch(pubkey)
+                and isinstance(name, str)
+                and name.strip()
+            }
+        )
+    return names
+
+
+def _json_list(result: CommandResult, operation: str) -> list[Any]:
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise BuzzBridgeError(f"{operation} returned invalid JSON") from exc
+    if not isinstance(payload, list):
+        raise BuzzBridgeError(f"{operation} returned no JSON list")
+    return payload
+
+
+def read_work_markers(
+    config: Mapping[str, Any] | None = None,
+    *,
+    runner: Runner | None = None,
+    buzz_binary: str = DEFAULT_BUZZ_BINARY,
+) -> list[WorkMarker]:
+    """Read tagged marker notes and join them with one presence lookup."""
+
+    command_runner = runner or SubprocessRunner()
+    notes_result = _run_buzz(
+        command_runner,
+        [
+            buzz_binary,
+            "notes",
+            "ls",
+            "--author",
+            "all",
+            "--tag",
+            WORK_MARKER_TAG,
+        ],
+        "buzz notes ls",
+    )
+    marker_tasks: dict[str, str] = {}
+    for note in _json_list(notes_result, "buzz notes ls"):
+        if not isinstance(note, Mapping) or note.get("slug") != WORK_MARKER_SLUG:
+            continue
+        pubkey = note.get("pubkey")
+        content = note.get("content")
+        if not isinstance(pubkey, str) or _HEX64_RE.fullmatch(pubkey) is None:
+            continue
+        if not isinstance(content, str):
+            continue
+        match = _WORK_MARKER_RE.fullmatch(content)
+        if match is not None:
+            marker_tasks[pubkey.lower()] = match.group(1)
+
+    if not marker_tasks:
+        return []
+
+    pubkeys = list(marker_tasks)
+    presence_result = _run_buzz(
+        command_runner,
+        [
+            buzz_binary,
+            "users",
+            "presence",
+            "--pubkeys",
+            ",".join(pubkeys),
+        ],
+        "buzz users presence",
+    )
+    online_pubkeys = {
+        str(item.get("pubkey")).lower()
+        for item in _json_list(presence_result, "buzz users presence")
+        if isinstance(item, Mapping)
+        and isinstance(item.get("pubkey"), str)
+        and item.get("status") == "online"
+    }
+    names = _work_marker_names(config)
+    return [
+        WorkMarker(
+            pubkey=pubkey,
+            display_name=names.get(pubkey, pubkey),
+            task_id=task_id,
+            alive=pubkey in online_pubkeys,
+            stale=pubkey not in online_pubkeys,
+        )
+        for pubkey, task_id in marker_tasks.items()
+    ]
+
+
 @dataclass(frozen=True)
 class ReleaseGateConfig:
     approvers: frozenset[str]
@@ -71,10 +246,6 @@ class BridgeOutcome:
     status: str
     event_id: str
     release_gate_called: bool
-
-
-class BuzzBridgeError(RuntimeError):
-    """Safe bridge failure whose message never includes subprocess output."""
 
 
 def _positive_number(value: Any, default: float) -> float:
