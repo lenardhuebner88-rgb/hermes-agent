@@ -12,6 +12,7 @@ import pytest
 from hermes_cli.foreign_lane_harvest import (
     CORRELATION_SOURCE_META,
     CORRELATION_SOURCE_TRANSCRIPT,
+    ExtractedRun,
     ORIGIN_CODEX,
     ORIGIN_GROK,
     ORIGIN_KIMI,
@@ -177,6 +178,8 @@ def test_codex_write_persists_rate_limit_sidecar(empty_db: Path, tmp_path: Path)
     )
     assert written == 1
     assert calls == 0  # default: session row only
+    usage_row = _row(empty_db, extracted.run_id)
+    assert usage_row["tool_call_count"] == 0
     assert rl_n == 1
     row = json.loads(rl.read_text().splitlines()[0])
     assert row["run_id"] == extracted.run_id
@@ -460,6 +463,30 @@ def _row(db: Path, run_id: str) -> dict:
         return dict(row)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [ORIGIN_CODEX, ORIGIN_GROK, ORIGIN_KIMI, ORIGIN_QWEN],
+)
+def test_terminal_foreign_run_records_non_null_tool_count(
+    empty_db: Path,
+    origin: str,
+) -> None:
+    extracted = ExtractedRun(
+        run_id=f"{origin}-without-tools",
+        origin=origin,
+        run_fields={"origin": origin, "source": "measured"},
+    )
+
+    written, calls, _rate_limits = write_extracted_run(
+        extracted,
+        db_path=empty_db,
+    )
+
+    assert written == 1
+    assert calls == 0
+    assert _row(empty_db, extracted.run_id)["tool_call_count"] == 0
 
 
 def _checksum(db: Path) -> dict:
