@@ -483,3 +483,53 @@ def test_resolve_worktree_own_path_on_foreign_branch_keeps_legacy_reuse(
     workspace, branch = kb._resolve_worktree_workspace(task)
     assert workspace == own.resolve()
     assert branch == "wt/foreign"
+
+
+def test_worktree_deps_tree_is_defined_exactly_once():
+    """A second same-named definition shadows this one for ALL callers.
+
+    ``_worktree_deps_tree`` resolves through ``_worktree_deps_root``, which
+    rejects a non-absolute ``HERMES_WORKTREE_DEPS_ROOT`` — the guard that keeps
+    a multi-GiB ``npm ci`` off the root filesystem. A duplicate definition
+    further down the module wins at call time (Python resolves globals when the
+    call happens, not when the ``def`` is read), so the older callers above it
+    silently switch to the newer formula and lose that guard. Assert on the AST
+    rather than on a grep: the shadowing is invisible in any single call site.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    source = _Path(kwt.__file__).read_text(encoding="utf-8")
+    module = ast.parse(source)
+    definitions = [
+        node.lineno
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_worktree_deps_tree"
+    ]
+    assert len(definitions) == 1, (
+        f"_worktree_deps_tree is defined {len(definitions)} times "
+        f"(lines {definitions}); the later one shadows the earlier for every "
+        f"caller and drops the absolute-path guard"
+    )
+
+
+@pytest.mark.parametrize("value", ["", "relativ/deps", "."])
+def test_worktree_deps_root_rejects_non_absolute(monkeypatch, value):
+    """A relative or empty deps root must fail closed, never fall back silently.
+
+    Falling back would put the dependency tree somewhere under the current
+    working directory instead of the configured SSD mount.
+    """
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", value)
+    with pytest.raises(kwt.WorktreeError):
+        kwt._worktree_deps_tree(Path("/tmp/some-worktree"))
+
+
+def test_worktree_deps_root_expands_user(monkeypatch, tmp_path):
+    """``~`` must expand — a literal ``~`` directory is never what was meant."""
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", "~/hermes-deps-test")
+    # Path.expanduser() resolves through $HOME, not Path.home().
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tree = kwt._worktree_deps_tree(Path("/tmp/some-worktree"))
+    assert "~" not in str(tree)
+    assert str(tree).startswith(str(tmp_path.resolve()))
