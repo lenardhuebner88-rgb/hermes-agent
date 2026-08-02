@@ -392,6 +392,263 @@ def test_chain_tip_reuses_one_uncapped_scan_and_accumulated_diff(
     assert len(full_scans) == 2
 
 
+def test_stale_baseline_clamp_excludes_target_advance_and_keeps_slice(
+    kanban_home, tmp_path
+):
+    repo = _repo(tmp_path)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="target advance plus slice",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="standard",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "worktree_provisioned",
+                {"merge_target": "main"},
+            )
+        assert kb.claim_task(conn, task_id) is not None
+        pinned_baseline = _git(repo, "rev-parse", "HEAD")
+
+        _git(repo, "checkout", "main")
+        foreign = repo / "fremde_datei.py"
+        foreign.write_text("FOREIGN = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "foreign advancement")
+
+        _git(repo, "checkout", "feature")
+        slice_file = repo / "slice_datei.py"
+        slice_file.write_text("SLICE = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "own slice after pin")
+        _git(repo, "merge", "main", "-m", "sync target advancement")
+        fork_point = _git(repo, "merge-base", "HEAD", "main")
+
+        context = policy.build_review_context(conn, task_id)
+        assert context.baseline_commit == fork_point, (
+            f"Baseline should be clamped to fork point {fork_point[:12]}, "
+            f"got {context.baseline_commit[:12] if context.baseline_commit else 'None'}"
+        )
+        assert context.baseline_kind == "pre_run_commit_sha"
+        assert context.baseline_clamped_to_fork_point is True
+        assert context.pre_clamp_baseline_commit == pinned_baseline
+        assert context.clamp_target_ref == "main"
+        assert context.changed_files
+        foreign_excluded = "fremde_datei.py" not in context.changed_files
+        slice_included = "slice_datei.py" in context.changed_files
+        print(
+            "clamp assertions: "
+            f"foreign excluded={foreign_excluded}; "
+            f"slice included={slice_included}; "
+            f"changed_files={context.changed_files}"
+        )
+        assert foreign_excluded
+        assert slice_included
+
+        snapshot = policy.capture_review_snapshot(
+            context,
+            conn,
+            task_id,
+            context.run_id,
+            capture=kb._capture_review_diff_snapshot,
+        )
+        assert snapshot["diff_baseline"] == "pre_run_commit_sha"
+        assert snapshot["diff_base_clamped_to_fork_point"] is True
+        assert snapshot["diff_base_pre_clamp_commit"] == pinned_baseline
+        assert snapshot["diff_clamp_target"] == "main"
+
+        deferred = policy.defer_event_payload(context, {"passed": True})
+        assert deferred["diff_baseline"] == "pre_run_commit_sha"
+        assert deferred["diff_base_clamped_to_fork_point"] is True
+        assert deferred["diff_base_pre_clamp_commit"] == pinned_baseline
+        assert deferred["diff_clamp_target"] == "main"
+
+
+def test_landed_candidate_preserves_slice_diff_and_critical_path_risk(
+    kanban_home, tmp_path
+):
+    repo = _repo(tmp_path)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="landed critical slice",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="standard",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "worktree_provisioned",
+                {"merge_target": "main"},
+            )
+        assert kb.claim_task(conn, task_id) is not None
+        pinned_baseline = _git(repo, "rev-parse", "HEAD")
+
+        critical = repo / "gateway" / "run.py"
+        critical.parent.mkdir()
+        critical.write_text("AUTONOMY = True\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "critical slice")
+        _git(repo, "checkout", "main")
+        _git(repo, "merge", "--no-ff", "feature", "-m", "land critical slice")
+        _git(repo, "checkout", "feature")
+
+        context = policy.build_review_context(conn, task_id)
+        assert context.baseline_commit == pinned_baseline
+        assert context.baseline_clamped_to_fork_point is False
+        assert context.changed_files == ("gateway/run.py",)
+        assert context.path_risk.tier == "critical"
+        assert kb._effective_review_tier(
+            conn,
+            task_id,
+            cfg=_review_cfg(),
+            review_context=context,
+        ) == "critical"
+
+
+def test_recorded_task_commit_in_clamp_span_keeps_original_baseline(
+    kanban_home, tmp_path
+):
+    repo = _repo(tmp_path)
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="recorded task commit in clamp span",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="standard",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "worktree_provisioned",
+                {"merge_target": "main"},
+            )
+        claim = kb.claim_task(conn, task_id)
+        assert claim is not None
+        assert claim.current_run_id is not None
+        pinned_baseline = _git(repo, "rev-parse", "HEAD")
+
+        own = repo / "own_recorded_slice.py"
+        own.write_text("OWN = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "recorded own slice")
+        own_commit = _git(repo, "rev-parse", "HEAD")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET metadata = ? WHERE id = ?",
+                (json.dumps({"commit": own_commit}), claim.current_run_id),
+            )
+
+        _git(repo, "checkout", "main")
+        _git(repo, "merge", "--no-ff", "feature", "-m", "land recorded slice")
+        foreign = repo / "foreign_after_landing.py"
+        foreign.write_text("FOREIGN = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "advance target after landing")
+
+        _git(repo, "checkout", "feature")
+        followup = repo / "followup_slice.py"
+        followup.write_text("FOLLOWUP = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "follow-up slice")
+        _git(repo, "merge", "main", "-m", "sync landed target")
+        candidate = _git(repo, "rev-parse", "HEAD")
+        fork_point = _git(repo, "merge-base", candidate, "main")
+        assert not policy._git_succeeds(
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            candidate,
+            "main",
+        )
+        assert policy._git_succeeds(
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            pinned_baseline,
+            own_commit,
+        )
+        assert policy._git_succeeds(
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            own_commit,
+            fork_point,
+        )
+
+        context = policy.build_review_context(conn, task_id)
+        assert context.baseline_commit == pinned_baseline
+        assert context.baseline_clamped_to_fork_point is False
+        assert "own_recorded_slice.py" in context.changed_files
+
+
+def test_fork_point_clamp_never_moves_baseline_backward(
+    kanban_home, tmp_path
+):
+    repo = _repo(tmp_path)
+    anchor = repo / "slice_anchor.py"
+    anchor.write_text("ANCHOR = 1\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "slice anchor")
+    pinned_baseline = _git(repo, "rev-parse", "HEAD")
+
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="forward-only clamp",
+            assignee="coder",
+            workspace_path=str(repo),
+            review_tier="standard",
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "worktree_provisioned",
+                {"merge_target": "main"},
+            )
+        assert kb.claim_task(conn, task_id) is not None
+
+        _git(repo, "checkout", "main")
+        main_only = repo / "main_only.py"
+        main_only.write_text("MAIN = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "main advances separately")
+        _git(repo, "checkout", "feature")
+        slice_work = repo / "slice_after_claim.py"
+        slice_work.write_text("SLICE = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "slice work after claim")
+        fork_point = _git(repo, "merge-base", "HEAD", "main")
+        assert not policy._git_succeeds(
+            str(repo),
+            "merge-base",
+            "--is-ancestor",
+            pinned_baseline,
+            fork_point,
+        )
+
+        context = policy.build_review_context(conn, task_id)
+        assert context.baseline_commit == pinned_baseline
+        assert context.baseline_kind == "pre_run_commit_sha"
+        assert context.baseline_clamped_to_fork_point is False
+        assert context.changed_files == ("slice_after_claim.py",)
+        assert kb.complete_task(
+            conn,
+            task_id,
+            summary="forward-only clamp reviewed",
+            review_gate=False,
+        )
+
+
 def test_non_main_target_advance_excludes_target_only_file(
     kanban_home, tmp_path
 ):

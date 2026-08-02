@@ -837,6 +837,71 @@ def test_persistent_red_triage_is_idempotent_while_window_ramps(board_home):
         assert len(strategist_surface.held_operator_proposals(conn)) == 1
 
 
+def test_persistent_red_triage_dedups_recent_archived_key_only(board_home):
+    """Archived triage keys stay deduped for seven days, without suppressing
+    genuinely new fingerprints or permanent re-filing after the cooldown."""
+    out_dir = board_home / "specs"
+
+    def records_for(test_file: str):
+        detail = (
+            "=== 1 files with test failures (1 tests failed) ===\n"
+            f"  {test_file}  (1 test failed)\n"
+        )
+        return _gate_records(
+            ("2026-07-30", "python", detail),
+            ("2026-07-31", "python", detail),
+        )
+
+    first = strategist.propose_persistent_red_triage(
+        board=None,
+        out_dir=out_dir,
+        gate_records=records_for("tests/tools/test_voice_mode.py"),
+    )
+    first_root = first["ingested"]["root_task_id"]
+    with kb.connect() as conn:
+        assert kb.archive_task(conn, first_root) is True
+
+    recent_rerun = strategist.propose_persistent_red_triage(
+        board=None,
+        out_dir=out_dir,
+        gate_records=records_for("tests/tools/test_voice_mode.py"),
+    )
+    assert recent_rerun["ingested"] is None
+    assert recent_rerun["skipped_recent_idempotency_key"] is True
+
+    distinct = strategist.propose_persistent_red_triage(
+        board=None,
+        out_dir=out_dir,
+        gate_records=records_for("tests/tools/test_terminal_tool.py"),
+    )
+    assert distinct["ingested"]["already_ingested"] is False
+
+    with kb.connect() as conn:
+        conn.execute(
+            "UPDATE task_events SET created_at = created_at - (8 * 24 * 60 * 60) "
+            "WHERE task_id = ? AND kind = 'archived'",
+            (first_root,),
+        )
+        conn.commit()
+
+    expired_rerun = strategist.propose_persistent_red_triage(
+        board=None,
+        out_dir=out_dir,
+        gate_records=records_for("tests/tools/test_voice_mode.py"),
+    )
+    assert expired_rerun["ingested"]["already_ingested"] is False
+    assert expired_rerun["ingested"]["root_task_id"] != first_root
+
+    with kb.connect() as conn:
+        rows = conn.execute(
+            "SELECT t.status FROM tasks AS t "
+            "WHERE t.created_by = ? AND NOT EXISTS ("
+            "SELECT 1 FROM task_links AS l WHERE l.child_id = t.id)",
+            (strategist.GATE_TRIAGE_AUTHOR,),
+        ).fetchall()
+    assert len(rows) == 3
+
+
 def test_persistent_red_triage_leaker_head_planspec_is_actionable(board_home):
     """AC-1 (operator layer, LIVE 2026-07-06 shape): a leaker-only head with
     attributed nights behind it must render an ACTIONABLE Triage-PlanSpec — real
