@@ -84,6 +84,13 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     )
     (repo / "docs").mkdir()
     (repo / "docs" / "keep.md").write_text("# keep\n")
+    # The budget check fails closed without a readable duration cache (see
+    # hermes_cli/affected_test_budget.py). The real checkout always has one, so
+    # a throwaway repo needs one too or every wrapper test dies on exit 2
+    # before reaching the behaviour it means to pin. An empty object is the
+    # honest fixture: readable cache, no forecast for these files (they fall
+    # back to UNKNOWN_TEST_DURATION_SECONDS, far below the budget).
+    (repo / "test_durations.json").write_text("{}\n", encoding="utf-8")
 
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
@@ -155,7 +162,29 @@ def test_mapped_diff_forwards_exactly_the_affected_test(tmp_path: Path) -> None:
     assert sentinel.exists(), "run_tests.sh was not invoked for a mapped diff"
     forwarded = sentinel.read_text().split()
     assert forwarded == ["tests/pkg/test_foo.py"], forwarded
-    assert "time-budget check skipped" in proc.stderr
+    # The budget check ran against a readable cache — no skip note, no
+    # fail-closed error. (Pre-2026-08-01 this asserted the "time-budget check
+    # skipped" note that a missing cache used to emit; missing caches now fail
+    # closed instead — pinned by the test below.)
+    assert "time-budget check" not in proc.stderr, proc.stderr
+
+
+def test_missing_duration_cache_fails_closed_without_running_pytest(
+    tmp_path: Path,
+) -> None:
+    """A repo with no readable duration cache must not silently run tests."""
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "test_durations.json").unlink()
+    (repo / "pkg" / "foo.py").write_text("VALUE = 2\n")
+    _git(repo, "add", "pkg/foo.py")
+    _git(repo, "commit", "-q", "-m", "change source")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 2, proc.stderr
+    assert not sentinel.exists(), "no test may run without a runtime estimate"
+    assert "time-budget check unavailable" in proc.stderr
+    assert "HERMES_AFFECTED_BUDGET_OK=1" in proc.stderr
 
 
 def test_over_budget_diff_exits_five_without_running_pytest(

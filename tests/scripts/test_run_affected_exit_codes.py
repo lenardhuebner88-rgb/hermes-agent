@@ -58,6 +58,10 @@ def _make_repo(tmp_path: Path, *, branch_age_exit: int, test_exit: int = 0) -> t
     (repo / "pkg" / "foo.py").write_text("VALUE = 1\n")
     (repo / "tests" / "pkg").mkdir(parents=True)
     (repo / "tests" / "pkg" / "test_foo.py").write_text("def test_foo():\n    assert True\n")
+    # Readable duration cache: the budget check fails closed without one and
+    # would swallow every exit code this file pins (see
+    # hermes_cli/affected_test_budget.py).
+    (repo / "test_durations.json").write_text("{}\n", encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "init")
