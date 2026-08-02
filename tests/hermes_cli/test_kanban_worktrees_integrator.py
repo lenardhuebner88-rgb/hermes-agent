@@ -57,6 +57,10 @@ def repo(tmp_path):
     (r / "a.txt").write_text("base\n")
     (r / "web").mkdir()
     (r / "web" / "index.txt").write_text("web\n")
+    # Readable duration cache: the affected-test budget check fails closed
+    # without one, so every mapping assertion here would die on
+    # "duration cache missing" (see hermes_cli/affected_test_budget.py).
+    (r / "test_durations.json").write_text("{}\n", encoding="utf-8")
     _git(r, "add", "-A")
     _git(r, "commit", "-m", "base")
     return r

@@ -1087,6 +1087,47 @@ def test_extract_failing_files_empty_when_no_failure_block():
     assert vm._extract_failing_test_files(None) == set()
 
 
+# a red night whose failing test (tests/scripts/test_run_affected.py) carries a
+# verbatim run_tests_parallel summary as a FIXTURE; the traceback renderer
+# replays it — indented — inside the "Failure output" dump, ahead of the run's
+# real summary. Pre-fix this minted red_files/GATE-DEFLAKE tasks for paths that
+# never ran (live baseline 2026-08-02).
+_POISONED_LOG = (
+    "=== Failure output ===\n"
+    "\n"
+    "--- tests/scripts/test_run_affected.py ---\n"
+    "        summary = '''\n"
+    "    === 2 files with test failures (3 tests failed) ===\n"
+    "      tests/hermes_cli/test_kanban_db.py  (2 tests failed)\n"
+    "      tests/tools/test_kanban_tools.py  (1 test failed)\n"
+    "    '''\n"
+    "    FAILED tests/hermes_cli/test_kanban_db.py::test_one\n"
+    "E   AssertionError\n"
+    "\n"
+    "=== 1 file with test failures (8 tests failed) ===\n"
+    "  tests/scripts/test_run_affected.py  (8 tests failed)\n"
+)
+
+
+def test_extract_failing_files_ignores_fixture_replay_in_failure_dump():
+    # AC-1: every extracted path is a really-failing file — the indented replay
+    # of a fixture summary contributes nothing.
+    files = vm._extract_failing_test_files(_POISONED_LOG)
+    assert files == {"tests/scripts/test_run_affected.py"}
+    assert "tests/hermes_cli/test_kanban_db.py" not in files
+    assert "tests/tools/test_kanban_tools.py" not in files
+
+
+def test_extract_failing_files_keeps_column0_failed_lines():
+    # AC-2 counter-metric: the column anchor must not cost recall — a genuine
+    # column-0 ``FAILED`` line from the raw dump still counts.
+    text = _POISONED_LOG + "FAILED tests/scripts/test_gate_diff_base.py::test_x\n"
+    assert vm._extract_failing_test_files(text) == {
+        "tests/scripts/test_run_affected.py",
+        "tests/scripts/test_gate_diff_base.py",
+    }
+
+
 def test_red_cause_backfills_legacy_unattributed_predecessor():
     # head attributed (python, 6 files); the older night is red but un-attributed.
     records = [
@@ -2784,3 +2825,174 @@ def test_deflake_filed_roundtrip(tmp_path):
     assert vm.read_deflake_filed(path) == {
         "GATE-DEFLAKE-PYTHON-aaaa", "GATE-DEFLAKE-VITEST-bbbb"
     }
+
+
+# ---------------------------------------------------------------------------
+# Empty-extraction guard (GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1)
+#
+# Invariant: a gate that went red BECAUSE tests failed can NEVER legitimately
+# yield an empty failing-file set — that is always an extraction defect, never
+# "nothing to do". Either the raw failing-list fallback recovers the files, or
+# the night is classified as a diagnosable ``extraction-anomaly``. Never a blind
+# ``red_files=[]`` triage card.
+#
+# AC-2 (anti-Goodhart): a legitimately empty set — tsc/build red, or a test gate
+# that died before any test ran — must NOT raise an anomaly.
+# ---------------------------------------------------------------------------
+
+# The LIVE 2026-08-02 shape that filed the blind GATE-TRIAGE-PYTHON-cd7a0054
+# card: the isolation head line NAMES the failing file, but the strict extractor
+# has no regex for that shape, so red_files came out empty.
+_BLIND_DETAIL_LIVE = (
+    "python (isolated): tests/acp/test_bar.py\n"
+    "▶ running per-file parallel test suite via run_tests_parallel.py\n"
+    "▶ launching test runner\n"
+    "No test files to run\n"
+)
+# Red from tests (the summary counts prove it) but not one file path survives.
+_BLIND_DETAIL_NO_PATHS = (
+    "python (run_tests.sh):\n"
+    "=========================== short test summary info ============================\n"
+    "========================= 3 failed, 8 passed in 0.97s ==========================\n"
+)
+
+
+def test_empty_extraction_guard_recovers_files_from_isolated_head_line():
+    # AC-1: strict extraction empty on a test-red night -> raw failing-list
+    # fallback supplies the file the evidence already named.
+    records = [
+        _red("2026-08-01", gate="python", detail=_BLIND_DETAIL_LIVE),
+        _red("2026-08-02", gate="python", detail=_BLIND_DETAIL_LIVE),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    # the strict-extraction contract is untouched...
+    assert cause["red_files"] == set()
+    assert vm._extract_failing_test_files(_BLIND_DETAIL_LIVE) == set()
+    # ...but the operator-facing surface is no longer blind:
+    assert cause["red_files_effective"] == {"tests/acp/test_bar.py"}
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_RAW_FALLBACK
+    assert cause["extraction_anomaly"] is None
+    # fingerprint follows the recovered set, not the bare gate name
+    assert cause["fingerprint"] == hashlib.sha1(
+        b"tests/acp/test_bar.py"
+    ).hexdigest()
+
+
+def test_empty_extraction_guard_escalates_anomaly_when_nothing_recoverable():
+    # AC-1: red FROM test failures, evidence proves it, yet no path is
+    # recoverable -> explicit, classifiable extraction-anomaly instead of a
+    # blind card.
+    records = [
+        _red("2026-08-01", gate="python", detail=_BLIND_DETAIL_NO_PATHS),
+        _red("2026-08-02", gate="python", detail=_BLIND_DETAIL_NO_PATHS),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["red_files"] == set()
+    assert cause["red_files_effective"] == set()
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_ANOMALY
+    anomaly = cause["extraction_anomaly"]
+    assert anomaly["kind"] == "extraction-anomaly"
+    assert anomaly["gate"] == "python"
+    assert anomaly["date"] == "2026-08-02"
+    assert "3 failed" in anomaly["evidence_excerpt"]
+
+
+def test_empty_extraction_guard_anomaly_fingerprint_is_stable_no_spam():
+    # AC-2 (no alarm noise): the same broken extraction on a later night must
+    # dedup — one anomaly chain per gate, not one per night.
+    base = [
+        _red("2026-08-01", gate="python", detail=_BLIND_DETAIL_NO_PATHS),
+        _red("2026-08-02", gate="python", detail=_BLIND_DETAIL_NO_PATHS),
+    ]
+    later = base + [
+        _red("2026-08-03", gate="python", detail=_BLIND_DETAIL_NO_PATHS + "extra\n"),
+    ]
+    fp_a = vm.derive_persistent_red_triage(base, min_reds=2, window=3)["fingerprint"]
+    fp_b = vm.derive_persistent_red_triage(later, min_reds=2, window=3)["fingerprint"]
+    assert fp_a == fp_b
+
+
+def test_empty_extraction_guard_silent_on_non_test_gate():
+    # AC-2: tsc red without any failing test file is LEGITIMATELY empty — the
+    # guard must not manufacture an anomaly out of a compile error.
+    tsc_detail = (
+        "Frontend tsc --noEmit:\n"
+        "src/control/Panel.tsx(41,7): error TS2345: Argument of type 'string' "
+        "is not assignable to parameter of type 'number'.\n"
+    )
+    records = [
+        _red("2026-08-01", gate="tsc", detail=tsc_detail),
+        _red("2026-08-02", gate="tsc", detail=tsc_detail),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["gate"] == "tsc"
+    assert cause["red_files"] == set()
+    assert cause["red_files_effective"] == set()
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_NON_TEST
+    assert cause["extraction_anomaly"] is None
+
+
+def test_empty_extraction_guard_silent_when_test_gate_died_before_any_test():
+    # AC-2: a python gate that never got to run a test (env/import failure)
+    # carries no test-failure evidence — legitimately file-less, no anomaly.
+    setup_detail = (
+        "Python branch `abc123` (run_tests.sh):\n"
+        "ERROR: isolated environment imports hermes_cli from /wrong/path\n"
+        "gate aborted before the test runner started\n"
+    )
+    records = [
+        _red("2026-08-01", gate="python", detail=setup_detail),
+        _red("2026-08-02", gate="python", detail=setup_detail),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_NON_TEST
+    assert cause["extraction_anomaly"] is None
+
+
+def test_empty_extraction_guard_recovers_vitest_files():
+    # AC-1 across gates: a vitest head whose .tsx files the python-only strict
+    # extractor can never see is recovered by the raw fallback — and no python
+    # path is smuggled in.
+    records = [
+        _red("2026-07-18", gate="vitest", detail=_VITEST_DETAIL_A),
+        _red("2026-07-19", gate="vitest", detail=_VITEST_DETAIL_B),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["gate"] == "vitest"
+    assert cause["red_files"] == set()  # strict contract unchanged
+    assert cause["red_files_effective"] == {"src/components/OtherPanel.test.tsx"}
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_RAW_FALLBACK
+    assert cause["extraction_anomaly"] is None
+
+
+def test_empty_extraction_guard_untouched_when_strict_extraction_worked():
+    # Regression: a night whose files DO extract keeps source="extraction" and
+    # never enters the guard path.
+    records = [
+        _red("2026-07-04", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-05", gate="python", detail=_REAL_DETAIL_B),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["red_files"] == cause["red_files_effective"]
+    assert cause["red_files_source"] == vm.RED_FILES_SOURCE_EXTRACTION
+    assert cause["extraction_anomaly"] is None
+
+
+def test_is_test_shaped_red_requires_gate_and_evidence():
+    # Unit-level AC-2 boundary.
+    assert vm._is_test_shaped_red("python", ["FAILED tests/x.py::test_a"]) is True
+    assert vm._is_test_shaped_red("vitest", [" FAIL  src/a.test.ts > x"]) is True
+    assert vm._is_test_shaped_red("python", ["1 failed, 2 passed in 1s"]) is True
+    # right evidence, wrong gate -> never (compile gates are never test-shaped)
+    assert vm._is_test_shaped_red("tsc", ["FAILED tests/x.py::test_a"]) is False
+    assert vm._is_test_shaped_red("build", ["3 failed"]) is False
+    # right gate, no evidence -> never
+    assert vm._is_test_shaped_red("python", ["ModuleNotFoundError: no hermes"]) is False
+    assert vm._is_test_shaped_red("python", []) is False
+    assert vm._is_test_shaped_red("unknown", ["FAILED tests/x.py::test_a"]) is False
