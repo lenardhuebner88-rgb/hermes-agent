@@ -284,6 +284,59 @@ def _fixer_committed_paths(
     return {path for path in paths if path in landed}
 
 
+def _parent_work_after_fixer(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+    repo_root: Any,
+    branch: str,
+    paths: set[str],
+) -> set[str]:
+    """Subset of *paths* the parent itself touched after its fixer started.
+
+    Only needed on the operator-unblock branch. With no
+    ``lane_scope_fixer_parent_resumed`` event there is no recorded handoff
+    tip, so the fixer's attribution range ends at the current branch tip and
+    would also swallow parent commits that landed after the fixer was done.
+
+    The resume event was never the boundary itself, only a proxy for it. The
+    parent's own claim stamps answer the same question directly: a
+    materialized ``pre_run_commit_sha`` of the parent that *descends* from the
+    fixer's stamp belongs to a run that started after the fixer, so everything
+    between it and the branch tip is the parent's own later work and can never
+    be the fixer's. The oldest such stamp is the boundary — a newer one would
+    leave an earlier post-fixer parent commit inside the fixer's range.
+
+    Fails closed: if the boundary cannot be resolved, every path counts as
+    parent work and the fixer earns nothing.
+    """
+    if not paths:
+        return set()
+    fixer_stamp = kfs._oldest_materialized_run_head(conn, child_id)
+    if not fixer_stamp:
+        return set(paths)
+    rows = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs "
+        "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
+        "AND pre_run_commit_sha != '' AND workspace_materialized = 1 "
+        "ORDER BY id ASC",
+        (parent_id,),
+    ).fetchall()
+    for row in rows:
+        stamp = str(row["pre_run_commit_sha"] or "").strip()
+        if not stamp or stamp == fixer_stamp:
+            continue
+        try:
+            descends = kwt._branch_is_ancestor(repo_root, fixer_stamp, stamp)
+        except Exception:
+            return set(paths)
+        if descends:
+            return _paths_changed_since(repo_root, stamp, branch, paths)
+    # The parent was never re-claimed after its fixer started, so no parent
+    # commit can sit inside the fixer's range.
+    return set()
+
+
 def _operator_waived_paths(
     conn: sqlite3.Connection,
     parent_id: str,
@@ -377,9 +430,11 @@ def allowlisted_paths_for_parent(
     per child, per path, from one of exactly two sources:
 
     * ``fixer_commit`` -- the path is attributable to that fixer child
-      (merge-safe, see :func:`_fixer_committed_paths`), and the completion
-      hook has recorded the handoff tip, so later parent work stays
-      distinguishable from the fixer's own;
+      (merge-safe, see :func:`_fixer_committed_paths`) and is not later parent
+      work riding along in the same range. The boundary is the recorded
+      handoff tip when the completion hook resumed the parent, and the
+      parent's own post-fixer claim stamp when an operator unblocked it by
+      hand (see :func:`_parent_work_after_fixer`);
     * ``operator_waiver`` -- an explicit, signed, tip-bound
       ``lane_scope_allowlist_waiver`` event names the path.
 
@@ -431,9 +486,11 @@ def allowlisted_paths_for_parent(
 
     resume_tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
     # Only the fingerprint of the newest park gates the lookup; its
-    # ``park_branch_tip`` is no longer the attribution basis — each fixer
-    # child is bounded by its own pre-run stamp instead of a shared range.
-    latest_fp, _park_tip = _latest_lane_scope_park(conn, parent_id)
+    # ``park_branch_tip`` is deliberately not the attribution basis — it
+    # predates the fixer's own commits, so using it as a retouch basis would
+    # count the fixer's work as parent retouch. Each fixer child is bounded by
+    # its own pre-run stamp, each parent by its own post-fixer claim stamp.
+    latest_fp = _latest_lane_scope_park(conn, parent_id)[0]
     if not resume_tip and latest_fp != want_fp:
         # Done fixer for this fp but no matching current park and no resume:
         # refuse permanent allowlist (Opus B5).
@@ -459,10 +516,17 @@ def allowlisted_paths_for_parent(
         waived = _operator_waived_paths(
             conn, parent_id, want_fp, child_id, endpoint_tip, child_paths,
         )
-        # A fixer commit is authoritative only after the completion hook has
-        # recorded the handoff tip. Without that boundary, later parent work
-        # cannot be distinguished from the fixer's own changes.
-        if committed and resume_tip:
+        if committed and not resume_tip:
+            # Operator-unblock branch: the completion hook never recorded a
+            # handoff tip, so the fixer's range reaches to the branch tip.
+            # Bound it by the parent's own post-fixer claim stamp instead of
+            # dropping the evidence — dropping it re-opens the
+            # park→fix→resume loop for exactly the live-documented case
+            # "fixer resolves but leaves parent blocked".
+            committed = committed - _parent_work_after_fixer(
+                conn, parent_id, child_id, repo_root, branch, committed,
+            )
+        if committed:
             evidence.setdefault(child_id, {})["fixer_commit"] = committed
         if waived:
             evidence.setdefault(child_id, {})["operator_waiver"] = waived

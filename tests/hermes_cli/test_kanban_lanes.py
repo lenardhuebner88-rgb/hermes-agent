@@ -1018,3 +1018,154 @@ def test_unsigned_waiver_does_not_allowlist_violation(
         assert _events(
             conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
         ) == []
+
+
+# ---------------------------------------------------------------------------
+# Operator-unblock branch: earned immunity without a resume event
+# ---------------------------------------------------------------------------
+#
+# The documented live failure is "conflict fixer resolves but leaves parent
+# blocked": the fixer lands its corrective work, closes, and the completion
+# hook never wakes the parent — so no ``lane_scope_fixer_parent_resumed``
+# event is written and an operator unblocks the parent by hand. Tying fixer
+# evidence to that event makes the park→fix→resume loop re-open for exactly
+# this branch: the parent re-parks on a path its fixer demonstrably adopted.
+#
+# The event was only ever a *proxy* for the real boundary — "where does the
+# fixer's work stop and the parent's later work begin". The parent's own
+# materialized claim stamps answer that directly, so the evidence stays
+# tip-bound without needing the hook to have fired.
+
+
+def _operator_unblock(conn, parent_id):
+    """The paved-road handgrip: operator clears the park without a hook."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', block_kind = NULL, "
+            "block_recurrences = 0 WHERE id = ?",
+            (parent_id,),
+        )
+        kb._append_event(
+            conn, parent_id, "unblocked", {"status": "ready", "source": "operator"},
+        )
+
+
+def _stamp_materialized_parent_run(conn, parent_id, pre_run_sha):
+    """Record the claim stamp a re-dispatched parent run leaves behind."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, status, started_at, pre_run_commit_sha, "
+            "workspace_materialized) VALUES (?, 'running', 0, ?, 1)",
+            (parent_id, pre_run_sha),
+        )
+
+
+def test_operator_unblocked_parent_keeps_earned_fixer_allowlist(
+    lane_repo, lane_scope_home,
+):
+    """Fixer work stays evidence when the completion hook never resumed.
+
+    Fixer commits the lane path, closes, no resume event is written, the
+    operator unblocks by hand — the parent must merge, not re-park on the
+    very path its fixer adopted.
+    """
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_operator_unblock_lane_fixer",
+            )
+        )
+        worktree = info["path"]
+        # The parked run of the parent left its own claim stamp behind — it
+        # predates the fixer and must not be read as a post-fixer boundary,
+        # or the fixer's work would be charged to the parent.
+        _stamp_materialized_parent_run(
+            conn, parent_id, _git(worktree, "rev-parse", "HEAD~1"),
+        )
+        _stamp_materialized_fixer_run(
+            conn, child_id, _git(worktree, "rev-parse", "HEAD"),
+        )
+        _commit_in(
+            worktree,
+            path,
+            "export const LandingPack = 2\n",
+            msg="adopt frontend path",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        # The completion hook did NOT wake the parent.
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT,
+        ) == []
+        _operator_unblock(conn, parent_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "merged", result
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        )[-1] == {
+            "child_id": child_id,
+            "fingerprint": dispatch["fingerprint"],
+            "paths": [path],
+            "source": "fixer_commit",
+        }
+
+
+def test_parent_work_after_operator_unblock_is_not_fixer_evidence(
+    lane_repo, lane_scope_home,
+):
+    """The missing handoff tip must not widen the fixer's attribution.
+
+    Without a resume event the fixer's range runs to the branch tip, so a
+    parent commit landing after the fixer would ride along as "fixer work".
+    The parent's own post-fixer claim stamp bounds it: everything from there
+    on is the parent's, and the gate re-parks.
+    """
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, _dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_parent_work_after_unblock",
+            )
+        )
+        worktree = info["path"]
+        _stamp_materialized_fixer_run(
+            conn, child_id, _git(worktree, "rev-parse", "HEAD"),
+        )
+        _commit_in(
+            worktree,
+            path,
+            "export const LandingPack = 2\n",
+            msg="adopt frontend path",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        _operator_unblock(conn, parent_id)
+
+        # Re-dispatched parent stamps its own claim, then touches the path
+        # the fixer had adopted — that is new violating work, not the fixer's.
+        _stamp_materialized_parent_run(
+            conn, parent_id, _git(worktree, "rev-parse", "HEAD"),
+        )
+        _commit_in(
+            worktree,
+            path,
+            "export const LandingPack = 3\n",
+            msg=f"kanban({parent_id}): touch it again",
+        )
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked", result
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        ) == []
