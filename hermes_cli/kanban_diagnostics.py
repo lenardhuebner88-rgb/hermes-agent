@@ -39,6 +39,8 @@ import sqlite3
 import subprocess
 import time
 
+from hermes_cli import kanban_review_authority as _review_authority
+
 
 # Severity rungs, ordered least → most urgent. The UI colors them
 # amber (warning), orange (error), red (critical). Sorted outputs put
@@ -1970,7 +1972,18 @@ def _rule_chain_root_pending_integration(
     ]
 
 
+def _rule_negative_verdict_without_authority(
+    task, events, runs, now, cfg
+) -> list[Diagnostic]:
+    return _review_authority.derive_negative_verdict_without_authority_diagnostics(
+        task,
+        events,
+        diagnostic_factory=Diagnostic,
+    )
+
+
 _RULES: list[RuleFn] = [
+    _rule_negative_verdict_without_authority,
     _rule_hallucinated_cards,
     _rule_triage_aux_unavailable,
     _rule_reviewer_role_tool_mismatch,
@@ -1992,6 +2005,7 @@ _RULES: list[RuleFn] = [
 # Known kinds (for the UI's filter / legend / i18n keys). Update when
 # rules are added.
 DIAGNOSTIC_KINDS = (
+    _review_authority.NEGATIVE_VERDICT_WITHOUT_AUTHORITY_DIAGNOSTIC_KIND,
     "hallucinated_cards",
     "triage_aux_unavailable",
     "reviewer_role_tool_mismatch",
