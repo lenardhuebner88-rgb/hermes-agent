@@ -39,7 +39,6 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 from urllib.parse import quote
 
 from hermes_cli.usage_facts_db import (
-    finalize_run_tool_call_count,
     initialize_usage_facts_db,
     record_llm_call,
     upsert_run_facts,
@@ -117,10 +116,6 @@ class ExtractedRun:
     rate_limit: Optional[RateLimitSnapshot] = None
     provenance_path: Optional[str] = None
     source_fingerprint: Optional[str] = None
-    # True only when the extractor saw a real tool measurement source
-    # (today: a `tools` object in the Qwen usage log). Gates the observed-zero
-    # finalizer so uninstrumented lanes keep NULL instead of a fabricated 0.
-    tool_count_observed: bool = False
 
 
 @dataclass
@@ -682,14 +677,12 @@ def extract_qwen_row(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
 
     tool_calls = None
     tools = obj.get("tools")
-    tool_count_observed = isinstance(tools, dict)
-    if tool_count_observed:
+    if isinstance(tools, dict):
         tool_calls = _int_or_none(tools.get("totalCalls"))
 
     return ExtractedRun(
         run_id=run_id,
         origin=ORIGIN_QWEN,
-        tool_count_observed=tool_count_observed,
         run_fields={
             "origin": ORIGIN_QWEN,
             "provider": "qwen",
@@ -940,13 +933,6 @@ def write_extracted_run(
         calls_written = len(extracted.calls)
     else:
         upsert_run_facts(extracted.run_id, extracted.run_fields, path=db_path)
-
-    # Only lanes with a real tool measurement source may finalize an observed
-    # zero.  Uninstrumented origins keep NULL — unknown stays unknown, never a
-    # fabricated 0.  The conditional finalizer preserves richer existing
-    # measurements during replays and force-harvests.
-    if extracted.tool_count_observed:
-        finalize_run_tool_call_count(extracted.run_id, path=db_path)
 
     rl_written = 0
     if extracted.rate_limit is not None and rate_limit_path is not None:
