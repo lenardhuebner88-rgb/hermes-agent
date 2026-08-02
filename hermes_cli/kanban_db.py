@@ -103,6 +103,7 @@ from hermes_cli import disposition as _disposition_mod, kanban_breaker_message a
 from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
+from hermes_cli import kanban_review_authority as _review_authority
 from hermes_cli import kanban_review_policy as _review_policy
 from hermes_cli import kanban_runtime_facts as _runtime_facts
 from hermes_cli.kanban_chain_status import (
@@ -10179,6 +10180,16 @@ def _end_run(
     )
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
     _record_run_metric_scores(conn, run_id, task_id, created_at=now)
+    _review_authority.record_negative_verdict_without_authority(
+        conn,
+        task_id=task_id,
+        run_id=run_id,
+        outcome=outcome,
+        metadata=metadata_for_store,
+        originated_from_review=_run_originated_from_review(conn, task_id, run_id),
+        normalize_verdict=_normalize_review_verdict,
+        append_event=_append_event,
+    )
     return run_id
 
 
