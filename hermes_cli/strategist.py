@@ -1333,6 +1333,7 @@ def lever_to_markdown(lever: Lever) -> str:
 
     build_id = f"{lever.key}-S1"
     review_id = f"{lever.key}-S2"
+    scout_id = f"{lever.key}-SCOUT"
     strategist_meta = {
         "target_metric": lever.target_metric,
         "roi": lever.roi,
@@ -1343,6 +1344,53 @@ def lever_to_markdown(lever: Lever) -> str:
     grounding = (lever.grounding or "").strip()
     if grounding:
         strategist_meta["grounding"] = grounding
+    scope_files = _scope_files_from_grounding(grounding)
+    build_subtask = {
+        "id": build_id,
+        "title": f"{lever.title} (Build plus Test)",
+        "lane": lever.lane,
+        "deps": [] if scope_files else [scout_id],
+        "acceptance_criteria": [
+            f"Ziel-Kennzahl adressiert: {lever.target_metric}",
+            f"Counter-Metrik als Guardrail geprueft und gehalten: {lever.counter_metric}",
+            "Gates gruen via scripts/run-affected.sh, Beleg mit Kommando und Exit-Code",
+        ],
+        "body": lever.rationale,
+    }
+    if scope_files:
+        build_subtask["scope_files"] = scope_files
+    if lever.key.startswith(("GATE-FIX-", "GATE-TRIAGE-")):
+        build_subtask["review_tier"] = "review"
+
+    subtasks = []
+    if not scope_files:
+        subtasks.append(
+            {
+                "id": scout_id,
+                "title": f"Scope fuer {lever.title} ermitteln",
+                "lane": "scout",
+                "kind": "analysis",
+                "deps": [],
+                "acceptance_criteria": [
+                    "Repo-relative Scope-Dateien, relevante Aufrufer und Risiken als Task-Kommentar festgehalten",
+                ],
+                "body": "Read-only Recon vor dem Build; keine Dateien veraendern.",
+            }
+        )
+    subtasks.extend(
+        [
+            build_subtask,
+            {
+                "id": review_id,
+                "title": "Review-Urteil zum Hebel",
+                "lane": "reviewer",
+                "deps": [build_id],
+                "acceptance_criteria": [
+                    "Review-Urteil mit Beleg festgehalten; Ziel-Kennzahl und Counter-Metrik beide adressiert",
+                ],
+            },
+        ]
+    )
     frontmatter = {
         "status": "vorgeschlagen",
         "owner": "Strategist",
@@ -1353,29 +1401,7 @@ def lever_to_markdown(lever: Lever) -> str:
         "strategist_meta": strategist_meta,
         "taskgraph_hints": {
             "binding": True,
-            "subtasks": [
-                {
-                    "id": build_id,
-                    "title": f"{lever.title} (Build plus Test)",
-                    "lane": lever.lane,
-                    "deps": [],
-                    "acceptance_criteria": [
-                        f"Ziel-Kennzahl adressiert: {lever.target_metric}",
-                        f"Counter-Metrik als Guardrail geprueft und gehalten: {lever.counter_metric}",
-                        "Gates gruen via scripts/run-affected.sh, Beleg mit Kommando und Exit-Code",
-                    ],
-                    "body": lever.rationale,
-                },
-                {
-                    "id": review_id,
-                    "title": "Review-Urteil zum Hebel",
-                    "lane": "reviewer",
-                    "deps": [build_id],
-                    "acceptance_criteria": [
-                        "Review-Urteil mit Beleg festgehalten; Ziel-Kennzahl und Counter-Metrik beide adressiert",
-                    ],
-                },
-            ],
+            "subtasks": subtasks,
         },
     }
     fm = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).strip()

@@ -460,8 +460,9 @@ def test_verdict_only_code_lane_warns_on_validate_and_blocks_ingest(
 
     assert preview["disposition"] == "warn"
     assert preview["would_block"] is True
-    assert len(preview["findings"]) == 1
-    finding = preview["findings"][0]
+    role_findings = [f for f in preview["findings"] if f.startswith("role_misuse: ")]
+    assert len(role_findings) == 1
+    finding = role_findings[0]
     assert "role_misuse" in finding
     assert "lane='research' cannot own kind='code'" in finding
     assert "coder, coder-claude, coder-frontend, premium" in finding
@@ -601,7 +602,8 @@ def test_scoped_code_subtask_has_no_scope_advisory(tmp_path: Path):
 
     findings = planspecs._collect_spec_rubric_findings(spec)
 
-    assert not any(f.startswith("scope-less code subtask: ") for f in findings)
+    assert "scope-less code subtask: B1-S1" not in findings
+    assert "scope-less code subtask: B1-S2" in findings
 
 
 def test_list_planspecs_reports_binding_status(tmp_path: Path):

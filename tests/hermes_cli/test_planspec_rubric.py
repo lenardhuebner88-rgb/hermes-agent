@@ -93,6 +93,7 @@ taskgraph_hints:
       title: "Short verbatim task title"
       lane: coder
       deps: []
+      scope_files: ["hermes_cli/planspecs.py"]
       acceptance_criteria:
         - "Verbatim AC statement that must hold for this subtask"
       body: "Optional verbatim worker body"

@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs
@@ -139,8 +140,8 @@ def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
         assert prop["target_metric"]
         assert prop["roi"]
         assert prop["counter_metric"]
-        # chain has a build + review subtask
-        assert prop["subtask_count"] == 2
+        # Unscoped generated proposals get read-only scout + build + review.
+        assert prop["subtask_count"] == 3
 
 
 def test_cap_limits_to_five(board_home, monkeypatch):
@@ -575,9 +576,11 @@ def test_lever_markdown_emits_grounded_scope_and_gate_review_tier():
     )
 
     md = strategist.lever_to_markdown(lever)
+    frontmatter = yaml.safe_load(md.split("---", 2)[1])
+    build = frontmatter["taskgraph_hints"]["subtasks"][0]
 
-    assert 'scope_files:\n        - "hermes_cli/strategist.py"' in md
-    assert "review_tier: review" in md
+    assert build["scope_files"] == ["hermes_cli/strategist.py"]
+    assert build["review_tier"] == "review"
 
 
 def test_lever_markdown_prepends_scout_when_grounding_has_no_path():
@@ -596,10 +599,14 @@ def test_lever_markdown_prepends_scout_when_grounding_has_no_path():
     )
 
     md = strategist.lever_to_markdown(lever)
+    frontmatter = yaml.safe_load(md.split("---", 2)[1])
+    scout, build, review = frontmatter["taskgraph_hints"]["subtasks"]
 
-    assert "id: UNSCOPED-1-SCOUT" in md
-    assert "kind: analysis" in md
-    assert 'deps: ["UNSCOPED-1-SCOUT"]' in md
+    assert scout["id"] == "UNSCOPED-1-SCOUT"
+    assert scout["lane"] == "scout"
+    assert scout["kind"] == "analysis"
+    assert build["deps"] == [scout["id"]]
+    assert review["deps"] == [build["id"]]
 
 
 # --------------------------------------------------------------------------- #
@@ -769,7 +776,7 @@ def test_gate_fix_opens_held_planspec_on_two_red_nights(board_home):
     ing = result["ingested"]
     assert ing["root_task_id"]
     assert ing["already_ingested"] is False
-    assert ing["subtask_count"] == 2  # build + review
+    assert ing["subtask_count"] == 3  # scope scout + build + review
     assert ing["freigabe"] == "operator"  # HELD / operator-gated, never auto-deploy
 
     with kb.connect() as conn:
