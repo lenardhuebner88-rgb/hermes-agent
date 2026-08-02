@@ -858,6 +858,117 @@ def _extract_failing_test_files(text: Optional[str]) -> set[str]:
     return files
 
 
+# ---------------------------------------------------------------------------
+# Empty-extraction guard (GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1)
+#
+# Invariant: a gate that went red BECAUSE tests failed can never legitimately
+# yield an EMPTY failing-file set. Whenever it does, the extraction is broken
+# (a parser that misses a report shape, a truncated detail, fixture text that
+# poisons the summary scan) — never "nothing to do". Filing a triage card with
+# ``red_files=[]`` then sends a worker out blind, which is what happened on
+# 2026-08-02 (``GATE-TRIAGE-PYTHON-cd7a0054``: the ledger detail literally named
+# ``tests/acp/test_bar.py`` in its isolation head line, the strict extractor saw
+# none of it, and the card said "(unbekannt)").
+#
+# This is deliberately defense-in-depth in a DIFFERENT function than the strict
+# parser: it re-reads the SAME evidence with the raw failing-list parsers
+# (:func:`gate_leaker.parse_failed_files` — the run_tests_parallel summary /
+# vitest FAIL scraper — plus the isolation head line), and when even that finds
+# nothing it classifies the night as an ``extraction-anomaly`` so the operator
+# gets a diagnosable escalation instead of a blind worker.
+#
+# AC-2 (anti-Goodhart): the guard stays SILENT for a legitimately empty set —
+# tsc/build/lint reds are whole-project compiles with no failing test file, and
+# even a ``python`` gate that died in setup (venv/import error, no test ever
+# ran) carries no test-failure evidence. Positive test-failure evidence is
+# REQUIRED before anything fires, so no alarm noise is added.
+# ---------------------------------------------------------------------------
+
+# Gates whose redness can be CAUSED by failing tests at all.
+TEST_SHAPED_GATES = frozenset({"python", "pytest", "vitest"})
+
+# The bounded isolation rerun renders its reproduced failure as a head line
+# ``"<gate> (isolated): <file>"`` (``gate_leaker.format_first_fail_detail``).
+# That is the most reliable raw failing-file signal a ledger detail carries —
+# and precisely the shape the strict extractor has no regex for.
+_ISOLATED_HEAD_FILE_RE = re.compile(
+    r"^[\w.+-]+\s+\(isolated\):\s+(\S+)\s*$", re.MULTILINE
+)
+
+# Positive evidence that the night went red BECAUSE tests failed. Each shape is
+# emitted only in test-failure context: the isolation head line, the
+# run_tests_parallel failing-file section headers, pytest FAILED/ERROR lines and
+# short-summary block, vitest ``FAIL <file>.test.tsx``, and any runner's
+# "<n> failed" count. A compile/lint/setup failure matches none of them.
+_TEST_RED_EVIDENCE_RES = (
+    _ISOLATED_HEAD_FILE_RE,
+    re.compile(r"^===\s+\d+\s+files?\s+(?:with|where)\b", re.MULTILINE),
+    re.compile(r"^FAILED\s+\S", re.MULTILINE),
+    re.compile(r"^ERROR\s+\S+\.py\b", re.MULTILINE),
+    re.compile(r"^\s*FAIL\s+\S+\.(?:test|spec)\.[cm]?[jt]sx?\b", re.MULTILINE),
+    re.compile(r"\b\d+\s+failed\b"),
+    re.compile(r"short test summary info"),
+)
+
+# ``red_files_source`` values on a triage result — how the operator-facing file
+# set was obtained (or why it stayed empty).
+RED_FILES_SOURCE_EXTRACTION = "extraction"      # strict parser found the files
+RED_FILES_SOURCE_RAW_FALLBACK = "raw-failing-list"  # guard's raw re-parse found them
+RED_FILES_SOURCE_ANOMALY = "extraction-anomaly"     # red from tests, 0 files: broken
+RED_FILES_SOURCE_NON_TEST = "non-test-red"          # legitimately empty (AC-2)
+
+EXTRACTION_ANOMALY_KIND = "extraction-anomaly"
+
+# Bound for the evidence excerpt carried on an anomaly (logging/telemetry only —
+# never rendered into an idempotent PlanSpec body).
+EXTRACTION_ANOMALY_EXCERPT_MAX = 400
+
+
+def _is_test_shaped_red(gate: Optional[str], texts: list[str]) -> bool:
+    """True iff this red night's evidence proves it went red FROM test failures.
+
+    Two layers, both required (AC-2): the gate must be one whose unit of work is
+    a test run at all (:data:`TEST_SHAPED_GATES` — never tsc/build/lint), AND at
+    least one piece of positive test-failure evidence must appear in its detail.
+    A red gate without that evidence (compile error, missing toolchain, venv or
+    import failure before any test ran) is legitimately file-less and must NOT
+    be reported as an extraction anomaly."""
+    if str(gate or "").strip().lower() not in TEST_SHAPED_GATES:
+        return False
+    for text in texts:
+        if not text:
+            continue
+        for rx in _TEST_RED_EVIDENCE_RES:
+            if rx.search(text):
+                return True
+    return False
+
+
+def _extract_raw_failing_files(gate: Optional[str], texts: list[str]) -> set[str]:
+    """Raw failing-file list for a red night — the guard's fallback extractor.
+
+    Superset of :func:`_extract_failing_test_files`, deliberately parsing the
+    same evidence a second way so a single parser bug cannot blind the triage:
+    the isolation head line, plus ``gate_leaker.parse_failed_files`` (the
+    canonical run_tests_parallel summary-section / ``Repro:`` / vitest ``FAIL``
+    scraper the heartbeat itself uses). Bounded to
+    :data:`GATE_BACKFILL_MAX_FILES`. Returns an empty set when the evidence
+    genuinely names no file — the caller then escalates an anomaly."""
+    from hermes_cli import gate_leaker
+
+    files: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        files |= set(_ISOLATED_HEAD_FILE_RE.findall(text))
+        files |= set(gate_leaker.parse_failed_files(gate, text))
+        files |= _extract_failing_test_files(text)
+    files = {f for f in (str(x).strip() for x in files) if f}
+    if len(files) > GATE_BACKFILL_MAX_FILES:
+        return set(sorted(files)[:GATE_BACKFILL_MAX_FILES])
+    return files
+
+
 def _same_recurring_cause(prev_files: set[str], head_files: set[str]) -> bool:
     """True iff a log-confirmed un-attributed night shares the head's cause.
 
@@ -1111,6 +1222,17 @@ def derive_persistent_red_triage(
             "gate": <str>,                  # the ANCHOR night's gate (head's own,
                                              # or same-gate unknown fallback — see below)
             "red_files": set[str],          # the ANCHOR night's failing test files
+                                             # (STRICT extraction — unchanged contract)
+            "red_files_effective": set[str], # what the operator surface must use:
+                                             # ``red_files``, or the guard's raw
+                                             # fallback list when the strict
+                                             # extraction came up empty on a
+                                             # test-caused red night
+            "red_files_source": <str>,       # extraction | raw-failing-list |
+                                             # extraction-anomaly | non-test-red
+            "extraction_anomaly": <dict|None>,  # set ONLY when the anchor night is
+                                             # red FROM test failures yet no failing
+                                             # file could be recovered at all
                                              # (head night's, or — only when head gate
                                              # is un-attributed 'unknown' — the most
                                              # recent SAME-GATE window night that HAS
@@ -1159,6 +1281,21 @@ def derive_persistent_red_triage(
     whose anchor night shows the same red files still hit ``already_ingested``;
     an anchor whose OWN red files genuinely change still (correctly) opens a
     fresh chain — new information for the operator.
+
+    Empty-extraction guard (GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1): a red
+    gate that failed BECAUSE tests failed can never legitimately produce an
+    empty file set, so the anchor's emptiness is re-checked against the raw
+    failing-list parsers (:func:`_extract_raw_failing_files`). Recovered files
+    become ``red_files_effective`` (``red_files_source="raw-failing-list"``);
+    when even that finds nothing the night is classified as an
+    ``extraction_anomaly`` — a diagnosable escalation instead of a blind
+    ``red_files=[]`` triage card. Legitimately empty sets (tsc/build/lint reds,
+    or a test gate that died before any test ran) carry no test-failure evidence
+    and are left exactly as before (``red_files_source="non-test-red"``, no
+    anomaly) — the anti-Goodhart guardrail against alarm noise. ``red_files``
+    itself keeps its strict-extraction meaning; only the ``*_effective`` /
+    ``*_source`` / ``extraction_anomaly`` fields are new, and the fingerprint
+    follows the effective set.
     """
     if not records:
         return None
@@ -1237,16 +1374,60 @@ def derive_persistent_red_triage(
     # carry concrete red files. Attributed heads (e.g. vitest) keep their own
     # gate + empty file set — never steal an older different gate's files.
     # NEUTRAL nights never reach this path (excluded by NIGHT_RED filter above).
-    anchor_files, anchor_gate = head_files, head_gate
+    anchor_files, anchor_gate, anchor_date = head_files, head_gate, head_date
     if not anchor_files and head_gate == "unknown":
         for date in reversed(red_dates):
             _g, files = _night_gate_and_files(date)
             if files:
                 anchor_files = files
                 anchor_gate = _g
+                anchor_date = date
                 break
 
-    fingerprint_source = "|".join(sorted(anchor_files)) if anchor_files else anchor_gate
+    # Empty-extraction guard (GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1). Only
+    # reached when the strict extraction produced NOTHING for the anchor night.
+    red_files_effective = set(anchor_files)
+    red_files_source = (
+        RED_FILES_SOURCE_EXTRACTION if anchor_files else RED_FILES_SOURCE_NON_TEST
+    )
+    extraction_anomaly: Optional[dict] = None
+    if not anchor_files:
+        anchor_details = [
+            str((rec.get("first_fail") or {}).get("detail") or "")
+            for _idx, rec in _night_records(anchor_date)
+        ]
+        if _is_test_shaped_red(anchor_gate, anchor_details):
+            fallback_files = _extract_raw_failing_files(anchor_gate, anchor_details)
+            if fallback_files:
+                red_files_effective = fallback_files
+                red_files_source = RED_FILES_SOURCE_RAW_FALLBACK
+            else:
+                red_files_source = RED_FILES_SOURCE_ANOMALY
+                excerpt = "\n".join(t for t in anchor_details if t).strip()
+                if len(excerpt) > EXTRACTION_ANOMALY_EXCERPT_MAX:
+                    excerpt = excerpt[-EXTRACTION_ANOMALY_EXCERPT_MAX:]
+                extraction_anomaly = {
+                    "kind": EXTRACTION_ANOMALY_KIND,
+                    "gate": anchor_gate,
+                    "date": anchor_date,
+                    "reason": (
+                        "gate red from test failures, but 0 failing files could "
+                        "be extracted from its evidence"
+                    ),
+                    "evidence_excerpt": excerpt,
+                }
+
+    # Fingerprint follows the OPERATOR-FACING set (the effective one), so a
+    # fallback-recovered file set keys its own idempotent chain. An anomaly keys
+    # on a gate-stable sentinel instead: the same broken extraction on the same
+    # gate must dedup night after night (no anomaly spam), while a later night
+    # whose files DO extract leaves the anomaly key behind for a real triage.
+    if extraction_anomaly is not None:
+        fingerprint_source = f"{EXTRACTION_ANOMALY_KIND}|{anchor_gate}"
+    elif red_files_effective:
+        fingerprint_source = "|".join(sorted(red_files_effective))
+    else:
+        fingerprint_source = anchor_gate
     fingerprint = hashlib.sha1(fingerprint_source.encode("utf-8")).hexdigest()
 
     prev_sha_at = _prev_sha_index(records)
@@ -1271,6 +1452,9 @@ def derive_persistent_red_triage(
     return {
         "gate": anchor_gate,
         "red_files": set(anchor_files),
+        "red_files_effective": red_files_effective,
+        "red_files_source": red_files_source,
+        "extraction_anomaly": extraction_anomaly,
         "red_files_window_union": red_files_window_union,
         "red_files_by_night": red_files_by_night,
         "fingerprint": fingerprint,
