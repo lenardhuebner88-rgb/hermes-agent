@@ -179,7 +179,8 @@ def test_codex_write_persists_rate_limit_sidecar(empty_db: Path, tmp_path: Path)
     assert written == 1
     assert calls == 0  # default: session row only
     usage_row = _row(empty_db, extracted.run_id)
-    assert usage_row["tool_call_count"] == 0
+    # Codex has no tool measurement source: NULL stays NULL (unknown, not 0).
+    assert usage_row["tool_call_count"] is None
     assert rl_n == 1
     row = json.loads(rl.read_text().splitlines()[0])
     assert row["run_id"] == extracted.run_id
@@ -469,14 +470,38 @@ def _row(db: Path, run_id: str) -> dict:
     "origin",
     [ORIGIN_CODEX, ORIGIN_GROK, ORIGIN_KIMI, ORIGIN_QWEN],
 )
-def test_terminal_foreign_run_records_non_null_tool_count(
+def test_terminal_foreign_run_without_tool_source_keeps_null_tool_count(
     empty_db: Path,
     origin: str,
 ) -> None:
+    # No extractor saw a tool measurement source: NULL must stay NULL.
+    # A fabricated 0 would claim "no tools used" on uninstrumented lanes.
     extracted = ExtractedRun(
         run_id=f"{origin}-without-tools",
         origin=origin,
         run_fields={"origin": origin, "source": "measured"},
+    )
+
+    written, calls, _rate_limits = write_extracted_run(
+        extracted,
+        db_path=empty_db,
+    )
+
+    assert written == 1
+    assert calls == 0
+    assert _row(empty_db, extracted.run_id)["tool_call_count"] is None
+
+
+def test_terminal_run_with_tool_source_finalizes_observed_zero(
+    empty_db: Path,
+) -> None:
+    # A lane with a real measurement source (Qwen `tools` object present but
+    # no totalCalls) yields an observed zero for the terminal session.
+    extracted = ExtractedRun(
+        run_id="qwen_cli-with-tools-object",
+        origin=ORIGIN_QWEN,
+        run_fields={"origin": ORIGIN_QWEN, "source": "measured"},
+        tool_count_observed=True,
     )
 
     written, calls, _rate_limits = write_extracted_run(
