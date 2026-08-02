@@ -333,11 +333,7 @@ def test_deterministic_skip_persists_captured_diff_snapshot(
         "_worker_gate_config",
         lambda: {
             "enabled": True,
-            "repos": {
-                str(repo.resolve()): [
-                    "printf '=== Summary: 1 files, 1 tests passed, 0 failed ===\\n'"
-                ]
-            },
+            "repos": {str(repo.resolve()): ["true"]},
             "default": [],
             "timeout": 60,
             "code_roles": frozenset({"coder"}),
