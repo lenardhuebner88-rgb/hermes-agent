@@ -71,7 +71,11 @@ def _review_cfg(**overrides) -> dict:
 def _worker_gate(repo: Path) -> dict:
     return {
         "enabled": True,
-        "repos": {str(repo.resolve()): ["true"]},
+        "repos": {
+            str(repo.resolve()): [
+                "printf '=== Summary: 1 files, 1 tests passed, 0 failed ===\\n'"
+            ]
+        },
         "default": [],
         "timeout": 60,
         "code_roles": frozenset({"coder"}),
