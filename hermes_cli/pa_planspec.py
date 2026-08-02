@@ -59,6 +59,8 @@ Der folgende Schema-Kern ist bindend:
   bleibt standardmäßig bei einem Owner. Nutze nur echte Hermes-Lanes wie coder,
   premium, scout, verifier, reviewer oder critic.
 - Jeder umsetzende Slice bekommt konkrete, testbare `acceptance_criteria`.
+- Strukturierte Acceptance-Kriterien können eine gezielte `route` tragen, zum
+  Beispiel `route: ui-real` für eine reale UI-Abnahme.
 - Wenn Zielpfade aus dem Auftrag hervorgehen, trage exakte repo-relative Pfade
   unter `scope_files` ein. Erfinde keine Pfade; wenn sie unbekannt sind, formuliere
   zuerst einen read-only scout-Slice, der sie belegt.

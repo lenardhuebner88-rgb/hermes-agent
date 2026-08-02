@@ -399,6 +399,11 @@ def test_compose_draft_prompt_includes_project():
     assert "(kein Projekt-Scope angegeben)" not in prompt
 
 
+def test_draft_system_prompt_requests_acceptance_route_with_example():
+    assert "route" in pp.DRAFT_SYSTEM_PROMPT
+    assert "ui-real" in pp.DRAFT_SYSTEM_PROMPT
+
+
 def test_parse_validation_output_clean_with_zero_exit():
     """Kill bool_op_swap L307: and -> or.
 

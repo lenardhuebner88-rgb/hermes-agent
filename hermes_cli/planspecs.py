@@ -95,7 +95,11 @@ _CC_INSTRUMENT_AC_TOKENS = {
     "cross-family",
 }
 
-_WARN_ONLY_RUBRIC_PREFIXES = ("over-decomposed: ", "role_misuse: ")
+_WARN_ONLY_RUBRIC_PREFIXES = (
+    "over-decomposed: ",
+    "role_misuse: ",
+    "scope-less code subtask: ",
+)
 _ROLE_MISUSE_PREFIX = "role_misuse: "
 _FO_VIEW_SURFACE_NAMES = frozenset({"admin", "kitchen", "lists", "shopping"})
 
@@ -1342,6 +1346,11 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
         rt = (getattr(subtask, "review_tier", "") or "").strip().lower()
         if rt and rt not in VALID_REVIEW_TIERS:
             findings.append(f"unknown review_tier in {sid}: {subtask.review_tier}")
+
+        # Missing code scope is visible to operators but remains non-blocking so
+        # hand-authored legacy specs can still ingest and a scout can establish it.
+        if child.get("kind") == "code" and not getattr(subtask, "scope_files", []):
+            findings.append(f"scope-less code subtask: {sid}")
 
         # 4b) No CC instrument baked into a worker AC. Mask documentary code/quote
         # examples first, so an AC may describe the rejected text (e.g.

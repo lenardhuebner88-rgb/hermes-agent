@@ -572,6 +572,38 @@ def test_valid_review_tier_passes_rubric(tmp_path: Path):
     assert not any("review_tier" in f for f in findings)
 
 
+def test_scope_less_code_subtask_is_advisory(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    spec = planspecs.parse_binding_planspec(
+        _write_planspec(plans_root), plans_root=plans_root
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert "scope-less code subtask: B1-S1" in findings
+    assert "scope-less code subtask: B1-S1" not in planspecs._blocking_spec_rubric_findings(
+        findings
+    )
+
+
+def test_scoped_code_subtask_has_no_scope_advisory(tmp_path: Path):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            "      deps: []\n",
+            '      deps: []\n      scope_files: ["hermes_cli/planspecs.py"]\n',
+        ),
+        encoding="utf-8",
+    )
+    spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(f.startswith("scope-less code subtask: ") for f in findings)
+
+
 def test_list_planspecs_reports_binding_status(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)

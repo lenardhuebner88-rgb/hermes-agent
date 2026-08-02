@@ -559,6 +559,49 @@ def test_lever_markdown_round_trips_annotation():
     assert "TODO" not in md and "<" not in md and "..." not in md
 
 
+def test_lever_markdown_emits_grounded_scope_and_gate_review_tier():
+    lever = strategist.Lever(
+        key="GATE-FIX-PYTHON-1",
+        title="Fix the strategist gate",
+        lane="coder",
+        target_metric="gate green",
+        roi="high",
+        counter_metric="existing tests stay green",
+        rationale="repair a persistent gate failure",
+        grounding="failure in hermes_cli/strategist.py:1308",
+        gain_weight=1.0,
+        cost=0.1,
+        counter_risk=0.1,
+    )
+
+    md = strategist.lever_to_markdown(lever)
+
+    assert 'scope_files:\n        - "hermes_cli/strategist.py"' in md
+    assert "review_tier: review" in md
+
+
+def test_lever_markdown_prepends_scout_when_grounding_has_no_path():
+    lever = strategist.Lever(
+        key="UNSCOPED-1",
+        title="Investigate unknown implementation",
+        lane="coder",
+        target_metric="unknown failure resolved",
+        roi="high",
+        counter_metric="existing tests stay green",
+        rationale="the current evidence does not identify a file",
+        grounding="dashboard observation without a repository path",
+        gain_weight=1.0,
+        cost=0.1,
+        counter_risk=0.1,
+    )
+
+    md = strategist.lever_to_markdown(lever)
+
+    assert "id: UNSCOPED-1-SCOUT" in md
+    assert "kind: analysis" in md
+    assert 'deps: ["UNSCOPED-1-SCOUT"]' in md
+
+
 # --------------------------------------------------------------------------- #
 # STRATEGIST-SELF-GROUNDING-S1 — grounding presence-gate on the DRAFT path only
 # --------------------------------------------------------------------------- #

@@ -1254,6 +1254,22 @@ def _grounding_path_exists(token: str) -> bool:
     return False
 
 
+def _scope_files_from_grounding(grounding: str) -> list[str]:
+    """Return existing repo-relative files cited by grounding evidence."""
+    scope_files: list[str] = []
+    for token in _GROUNDING_TOKEN_SPLIT.split(grounding):
+        if not token or not _grounding_path_exists(token):
+            continue
+        try:
+            path = Path(token).resolve() if os.path.isabs(token) else (_REPO_ROOT / token).resolve()
+            relative = path.relative_to(_REPO_ROOT).as_posix()
+        except (OSError, ValueError):
+            continue
+        if relative not in scope_files:
+            scope_files.append(relative)
+    return scope_files
+
+
 def grounding_gate(lever: Lever) -> GateResult:
     """Deterministic gate for the strategist-DRAFT path ONLY.
 
