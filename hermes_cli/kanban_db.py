@@ -115,6 +115,7 @@ from hermes_cli.kanban_chain_status import (
 from hermes_cli.kanban_scores_digest import scores_digest as _fork_scores_digest
 from hermes_cli import kanban_templates
 from hermes_cli import kanban_worker_runtime as _worker_runtime
+from hermes_cli import kanban_worker_termination as _kwterm
 
 _log = logging.getLogger(__name__)
 
@@ -23426,6 +23427,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    externally_terminated: list[str] = []
     transient_recovered: list[str] = []
     persistent_blocks: list[tuple[str, str, int, Optional[int]]] = []
     # Per-crash details collected inside the main txn, used after it
@@ -23530,9 +23532,20 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             kind, code = exact_exit or _classify_worker_exit(pid)
             rate_limited_exit = False
+            externally_terminated_exit = False
             recoverable_protocol_miss = False
             transient_pid_loss = False
-            if kind == "clean_exit":
+            external = _kwterm.classify_external_termination(
+                conn, row["id"], row["current_run_id"], pid=pid,
+                claimer=row["claim_lock"], exit_kind=kind, exit_code=code,
+            )
+            if external is not None:
+                protocol_violation = False
+                externally_terminated_exit = True
+                error_text = external["error_text"]
+                event_kind = external["event_kind"]
+                event_payload = external["event_payload"]
+            elif kind == "clean_exit":
                 evidence = _deliverable_evidence_for_protocol_miss(
                     conn,
                     row["id"],
@@ -23654,7 +23667,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
                 _run_outcome = (
-                    "rate_limited"
+                    _kwterm.EXTERNAL_TERMINATION_OUTCOME
+                    if externally_terminated_exit
+                    else "rate_limited"
                     if rate_limited_exit
                     else TRANSIENT_RETRY_OUTCOME
                     if transient_pid_loss
@@ -23677,16 +23692,20 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
-                # Quota walls are exempt from the streak breaker: the respawn
-                # guard already defers them on a cooldown and they self-heal
-                # when the quota window resets — terminal-blocking them would
-                # turn every budget wall into manual operator work. Protocol
-                # violations are likewise handled by their dedicated streak
-                # below, which preserves the per-task max_retries override and
-                # emits the gave_up contract on the terminal attempt.
+                # Intentional external terminations are not failures at all —
+                # the board asked for the kill. Quota walls are exempt from the
+                # streak breaker too: the respawn guard already defers them on
+                # a cooldown and they self-heal when the quota window resets —
+                # terminal-blocking them would turn every budget wall into
+                # manual operator work. Protocol violations are likewise
+                # handled by their dedicated streak below, which preserves the
+                # per-task max_retries override and emits the gave_up contract
+                # on the terminal attempt.
                 persistent_streak = (
                     None
-                    if rate_limited_exit or protocol_violation
+                    if externally_terminated_exit
+                    or rate_limited_exit
+                    or protocol_violation
                     else _persistent_failure_fingerprint_streak(conn, row["id"])
                 )
                 if persistent_streak is not None:
@@ -23701,7 +23720,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (row["id"], fingerprint, streak, run_id)
                     )
                     continue
-                if rate_limited_exit:
+                if externally_terminated_exit:
+                    # No failure stamp: the task is untouched, only its worker
+                    # was killed on request. Leaving last_failure_error clean
+                    # keeps the respawn guard from deferring the next spawn.
+                    externally_terminated.append(row["id"])
+                elif rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
                     # respawn until the window clears — WITHOUT touching
@@ -23874,6 +23898,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_externally_terminated = externally_terminated  # type: ignore[attr-defined]
     detect_crashed_workers._last_transient_recovered = transient_recovered  # type: ignore[attr-defined]
     return crashed
 

@@ -16964,11 +16964,11 @@ def main(
                 # Without this hook the helper was live only for ``--quiet`` and
                 # real workers always fell through to the gateway's later repair
                 # run instead of receiving their terminal-only turn.
+                _chat_result = getattr(cli, "_last_chat_result", None)
                 if (
                     os.environ.get("HERMES_KANBAN_TASK")
                     and os.environ.get("HERMES_KANBAN_GOAL_MODE") != "1"
                 ):
-                    _chat_result = getattr(cli, "_last_chat_result", None)
                     try:
                         _run_kanban_finalize_nudge_q(
                             cli,
@@ -16982,6 +16982,19 @@ def main(
                     except Exception as _nudge_exc:
                         logger.debug("kanban finalize nudge failed: %s", _nudge_exc)
                 cli._print_exit_summary(clear_screen=False)
+
+                # Dispatcher workers use this human-facing ``-q`` path. Keep
+                # its process status aligned with the machine-output branch
+                # above instead of returning 0 after ``chat()`` recorded a
+                # failed conversation result. Policy lives fork-owned in
+                # hermes_cli/kanban_worker_termination.py.
+                from hermes_cli.kanban_worker_termination import (
+                    single_query_exit_code as _single_query_exit_code,
+                )
+
+                _exit_code = _single_query_exit_code(_chat_result)
+                if _exit_code:
+                    sys.exit(_exit_code)
         finally:
             _finalize_single_query(cli)
         return

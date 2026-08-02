@@ -1102,8 +1102,19 @@ def _scope_contract_files(
 
 
 def _path_is_under(path: str, roots: Sequence[str]) -> bool:
+    # Scope declarations are written by humans and decomposers, and the form
+    # they actually use is the glob ("web/src/control/**", "hermes_cli/").
+    # Comparing those verbatim matches nothing, so every consumer silently
+    # degrades to "no scope declared" instead of reporting a bad declaration.
     normalized = _normalize_dirty_path(path)
-    return any(normalized == root or normalized.startswith(f"{root}/") for root in roots)
+    normalized_roots = (
+        _normalize_dirty_path(root).removesuffix("/**").rstrip("/")
+        for root in roots
+    )
+    return any(
+        normalized == root or normalized.startswith(f"{root}/")
+        for root in normalized_roots
+    )
 
 
 def _dirty_scope_overlap(
@@ -1118,6 +1129,111 @@ def _dirty_scope_overlap(
         ):
             overlap.append(dirty_path)
     return sorted(dict.fromkeys(overlap))
+
+
+# ---------------------------------------------------------------------------
+# Reversible rescue of a single dirty path (`hermes kanban rescue-overlap`)
+# ---------------------------------------------------------------------------
+#
+# A foreign dirty file in the live checkout blocks integration. The only
+# handles that existed without this were "wait for the other session" or a
+# manual `git restore`, which destroys the foreign change with no receipt.
+# Restored piece of 5455c91e94, lost with the revert 88377432aa.
+
+
+def _git_binary(
+    repo: Path,
+    *args: str,
+    check: bool = True,
+    input_data: bytes | None = None,
+) -> bytes:
+    """``_git`` for byte-exact output: patches must not go through text mode."""
+    proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["git", "-C", str(repo), *args], input=input_data, capture_output=True,
+        timeout=GIT_TIMEOUT_SECONDS,
+    )
+    if check and proc.returncode != 0:
+        message = (proc.stderr or proc.stdout).decode(errors="replace").strip()
+        raise WorktreeError(
+            f"git {' '.join(args[:3])}… failed in {repo}: {message[:500]}"
+        )
+    return proc.stdout
+
+
+def _tree_blob_oid(repo: Path, ref: str, path: str) -> str | None:
+    oid = _git(repo, "rev-parse", "--verify", f"{ref}:{path}", check=False)
+    return oid or None
+
+
+def _dirty_path_patch(repo: Path, path: str) -> bytes:
+    if _tree_blob_oid(repo, "HEAD", path) is not None:
+        return _git_binary(repo, "diff", "--binary", "HEAD", "--", path)
+    return _git_binary(
+        repo, "diff", "--no-index", "--binary", "--", "/dev/null", path,
+        check=False,
+    )
+
+
+def _reset_dirty_path(repo: Path, path: str) -> None:
+    if _tree_blob_oid(repo, "HEAD", path) is not None:
+        _git(repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", path)
+        return
+    candidate = repo / path
+    if candidate.is_dir() and not candidate.is_symlink():
+        raise WorktreeError(f"refusing to rescue untracked directory as one file: {path}")
+    candidate.unlink(missing_ok=True)
+
+
+def _validate_dirty_relative_path(repo: Path, path: str) -> str:
+    path_obj = Path(path)
+    normalized = path_obj.as_posix()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    if not normalized or path_obj.is_absolute() or ".." in path_obj.parts:
+        raise WorktreeError(f"rescue path must be repository-relative: {path!r}")
+    if normalized not in dirty_files(repo):
+        raise WorktreeError(f"path is not dirty in {repo}: {normalized}")
+    return normalized
+
+
+def rescue_dirty_path(
+    repo: Path | str,
+    path: str,
+    *,
+    rescue_dir: Path | str,
+    task_id: str,
+) -> dict[str, str]:
+    """Write a reversible patch, then reset one dirty path to ``HEAD``.
+
+    Patch FIRST, reset second: a failure anywhere before the reset leaves the
+    working tree untouched, so the operation can never lose the foreign change.
+    """
+    root = Path(repo).resolve()
+    normalized = _validate_dirty_relative_path(root, path)
+    patch = _dirty_path_patch(root, normalized)
+    if not patch:
+        raise WorktreeError(f"could not produce a rescue patch for {normalized}")
+    digest = hashlib.sha256(patch).hexdigest()
+    safe_path = (
+        re.sub(r"[^A-Za-z0-9_.-]+", "_", normalized).strip("_") or "path"
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    destination_dir = Path(rescue_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = (
+        destination_dir / f"{task_id}-{stamp}-{safe_path}-{digest[:12]}.patch"
+    )
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(patch)
+    _reset_dirty_path(root, normalized)
+    return {
+        "path": normalized,
+        "patch_path": str(destination),
+        "patch_sha256": digest,
+        "repo": str(root),
+        "head": _git(root, "rev-parse", "HEAD"),
+    }
 
 
 def _select_wip_paths(

@@ -1004,6 +1004,112 @@ def test_rate_limit_exit_requeues_without_counting_failure(
         assert "crashed" not in outcomes
 
 
+@pytest.mark.parametrize(
+    "reclaim_reason",
+    ["archive_worker_alive", "manual_reclaim_worker_alive"],
+)
+def test_intentional_sigkill_is_not_a_protocol_violation(
+    kanban_home, monkeypatch, reclaim_reason,
+):
+    """A SIGKILL requested by archive/manual reclaim is an external
+    termination, not worker misconduct or a failure-streak input.
+
+    Restored piece of d1a40e0617 (lost with the revert 88377432aa).
+    """
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect_closing() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="intentional kill", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+        pid = 65001
+        conn.execute(
+            "UPDATE tasks SET worker_pid=?, started_at=? WHERE id=?",
+            (pid, int(time.time()) - 60, tid),
+        )
+        conn.execute(
+            "UPDATE task_runs SET worker_pid=? WHERE id=?",
+            (pid, run_id),
+        )
+        kb._append_event(
+            conn,
+            tid,
+            "reclaim_deferred",
+            {
+                "reason": reclaim_reason,
+                "termination": {"sigterm": True, "sigkill": True},
+            },
+            run_id=run_id,
+        )
+        conn.commit()
+        _kb._record_worker_exit(pid, 9)  # raw wait status for SIGKILL
+
+        crashed = kb.detect_crashed_workers(conn)
+
+        assert tid not in crashed
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        run = conn.execute(
+            "SELECT status, outcome FROM task_runs WHERE id=?", (run_id,),
+        ).fetchone()
+        assert (run["status"], run["outcome"]) == (
+            "externally_terminated",
+            "externally_terminated",
+        )
+        kinds = [
+            row["kind"]
+            for row in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id", (tid,),
+            ).fetchall()
+        ]
+        assert "externally_terminated" in kinds
+        assert "protocol_violation" not in kinds
+
+
+def test_unmarked_sigkill_still_counts_as_a_crash(kanban_home, monkeypatch):
+    """Only an audited archive/reclaim marker downgrades a SIGKILL.
+
+    Counter-metric for the restore: an OOM kill or an operator `kill -9`
+    without a `reclaim_deferred` marker must stay a crash.
+    """
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect_closing() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="oom kill", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        run_id = task.current_run_id
+        pid = 65002
+        conn.execute(
+            "UPDATE tasks SET worker_pid=?, started_at=? WHERE id=?",
+            (pid, int(time.time()) - 60, tid),
+        )
+        conn.execute("UPDATE task_runs SET worker_pid=? WHERE id=?", (pid, run_id))
+        conn.commit()
+        _kb._record_worker_exit(pid, 9)
+
+        crashed = kb.detect_crashed_workers(conn)
+
+        assert tid in crashed
+        run = conn.execute(
+            "SELECT status, outcome FROM task_runs WHERE id=?", (run_id,),
+        ).fetchone()
+        assert run["outcome"] != "externally_terminated"
+
+
 def test_real_crash_still_counts_and_trips_breaker(kanban_home, monkeypatch):
     """Sanity: a genuine non-zero crash (not the sentinel) still increments
     the failure counter and trips the breaker — the rate-limit carve-out is

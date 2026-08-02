@@ -272,6 +272,78 @@ def test_human_single_query_kanban_worker_runs_terminalization_continuation(
     ]
 
 
+def test_human_single_query_propagates_rate_limit_exit_code(monkeypatch):
+    """Regression guard for the surviving cli.py half of d1a40e0617.
+
+    The kanban_db half of that commit was lost with the revert 88377432aa;
+    this half stayed. The test is green from line 1 by design (AC-5) — it
+    exists so the propagation cannot be reverted unnoticed a second time.
+    """
+    calls = []
+
+    import cli as cli_mod
+    from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+
+    class _Console:
+        def print(self, *_args, **_kwargs):
+            return None
+
+    class FakeCLI:
+        def __init__(self, **_kwargs):
+            self.console = _Console()
+            self.session_id = "rate-limited-session"
+            self.conversation_history = []
+            self.agent = SimpleNamespace(
+                session_id="rate-limited-session",
+                platform="cli",
+            )
+            self._last_chat_result = None
+
+        def _claim_active_session(self, _surface, *, stderr=False):
+            return True
+
+        def _show_security_advisories(self):
+            return None
+
+        def chat(self, query, images=None):
+            calls.append(("chat", query, images))
+            self._last_chat_result = {
+                "final_response": "",
+                "failed": True,
+                "failure_reason": "rate_limit",
+            }
+            return ""
+
+        def _print_exit_summary(self, clear_screen=True):
+            calls.append("summary")
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    monkeypatch.delenv("HERMES_KANBAN_GOAL_MODE", raising=False)
+    monkeypatch.setattr(cli_mod, "HermesCLI", FakeCLI)
+    monkeypatch.setattr(cli_mod.atexit, "register", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "_finalize_single_query",
+        lambda fake_cli: calls.append(("finalize", fake_cli.session_id)),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "_run_kanban_finalize_nudge_q",
+        lambda *_args, **_kwargs: calls.append("terminalize"),
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.main(query="work kanban task t_12345678", quiet=False)
+
+    assert exc_info.value.code == KANBAN_RATE_LIMIT_EXIT_CODE
+    assert calls == [
+        ("chat", "work kanban task t_12345678", None),
+        "terminalize",
+        "summary",
+        ("finalize", "rate-limited-session"),
+    ]
+
+
 def test_quiet_single_query_main_finalizes_while_preserving_exit_code(monkeypatch):
     calls = []
 

@@ -713,3 +713,46 @@ def test_lane_scope_evil_merge_receipt_does_not_clear_snapshot_violations(
         assert len(blocked) == 1
         assert blocked[0]["violating_paths"] == ["web/src/control/Evil.tsx"]
         assert blocked[0]["expected_lane"] == "coder-frontend"
+
+
+# ---------------------------------------------------------------------------
+# Declared-scope path matching — `/**` glob normalization
+# ---------------------------------------------------------------------------
+#
+# Restored piece of 61b392d86c (lost with the revert 88377432aa). Scope
+# declarations are written by humans and decomposers in glob form
+# ("web/src/control/**"); without normalization every such entry matches
+# nothing, so a scope-driven guard silently degrades to "no scope declared".
+
+
+@pytest.mark.parametrize(
+    "path,roots,expected",
+    [
+        # The glob form is what PlanSpecs and task bodies actually declare.
+        ("web/src/control/App.tsx", ["web/src/control/**"], True),
+        ("web/src/control", ["web/src/control/**"], True),
+        ("hermes_cli/kanban.py", ["hermes_cli/**"], True),
+        # Trailing slash is the same declaration, written differently.
+        ("hermes_cli/kanban.py", ["hermes_cli/"], True),
+        # Leading slash: absolute-looking declarations are repo-relative.
+        ("hermes_cli/kanban.py", ["/hermes_cli/**"], True),
+        # Plain (non-glob) roots keep working exactly as before.
+        ("hermes_cli/kanban.py", ["hermes_cli"], True),
+        ("hermes_cli/kanban.py", ["hermes_cli/kanban.py"], True),
+        # No prefix-widening: the glob must not match a sibling directory
+        # whose name merely starts with the declared one.
+        ("web/src/controlx/App.tsx", ["web/src/control/**"], False),
+        ("tests/hermes_cli/test_x.py", ["web/src/control/**"], False),
+    ],
+)
+def test_path_is_under_normalizes_glob_scope_declarations(path, roots, expected):
+    assert kwt._path_is_under(path, roots) is expected
+
+
+def test_dirty_scope_overlap_sees_glob_declared_scope():
+    """The overlap guard consumes `_path_is_under`; a glob scope must count."""
+    overlap = kwt._dirty_scope_overlap(
+        ["web/src/control/App.tsx", "docs/readme.md"],
+        ["web/src/control/**"],
+    )
+    assert overlap == ["web/src/control/App.tsx"]
