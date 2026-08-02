@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli.kanban_chain_status import (
@@ -22,6 +23,7 @@ from hermes_cli.kanban_chain_status import (
     is_settled_fixer_card,
 )
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_fixer_scope as kfs
 from hermes_cli import kanban_worktrees as kwt
 
 _log = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ LANE_FIXER_IDEM_PREFIX = "lane-scope-fixer:"
 LANE_FIXER_DISPATCHED_EVENT = "lane_scope_fixer_dispatched"
 LANE_FIXER_FOR_EVENT = "lane_scope_fixer_for"
 LANE_FIXER_PARENT_RESUMED_EVENT = "lane_scope_fixer_parent_resumed"
+LANE_SCOPE_ALLOWLISTED_EVENT = "lane_scope_allowlisted"
+LANE_SCOPE_ALLOWLIST_WAIVER_EVENT = "lane_scope_allowlist_waiver"
 
 
 def _lane_fingerprint(violating_paths: Iterable[str], expected_lane: str) -> str:
@@ -191,6 +195,168 @@ def _paths_changed_since(
     return {path for path in paths if path in changed}
 
 
+def _latest_lane_scope_park(
+    conn: sqlite3.Connection,
+    parent_id: str,
+) -> tuple[str, str]:
+    """Fingerprint and park-time branch tip of the newest lane-scope park."""
+    rows = conn.execute(
+        """
+        SELECT payload FROM task_events
+        WHERE task_id = ? AND kind = 'worker_gate_blocked'
+        ORDER BY id DESC
+        """,
+        (parent_id,),
+    ).fetchall()
+    for row in rows:
+        payload = _payload_dict(row["payload"])
+        if payload.get("gate") != "lane_scope":
+            continue
+        fingerprint = _lane_fingerprint_from_scope_payload(payload)
+        if fingerprint:
+            return (
+                fingerprint,
+                str(payload.get("park_branch_tip") or "").strip(),
+            )
+    return "", ""
+
+
+def _parent_worktree(conn: sqlite3.Connection, parent_id: str) -> Optional[Path]:
+    """Provisioned chain worktree of *parent_id*, or ``None``.
+
+    Attribution must run in the checkout that has the chain branch at
+    ``HEAD``: ``kanban_fixer_scope._attributed_task_paths`` anchors its
+    stamp-plausibility check on ``HEAD``, and the repo root handed to the
+    lane gate is the main checkout, whose ``HEAD`` is the merge target.
+    """
+    row = conn.execute(
+        "SELECT workspace_path FROM tasks WHERE id = ?",
+        (parent_id,),
+    ).fetchone()
+    if row is None or not row["workspace_path"]:
+        return None
+    provisioned = kwt.split_provisioned_path(row["workspace_path"])
+    if provisioned is None:
+        return None
+    return Path(str(provisioned[2]))
+
+
+def _fixer_committed_paths(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+    candidate_ref: str,
+    paths: set[str],
+) -> set[str]:
+    """Subset of *paths* the fixer *child_id* is itself attributable for.
+
+    Merge-safe by construction: attribution runs through the fork-owned
+    ``kanban_fixer_scope._attributed_task_paths`` (pre-run..candidate SHA
+    range first, per-run commit receipts second) rather than a
+    ``git log --grep=kanban(<child>):`` subject convention. Nothing enforces
+    that convention on a worker's commit message, and a receipt pointing at
+    a MERGE commit reads as Unknown (``diff-tree`` prints no path for it), so
+    both subject-shaped routes go blind exactly when a fixer lands its
+    corrective work by merging its own branch — and the parent would then
+    re-park forever on paths the fixer had in fact adopted.
+    """
+    if not child_id or not paths or not candidate_ref:
+        return set()
+    worktree = _parent_worktree(conn, parent_id)
+    if worktree is None:
+        return set()
+    try:
+        attributed = kfs._attributed_task_paths(
+            conn,
+            child_id,
+            worktree,
+            kwt,
+            completion_metadata=None,
+            candidate_ref=candidate_ref,
+        )
+    except Exception:
+        return set()
+    if not attributed:
+        # ``None`` is the helper's Unknown answer, ``[]`` means the fixer
+        # contributed nothing. Neither earns an allowlist.
+        return set()
+    landed = set(attributed)
+    return {path for path in paths if path in landed}
+
+
+def _operator_waived_paths(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    fingerprint: str,
+    child_id: str,
+    branch_tip: str,
+    paths: set[str],
+) -> set[str]:
+    """Return paths covered by an explicit, attributable operator waiver."""
+    rows = conn.execute(
+        """
+        SELECT payload FROM task_events
+        WHERE task_id = ? AND kind = ?
+        ORDER BY id DESC
+        """,
+        (parent_id, LANE_SCOPE_ALLOWLIST_WAIVER_EVENT),
+    ).fetchall()
+    waived: set[str] = set()
+    for row in rows:
+        payload = _payload_dict(row["payload"])
+        if str(payload.get("fingerprint") or "") != fingerprint:
+            continue
+        if str(payload.get("child_id") or "") != child_id:
+            continue
+        if not str(payload.get("operator_id") or "").strip():
+            continue
+        if str(payload.get("branch_tip") or "").strip() != branch_tip:
+            continue
+        waived.update(
+            str(path).strip()
+            for path in payload.get("paths") or []
+            if str(path).strip() in paths
+        )
+    return waived
+
+
+def _record_allowlisted_paths(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    fingerprint: str,
+    evidence: dict[str, dict[str, set[str]]],
+) -> None:
+    """Audit every earned allowlist on the board and in the log."""
+    payloads: list[dict[str, Any]] = []
+    for child_id, sources in evidence.items():
+        for source, paths in sources.items():
+            if not paths:
+                continue
+            payloads.append(
+                {
+                    "child_id": child_id,
+                    "fingerprint": fingerprint,
+                    "paths": sorted(paths),
+                    "source": source,
+                }
+            )
+    if not payloads:
+        return
+    with kb.write_txn(conn):
+        for payload in payloads:
+            kb._append_event(
+                conn, parent_id, LANE_SCOPE_ALLOWLISTED_EVENT, payload,
+            )
+    for payload in payloads:
+        _log.warning(
+            "lane-scope allowlist parent=%s child=%s fingerprint=%s paths=%s",
+            parent_id,
+            payload["child_id"],
+            fingerprint,
+            ",".join(payload["paths"]),
+        )
+
+
 def allowlisted_paths_for_parent(
     conn: sqlite3.Connection,
     parent_id: str,
@@ -200,17 +366,26 @@ def allowlisted_paths_for_parent(
     repo_root: Any = None,
     branch: Optional[str] = None,
 ) -> set[str]:
-    """Paths a completed lane-scope fixer owns for the *current* violation.
+    """Paths a completed lane-scope fixer *earned* for the current violation.
 
     Bound to the fingerprint of the violation being checked now (Opus B4/B5),
     not to every historical done fixer child. Permanent path allowlisting is
     refused: after a successful fixer resume, new parent commits on those
     paths re-arm the gate (retouch after ``resume_branch_tip``).
 
-    Active only when:
-    1. the parent is currently parked for this fingerprint, or
-    2. a matching resume exists and the paths were not re-touched after the
-       recorded branch tip.
+    A done fixer card is a *claim*, not evidence. Immunity has to be earned
+    per child, per path, from one of exactly two sources:
+
+    * ``fixer_commit`` -- the path is attributable to that fixer child
+      (merge-safe, see :func:`_fixer_committed_paths`), and the completion
+      hook has recorded the handoff tip, so later parent work stays
+      distinguishable from the fixer's own;
+    * ``operator_waiver`` -- an explicit, signed, tip-bound
+      ``lane_scope_allowlist_waiver`` event names the path.
+
+    Without either, a fixer that closed *without touching anything* would
+    hand its parent a free pass over the exact paths that parked it. Every
+    granted path is audited via :func:`_record_allowlisted_paths`.
     """
     want_fp = ""
     if violating_paths is not None and expected_lane:
@@ -226,7 +401,7 @@ def allowlisted_paths_for_parent(
         """,
         (parent_id, LANE_FIXER_DISPATCHED_EVENT),
     ).fetchall()
-    allow: set[str] = set()
+    candidates: dict[str, set[str]] = {}
     for row in rows:
         payload = _payload_dict(row["payload"])
         child_id = str(payload.get("child_id") or "").strip()
@@ -240,10 +415,12 @@ def allowlisted_paths_for_parent(
         ).fetchone()
         if child is None or child["status"] != "done":
             continue
+        child_paths = candidates.setdefault(child_id, set())
         for path in payload.get("violating_paths") or []:
             text = str(path).strip()
             if text:
-                allow.add(text)
+                child_paths.add(text)
+    allow = set().union(*candidates.values()) if candidates else set()
     if not allow:
         return set()
 
@@ -252,53 +429,75 @@ def allowlisted_paths_for_parent(
     if not want_fp:
         return set(allow)
 
-    tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
-    if tip and repo_root is not None and branch:
-        retouched = _paths_changed_since(repo_root, tip, branch, allow)
-        if retouched:
-            # New parent commits after resume on allowlisted paths re-arm the
-            # gate (Opus B5) — the fixer only covered the original park.
-            return set()
-        return allow
-    if tip:
-        # Resume recorded but no git context — keep allowlist for this fp only.
-        return allow
-
-    # No resume tip (operator unblock path): allow only while the *latest*
-    # lane-scope park fingerprint still matches this violation, and use the
-    # park-time branch tip as retouch basis so brand-new parent commits on the
-    # same paths re-arm the gate (Opus R2-2 residual B5). Re-complete of the
-    # same park without new commits stays allowed.
-    latest_fp = ""
-    park_tip = ""
-    park_rows = conn.execute(
-        """
-        SELECT payload FROM task_events
-        WHERE task_id = ? AND kind = 'worker_gate_blocked'
-        ORDER BY id DESC
-        """,
-        (parent_id,),
-    ).fetchall()
-    for park_row in park_rows:
-        park_payload = _payload_dict(park_row["payload"])
-        if park_payload.get("gate") != "lane_scope":
-            continue
-        latest_fp = _lane_fingerprint_from_scope_payload(park_payload)
-        if latest_fp:
-            park_tip = str(park_payload.get("park_branch_tip") or "").strip()
-            break
-    if latest_fp != want_fp:
+    resume_tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
+    # Only the fingerprint of the newest park gates the lookup; its
+    # ``park_branch_tip`` is no longer the attribution basis — each fixer
+    # child is bounded by its own pre-run stamp instead of a shared range.
+    latest_fp, _park_tip = _latest_lane_scope_park(conn, parent_id)
+    if not resume_tip and latest_fp != want_fp:
         # Done fixer for this fp but no matching current park and no resume:
         # refuse permanent allowlist (Opus B5).
         return set()
-    if park_tip and repo_root is not None and branch:
-        retouched = _paths_changed_since(repo_root, park_tip, branch, allow)
-        if retouched:
-            return set()
+
+    # Production always supplies git context. Legacy direct callers keep the
+    # exact fingerprint binding, but cannot earn new audit-backed immunity.
+    if repo_root is None or not branch:
         return allow
-    # Matching park without a tip (legacy events) — keep allowlist for this
-    # fingerprint only so re-complete of the original park still works.
-    return allow
+    try:
+        endpoint_tip = resume_tip or str(
+            kwt._git(repo_root, "rev-parse", branch)
+        ).strip()
+    except Exception:
+        # Fail closed: an unreadable branch is not evidence of a fix.
+        return set()
+
+    evidence: dict[str, dict[str, set[str]]] = {}
+    for child_id, child_paths in candidates.items():
+        committed = _fixer_committed_paths(
+            conn, parent_id, child_id, endpoint_tip, child_paths,
+        )
+        waived = _operator_waived_paths(
+            conn, parent_id, want_fp, child_id, endpoint_tip, child_paths,
+        )
+        # A fixer commit is authoritative only after the completion hook has
+        # recorded the handoff tip. Without that boundary, later parent work
+        # cannot be distinguished from the fixer's own changes.
+        if committed and resume_tip:
+            evidence.setdefault(child_id, {})["fixer_commit"] = committed
+        if waived:
+            evidence.setdefault(child_id, {})["operator_waiver"] = waived
+
+    earned = {
+        path
+        for sources in evidence.values()
+        for source_paths in sources.values()
+        for path in source_paths
+    }
+    if resume_tip and earned:
+        # New parent commits after resume on allowlisted paths re-arm the
+        # gate (Opus B5) — the fixer only covered the original park.
+        committed_paths = {
+            path
+            for sources in evidence.values()
+            for path in sources.get("fixer_commit", set())
+        }
+        retouched = _paths_changed_since(
+            repo_root, resume_tip, branch, committed_paths,
+        )
+        if retouched:
+            for sources in evidence.values():
+                sources.get("fixer_commit", set()).difference_update(retouched)
+            earned = {
+                path
+                for sources in evidence.values()
+                for source_paths in sources.values()
+                for path in source_paths
+            }
+    if not earned:
+        return set()
+
+    _record_allowlisted_paths(conn, parent_id, want_fp, evidence)
+    return earned
 
 
 def _branch_tip_for_parent(conn: sqlite3.Connection, parent_id: str) -> str:

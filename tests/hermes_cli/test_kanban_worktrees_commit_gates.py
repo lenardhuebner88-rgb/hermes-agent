@@ -2218,11 +2218,39 @@ def test_never_ran_root_not_auto_closed_when_it_has_task_runs(
     assert auto == []
 
 
+def _stamp_materialized_fixer_run(conn, child_id, pre_run_sha):
+    """Record the materialized pre-run stamp a dispatched fixer run leaves.
+
+    ``kanban_fixer_scope._attributed_task_paths`` reads exactly this row to
+    bound the fixer's own range; without it a fixer's work is unattributable.
+    """
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, status, started_at, pre_run_commit_sha, "
+            "workspace_materialized) VALUES (?, 'done', 0, ?, 1)",
+            (child_id, pre_run_sha),
+        )
+
+
+def _park_parent_for_integration(conn, task_id, reason):
+    """Force the blocked+integration state the fixer resume path requires."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        kb._append_event(
+            conn, task_id, "blocked", {"reason": reason, "kind": "integration"},
+        )
+
+
 def test_lane_scope_allowlist_prevents_repark_after_fixer(
     repo, kanban_home, monkeypatch,
 ):
-    """V7 loop trap: after fixer is done, parent re-check must not re-park
-    solely for the fixer's allowlisted paths."""
+    """V7 loop trap: after a fixer has *earned* its paths, the parent re-check
+    must not re-park solely for those allowlisted paths."""
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     from hermes_cli import kanban_lane_fixer as lane_fixer
 
@@ -2239,12 +2267,24 @@ def test_lane_scope_allowlist_prevents_repark_after_fixer(
         fixer_events = _events(conn, task_id, "lane_scope_fixer_dispatched")
         assert len(fixer_events) == 1
         child_id = fixer_events[0]["child_id"]
+        _park_parent_for_integration(conn, task_id, out["reason"])
 
-        # Mark fixer done (successful corrective handoff).
+        # A successful corrective handoff carries fixer-owned work; a done
+        # card alone earns nothing.
+        _stamp_materialized_fixer_run(
+            conn, child_id, _git(info["path"], "rev-parse", "HEAD").strip(),
+        )
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({child_id}): adopt frontend path",
+        )
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
             )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
         allow = lane_fixer.allowlisted_paths_for_parent(
             conn,
             task_id,
@@ -2286,27 +2326,24 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
 
         # Force a blocked park + structured lane-scope event (no claim_task —
         # that would insert non-materialized pre_run stamps and skip the gate).
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
-                "WHERE id = ?",
-                (task_id,),
-            )
-            kb._append_event(
-                conn,
-                task_id,
-                "blocked",
-                {
-                    "reason": (
-                        "integration parked: lane-scope violation: assignee "
-                        "'coder' changed paths outside its lane: "
-                        "web/src/control/Foo.tsx — this task should have been "
-                        "assigned to lane 'coder-frontend'."
-                    ),
-                    "kind": "integration",
-                },
-            )
+        _park_parent_for_integration(
+            conn,
+            task_id,
+            "integration parked: lane-scope violation: assignee "
+            "'coder' changed paths outside its lane: "
+            "web/src/control/Foo.tsx — this task should have been "
+            "assigned to lane 'coder-frontend'.",
+        )
 
+        # The fixer earns the path first — otherwise this test would prove the
+        # re-arm while the allowlist was empty for an unrelated reason.
+        _stamp_materialized_fixer_run(conn, child_id, tip_before)
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({child_id}): adopt frontend path",
+        )
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
@@ -2315,12 +2352,20 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
         tip_events = _events(conn, task_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT)
         assert tip_events
         assert tip_events[0].get("resume_branch_tip")
+        assert lane_fixer.allowlisted_paths_for_parent(
+            conn,
+            task_id,
+            violating_paths=["web/src/control/Foo.tsx"],
+            expected_lane="coder-frontend",
+            repo_root=repo,
+            branch=kwt.chain_branch("t_ls_retouch"),
+        ) == {"web/src/control/Foo.tsx"}
 
         # Parent makes NEW work on the formerly allowlisted path after resume.
         _commit_in(
             info["path"],
             "web/src/control/Foo.tsx",
-            "export const Foo = 2\n",
+            "export const Foo = 3\n",
             msg=f"kanban({task_id}): new work after fixer",
         )
         assert _git(info["path"], "rev-parse", "HEAD").strip() != tip_before

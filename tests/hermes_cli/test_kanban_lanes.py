@@ -9,12 +9,14 @@ DB; the dispatcher hot-reads the ACTIVE lane at every spawn. Precedence:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_lane_fixer as lane_fixer
 from hermes_cli import kanban_worktrees as kwt
 from tests.hermes_cli._kanban_test_helpers import _commit_in, _events, _git, _ok_gate
 
@@ -756,3 +758,263 @@ def test_dirty_scope_overlap_sees_glob_declared_scope():
         ["web/src/control/**"],
     )
     assert overlap == ["web/src/control/App.tsx"]
+
+
+# ---------------------------------------------------------------------------
+# Earned lane allowlists — restored piece of a0ead50fd3 (lost with 88377432aa)
+# ---------------------------------------------------------------------------
+#
+# A *done* lane-scope fixer card is a claim, not evidence. Before this guard a
+# fixer that closed without touching anything handed its parent permanent
+# immunity over exactly the paths that parked it. Immunity must be earned per
+# child and per path — either the fixer is attributable for the path, or an
+# operator signed an explicit, tip-bound waiver — and every grant is audited.
+#
+# Attribution runs through the fork-owned
+# ``kanban_fixer_scope._attributed_task_paths`` instead of a commit-subject
+# grep: ``git log --name-only`` prints no path for a MERGE commit, so fixer
+# work that lands by merge would otherwise earn nothing and re-park its parent
+# forever. Real git + real board DB, no mocks for the file set.
+
+
+def _stamp_materialized_fixer_run(conn, child_id, pre_run_sha):
+    """Record the materialized pre-run stamp a dispatched fixer run leaves."""
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, status, started_at, pre_run_commit_sha, "
+            "workspace_materialized) VALUES (?, 'done', 0, ?, 1)",
+            (child_id, pre_run_sha),
+        )
+
+
+def _park_unscoped_parent_with_lane_fixer(conn, lane_repo, root_id):
+    """Park an out-of-lane ``coder`` parent and dispatch its lane fixer."""
+    info = kwt.ensure_worktree(lane_repo, root_id)
+    path = "web/src/control/LandingPack.tsx"
+    _commit_in(
+        info["path"],
+        path,
+        "export const LandingPack = 1\n",
+        msg=f"kanban({root_id}): work",
+    )
+    parent_id = kb.create_task(
+        conn,
+        title="unscoped backend task",
+        assignee="coder",
+        workspace_kind="dir",
+        workspace_path=str(info["path"]),
+    )
+    result = kwt.maybe_integrate_on_complete(
+        conn, parent_id, gate_runner=_ok_gate,
+    )
+    assert result is not None and result["action"] == "parked"
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+            "WHERE id = ?",
+            (parent_id,),
+        )
+        kb._append_event(
+            conn,
+            parent_id,
+            "blocked",
+            {"reason": result["reason"], "kind": "integration"},
+        )
+    dispatched = _events(
+        conn, parent_id, lane_fixer.LANE_FIXER_DISPATCHED_EVENT,
+    )
+    assert len(dispatched) == 1
+    return parent_id, dispatched[0]["child_id"], info, path, dispatched[0]
+
+
+def test_commitless_lane_fixer_does_not_allowlist_violation(
+    lane_repo, lane_scope_home,
+):
+    """A fixer that changed nothing must not clear its parent's violation."""
+    with kb.connect() as conn:
+        parent_id, child_id, _info, path, _dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_commitless_lane_fixer",
+            )
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked", (
+            "a done fixer card with no attributable work bought the parent "
+            "immunity over the exact path that parked it"
+        )
+        blocked = _events(conn, parent_id, kwt.LANE_SCOPE_BLOCKED_EVENT)
+        assert blocked[-1]["violating_paths"] == [path]
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        ) == []
+
+
+def test_merge_landed_lane_fixer_earns_audited_allowlist(
+    lane_repo, lane_scope_home, caplog,
+):
+    """Fixer work that lands as a MERGE is attributed and stops the re-park.
+
+    Both subject-based routes are blind to this shape: the fixer's own commit
+    carries no ``kanban(<child>):`` marker (nothing enforces that convention
+    on a worker), and ``diff-tree`` on the merge receipt prints no path at
+    all. Only the SHA-range stamp attributes it — which is why attribution
+    goes through ``kanban_fixer_scope._attributed_task_paths``.
+    """
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_merge_landed_lane_fixer",
+            )
+        )
+        worktree = info["path"]
+        chain = _git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
+        park_tip = _git(worktree, "rev-parse", "HEAD")
+        _stamp_materialized_fixer_run(conn, child_id, park_tip)
+
+        # The fixer adopts the frontend path on its own branch and merges it
+        # in. Its subject deliberately carries no `kanban(<child>):` marker —
+        # a real worker's commit message is not a machine contract.
+        _git(worktree, "checkout", "-b", f"lane-fixer/{child_id}")
+        _commit_in(
+            worktree,
+            path,
+            "export const LandingPack = 2\n",
+            msg="adopt frontend path",
+        )
+        _git(worktree, "checkout", chain)
+        _git(
+            worktree, "merge", "--no-ff", "-m",
+            f"kanban: merge lane-fixer/{child_id}", f"lane-fixer/{child_id}",
+        )
+        merge_commit = _git(worktree, "rev-parse", "HEAD")
+        parents = _git(worktree, "rev-list", "--parents", "-n", "1", "HEAD")
+        assert len(parents.split()) == 3, "fixture must produce a real merge"
+        # Neither subject-based route can see this work: the receipt route
+        # reads a merge as Unknown, and a `--grep=kanban(<child>):` log walk
+        # matches nothing. Only the pre-run..candidate stamp attributes it.
+        assert kwt._lane_scope_recorded_task_commit_paths(
+            conn, child_id, worktree, {"commit": merge_commit},
+        ) is None
+        assert _git(
+            worktree, "log", "--format=", "--name-only", "--fixed-strings",
+            f"--grep=kanban({child_id}):", f"{park_tip}..{merge_commit}",
+            "--", path,
+        ) == ""
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        with caplog.at_level(logging.WARNING, logger=lane_fixer.__name__):
+            result = kwt.maybe_integrate_on_complete(
+                conn, parent_id, gate_runner=_ok_gate,
+            )
+
+        assert result is not None and result["action"] == "merged", result
+        audited = _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        )
+        assert len(audited) == 1
+        assert audited[0] == {
+            "child_id": child_id,
+            "fingerprint": dispatch["fingerprint"],
+            "paths": [path],
+            "source": "fixer_commit",
+        }
+        assert (
+            f"lane-scope allowlist parent={parent_id} child={child_id} "
+            f"fingerprint={dispatch['fingerprint']} paths={path}"
+        ) in caplog.text
+
+
+def test_explicit_operator_waiver_can_allow_commitless_fixer(
+    lane_repo, lane_scope_home,
+):
+    """The escape hatch stays open, but only signed and bound to the tip."""
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_operator_lane_waiver",
+            )
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                parent_id,
+                lane_fixer.LANE_SCOPE_ALLOWLIST_WAIVER_EVENT,
+                {
+                    "branch_tip": _git(info["path"], "rev-parse", "HEAD"),
+                    "child_id": child_id,
+                    "fingerprint": dispatch["fingerprint"],
+                    "operator_id": "operator:test",
+                    "paths": [path],
+                },
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "merged", result
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        )[-1] == {
+            "child_id": child_id,
+            "fingerprint": dispatch["fingerprint"],
+            "paths": [path],
+            "source": "operator_waiver",
+        }
+
+
+def test_unsigned_waiver_does_not_allowlist_violation(
+    lane_repo, lane_scope_home,
+):
+    """A waiver without an operator id is not an operator decision."""
+    with kb.connect() as conn:
+        parent_id, child_id, info, path, dispatch = (
+            _park_unscoped_parent_with_lane_fixer(
+                conn, lane_repo, "t_unsigned_lane_waiver",
+            )
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                parent_id,
+                lane_fixer.LANE_SCOPE_ALLOWLIST_WAIVER_EVENT,
+                {
+                    "branch_tip": _git(info["path"], "rev-parse", "HEAD"),
+                    "child_id": child_id,
+                    "fingerprint": dispatch["fingerprint"],
+                    "operator_id": "",
+                    "paths": [path],
+                },
+            )
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id)
+
+        result = kwt.maybe_integrate_on_complete(
+            conn, parent_id, gate_runner=_ok_gate,
+        )
+
+        assert result is not None and result["action"] == "parked", result
+        assert _events(
+            conn, parent_id, lane_fixer.LANE_SCOPE_ALLOWLISTED_EVENT,
+        ) == []
