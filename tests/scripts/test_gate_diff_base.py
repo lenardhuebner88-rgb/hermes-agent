@@ -159,6 +159,12 @@ def slice_repo(tmp_path: Path) -> SliceRepo:
         "    assert backend.VALUE > 0\n",
         encoding="utf-8",
     )
+    # Duration cache required by the fail-closed affected-test time budget
+    # (hermes_cli/affected_test_budget.py); without it the gate exits 2.
+    (repo / "test_durations.json").write_text(
+        '{"tests/pkg/test_backend.py": 1.0}\n',
+        encoding="utf-8",
+    )
     frontend = repo / "web" / "ui.ts"
     frontend.parent.mkdir()
     frontend.write_text("export const value = 1\n", encoding="utf-8")
