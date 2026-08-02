@@ -16754,7 +16754,9 @@ def complete_task(
         if _wt_eligible:
             from hermes_cli.kanban_fixer_scope import enforce_on_complete
 
-            _wt_outcome = enforce_on_complete(conn, task_id)
+            _wt_outcome = enforce_on_complete(
+                conn, task_id, completion_metadata=metadata,
+            )
             if _wt_outcome is None:
                 from hermes_cli.kanban_worktrees import maybe_integrate_on_complete
 
