@@ -33636,6 +33636,9 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
                 if extra:
                     line += f" ({extra})"
                 lines.append(line)
+                route = str(item.get("route") or "").strip()
+                if route:
+                    lines.append(f"  Acceptance location (route): {route}")
             else:
                 lines.append(f"- [ ] {str(item).strip()}")
         lines.append("")
