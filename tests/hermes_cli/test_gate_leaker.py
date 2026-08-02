@@ -71,6 +71,104 @@ def test_parse_python_repro_fallback_when_no_summary():
 
 
 # ---------------------------------------------------------------------------
+# Fixture poisoning (GATE-REDFILE-EXTRACTION-FIXTURE-DEPOISON-S1)
+#
+# The nightly 2026-08-02 python.log: ``tests/scripts/test_run_affected.py`` was
+# itself failing, and its fixture is a verbatim run_tests_parallel summary with
+# invented paths. The traceback renderer replays that fixture INSIDE the
+# "Failure output" dump — i.e. BEFORE the run's real summary — indented. The
+# pre-fix parser read those 5 phantom paths as the canonical failing files,
+# filled the ISOLATION_MAX_FILES=12 budget with them, and pinned first_fail on a
+# path that does not exist ("No test files to run").
+# ---------------------------------------------------------------------------
+
+# 4-space indented replay of tests/scripts/test_run_affected.py's fixture,
+# followed by the run's REAL column-0 summary.
+POISONED_PY_LOG = """\
+=== Summary: 2742 files, 56589 tests passed, 19 failed/errors (100% complete) in 900.0s ===
+
+=== Failure output ===
+
+--- tests/scripts/test_run_affected.py ---
+    def test_red_summary_reruns_only_files_from_the_four_failure_blocks():
+        summary = '''
+    === Failure output ===
+
+    --- tests/hermes_cli/test_kanban_db.py ---
+    FAILED tests/hermes_cli/test_kanban_db.py::test_one
+      Repro: python -m pytest tests/hermes_cli/test_kanban_db.py
+
+    === 2 files with test failures (3 tests failed) ===
+      tests/hermes_cli/test_kanban_db.py  (2 tests failed)
+      tests/tools/test_kanban_tools.py  (1 test failed)
+    === 1 file where all tests passed but pytest exited non-zero (warnings-as-errors, hook failures, etc.) ===
+      tests/acp/test_bar.py  (7 passed)
+    === 1 file where no tests ran (collection/import error, timeout before collection, etc.) ===
+      tests/scripts/test_baz.py
+    '''
+E   AssertionError
+
+=== 2 files with test failures (9 tests failed) ===
+  tests/scripts/test_run_affected.py  (8 tests failed)
+  tests/scripts/test_gate_diff_base.py  (1 test failed)
+"""
+
+REAL_FILES_IN_POISONED_LOG = [
+    "tests/scripts/test_run_affected.py",
+    "tests/scripts/test_gate_diff_base.py",
+]
+PHANTOM_FILES_IN_POISONED_LOG = [
+    "tests/hermes_cli/test_kanban_db.py",
+    "tests/tools/test_kanban_tools.py",
+    "tests/acp/test_bar.py",
+    "tests/scripts/test_baz.py",
+]
+
+
+def test_parse_python_ignores_summary_blocks_replayed_inside_a_failure_dump():
+    # AC-1: zero fixture/artefact false positives — an indented ``=== N files
+    # with test failures ===`` block is replayed test source, not a header.
+    files = gl.parse_failed_files("python", POISONED_PY_LOG)
+    assert files == REAL_FILES_IN_POISONED_LOG
+    for phantom in PHANTOM_FILES_IN_POISONED_LOG:
+        assert phantom not in files
+
+
+def test_parse_python_poisoned_log_keeps_the_real_files_first():
+    # AC-1 (isolation budget): the real failing files must not be displaced
+    # behind phantoms in report order — first_fail is taken from the head of
+    # this list and the isolation rerun is capped at ISOLATION_MAX_FILES.
+    files = gl.parse_failed_files("python", POISONED_PY_LOG)
+    assert files[0] == "tests/scripts/test_run_affected.py"
+    assert len(files) <= gl.ISOLATION_MAX_FILES
+
+
+def test_parse_python_repro_lines_do_not_leak_when_a_summary_exists():
+    # The replayed fixture also carries a ``Repro:`` line; the repro scan is a
+    # fallback for summary-less (truncated) logs only.
+    files = gl.parse_failed_files("python", POISONED_PY_LOG)
+    assert "tests/hermes_cli/test_kanban_db.py" not in files
+
+
+def test_parse_python_keeps_every_real_summary_in_a_multi_run_log():
+    # AC-2 counter-metric: recall stays 100%. run-affected.sh reruns the failing
+    # selection, so one gate log can carry TWO real summaries — a de-poisoning
+    # that only trusted the LAST summary would silently drop the first run's
+    # files. Both runs' files survive, in report order.
+    log = (
+        "=== 1 file with test failures (1 test failed) ===\n"
+        "  tests/first/test_run.py  (1 test failed)\n"
+        "=== Summary: 1 file, 0 tests passed, 1 failed/errors ===\n"
+        "=== 1 file with test failures (1 test failed) ===\n"
+        "  tests/second/test_run.py  (1 test failed)\n"
+    )
+    assert gl.parse_failed_files("python", log) == [
+        "tests/first/test_run.py",
+        "tests/second/test_run.py",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # parse_failed_files — vitest
 # ---------------------------------------------------------------------------
 
