@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from hermes_cli import kanban_db as kb
 logger = logging.getLogger(__name__)
 
 TERMINAL_DECISION_STATUSES = frozenset({"vetoed", "released", "archived", "done"})
+ARCHIVED_INGEST_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
 
 
 def utc_now() -> str:
@@ -122,6 +124,44 @@ def has_terminal_decision_for_lever(plans_root: Path, lever_key: str) -> bool:
     except OSError as exc:
         logger.warning("strategist decision dedupe scan failed for %s: %s", plans_root, exc)
     return False
+
+
+def task_status_for_recent_idempotency_key(
+    conn: Any,
+    idempotency_key: str,
+    *,
+    now: int | None = None,
+    archived_cooldown_seconds: int = ARCHIVED_INGEST_COOLDOWN_SECONDS,
+) -> str | None:
+    """Return an active or recently archived task status for an ingest key.
+
+    Global PlanSpec ingest dedupe intentionally excludes archived tasks.  This
+    strategist-only guard prevents a held triage proposal from being minted
+    again immediately after archival while allowing it after the cooldown.
+    """
+    cutoff = int(time.time() if now is None else now) - int(archived_cooldown_seconds)
+    row = conn.execute(
+        """
+        SELECT t.status
+        FROM tasks AS t
+        WHERE t.idempotency_key = ?
+          AND (
+            t.status != 'archived'
+            OR COALESCE(
+              (
+                SELECT MAX(e.created_at)
+                FROM task_events AS e
+                WHERE e.task_id = t.id AND e.kind = 'archived'
+              ),
+              t.created_at
+            ) >= ?
+          )
+        ORDER BY (t.status != 'archived') DESC, t.created_at DESC
+        LIMIT 1
+        """,
+        (idempotency_key, cutoff),
+    ).fetchone()
+    return str(row["status"]) if row is not None else None
 
 
 def _board_status_for_source(conn: Any, path: Path) -> str | None:
