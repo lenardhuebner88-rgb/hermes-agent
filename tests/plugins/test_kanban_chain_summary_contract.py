@@ -60,7 +60,7 @@ def _insert_chain(conn, *, prefix: str, source_status: str, sink_status: str, so
                     source_title,
                     source_status,
                     1_000,
-                    1_100 if source_status == "done" else None,
+                    1_100 if source_status in {"done", "archived"} else None,
                     None,
                 ),
                 (
@@ -68,7 +68,7 @@ def _insert_chain(conn, *, prefix: str, source_status: str, sink_status: str, so
                     f"{source_title} gate",
                     sink_status,
                     1_001,
-                    1_200 if sink_status == "done" else None,
+                    1_200 if sink_status in {"done", "archived"} else None,
                     planspec_source,
                 ),
             ],
@@ -114,6 +114,11 @@ def test_chain_summaries_publish_state_identity_age_and_aggregate_costs(
             sink_status="done",
             source_title="Finished Plan",
         )
+        blocked = _insert_chain(conn, prefix="blocked", source_status="blocked", sink_status="blocked", source_title="Blocked Plan")
+        done_blocked = _insert_chain(conn, prefix="done_blocked", source_status="done", sink_status="blocked", source_title="Done Blocked Plan")
+        done_todo = _insert_chain(conn, prefix="done_todo", source_status="done", sink_status="todo", source_title="Done Todo Plan")
+        todo = _insert_chain(conn, prefix="todo", source_status="todo", sink_status="todo", source_title="Todo Plan")
+        archived = _insert_chain(conn, prefix="archived", source_status="archived", sink_status="done", source_title="Archived Plan")
 
     module = client.app.state.kanban_plugin_module
     monkeypatch.setattr(module, "_compute_task_diagnostics", lambda *args, **kwargs: {})
@@ -169,6 +174,13 @@ def test_chain_summaries_publish_state_identity_age_and_aggregate_costs(
         "state_age_seconds": 300,
         "cost_usd": 0.5,
     } == summaries[finished[1]]
+    assert summaries[blocked[1]]["state"] == "gehalten"
+    assert summaries[done_blocked[1]]["state"] == "angebrochen"
+    assert summaries[done_todo[1]]["state"] == "angebrochen"
+    assert summaries[todo[1]]["state"] == "gehalten"
+    assert summaries[archived[1]]["state"] == "fertig"
+    assert summaries[archived[1]]["total"] == 2
+    assert summaries[archived[1]]["done"] == 2
 
 
 def test_chain_summary_stations_are_topological_capped_and_card_ready(

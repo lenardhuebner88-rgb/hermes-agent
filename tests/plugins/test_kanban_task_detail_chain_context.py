@@ -74,7 +74,7 @@ def test_task_detail_includes_chain_context_and_adjacent_stations(client):
     assert first_context == {
         "root_id": last["id"],
         "chain_identifier": "First station",
-        "chain_state": "laeuft",
+        "chain_state": "gehalten",
         "position": 1,
         "total": 3,
         "previous_station": None,
@@ -83,7 +83,7 @@ def test_task_detail_includes_chain_context_and_adjacent_stations(client):
     assert middle_context == {
         "root_id": last["id"],
         "chain_identifier": "First station",
-        "chain_state": "laeuft",
+        "chain_state": "gehalten",
         "position": 2,
         "total": 3,
         "previous_station": {"id": first["id"], "title": "First station"},
@@ -92,7 +92,7 @@ def test_task_detail_includes_chain_context_and_adjacent_stations(client):
     assert last_context == {
         "root_id": last["id"],
         "chain_identifier": "First station",
-        "chain_state": "laeuft",
+        "chain_state": "gehalten",
         "position": 3,
         "total": 3,
         "previous_station": {"id": middle["id"], "title": "Middle station"},
@@ -101,3 +101,24 @@ def test_task_detail_includes_chain_context_and_adjacent_stations(client):
     assert "chain_context" not in client.get(
         f"/api/plugins/kanban/tasks/{standalone['id']}"
     ).json()["task"]
+
+
+def test_task_detail_blocked_chain_is_held(client):
+    first = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "Blocked first"}
+    ).json()["task"]
+    last = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Blocked last", "parents": [first["id"]]},
+    ).json()["task"]
+    with kb.connect() as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked' WHERE id IN (?, ?)",
+            (first["id"], last["id"]),
+        )
+
+    context = client.get(
+        f"/api/plugins/kanban/tasks/{first['id']}"
+    ).json()["task"]["chain_context"]
+
+    assert context["chain_state"] == "gehalten"
