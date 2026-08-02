@@ -1773,6 +1773,19 @@ def propose_persistent_red_triage(
         return summary
 
     spec_path = _write_spec(out_dir, lever)
+    parsed_spec = planspecs.parse_binding_planspec(spec_path, plans_root=Path(out_dir))
+    idempotency_key = planspecs.ingest_idempotency_key(parsed_spec)
+    conn = kanban_db.connect(board=board)
+    try:
+        existing_status = strategist_specs.task_status_for_recent_idempotency_key(
+            conn, idempotency_key
+        )
+    finally:
+        conn.close()
+    if existing_status == "archived":
+        summary["ingested"] = None
+        summary["skipped_recent_idempotency_key"] = True
+        return summary
     try:
         result = planspecs.ingest_planspec(
             spec_path, board=board, author=GATE_TRIAGE_AUTHOR, plans_root=Path(out_dir)
