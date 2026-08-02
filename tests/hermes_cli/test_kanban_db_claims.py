@@ -1037,17 +1037,23 @@ def test_intentional_sigkill_is_not_a_protocol_violation(
             "UPDATE task_runs SET worker_pid=? WHERE id=?",
             (pid, run_id),
         )
-        kb._append_event(
+        _kb._defer_reclaim_for_live_worker(
             conn,
             tid,
-            "reclaim_deferred",
-            {
-                "reason": reclaim_reason,
-                "termination": {"sigterm": True, "sigkill": True},
-            },
-            run_id=run_id,
+            task.claim_lock,
+            int(time.time()),
+            {"termination_attempted": True, "sigkill": True, "terminated": False},
+            reason=reclaim_reason,
         )
-        conn.commit()
+        marker_payload = json.loads(
+            conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id=? AND run_id=? AND kind='reclaim_deferred'",
+                (tid, run_id),
+            ).fetchone()["payload"]
+        )
+        assert marker_payload["sigkill"] is True
+        assert "termination" not in marker_payload
         _kb._record_worker_exit(pid, 9)  # raw wait status for SIGKILL
 
         crashed = kb.detect_crashed_workers(conn)
