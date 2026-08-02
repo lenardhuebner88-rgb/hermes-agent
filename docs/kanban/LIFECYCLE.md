@@ -215,6 +215,19 @@ single write. The order matters and is load-bearing:
    `review` row would merge an unreviewed chain.
 7. **The done UPDATE.**
 
+Before integration, provisioned code lanes also pass
+`_enforce_lane_scope_on_complete`.
+The check starts with the review/workspace snapshot diff. Task-local commit
+receipts from
+`_lane_scope_recorded_task_commit_paths`
+may narrow that diff only when they provide attributable single-parent commit
+paths. A merge commit, an empty path set, or an unusable receipt means
+*attribution unknown*, not "this task changed nothing", so the full snapshot
+diff remains in force. Completed fixer children can contribute only their
+declared or offending-path allowlist; they do not erase unrelated chain
+collateral. This makes a concrete `scope_files` declaration the effective
+contract for every code slice.
+
 ### The serialized integrator
 
 [`integrate_chain`](../../hermes_cli/kanban_worktrees.py) is *the* single
@@ -295,8 +308,11 @@ requires *positive* evidence: [`_run_worker_gate`](../../hermes_cli/kanban_db.py
 returns `{"configured": False}` (no `passed` key) whenever the gate is disabled,
 the assignee is not code-bearing, the workspace is missing, or no commands match
 the repo — and `stamp.get("passed") is True` is then False, so the task parks in
-review. Disabled/misconfigured therefore fails **safe**. What it does *not*
-protect against is a gate that passes **vacuously** — see the trap below.
+review. Disabled/misconfigured therefore fails **safe**. A green process exit is
+also insufficient: `_worker_gate_has_positive_test_count`
+requires a recognized runner summary with more than zero passed tests before
+review may be skipped or deferred. Zero-test and unknown-count gates therefore
+park for review instead of passing vacuously.
 
 **Lever 2 — `judge_at_chain_tip: true`.** A non-tip `review`-tier slice defers
 its LLM review to the chain tip, so one judgment covers the feature instead of
@@ -474,6 +490,14 @@ fan-out (`hermes_cli/kanban_decompose.py`), PlanSpec ingest
 `create_epic`, which maintains a parallel `open`/closed object referenced by
 `tasks.epic_id`. All of them funnel into the same state vocabulary, so the
 transition table still applies once the row exists.
+
+Structured acceptance criteria may carry a `route`, which is preserved in the
+task's `acceptance_criteria` payload and rendered as the concrete acceptance
+location in reviewer and chain-tip briefs. Scope follows a different path:
+PlanSpec intake writes the human-readable `## Scope Contract` body block but
+does not populate `tasks.scope_contract`. Strategist-generated code work must
+therefore derive concrete `scope_files` from grounding or insert a scout
+dependency before the ungrounded build slice.
 
 ## Section index
 

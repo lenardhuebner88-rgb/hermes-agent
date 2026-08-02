@@ -81,6 +81,10 @@ symbols. Read `AIAgent`'s actual signature before editing it.
   transcript/composer in React. Desktop is a separate Electron surface.
 - New core tools require registry registration and deliberate exposure through
   `toolsets.py`. Prefer CLI/skill/plugin/MCP first.
+- PlanSpec code slices need grounded `scope_files`; missing Strategist grounding
+  inserts a scout dependency. Structured acceptance criteria may carry `route`
+  for the concrete review/UI location. Intake renders the scope contract into
+  the task body; it does not populate `tasks.scope_contract`.
 - Add non-secret behavior to `DEFAULT_CONFIG` in `hermes_cli/config.py`; reserve
   `.env` metadata for credentials. Know the separate CLI/setup/gateway loaders.
 - Use `get_hermes_home()` for persistent paths and `display_hermes_home()` in
@@ -198,15 +202,19 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   `git diff --name-only $(git merge-base main <branch>)..<branch>`, and
   `branch_name` for a chain slice is the *chain* branch (`kanban/<root>`), not
   `kanban/<task-id>` — guessing it yields an empty diff and a wrong conclusion.
-  Four distinct causes existed; all are fixed as of 2026-07-28. **Read the code
-  path in the wrong order and you will fix the wrong one — measure this first:**
+  Four distinct causes existed by 2026-07-28; the 2026-08-02 guards additionally
+  hardened fixer-scope inheritance, stale review-base clamping, zero-test gates,
+  and merge-receipt attribution. **Read the code path in the wrong order and you
+  will fix the wrong one — measure this first:**
   `_lane_scope_review_snapshot_diff_spec(conn, task_id, repo_root)`. When it
-  returns non-`None`, a review snapshot pins the diff and the *entire* per-task
-  attribution is skipped — receipts, orphaned-basis branch, merge-base
-  subtraction all become dead code for that completion. For a chain slice the
-  snapshot candidate is the shared chain **tip**, so the slice is charged with
-  its siblings' commits. That single mechanism produced seven consecutive false
-  parks on one card while three earlier fixes looked correct and never ran.
+  returns non-`None`, a review snapshot pins the upper-bound diff. Task-local
+  receipts may narrow that bound only when attributable single-parent commits
+  yield paths; merge commits and empty/unusable receipts mean *unknown*, so the
+  full snapshot remains. For a chain slice the snapshot candidate is the shared
+  chain **tip**, so explicit `scope_files` plus the bounded fixer allowlist are
+  still required to distinguish the slice from sibling commits. The old
+  snapshot-short-circuit produced seven consecutive false parks while three
+  earlier fixes looked correct and never ran.
   Never answer a park with another lane-scope fixer before measuring; the second
   bounce means diagnose, not retry.
 - **`done` + `MERGED_GREEN` does not prove the code is on `main`.** Verified
