@@ -299,6 +299,78 @@ def test_prepare_worker_base_resets_fully_landed_two_file_commit(repo):
     assert kwt.dirty_files(worktree) == []
 
 
+def test_prepare_worker_base_rebases_when_landing_evidence_is_a_conflict_merge(
+    repo,
+):
+    """A conflict-resolved merge is no evidence that this branch landed.
+
+    ``_target_landing_is_evidenced`` compares target's landing commit against
+    this branch commit's own path set. For a MERGE commit ``diff-tree``
+    (without ``-m``/``--cc``) prints nothing, so the empty set was trivially a
+    subset of everything and the path counted as landed. With a second, truly
+    pending path in the same commit that produced a mixed landed/pending split
+    and parked the worker with the ``partially landed`` diagnosis -- after a
+    rebase git had just performed without a single conflict. Only a merge
+    whose resolution touched the path reaches here at all: a clean ``--no-ff``
+    integrator merge is TREESAME and history simplification hands back the
+    feature commit instead.
+    """
+    info = kwt.ensure_worktree(repo, "t_conflict_merge_landing")
+    worktree = info["path"]
+    target_file = worktree / "tests" / "test_repair.py"
+    target_file.parent.mkdir(parents=True)
+    target_file.write_text("def test_repair():\n    assert True\n")
+    script = worktree / "scripts" / "run_tests.sh"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\npytest tests/test_repair.py\n")
+    _git(worktree, "add", "tests/test_repair.py", "scripts/run_tests.sh")
+    _git(worktree, "commit", "-m", "worker: add repair test")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    # Two independent target-side versions of the same path, reconciled by a
+    # merge whose resolution happens to produce this branch's content.
+    _git(repo, "checkout", "-b", "side")
+    side_file = repo / "tests" / "test_repair.py"
+    side_file.parent.mkdir(parents=True, exist_ok=True)
+    side_file.write_text("def test_repair():\n    assert 'side'\n")
+    _git(repo, "add", "tests/test_repair.py")
+    _git(repo, "commit", "-m", "side: repair test variant")
+    _git(repo, "checkout", "main")
+    side_file.parent.mkdir(parents=True, exist_ok=True)
+    side_file.write_text("def test_repair():\n    assert 'main'\n")
+    _git(repo, "add", "tests/test_repair.py")
+    _git(repo, "commit", "-m", "main: repair test variant")
+    # Conflicts by construction: git exits non-zero and leaves MERGE_HEAD, so
+    # the resolving commit below really is a merge commit.
+    subprocess.run(
+        ["git", "-C", str(repo), "merge", "--no-commit", "side"],
+        capture_output=True, text=True,
+    )
+    side_file.write_text("def test_repair():\n    assert True\n")
+    _git(repo, "add", "tests/test_repair.py")
+    _git(repo, "commit", "-m", "main: resolve repair test conflict")
+    merge_commit = _git(repo, "rev-parse", "main")
+    parents = _git(repo, "rev-list", "--parents", "-n", "1", "main").split()
+    assert len(parents) == 3, "fixture must produce a real merge commit"
+    assert _git(repo, "log", "--format=%H", "-1", "main", "--",
+                "tests/test_repair.py") == merge_commit
+    # The second path of the same commit never reached the target at all.
+    assert not (repo / "scripts" / "run_tests.sh").exists()
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased", (
+        "an unattributable merge commit was accepted as landing evidence and "
+        "produced a phantom partial-landing park"
+    )
+    assert (worktree / "scripts" / "run_tests.sh").exists()
+    assert kwt.dirty_files(worktree) == []
+
+
 def test_prepare_worker_base_rebases_through_coincidental_identical_add(repo):
     """An empty marker file independently created on both sides must not
     park (Ausprägung B). Unlike the genuine partial pick above, target's

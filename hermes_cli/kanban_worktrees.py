@@ -731,13 +731,36 @@ def _target_landing_is_evidenced(
         ).split("\0")
         if p
     }
+    if not landing_paths:
+        # ``diff-tree`` without ``-m``/``--cc`` prints NOTHING for a merge
+        # commit, so the subset test below would pass vacuously and turn an
+        # unattributable commit into landing evidence. Same Unknown semantics
+        # as ``_lane_scope_recorded_task_commit_paths``: an empty path set is
+        # never an authoritative answer. Reachable only for a merge whose
+        # conflict resolution touched *path* -- a clean ``--no-ff`` merge is
+        # TREESAME, so history simplification returns the feature commit here.
+        _log.info(
+            "landing evidence: commit %s of %s that last touched %s reports "
+            "no paths (merge commit or empty commit); not attributable, "
+            "treating the path as not landed",
+            landing_commit,
+            target,
+            path,
+        )
+        return False
     return landing_paths <= branch_changed_paths
 
 
 def _commit_landing_paths(
     repo: Path, target: str, commit: str
 ) -> tuple[list[str], list[str]]:
-    """Split one commit's changed paths by whether its resulting tree entry landed."""
+    """Split one commit's changed paths by whether its resulting tree entry landed.
+
+    Coupled to :func:`_target_landing_is_evidenced`: an empty path list here
+    already degrades fail-safe (no path is claimed landed), so the Unknown
+    handling lives in the evidence check, not in this loop. A path is only
+    moved to ``landed`` on positive evidence.
+    """
     parents = _git(repo, "show", "-s", "--format=%P", commit).split()
     parent = parents[0] if parents else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     changed = [
@@ -6727,6 +6750,17 @@ def _lane_scope_recorded_task_commit_paths(
     commit-subject convention.  Keep the attribution strictly task-local:
     chain siblings may have their own completion receipts, but their paths
     must never be charged to this task.
+
+    Return contract (every caller may rely on it):
+
+    * ``None`` -- attribution UNKNOWN. No receipt at all, or no receipt that
+      resolves *and* yields paths. Callers must fall back to their own
+      heuristic and must never read this as "the task changed nothing".
+    * a NON-EMPTY set -- the authoritative task-local path set.
+
+    An empty set is never returned: it is indistinguishable from the merge
+    commit case (``diff-tree`` without ``-m``/``--cc`` prints no path for a
+    merge) and would silently clear real violations.
     """
     metadata: list[dict[str, Any]] = []
     if isinstance(completion_metadata, dict):
@@ -6757,25 +6791,11 @@ def _lane_scope_recorded_task_commit_paths(
         return None
 
     paths: set[str] = set()
-    resolved = 0
+    attributed = 0
     for commit in commits:
         try:
             resolved_commit = _git(
                 repo_root, "rev-parse", "--verify", f"{commit}^{{commit}}",
-            )
-            resolved += 1
-            paths.update(
-                path
-                for path in _git(
-                    repo_root,
-                    "diff-tree",
-                    "--root",
-                    "--no-commit-id",
-                    "--name-only",
-                    "-r",
-                    resolved_commit,
-                ).splitlines()
-                if path
             )
         except WorktreeError:
             _log.warning(
@@ -6784,7 +6804,39 @@ def _lane_scope_recorded_task_commit_paths(
                 commit,
                 task_id,
             )
-    if not resolved:
+            continue
+        commit_paths = {
+            path
+            for path in _git(
+                repo_root,
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                resolved_commit,
+            ).splitlines()
+            if path
+        }
+        if not commit_paths:
+            # Resolving the object is NOT the same as attributing it: a merge
+            # commit prints no paths here (``diff-tree`` without ``-m``/
+            # ``--cc``), and neither does an empty commit. Counting such a
+            # receipt as resolved made the empty set look authoritative, so
+            # every caller read "this task changed zero paths" -- a merge that
+            # smuggled an out-of-lane file through its conflict resolution
+            # then cleared its own violations. Unknown, not empty.
+            _log.warning(
+                "lane-scope: recorded worker commit %s of task %s resolves "
+                "but yields no paths (merge commit without -m, or an empty "
+                "commit); not attributable",
+                resolved_commit,
+                task_id,
+            )
+            continue
+        attributed += 1
+        paths.update(commit_paths)
+    if not attributed:
         return None
     return paths
 
@@ -6982,6 +7034,12 @@ def _enforce_lane_scope_on_complete(
             # them as an upper bound here as well — a slice can only be charged
             # for paths its OWN commits touched. No receipts (legacy task) means
             # no change in behaviour.
+            #
+            # The upper bound only holds while the receipts are attributable:
+            # a `None` result (no receipt, or only unattributable ones such as
+            # a merge commit) must leave the reviewed diff untouched. Filtering
+            # on an empty set instead would clear EVERY violation — exactly the
+            # fail-open a smuggling merge receipt needs.
             recorded_paths = _lane_scope_recorded_task_commit_paths(
                 conn, task_id, repo_root, completion_metadata,
             )
@@ -6989,6 +7047,14 @@ def _enforce_lane_scope_on_complete(
                 changed_files = [
                     path for path in changed_files if path in recorded_paths
                 ]
+            else:
+                _log.warning(
+                    "lane-scope: task %s has no attributable worker commit "
+                    "receipt; keeping the full reviewed diff %s as the "
+                    "candidate set instead of narrowing it",
+                    task_id,
+                    diff_spec,
+                )
         if exclude_pre_own_basis:
             recorded_paths = _lane_scope_recorded_task_commit_paths(
                 conn, task_id, repo_root, completion_metadata,
@@ -6999,9 +7065,12 @@ def _enforce_lane_scope_on_complete(
                 # A merge-base subtraction cannot identify siblings that
                 # committed after this task's claim.  Preserve it only as a
                 # compatibility fallback and make the uncertainty auditable.
+                # Reached for an UNKNOWN receipt too (merge commit / empty
+                # commit): the heuristic below is weaker than a receipt but
+                # still stricter than accepting an empty path set as proof.
                 _log.warning(
                     "lane-scope: orphaned pre_run_commit_sha %s of task %s "
-                    "has no resolvable task-local worker commit receipt; "
+                    "has no attributable task-local worker commit receipt; "
                     "falling back to uncertain merge-base attribution",
                     exclude_pre_own_basis,
                     task_id,

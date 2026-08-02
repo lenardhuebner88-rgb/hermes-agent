@@ -9,11 +9,14 @@ DB; the dispatcher hot-reads the ACTIVE lane at every spawn. Precedence:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
+from tests.hermes_cli._kanban_test_helpers import _commit_in, _events, _git, _ok_gate
 
 
 @pytest.fixture
@@ -591,3 +594,122 @@ class TestActiveLaneEntry:
             for row in conn.execute("SELECT profiles FROM lanes").fetchall():
                 parsed = json.loads(row["profiles"])
                 assert isinstance(parsed, dict) and parsed
+
+
+# ---------------------------------------------------------------------------
+# Lane-scope enforcement vs. merge-commit receipts (MR-S1).
+#
+# A worker receipt pointing at a MERGE commit yields no paths from
+# ``diff-tree`` (no ``-m``/``--cc``). Read as an authoritative empty set it
+# filtered every candidate path away and waved an out-of-lane file through;
+# the shared helper now reports Unknown instead, so the guard keeps judging
+# the reviewed diff. Real git + real board DB, no mocks for the file set.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def lane_scope_home(tmp_path, monkeypatch):
+    """Isolated board DB (asserted off the live board) for git-real cases."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    for key in list(os.environ):
+        if key.startswith("HERMES_KANBAN_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = kb.kanban_db_path(board="default")
+    assert db_path.resolve() != Path("/home/piet/.hermes/kanban.db").resolve()
+    assert home.resolve() in db_path.resolve().parents
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kb.init_db()
+    return home
+
+
+@pytest.fixture
+def lane_repo(tmp_path):
+    """Real git repo on ``main`` with one base commit."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-b", "main")
+    _git(r, "config", "user.email", "lane-scope@test.invalid")
+    _git(r, "config", "user.name", "lane scope test")
+    (r / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-m", "base")
+    return r
+
+
+def _evil_merge_receipt(lane_repo: Path, task_root: str) -> tuple[Path, str, str]:
+    """Branch with an in-lane commit plus a merge that smuggles a web/ file."""
+    info = kwt.ensure_worktree(lane_repo, task_root)
+    worktree = info["path"]
+    base_commit = _git(worktree, "rev-parse", "HEAD")
+    _commit_in(
+        worktree,
+        "hermes_cli/backend_slice.py",
+        "SLICE = 1\n",
+        msg=f"kanban({task_root}): backend slice",
+    )
+    _commit_in(
+        lane_repo,
+        "hermes_cli/foreign_target.py",
+        "FOREIGN = 1\n",
+        msg="foreign target advance",
+    )
+    _git(worktree, "merge", "--no-commit", "main")
+    evil = worktree / "web" / "src" / "control" / "Evil.tsx"
+    evil.parent.mkdir(parents=True, exist_ok=True)
+    evil.write_text("export const Evil = 1\n", encoding="utf-8")
+    _git(worktree, "add", "web/src/control/Evil.tsx")
+    _git(worktree, "commit", "-m", f"kanban({task_root}): merge live target")
+    merge_commit = _git(worktree, "rev-parse", "HEAD")
+    parents = _git(worktree, "rev-list", "--parents", "-n", "1", "HEAD").split()
+    assert len(parents) == 3, "fixture must produce a real merge commit"
+    return worktree, base_commit, merge_commit
+
+
+def test_lane_scope_evil_merge_receipt_does_not_clear_snapshot_violations(
+    lane_repo, lane_scope_home,
+):
+    with kb.connect() as conn:
+        worktree, base_commit, merge_commit = _evil_merge_receipt(
+            lane_repo, "t_ls_evil_merge"
+        )
+        # The receipt itself is unattributable: no path may be charged to it,
+        # and none may be cleared by it either.
+        assert kwt._lane_scope_recorded_task_commit_paths(
+            conn, "t_missing", worktree, {"commit": merge_commit},
+        ) is None
+        task_id = kb.create_task(
+            conn,
+            title="backend slice with evil merge receipt",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(worktree),
+        )
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                "review_snapshot_provisioned",
+                {
+                    "base_commit": base_commit,
+                    "candidate_commit": merge_commit,
+                },
+            )
+
+        out = kwt.maybe_integrate_on_complete(
+            conn,
+            task_id,
+            completion_metadata={"commit": merge_commit},
+            gate_runner=_ok_gate,
+        )
+
+        assert out is not None and out["action"] == "parked", (
+            "an empty merge-commit receipt filtered every reviewed path away "
+            "and waved the out-of-lane file through"
+        )
+        blocked = _events(conn, task_id, kwt.LANE_SCOPE_BLOCKED_EVENT)
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == ["web/src/control/Evil.tsx"]
+        assert blocked[0]["expected_lane"] == "coder-frontend"

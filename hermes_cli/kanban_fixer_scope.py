@@ -116,6 +116,9 @@ def _attributed_task_paths(
         worktree,
         completion_metadata=completion_metadata,
     )
+    # ``None`` is the helper's Unknown answer (no receipt, or only
+    # unattributable ones such as a merge commit); it never returns an empty
+    # set, so there is no local empty-set case left to re-interpret here.
     if recorded:
         paths = sorted(recorded)
         _log.info(
@@ -124,16 +127,6 @@ def _attributed_task_paths(
             ", ".join(paths),
         )
         return paths
-    if recorded is not None:
-        # ``diff-tree`` without ``-m`` yields no paths for a merge commit,
-        # including a merge that introduced files during conflict resolution.
-        # Therefore an empty receipt result is unknown attribution, not proof
-        # that the task changed zero paths.
-        _log.info(
-            "conflict-fixer scope: task %s empty commit-receipt path set is "
-            "not attributable",
-            task_id,
-        )
     return None
 
 

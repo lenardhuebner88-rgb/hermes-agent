@@ -306,6 +306,12 @@ def _recorded_task_commits(
     ``kanban_worktrees._lane_scope_recorded_task_commit_paths``: malformed
     metadata is ignored, duplicate commit receipts are collapsed, and
     unresolvable commits do not count as usable attribution.
+
+    Note the deliberate difference in granularity: that helper answers with a
+    PATH set and therefore also rejects a commit which resolves but yields no
+    path (a merge commit, an empty commit) as unattributable. This function
+    answers with COMMITS, where resolvability is the whole question, so a
+    merge commit stays a usable commit here.
     """
     try:
         rows = conn.execute(

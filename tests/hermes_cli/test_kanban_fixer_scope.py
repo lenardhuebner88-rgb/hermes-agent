@@ -535,12 +535,15 @@ def test_conflict_fixer_merge_commit_receipt_is_not_attributable(
             worktree, "rev-list", "--parents", "-n", "1", "HEAD",
         ).split()
         assert len(parents) == 3
+        # ``diff-tree`` without ``-m``/``--cc`` prints nothing for a merge
+        # commit, so the receipt yields NO path -- unknown attribution, never
+        # an authoritative "this task changed zero paths".
         assert kwt._lane_scope_recorded_task_commit_paths(
             conn,
             child_id,
             worktree,
             completion_metadata={"commit": merge_commit},
-        ) == set()
+        ) is None
 
         _advance_target(repo, revision=2)
         orphaned_stamp = _git(repo, "rev-parse", "HEAD")
@@ -560,7 +563,11 @@ def test_conflict_fixer_merge_commit_receipt_is_not_attributable(
         parent = kb.get_task(conn, parent_id)
         assert child is not None and child.status == "done"
         assert parent is not None and parent.status == "ready"
-        assert "empty commit-receipt path set is not attributable" in caplog.text
+        # The Unknown decision is now the shared helper's, not a local
+        # re-interpretation in kanban_fixer_scope; the fixer side still fails
+        # open (child done, parent resumed) for an unattributable receipt.
+        assert "resolves but yields no paths" in caplog.text
+        assert "not attributable" in caplog.text
         assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
 
 
