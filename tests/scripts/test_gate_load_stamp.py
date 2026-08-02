@@ -169,6 +169,11 @@ def _make_run_affected_repo(
     (repo / "tests" / "pkg" / "test_foo.py").write_text(
         "def test_foo():\n    assert True\n"
     )
+    # Readable duration cache: without one the budget check fails closed and
+    # run-affected.sh exits 2 before the stamp wiring under test is reached
+    # (see hermes_cli/affected_test_budget.py). Callers that need real
+    # predictions overwrite this file with concrete durations.
+    (repo / "test_durations.json").write_text("{}\n", encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "init")

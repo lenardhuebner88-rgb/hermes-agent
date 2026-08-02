@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -93,6 +94,19 @@ def test_compatibility_wrappers_pin_integration_mode(
         (tests / f"test_{index:03d}.py").write_text(
             "def test_placeholder():\n    assert True\n"
         )
+    # Readable duration cache with real forecasts: without one the budget check
+    # fails closed ("duration cache missing"), and with an EMPTY one these 201
+    # placeholder files would each be assumed at UNKNOWN_TEST_DURATION_SECONDS
+    # and trip the time budget instead. Neither is what this test pins.
+    (tmp_path / "test_durations.json").write_text(
+        json.dumps(
+            {
+                f"tests/pkg/test_{index:03d}.py": 0.1
+                for index in range(WORKER_FALLBACK_MAX_TEST_FILES + 1)
+            }
+        ),
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     standalone = _load_standalone_mapper()

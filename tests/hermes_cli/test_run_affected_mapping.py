@@ -29,6 +29,11 @@ def test_core_edit_selects_focused_import_test_before_fallback_cap(tmp_path: Pat
             "def test_unrelated():\n    assert True\n", encoding="utf-8"
         )
 
+    # Readable duration cache: the budget check fails closed without one and
+    # affected-tests.sh would exit 2 instead of printing the selection
+    # (see hermes_cli/affected_test_budget.py).
+    (tmp_path / "test_durations.json").write_text("{}\n", encoding="utf-8")
+
     _git(tmp_path, "init", "-b", "main")
     _git(tmp_path, "config", "user.email", "test@example.com")
     _git(tmp_path, "config", "user.name", "Test User")
@@ -54,6 +59,9 @@ def test_core_edit_selects_focused_import_test_before_fallback_cap(tmp_path: Pat
     )
 
     assert bounded.stdout.split() == ["tests/hermes_cli/test_core_contract.py"]
-    assert "time-budget check skipped" in bounded.stderr
-    assert "duration cache missing" in bounded.stderr
-    assert "complete selection retained (1 file)" in bounded.stderr
+    # A readable cache means the budget check ran and passed: no skip note, no
+    # fail-closed error. (Pre-2026-08-01 a missing cache emitted a visible
+    # "time-budget check skipped" note; e50e541123 made that case fail closed —
+    # pinned end-to-end by
+    # tests/scripts/test_run_affected.py::test_missing_duration_cache_fails_closed_without_running_pytest.)
+    assert "time-budget check" not in bounded.stderr, bounded.stderr
