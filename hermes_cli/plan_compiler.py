@@ -174,6 +174,7 @@ class AcceptanceCriterion(BaseModel):
     owner: str = "coder"
     applies_to: list[str] = Field(default_factory=list)
     required: bool = True
+    route: str | None = None
 
     @field_validator("id")
     @classmethod
@@ -196,6 +197,14 @@ class AcceptanceCriterion(BaseModel):
     @classmethod
     def _clean_applies_to(cls, value: list[str]) -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        """Keep criteria without a route byte-identical to the prior shape."""
+        data = handler(self)
+        if data.get("route") is None:
+            data.pop("route", None)
+        return data
 
 
 class PlanContract(BaseModel):
