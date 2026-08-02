@@ -8,6 +8,7 @@ import pytest
 from hermes_cli.usage_facts_db import (
     LLM_CALL_COLUMNS,
     RUN_FACT_COLUMNS,
+    finalize_run_tool_call_count,
     increment_tool_call,
     initialize_usage_facts_db,
     purge_expired_traces,
@@ -345,7 +346,7 @@ def test_trace_message_fingerprint_is_idempotent_per_run(tmp_path):
     ] == 1
 
 
-def test_unknown_observations_remain_null(tmp_path):
+def test_completed_call_records_zero_tools_but_keeps_other_unknowns_null(tmp_path):
     path = tmp_path / "facts.db"
     record_llm_call(
         "run-null",
@@ -362,10 +363,32 @@ def test_unknown_observations_remain_null(tmp_path):
     assert fact["llm_call_count"] == 1
     assert fact["input_tokens"] is None
     assert fact["output_tokens"] is None
-    assert fact["tool_call_count"] is None
+    assert fact["tool_call_count"] == 0
     assert fact["duration_ms"] is None
     assert call["input_tokens"] is None
     assert call["temperature"] is None
+
+
+def test_finalize_tool_count_preserves_existing_claude_measurement(tmp_path):
+    path = tmp_path / "facts.db"
+    upsert_run_facts(
+        "claude-existing",
+        {
+            "origin": "claude_code",
+            "source": "measured",
+            "tool_call_count": 7,
+        },
+        path=path,
+    )
+
+    finalize_run_tool_call_count("claude-existing", path=path)
+
+    fact = _row(
+        path,
+        "SELECT tool_call_count FROM run_usage_facts "
+        "WHERE run_id='claude-existing'",
+    )
+    assert fact["tool_call_count"] == 7
 
 
 def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
