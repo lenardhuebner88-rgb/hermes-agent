@@ -66,13 +66,29 @@ function useIsLg(): boolean {
 
 // ─── Subtab-Definition ───────────────────────────────────────────────────────
 
-type FleetSubtab = "heute" | "worker" | "ketten" | "board" | "plan" | "risiko";
+const FLEET_SUBTABS = [
+  { id: "heute", label: de.fleet.subtabHeute },
+  { id: "worker", label: de.fleet.subtabWorker },
+  { id: "ketten", label: de.fleet.subtabKetten },
+  { id: "board", label: de.fleet.subtabBoard },
+  { id: "plan", label: de.fleet.subtabPlan },
+  { id: "risiko", label: de.fleet.subtabRisiko },
+] as const;
+
+type FleetSubtab = (typeof FLEET_SUBTABS)[number]["id"];
 
 interface SubtabDef {
   id: FleetSubtab;
   label: string;
   count?: number;
   warn?: boolean;
+}
+
+const FLEET_SUBTAB_IDS = new Set<string>(FLEET_SUBTABS.map(({ id }) => id));
+
+function parseFleetSubtab(raw: string | null): FleetSubtab | null {
+  if (raw == null || raw === "") return null;
+  return FLEET_SUBTAB_IDS.has(raw) ? (raw as FleetSubtab) : null;
 }
 
 /** BoardTab filter vocabulary — only accept these as ?status= deep-link values. */
@@ -139,6 +155,7 @@ export function FleetView() {
   // One-shot deep-link status for BoardTab (consumed from ?status= once per mount).
   const [deepLinkStatusFilter, setDeepLinkStatusFilter] = useState<TaskStatus | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const subtabDeepLinkConsumedRef = useRef(false);
   const deepLinkConsumedRef = useRef(false);
   const planDeepLinkConsumedRef = useRef(false);
 
@@ -152,6 +169,22 @@ export function FleetView() {
   const selectedPlanspecs = usePlanSpecs({ scope: "all", limit: 500 }, selectedBoard);
   const planSegment = parsePlanSegment(searchParams.get("planSegment")) ?? "all";
   const planQuery = searchParams.get("planSearch") ?? "";
+
+  // Deep-link ?subtab=<FleetSubtab> — one-shot idiom (AgentTerminalsView).
+  // Vorrang: Die nachfolgenden feature-gebundenen Board-/Plan-Effekte laufen
+  // später und gewinnen mit ihrem setSubtab bewusst gegen diesen generischen
+  // Einstieg. Beim Konsum aus demselben Snapshot löschen sie ?subtab= mit.
+  useEffect(() => {
+    if (subtabDeepLinkConsumedRef.current) return;
+    const raw = searchParams.get("subtab");
+    if (raw == null || raw === "") return;
+    subtabDeepLinkConsumedRef.current = true;
+    const next = new URLSearchParams(searchParams);
+    next.delete("subtab");
+    setSearchParams(next, { replace: true });
+    const deepLinkedSubtab = parseFleetSubtab(raw);
+    if (deepLinkedSubtab) setSubtab(deepLinkedSubtab);
+  }, [searchParams, setSearchParams]);
 
   // Deep-link ?board=<slug>&status=<TaskStatus> und/oder ?task=<id> — one-shot
   // idiom (AgentTerminalsView). Board/Status: Katalog abwarten, Board-Subtab
@@ -178,6 +211,7 @@ export function FleetView() {
     next.delete("board");
     next.delete("status");
     next.delete("task");
+    next.delete("subtab");
     setSearchParams(next, { replace: true });
 
     if (hasBoard) {
@@ -230,6 +264,7 @@ export function FleetView() {
     planDeepLinkConsumedRef.current = true;
     const next = new URLSearchParams(searchParams);
     next.delete("plan");
+    next.delete("subtab");
     setSearchParams(next, { replace: true });
     const item = source.planspecs.find((candidate) => candidate.path === planParam);
     if (item) openPlanSpecDetail(item);
@@ -338,14 +373,17 @@ export function FleetView() {
   );
   const runningChainCount = kettenChipsForAside.filter((chip) => chip.state === "active").length;
 
-  const subtabDefs: SubtabDef[] = [
-    { id: "heute", label: de.fleet.subtabHeute },
-    { id: "worker", label: de.fleet.subtabWorker, count: activeWorkers.length > 0 ? activeWorkers.length : undefined },
-    { id: "ketten", label: de.fleet.subtabKetten, count: runningChainCount > 0 ? runningChainCount : undefined },
-    { id: "board", label: de.fleet.subtabBoard },
-    { id: "plan", label: de.fleet.subtabPlan, count: pendingApprovals > 0 ? pendingApprovals : undefined },
-    { id: "risiko", label: de.fleet.subtabRisiko, warn: blockedCount > 0 },
-  ];
+  const subtabDefs: SubtabDef[] = FLEET_SUBTABS.map((definition) => ({
+    ...definition,
+    count: definition.id === "worker"
+      ? (activeWorkers.length > 0 ? activeWorkers.length : undefined)
+      : definition.id === "ketten"
+        ? (runningChainCount > 0 ? runningChainCount : undefined)
+        : definition.id === "plan"
+          ? (pendingApprovals > 0 ? pendingApprovals : undefined)
+          : undefined,
+    warn: definition.id === "risiko" ? blockedCount > 0 : undefined,
+  }));
 
   function closeNodeDetail() {
     setNodeDetailId(null);
