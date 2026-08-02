@@ -22,12 +22,6 @@ _REQUEST_CHANGES = "REQUEST_CHANGES"
 _COMPLETED_OUTCOME = "completed"
 
 
-def _field(value: object, key: str, default: Any = None) -> Any:
-    if isinstance(value, Mapping):
-        return value.get(key, default)
-    return getattr(value, key, default)
-
-
 def _explicit_review_verdict(metadata: object) -> tuple[bool, object]:
     if not isinstance(metadata, Mapping):
         return False, None
@@ -89,6 +83,8 @@ def derive_negative_verdict_without_authority_diagnostics(
     events: Sequence[object],
     *,
     diagnostic_factory: Callable[..., object],
+    field: Callable[[object, str, Any], Any],
+    parse_payload: Callable[[object], Mapping[str, Any]],
 ) -> list[object]:
     """Project the newest triggering event into one warning diagnostic.
 
@@ -96,18 +92,15 @@ def derive_negative_verdict_without_authority_diagnostics(
     archived card clears the projection entirely.
     """
 
-    if _field(task, "status") == "archived":
+    if field(task, "status", None) == "archived":
         return []
 
     candidates: list[object] = []
     for event in events:
-        if _field(event, "kind") != NEGATIVE_VERDICT_WITHOUT_AUTHORITY_EVENT_KIND:
+        if field(event, "kind", None) != NEGATIVE_VERDICT_WITHOUT_AUTHORITY_EVENT_KIND:
             continue
-        payload = _field(event, "payload", {})
-        if (
-            isinstance(payload, Mapping)
-            and payload.get("normalized_verdict") == _REQUEST_CHANGES
-        ):
+        payload = parse_payload(event)
+        if payload.get("normalized_verdict") == _REQUEST_CHANGES:
             candidates.append(event)
     if not candidates:
         return []
@@ -115,17 +108,17 @@ def derive_negative_verdict_without_authority_diagnostics(
     trigger = max(
         candidates,
         key=lambda event: (
-            int(_field(event, "created_at", 0) or 0),
-            int(_field(event, "id", 0) or 0),
+            int(field(event, "created_at", 0) or 0),
+            int(field(event, "id", 0) or 0),
         ),
     )
-    payload = _field(trigger, "payload", {})
-    task_id = str(_field(task, "id", ""))
+    payload = parse_payload(trigger)
+    task_id = str(field(task, "id", ""))
     verdict = str(payload.get("normalized_verdict"))
     finding_count = int(payload.get("blocking_findings_count") or 0)
-    created_at = int(_field(trigger, "created_at", 0) or 0)
-    event_id = _field(trigger, "id")
-    run_id = _field(trigger, "run_id")
+    created_at = int(field(trigger, "created_at", 0) or 0)
+    event_id = field(trigger, "id", None)
+    run_id = field(trigger, "run_id", None)
 
     return [
         diagnostic_factory(

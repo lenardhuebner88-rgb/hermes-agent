@@ -1979,6 +1979,8 @@ def _rule_negative_verdict_without_authority(
         task,
         events,
         diagnostic_factory=Diagnostic,
+        field=_task_field,
+        parse_payload=_parse_payload,
     )
 
 

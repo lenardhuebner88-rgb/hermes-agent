@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -206,3 +207,71 @@ def test_diagnostic_is_warning_deduped_to_latest_trigger_and_archival_clears():
         diagnostic.kind == NEGATIVE_VERDICT_WITHOUT_AUTHORITY_DIAGNOSTIC_KIND
         for diagnostic in compute_task_diagnostics(task, events, [], now=300)
     )
+
+
+def test_negative_review_diagnostic_supports_bulk_sqlite_rows(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="row diagnostic", assignee="researcher")
+        payload = {
+            "normalized_verdict": "REQUEST_CHANGES",
+            "raw_verdict": "needs revision",
+            "authority_reason": REVIEW_AUTHORITY_REASON_NOT_REVIEW_CLAIM,
+            "blocking_findings_count": 2,
+        }
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                task_id,
+                NEGATIVE_VERDICT_WITHOUT_AUTHORITY_EVENT_KIND,
+                payload,
+                run_id=41,
+            )
+            latest_event_id = kb._append_event(
+                conn,
+                task_id,
+                NEGATIVE_VERDICT_WITHOUT_AUTHORITY_EVENT_KIND,
+                {**payload, "blocking_findings_count": 3},
+                run_id=42,
+            )
+
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        event_rows = conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY id", (task_id,)
+        ).fetchall()
+        assert isinstance(task_row, sqlite3.Row)
+        assert all(isinstance(event, sqlite3.Row) for event in event_rows)
+        assert isinstance(event_rows[-1]["payload"], str)
+
+        diagnostics = [
+            diagnostic
+            for diagnostic in compute_task_diagnostics(
+                task_row,
+                event_rows,
+                [],
+                now=int(event_rows[-1]["created_at"]),
+            )
+            if diagnostic.kind == NEGATIVE_VERDICT_WITHOUT_AUTHORITY_DIAGNOSTIC_KIND
+        ]
+        assert len(diagnostics) == 1
+        assert diagnostics[0].severity == "warning"
+        assert diagnostics[0].data["event_id"] == latest_event_id
+        assert diagnostics[0].data["blocking_findings_count"] == 3
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'archived' WHERE id = ?", (task_id,)
+            )
+        archived_task_row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        assert not any(
+            diagnostic.kind == NEGATIVE_VERDICT_WITHOUT_AUTHORITY_DIAGNOSTIC_KIND
+            for diagnostic in compute_task_diagnostics(
+                archived_task_row,
+                event_rows,
+                [],
+                now=int(event_rows[-1]["created_at"]),
+            )
+        )
