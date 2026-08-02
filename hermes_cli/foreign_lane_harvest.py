@@ -39,6 +39,7 @@ from typing import Any, Iterator, Mapping, Optional, Sequence
 from urllib.parse import quote
 
 from hermes_cli.usage_facts_db import (
+    finalize_run_tool_call_count,
     initialize_usage_facts_db,
     record_llm_call,
     upsert_run_facts,
@@ -933,6 +934,11 @@ def write_extracted_run(
         calls_written = len(extracted.calls)
     else:
         upsert_run_facts(extracted.run_id, extracted.run_fields, path=db_path)
+
+    # Extracted sessions are terminal, so absence of tool events is an
+    # observed zero.  The conditional finalizer preserves richer existing
+    # measurements during replays and force-harvests.
+    finalize_run_tool_call_count(extracted.run_id, path=db_path)
 
     rl_written = 0
     if extracted.rate_limit is not None and rate_limit_path is not None:
