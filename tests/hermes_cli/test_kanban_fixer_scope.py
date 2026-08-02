@@ -1,0 +1,715 @@
+"""Conflict-fixer children inherit the declared scope of their parent slice."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
+from tests.hermes_cli._kanban_test_helpers import _commit_in, _events, _git
+
+
+_PARK_REASON = "integration parked: merge conflict/failure (aborted): conflict.py"
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    for key in list(os.environ):
+        if key.startswith("HERMES_KANBAN_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = kb.kanban_db_path(board="default")
+    assert db_path.resolve() != Path("/home/piet/.hermes/kanban.db").resolve()
+    assert home.resolve() in db_path.resolve().parents
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    kb.init_db()
+    return home
+
+
+def _make_repo(repo: Path, base_branch: str) -> Path:
+    repo.mkdir()
+    _git(repo, "init", "-b", base_branch)
+    _git(repo, "config", "user.email", "fixer-scope@test.invalid")
+    _git(repo, "config", "user.name", "fixer scope test")
+    for path in (
+        "hermes_cli/allowed.py",
+        "hermes_cli/parent_owned.py",
+        "hermes_cli/sibling.py",
+        "tests/unrelated/test_timeout.py",
+    ):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("BASE = True\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    return repo
+
+
+@pytest.fixture
+def repo(tmp_path):
+    return _make_repo(tmp_path / "repo", "main")
+
+
+@pytest.fixture
+def repo_master(tmp_path):
+    """Chain repo whose base branch is *not* ``main``.
+
+    ``main`` exists but stays behind at the base commit: a guard that
+    measures against an invented ``"main"`` target therefore sees the
+    foreign target history as fixer work, instead of against ``master``
+    where it nets out. On the live board 4 of 45 real conflict fixers ran
+    on such a chain (repo ``/home/piet/vault``, which has no ``main`` at all).
+    """
+    repo = _make_repo(tmp_path / "repo-master", "master")
+    _git(repo, "branch", "main")
+    return repo
+
+
+def _materialize_parent(conn, repo: Path, parent_id: str) -> tuple[object, Path]:
+    claimed = kb.claim_task(conn, parent_id)
+    assert claimed is not None
+    materialized = kwt.materialize_dispatch_workspace(
+        conn,
+        claimed,
+        mode=kwt.MANAGED_WORKTREE_PROVISION,
+        board="default",
+        resolve_existing=lambda task, *, board=None: (
+            Path(task.workspace_path),
+            task.branch_name,
+        ),
+        resolve_managed_base=lambda task, *, board=None: repo,
+    )
+    provisioned = kwt.split_provisioned_path(materialized.path)
+    assert provisioned is not None
+    return claimed, provisioned[2]
+
+
+def _create_real_fixer(
+    conn,
+    repo: Path,
+    *,
+    allowed_paths: list[str] | None,
+    parent_extra_path: str | None = None,
+    record_parent_receipt: bool = False,
+) -> tuple[str, str, Path, int]:
+    create_kwargs = {}
+    if allowed_paths is not None:
+        create_kwargs["scope_contract"] = {"allowed_paths": allowed_paths}
+    parent_id = kb.create_task(
+        conn,
+        title="parked scoped parent",
+        assignee="coder",
+        workspace_kind="worktree",
+        workspace_path=str(repo),
+        **create_kwargs,
+    )
+    claimed_parent, worktree = _materialize_parent(conn, repo, parent_id)
+    _commit_in(
+        worktree,
+        "hermes_cli/allowed.py",
+        "BASE = True\nPARENT = True\n",
+        msg=f"kanban({parent_id}): parent slice",
+    )
+    if parent_extra_path is not None:
+        _commit_in(
+            worktree,
+            parent_extra_path,
+            "BASE = True\nPARENT_OWNED = True\n",
+            msg=f"kanban({parent_id}): parent-owned path",
+        )
+    parent_commit = _git(worktree, "rev-parse", "HEAD")
+    assert kb.block_task(conn, parent_id, reason=_PARK_REASON, kind="integration")
+    if record_parent_receipt:
+        assert claimed_parent.current_run_id is not None
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET metadata = ? WHERE id = ?",
+                (
+                    json.dumps({"commit": parent_commit}),
+                    int(claimed_parent.current_run_id),
+                ),
+            )
+
+    parent_row = conn.execute(
+        "SELECT * FROM tasks WHERE id = ?", (parent_id,)
+    ).fetchone()
+    summary = {"parked": [], "conflict_fixer_dispatched": []}
+    kb._maybe_route_conflict_park_fixer(
+        conn,
+        parent_row,
+        reason=_PARK_REASON,
+        retry_count=0,
+        now=int(time.time()),
+        summary=summary,
+    )
+    dispatched = summary["conflict_fixer_dispatched"]
+    assert len(dispatched) == 1
+    child_id = dispatched[0]["child_id"]
+    assert _events(conn, child_id, "conflict_fixer_for")
+
+    child = kb.claim_task(conn, child_id)
+    assert child is not None
+    run_id = child.current_run_id
+    assert run_id is not None
+    kwt.prepare_reused_task_worktree(conn, child, worktree)
+    run = conn.execute(
+        "SELECT workspace_materialized FROM task_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    assert run is not None and run["workspace_materialized"] == 1
+    return parent_id, child_id, worktree, int(run_id)
+
+
+def _complete_fixer(
+    conn,
+    child_id: str,
+    run_id: int,
+    *,
+    metadata: dict | None = None,
+) -> bool:
+    return kb.complete_task(
+        conn,
+        child_id,
+        summary="conflict fixed",
+        metadata=metadata,
+        expected_run_id=run_id,
+    )
+
+
+def _advance_target(repo: Path, *, revision: int = 1) -> None:
+    target = repo / "hermes_cli" / "foreign_target.py"
+    target.write_text(f"FOREIGN_REVISION = {revision}\n", encoding="utf-8")
+    _git(repo, "add", "hermes_cli/foreign_target.py")
+    _git(repo, "commit", "-m", f"foreign target advance {revision}")
+
+
+def _rebase_onto_target(repo: Path, worktree: Path) -> None:
+    _advance_target(repo)
+    _git(worktree, "rebase", "main")
+
+
+def test_conflict_fixer_outside_parent_scope_is_parked(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 45\n",
+            msg=f"kanban({child_id}): out-of-scope workaround",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None
+        assert child.status == "blocked", (
+            "out-of-scope conflict fixer completed instead of being parked"
+        )
+        assert parent is not None and parent.status == "blocked"
+        blocked = _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT)
+        assert len(blocked) == 1
+        assert blocked[0]["class"] == "fixer_scope"
+        assert blocked[0]["parent_id"] == parent_id
+        assert blocked[0]["allowed_paths"] == ["hermes_cli/allowed.py"]
+        assert blocked[0]["violating_paths"] == [
+            "tests/unrelated/test_timeout.py"
+        ]
+
+    assert _git(repo, "show", "main:tests/unrelated/test_timeout.py") == (
+        "BASE = True"
+    )
+
+
+def test_conflict_fixer_inside_parent_scope_completes(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): in-scope fix",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_allows_paths_already_touched_by_parent(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            parent_extra_path="hermes_cli/parent_owned.py",
+        )
+        _commit_in(
+            worktree,
+            "hermes_cli/parent_owned.py",
+            "BASE = True\nPARENT_OWNED = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): repair parent-owned path",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_allows_preservable_artifacts(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        _commit_in(
+            worktree,
+            "artifacts/fixer.log",
+            "conflict reproduction evidence\n",
+            msg=f"kanban({child_id}): conflict evidence",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_without_parent_scope_fails_open(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=None
+        )
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 45\n",
+            msg=f"kanban({child_id}): unscoped fix",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_rebase_without_violation_completes(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            record_parent_receipt=True,
+        )
+        fixer_stamp = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()["pre_run_commit_sha"]
+        _rebase_onto_target(repo, worktree)
+        assert not kwt._branch_is_ancestor(worktree, fixer_stamp, "HEAD")
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): rebased in-scope fix",
+        )
+        fixer_commit = _git(worktree, "rev-parse", "HEAD")
+
+        assert _complete_fixer(
+            conn, child_id, run_id, metadata={"commit": fixer_commit}
+        )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_rebase_parks_only_real_violation(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            record_parent_receipt=True,
+        )
+        _rebase_onto_target(repo, worktree)
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 90\n",
+            msg=f"kanban({child_id}): rebased out-of-scope fix",
+        )
+        fixer_commit = _git(worktree, "rev-parse", "HEAD")
+
+        assert _complete_fixer(
+            conn, child_id, run_id, metadata={"commit": fixer_commit}
+        )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "blocked"
+        assert parent is not None and parent.status == "blocked"
+        blocked = _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT)
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "tests/unrelated/test_timeout.py"
+        ]
+
+
+def test_conflict_fixer_merge_history_excludes_target_paths(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        fixer_stamp = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()["pre_run_commit_sha"]
+        _advance_target(repo)
+        _git(worktree, "merge", "main", "-m", "merge live target")
+        assert kwt._branch_is_ancestor(worktree, fixer_stamp, "HEAD")
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): merged-target in-scope fix",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_non_main_target_uses_its_own_merge_target(
+    repo_master, kanban_home,
+):
+    """A ``master`` chain must be measured against ``master``, not ``main``.
+
+    Pins the resolution path as much as the outcome: a fixer hangs off its
+    chain by event only, so ``chain_root_id`` of the fixer is the fixer
+    itself and carries no ``worktree_provisioned`` event. The chain root has
+    to come from the ``conflict_fixer_for`` marker.
+    """
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo_master, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        root_id = _events(conn, child_id, "conflict_fixer_for")[-1]["root_id"]
+        assert kwt.frozen_merge_target(conn, root_id) == "master"
+        assert kwt.chain_root_id(conn, child_id) == child_id
+        assert kwt.frozen_merge_target(conn, child_id) is None
+
+        _advance_target(repo_master)
+        _git(worktree, "merge", "master", "-m", "merge live target")
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): in-scope fix on a master chain",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_merge_history_without_receipt_uses_stamp_and_net_paths(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        run = conn.execute(
+            "SELECT pre_run_commit_sha, metadata FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert run["pre_run_commit_sha"]
+        assert not run["metadata"] or "commit" not in json.loads(run["metadata"])
+        _advance_target(repo)
+        _git(worktree, "merge", "main", "-m", "merge live target")
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): stamped merged-target fix",
+        )
+
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_fixer_scope"):
+            assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert "attributed via ancestor stamp" in caplog.text
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_merge_history_parks_separate_commit_violation(
+    repo, kanban_home,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        _advance_target(repo)
+        _git(worktree, "merge", "main", "-m", "merge live target")
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 180\n",
+            msg=f"kanban({child_id}): separate out-of-scope fix",
+        )
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): final in-scope fix",
+        )
+        final_commit = _git(worktree, "rev-parse", "HEAD")
+        assert kwt._lane_scope_recorded_task_commit_paths(
+            conn,
+            child_id,
+            worktree,
+            completion_metadata={"commit": final_commit},
+        ) == {"hermes_cli/allowed.py"}
+
+        assert _complete_fixer(
+            conn, child_id, run_id, metadata={"commit": final_commit}
+        )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "blocked", (
+            "ancestor stamp range failed to catch the earlier non-merge "
+            "violation"
+        )
+        assert parent is not None and parent.status == "blocked"
+        blocked = _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT)
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "tests/unrelated/test_timeout.py"
+        ]
+
+
+def test_conflict_fixer_merge_commit_receipt_is_not_attributable(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            record_parent_receipt=True,
+        )
+        _advance_target(repo)
+        _git(worktree, "merge", "--no-commit", "main")
+        evil_path = worktree / "tests" / "unrelated" / "test_timeout.py"
+        evil_path.write_text("BASE = True\nTIMEOUT = 240\n", encoding="utf-8")
+        _git(worktree, "add", "tests/unrelated/test_timeout.py")
+        _git(worktree, "commit", "-m", "evil merge receipt")
+        merge_commit = _git(worktree, "rev-parse", "HEAD")
+        parents = _git(
+            worktree, "rev-list", "--parents", "-n", "1", "HEAD",
+        ).split()
+        assert len(parents) == 3
+        assert kwt._lane_scope_recorded_task_commit_paths(
+            conn,
+            child_id,
+            worktree,
+            completion_metadata={"commit": merge_commit},
+        ) == set()
+
+        _advance_target(repo, revision=2)
+        orphaned_stamp = _git(repo, "rev-parse", "HEAD")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET pre_run_commit_sha = ? WHERE id = ?",
+                (orphaned_stamp, run_id),
+            )
+        _git(worktree, "rev-parse", "--verify", f"{orphaned_stamp}^{{commit}}")
+        assert not kwt._branch_is_ancestor(worktree, orphaned_stamp, "HEAD")
+
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_fixer_scope"):
+            assert _complete_fixer(
+                conn, child_id, run_id, metadata={"commit": merge_commit}
+            )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert "empty commit-receipt path set is not attributable" in caplog.text
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_chain_scope_allows_sibling_paths(repo, kanban_home):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        sibling_id = kb.create_task(
+            conn,
+            title="sibling slice",
+            assignee="coder",
+            scope_contract={"allowed_paths": ["hermes_cli/sibling.py"]},
+        )
+        kb.link_tasks(conn, parent_id, sibling_id)
+        _commit_in(
+            worktree,
+            "hermes_cli/sibling.py",
+            "BASE = True\nSIBLING_FIX = True\n",
+            msg=f"kanban({child_id}): repair sibling-scope path",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done", (
+            "fixer was parked even though the changed path is declared by a "
+            "chain sibling"
+        )
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_uses_parent_receipt_after_rebase(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            parent_extra_path="hermes_cli/parent_owned.py",
+            record_parent_receipt=True,
+        )
+        parent_stamp = conn.execute(
+            "SELECT id, metadata FROM task_runs WHERE task_id = ? "
+            "ORDER BY id ASC LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        parent_receipt = json.loads(parent_stamp["metadata"])["commit"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET pre_run_commit_sha = ? WHERE id = ?",
+                (parent_receipt, parent_stamp["id"]),
+            )
+        _rebase_onto_target(repo, worktree)
+        assert not kwt._branch_is_ancestor(worktree, parent_receipt, "HEAD")
+        assert kwt._lane_scope_recorded_task_commit_paths(
+            conn, parent_id, worktree, completion_metadata=None
+        ) == {"hermes_cli/parent_owned.py"}
+        _commit_in(
+            worktree,
+            "hermes_cli/parent_owned.py",
+            "BASE = True\nPARENT_OWNED = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): repair rebased parent-owned path",
+        )
+        fixer_commit = _git(worktree, "rev-parse", "HEAD")
+
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_fixer_scope"):
+            assert _complete_fixer(
+                conn, child_id, run_id, metadata={"commit": fixer_commit}
+            )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert (
+            f"task {parent_id} attributed via commit receipts: "
+            "hermes_cli/parent_owned.py"
+        ) in caplog.text
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_without_attribution_skips_guard(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            record_parent_receipt=True,
+        )
+        fixer_stamp = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()["pre_run_commit_sha"]
+        _rebase_onto_target(repo, worktree)
+        assert not kwt._branch_is_ancestor(worktree, fixer_stamp, "HEAD")
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 120\n",
+            msg=f"kanban({child_id}): unattributable out-of-scope fix",
+        )
+
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_fixer_scope"):
+            assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert "condition 2 failed" in caplog.text
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_without_stamp_skips_completion_metadata_receipt(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn,
+            repo,
+            allowed_paths=["hermes_cli/allowed.py"],
+            record_parent_receipt=True,
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET pre_run_commit_sha = NULL WHERE id = ?",
+                (run_id,),
+            )
+        stored = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()["metadata"]
+        assert not stored or "commit" not in json.loads(stored)
+        _commit_in(
+            worktree,
+            "tests/unrelated/test_timeout.py",
+            "BASE = True\nTIMEOUT = 150\n",
+            msg=f"kanban({child_id}): completion-only receipt violation",
+        )
+        fixer_commit = _git(worktree, "rev-parse", "HEAD")
+
+        with caplog.at_level("INFO", logger="hermes_cli.kanban_fixer_scope"):
+            assert _complete_fixer(
+                conn, child_id, run_id, metadata={"commit": fixer_commit}
+            )
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert "condition 2 failed" in caplog.text
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
