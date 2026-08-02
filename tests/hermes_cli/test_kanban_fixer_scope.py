@@ -34,11 +34,9 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-@pytest.fixture
-def repo(tmp_path):
-    repo = tmp_path / "repo"
+def _make_repo(repo: Path, base_branch: str) -> Path:
     repo.mkdir()
-    _git(repo, "init", "-b", "main")
+    _git(repo, "init", "-b", base_branch)
     _git(repo, "config", "user.email", "fixer-scope@test.invalid")
     _git(repo, "config", "user.name", "fixer scope test")
     for path in (
@@ -52,6 +50,26 @@ def repo(tmp_path):
         target.write_text("BASE = True\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-m", "base")
+    return repo
+
+
+@pytest.fixture
+def repo(tmp_path):
+    return _make_repo(tmp_path / "repo", "main")
+
+
+@pytest.fixture
+def repo_master(tmp_path):
+    """Chain repo whose base branch is *not* ``main``.
+
+    ``main`` exists but stays behind at the base commit: a guard that
+    measures against an invented ``"main"`` target therefore sees the
+    foreign target history as fixer work, instead of against ``master``
+    where it nets out. On the live board 4 of 45 real conflict fixers ran
+    on such a chain (repo ``/home/piet/vault``, which has no ``main`` at all).
+    """
+    repo = _make_repo(tmp_path / "repo-master", "master")
+    _git(repo, "branch", "main")
     return repo
 
 
@@ -372,6 +390,42 @@ def test_conflict_fixer_merge_history_excludes_target_paths(repo, kanban_home):
             "hermes_cli/allowed.py",
             "BASE = True\nPARENT = True\nFIXER = True\n",
             msg=f"kanban({child_id}): merged-target in-scope fix",
+        )
+
+        assert _complete_fixer(conn, child_id, run_id)
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        assert child is not None and child.status == "done"
+        assert parent is not None and parent.status == "ready"
+        assert _events(conn, child_id, kwt.LANE_SCOPE_BLOCKED_EVENT) == []
+
+
+def test_conflict_fixer_non_main_target_uses_its_own_merge_target(
+    repo_master, kanban_home,
+):
+    """A ``master`` chain must be measured against ``master``, not ``main``.
+
+    Pins the resolution path as much as the outcome: a fixer hangs off its
+    chain by event only, so ``chain_root_id`` of the fixer is the fixer
+    itself and carries no ``worktree_provisioned`` event. The chain root has
+    to come from the ``conflict_fixer_for`` marker.
+    """
+    with kb.connect() as conn:
+        parent_id, child_id, worktree, run_id = _create_real_fixer(
+            conn, repo_master, allowed_paths=["hermes_cli/allowed.py"]
+        )
+        root_id = _events(conn, child_id, "conflict_fixer_for")[-1]["root_id"]
+        assert kwt.frozen_merge_target(conn, root_id) == "master"
+        assert kwt.chain_root_id(conn, child_id) == child_id
+        assert kwt.frozen_merge_target(conn, child_id) is None
+
+        _advance_target(repo_master)
+        _git(worktree, "merge", "master", "-m", "merge live target")
+        _commit_in(
+            worktree,
+            "hermes_cli/allowed.py",
+            "BASE = True\nPARENT = True\nFIXER = True\n",
+            msg=f"kanban({child_id}): in-scope fix on a master chain",
         )
 
         assert _complete_fixer(conn, child_id, run_id)

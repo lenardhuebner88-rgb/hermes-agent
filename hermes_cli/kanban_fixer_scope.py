@@ -139,12 +139,29 @@ def _attributed_task_paths(
 
 def _target_net_paths(
     conn: sqlite3.Connection,
-    task_id: str,
+    root_id: str,
     worktree: Path,
     kwt,
 ) -> tuple[set[str], str] | None:
-    root_id = kwt.chain_root_id(conn, task_id)
-    merge_target = kwt.frozen_merge_target(conn, root_id) or "main"
+    """Paths the fixer branch still contributes on top of its merge target.
+
+    *root_id* must be the chain root recorded on the ``conflict_fixer_for``
+    marker, never ``chain_root_id`` of the fixer itself: a fixer is attached
+    to its chain by event only -- it has neither a ``task_links`` row nor a
+    ``decomposed`` event -- so ``chain_root_id`` returns the fixer's own id,
+    for which ``worktree_provisioned`` never exists.
+
+    There is deliberately no ``"main"`` fallback. On a chain whose target is
+    e.g. ``master`` an invented target measures against the wrong merge base,
+    pulls foreign target history into the net set and can only manufacture
+    parks; where ``main`` does not exist at all the diff throws and the guard
+    goes silently dead. An unresolvable target is uncertainty, so it skips.
+    """
+    if not root_id:
+        return None
+    merge_target = kwt.frozen_merge_target(conn, root_id)
+    if not merge_target:
+        return None
     try:
         paths = set(_diff_paths(kwt, worktree, f"{merge_target}...HEAD"))
     except Exception:
@@ -269,12 +286,14 @@ def enforce_on_complete(
             )
             return None
 
-        net_result = _target_net_paths(conn, task_id, worktree, kwt)
+        root_id = str(marker_payload.get("root_id") or "").strip()
+        net_result = _target_net_paths(conn, root_id, worktree, kwt)
         if net_result is None:
             _log.info(
                 "conflict-fixer scope guard skipped for task %s: condition 2 "
-                "failed (target-branch net contribution is unavailable)",
+                "failed (merge target of chain root %r is unavailable)",
                 task_id,
+                root_id,
             )
             return None
         net_paths, merge_target = net_result
@@ -325,7 +344,7 @@ def enforce_on_complete(
             "returncode": 1,
             "output_tail": reason,
             "parent_id": parent_id,
-            "root_id": marker_payload.get("root_id"),
+            "root_id": root_id,
             "allowed_paths": allowed_paths,
             "parent_touched_paths": parent_touched_paths,
             "violating_paths": violating_paths,
