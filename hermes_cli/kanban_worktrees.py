@@ -5470,6 +5470,81 @@ def _set_review_snapshot_read_only(path: Path, *, read_only: bool) -> None:
             continue
 
 
+# Die beiden node_modules-Pfade, die scripts/gate-frontend.sh als dedizierte
+# Symlinks erwartet. Reihenfolge und Schreibweise muessen zu _GATE_NM_PATHS
+# passen — das Gate vergleicht das Linkziel exakt.
+_REVIEW_SNAPSHOT_DEPS_LINKS = ("node_modules", "web/node_modules")
+
+
+def _worktree_deps_tree(workspace_path: Path) -> Path:
+    """Spiegelt die Deps-Identitaet aus scripts/gate-frontend.sh.
+
+    Das Gate bildet sie als `basename(<physischer repo_root>)-<sha256[:16]>`
+    unter HERMES_WORKTREE_DEPS_ROOT und weist jedes node_modules zurueck, das
+    nicht exakt dorthin zeigt. Diese Formel darf deshalb nicht driften.
+    """
+    root = os.environ.get("HERMES_WORKTREE_DEPS_ROOT") or "/mnt/data/hermes-worktree-deps"
+    physical = str(workspace_path.resolve())
+    digest = hashlib.sha256(physical.encode("utf-8")).hexdigest()[:16]
+    return Path(os.path.normpath(root)) / f"{Path(physical).name}-{digest}"
+
+
+def _link_review_snapshot_deps(workspace_path: Path) -> list[str]:
+    """Legt die dedizierten node_modules-Symlinks VOR der Read-only-Sperre an.
+
+    Der Review-Snapshot wird bis auf die Verzeichnisse schreibgeschuetzt —
+    danach laesst sich in ihm nichts mehr anlegen, auch nicht der
+    node_modules-Symlink, den scripts/gate-frontend.sh beim ersten Aufruf
+    sonst selbst provisioniert. Der Reviewer kann dann weder das Frontend-Gate
+    noch scripts/visual-verify.sh ausfuehren: tsc bricht mit
+    `EACCES … mkdir web/node_modules` ab, und das betroffene Akzeptanzkriterium
+    wird als UNMET gemeldet, obwohl am Kandidaten nichts fehlt. Genau so
+    scheiterte AC-7 bei t_fd6f3c06 am 2026-08-02.
+
+    Die Linkziele liegen ausserhalb des Snapshots, die verfolgten Dateien des
+    Kandidaten bleiben also unveraendert schreibgeschuetzt — schreibbar wird
+    nur die Build-Maschinerie. `Path.rglob` steigt nicht in Symlinks ab
+    (gemessen auf CPython 3.12), der Sweep sperrt den Deps-Baum daher nicht mit.
+    """
+    deps_tree = _worktree_deps_tree(workspace_path)
+    created: list[str] = []
+    for rel in _REVIEW_SNAPSHOT_DEPS_LINKS:
+        link = workspace_path / rel
+        if link.is_symlink() or link.exists():
+            continue
+        # Kein Verzeichnis erfinden, das der Kandidat nicht hat: ein Repo ohne
+        # web/ bekommt auch keinen web/node_modules-Link.
+        if not link.parent.is_dir():
+            continue
+        try:
+            link.symlink_to(deps_tree / rel)
+        except OSError:
+            continue
+        created.append(rel)
+    return created
+
+
+def _remove_review_snapshot_deps_tree(workspace_path: Path) -> str | None:
+    """Raeumt den zum Snapshot gehoerenden Deps-Baum mit ab.
+
+    Jeder Snapshot bekommt ueber die Pfad-Hash-Identitaet einen eigenen Baum;
+    ohne dieses Aufraeumen bleibt pro Review rund ein Gigabyte liegen, das der
+    Snapshot-Hygiene-Sweep nicht sieht (er kennt nur .worktrees/kanban-review).
+    Entfernt wird ausschliesslich ein Verzeichnis, dessen Name exakt der
+    Identitaet dieses Snapshots entspricht und das unter dem Deps-Root liegt.
+    """
+    deps_tree = _worktree_deps_tree(workspace_path)
+    deps_root = deps_tree.parent
+    try:
+        deps_tree.relative_to(deps_root)
+    except ValueError:
+        return None
+    if not deps_tree.is_dir() or deps_tree.is_symlink():
+        return None
+    shutil.rmtree(deps_tree, ignore_errors=True)
+    return None if deps_tree.exists() else str(deps_tree)
+
+
 def hygiene_sweep_review_snapshots(
     repo_root: Path | str,
     *,
@@ -5537,6 +5612,9 @@ def provision_review_snapshot(
         cleanup_review_snapshot(repo_root=repo_root, workspace_path=workspace_path)
     _git(repo_root, "worktree", "add", "--detach", str(workspace_path), candidate)
     try:
+        # Muss VOR der Sperre passieren — danach ist im Snapshot nichts mehr
+        # anlegbar und der Reviewer kann Gate und visual-verify nicht fahren.
+        deps_links = _link_review_snapshot_deps(workspace_path)
         _set_review_snapshot_read_only(workspace_path, read_only=True)
     except Exception:
         cleanup_review_snapshot(repo_root=repo_root, workspace_path=workspace_path)
@@ -5550,6 +5628,7 @@ def provision_review_snapshot(
         "detached": True,
         "disk_free_bytes": free_bytes,
         "disk_required_bytes": required_bytes,
+        "deps_links": deps_links,
     }
 
 
@@ -5562,6 +5641,9 @@ def cleanup_review_snapshot(*, repo_root: Path, workspace_path: Path) -> None:
     except ValueError as exc:
         raise RuntimeError(f"refusing to remove non-review workspace: {workspace_path}") from exc
     _set_review_snapshot_read_only(workspace_path, read_only=False)
+    # Vor dem Entfernen des Worktrees, solange die Identitaet noch aus dem
+    # physischen Pfad ableitbar ist.
+    _remove_review_snapshot_deps_tree(workspace_path)
     result = subprocess.run(
         ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(workspace_path)],
         text=True,

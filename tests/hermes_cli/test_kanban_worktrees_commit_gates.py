@@ -818,6 +818,100 @@ def test_review_snapshot_is_detached_read_only_full_diff_and_stable(repo, monkey
     assert not orphan_path.exists()
 
 
+def _provision_snapshot_with_web(repo, tmp_path, monkeypatch, *, task_id):
+    """Snapshot ueber einem Kandidaten, der ein web/-Verzeichnis mitbringt."""
+    monkeypatch.setenv("HERMES_KANBAN_REVIEW_SNAPSHOT_MIN_FREE_BYTES", "0")
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(tmp_path / "deps-root"))
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "web").mkdir(exist_ok=True)
+    (repo / "web" / "package.json").write_text('{"name":"web"}\n')
+    _git(repo, "add", "web/package.json")
+    _git(repo, "commit", "-m", "candidate with web workspace")
+    candidate = _git(repo, "rev-parse", "HEAD").strip()
+    snapshot = kwt.provision_review_snapshot(
+        source_workspace=repo,
+        task_id=task_id,
+        run_id=7,
+        candidate_commit=candidate,
+        base_commit=base,
+    )
+    return snapshot, Path(snapshot["workspace_path"])
+
+
+def test_review_snapshot_keeps_dependency_links_usable_after_lock(repo, tmp_path, monkeypatch):
+    """Der Reviewer muss im gesperrten Snapshot bauen koennen.
+
+    Regression: der Read-only-Sweep nimmt auch den Verzeichnissen das
+    Schreibrecht, danach liess sich der node_modules-Symlink nicht mehr
+    anlegen. gate-frontend.sh und visual-verify.sh brachen mit
+    `EACCES ... mkdir web/node_modules` ab und das Akzeptanzkriterium galt
+    als UNMET, obwohl am Kandidaten nichts fehlte (t_fd6f3c06, 2026-08-02).
+    """
+    snapshot, path = _provision_snapshot_with_web(repo, tmp_path, monkeypatch, task_id="t_deps")
+    try:
+        assert sorted(snapshot["deps_links"]) == ["node_modules", "web/node_modules"]
+        for rel in ("node_modules", "web/node_modules"):
+            link = path / rel
+            assert link.is_symlink(), f"{rel} fehlt nach der Sperre"
+            target = Path(os.readlink(link))
+            assert not str(target).startswith(str(path)), "Linkziel muss ausserhalb liegen"
+            # Durch den Link schreiben — das ist exakt der Pfad, den tsc nimmt.
+            (target / ".tmp").mkdir(parents=True, exist_ok=True)
+            (link / ".tmp" / "tsconfig.tsbuildinfo").write_text("{}\n")
+            assert (target / ".tmp" / "tsconfig.tsbuildinfo").read_text() == "{}\n"
+        # Die Integritaet des Kandidaten bleibt: verfolgte Dateien sind gesperrt.
+        with pytest.raises(PermissionError):
+            (path / "web" / "package.json").write_text("mutation\n")
+    finally:
+        kwt.cleanup_review_snapshot(repo_root=Path(snapshot["repo_root"]), workspace_path=path)
+
+
+def test_review_snapshot_dep_identity_matches_gate_frontend_formula(repo, tmp_path, monkeypatch):
+    """Gegenprobe gegen die Shell, nicht gegen unsere eigene Funktion.
+
+    scripts/gate-frontend.sh weist jedes node_modules zurueck, das nicht exakt
+    auf seinen erwarteten Baum zeigt. Weicht unsere Identitaet ab, faellt der
+    Reviewer in "mixed local/dedicated node_modules layout" statt zu bauen.
+    """
+    snapshot, path = _provision_snapshot_with_web(repo, tmp_path, monkeypatch, task_id="t_ident")
+    try:
+        shell = subprocess.run(
+            [
+                "bash", "-c",
+                'repo_root="$(cd "$1" && pwd -P)"; '
+                'root="$(readlink -m -- "$HERMES_WORKTREE_DEPS_ROOT")"; '
+                'h="$(printf %s "$repo_root" | sha256sum | awk "{print substr(\\$1, 1, 16)}")"; '
+                'printf %s "$root/$(basename -- "$repo_root")-$h"',
+                "_", str(path),
+            ],
+            text=True, capture_output=True, check=True,
+        )
+        expected_tree = Path(shell.stdout.strip())
+        assert Path(os.readlink(path / "node_modules")) == expected_tree / "node_modules"
+        assert Path(os.readlink(path / "web" / "node_modules")) == expected_tree / "web/node_modules"
+    finally:
+        kwt.cleanup_review_snapshot(repo_root=Path(snapshot["repo_root"]), workspace_path=path)
+
+
+def test_cleanup_review_snapshot_removes_dedicated_deps_tree(repo, tmp_path, monkeypatch):
+    """Ohne dieses Aufraeumen bleibt pro Review ~1 GB liegen.
+
+    Der Hygiene-Sweep sieht nur .worktrees/kanban-review und wuerde den
+    Deps-Baum nie anfassen — er waechst still mit jedem Review.
+    """
+    snapshot, path = _provision_snapshot_with_web(repo, tmp_path, monkeypatch, task_id="t_disk")
+    deps_tree = Path(os.readlink(path / "node_modules")).parent
+    deps_tree.mkdir(parents=True, exist_ok=True)
+    (deps_tree / "node_modules").mkdir(exist_ok=True)
+    (deps_tree / "node_modules" / "big.bin").write_text("x" * 1024)
+    assert deps_tree.is_dir()
+
+    kwt.cleanup_review_snapshot(repo_root=Path(snapshot["repo_root"]), workspace_path=path)
+
+    assert not deps_tree.exists(), "Deps-Baum des Snapshots blieb liegen"
+    assert deps_tree.parent.is_dir(), "nur der eigene Baum darf weg, nicht der Deps-Root"
+
+
 # ---------------------------------------------------------------------------
 # Lane-scope enforcement (coder <-> coder-frontend) at the worker-commit
 # boundary — mechanical backing for the decomposer PATH RULE prompt.
