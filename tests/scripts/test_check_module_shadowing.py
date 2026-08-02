@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import subprocess
 import sys
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -128,3 +131,90 @@ def test_explicit_allowlist_suppresses_only_named_file_and_symbol(
     assert "hermes_cli/kanban_db.py" not in result.stderr
     assert "hermes_cli/kanban_worktrees.py:1" in result.stderr
     assert "hermes_cli/kanban_worktrees.py:4" in result.stderr
+
+
+def test_committed_allowlist_is_an_explicit_empty_list() -> None:
+    """AC-1: the allowlist exists in the repo and starts out empty."""
+    assert json.loads(ALLOWLIST.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"path": "hermes_cli/kanban_db.py", "name": "intentional"}],
+        [{"path": "hermes_cli/kanban_db.py", "name": "intentional", "reason": " "}],
+        [["hermes_cli/kanban_db.py", "intentional", "terse"]],
+        {"path": "hermes_cli/kanban_db.py"},
+    ],
+)
+def test_allowlist_entry_without_a_reason_fails_loudly(
+    tmp_path: Path,
+    entries: object,
+) -> None:
+    """A suppression must stay a visible decision, never a silent typo."""
+    root, allowlist = _fixture_repo(
+        tmp_path,
+        kanban_db="def intentional():\n    pass\n\ndef intentional():\n    pass\n",
+    )
+    allowlist.write_text(json.dumps(entries), encoding="utf-8")
+
+    result = _run(root, allowlist)
+
+    assert result.returncode == 2, result.stdout
+    assert "allowlist" in result.stderr
+
+
+def test_checker_imports_no_repository_module() -> None:
+    """AC-4 counter-metric: a pure AST walk, so a broken repo cannot break it."""
+    repo_modules = {
+        path.name
+        for path in REPO_ROOT.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    } | {path.stem for path in REPO_ROOT.glob("*.py")}
+    assert "hermes_cli" in repo_modules, "guard lost its subject"
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "relative import ties the checker to a package"
+            if node.module:
+                imported.add(node.module.split(".")[0])
+
+    assert not imported & repo_modules, sorted(imported & repo_modules)
+
+
+def test_checker_modifies_no_file(tmp_path: Path) -> None:
+    """AC-4 counter-metric: read-only, even on the failing path."""
+    root, allowlist = _fixture_repo(
+        tmp_path,
+        kanban_db="def dupe():\n    pass\n\ndef dupe():\n    pass\n",
+    )
+
+    def _snapshot() -> dict[str, tuple[int, str]]:
+        return {
+            str(path.relative_to(root)): (
+                path.stat().st_mtime_ns,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    before = _snapshot()
+    result = _run(root, allowlist)
+
+    assert result.returncode == 1
+    assert _snapshot() == before
+
+
+def test_real_module_scan_stays_far_under_the_suite_budget() -> None:
+    """AC-4 counter-metric: the whole added gate costs a fraction of 5 s."""
+    started = time.perf_counter()
+    result = _run()
+    elapsed = time.perf_counter() - started
+
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 5.0, f"checker took {elapsed:.2f}s"
