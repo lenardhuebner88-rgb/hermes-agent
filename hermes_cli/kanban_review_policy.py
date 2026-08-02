@@ -57,6 +57,12 @@ _AUTONOMY_CORE_PATHS = frozenset(
     }
 )
 _MIGRATION_SUFFIXES = frozenset({".js", ".py", ".sql", ".ts"})
+_FORK_POINT_CLAMP_BASELINE_KINDS = frozenset(
+    {
+        "candidate_parent_same_tree_fallback",
+        "pre_run_commit_sha",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,9 @@ class ReviewDecisionContext:
     evidence_error: Optional[str] = None
     accumulated_required: bool = False
     path_state_digest: Optional[str] = None
+    baseline_clamped_to_fork_point: bool = False
+    pre_clamp_baseline_commit: Optional[str] = None
+    clamp_target_ref: Optional[str] = None
 
     @property
     def path_risk(self) -> PathRiskDecision:
@@ -283,6 +292,143 @@ def _linked_chain(
         return root_id, members, worktrees.frozen_merge_target(conn, root_id)
     except Exception:
         return None, (task_id,), None
+
+
+def _recorded_task_commits(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    workspace: str,
+) -> tuple[str, ...]:
+    """Resolve task-local worker commits from persisted run receipts.
+
+    This deliberately mirrors the receipt source and resolution behavior of
+    ``kanban_worktrees._lane_scope_recorded_task_commit_paths``: malformed
+    metadata is ignored, duplicate commit receipts are collapsed, and
+    unresolvable commits do not count as usable attribution.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT metadata FROM task_runs "
+            "WHERE task_id = ? ORDER BY id DESC",
+            (task_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+
+    commits: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        raw = row["metadata"] if isinstance(row, sqlite3.Row) else row[0]
+        if not raw:
+            continue
+        try:
+            metadata = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        commit = str(metadata.get("commit") or "").strip()
+        if not commit or commit in seen:
+            continue
+        seen.add(commit)
+        resolved = _git(
+            workspace,
+            "rev-parse",
+            "--verify",
+            f"{commit}^{{commit}}",
+        )
+        if resolved:
+            commits.append(resolved.strip())
+    return tuple(commits)
+
+
+def _clamp_to_fork_point(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    workspace: str,
+    baseline: str,
+    baseline_kind: str,
+    candidate: str,
+) -> tuple[str, bool, Optional[str]]:
+    """Advance a stale frozen base forward to its target branch fork point.
+
+    Clamp only when the candidate is not already landed, the base moves
+    forward, and no recorded worker commit for this task lies in the proposed
+    ``(baseline, fork_point]`` span.
+
+    Remaining attribution gap: when this task has no recorded commit receipts
+    (or none resolves), the landed-candidate guard is the only upper bound.
+    Task work inside ``(baseline, fork_point]`` then cannot be distinguished
+    from target-branch movement; this is a known gap, not intended semantics.
+    """
+    if baseline_kind not in _FORK_POINT_CLAMP_BASELINE_KINDS:
+        return baseline, False, None
+
+    target_ref = "main"
+    try:
+        from hermes_cli import kanban_worktrees as worktrees
+
+        root_id = worktrees.chain_root_id(conn, task_id)
+        target_ref = worktrees.frozen_merge_target(conn, root_id) or "main"
+    except Exception:
+        target_ref = "main"
+
+    target_out = _git(
+        workspace, "rev-parse", "--verify", f"{target_ref}^{{commit}}"
+    )
+    target_head = target_out.strip() if target_out else None
+    if not target_head and target_ref != "main":
+        target_ref = "main"
+        target_out = _git(
+            workspace, "rev-parse", "--verify", "main^{commit}"
+        )
+        target_head = target_out.strip() if target_out else None
+    if not target_head:
+        return baseline, False, None
+
+    if _git_succeeds(
+        workspace,
+        "merge-base",
+        "--is-ancestor",
+        candidate,
+        target_head,
+    ):
+        return baseline, False, None
+
+    fork_out = _git(workspace, "merge-base", candidate, target_head)
+    fork_point = fork_out.strip() if fork_out else None
+    if not fork_point or fork_point == baseline:
+        return baseline, False, None
+    if not _git_succeeds(
+        workspace, "merge-base", "--is-ancestor", baseline, fork_point
+    ):
+        return baseline, False, None
+    for recorded_commit in _recorded_task_commits(
+        conn,
+        task_id,
+        workspace=workspace,
+    ):
+        if (
+            recorded_commit != baseline
+            and _git_succeeds(
+                workspace,
+                "merge-base",
+                "--is-ancestor",
+                baseline,
+                recorded_commit,
+            )
+            and _git_succeeds(
+                workspace,
+                "merge-base",
+                "--is-ancestor",
+                recorded_commit,
+                fork_point,
+            )
+        ):
+            return baseline, False, None
+    return fork_point, True, target_ref
 
 
 def _prior_linked_defer(
@@ -630,6 +776,18 @@ def build_review_context(
             baseline, baseline_kind = _same_tree_parent_fallback(
                 workspace, baseline, candidate
             )
+    pre_clamp_baseline = baseline
+    baseline_clamped = False
+    clamp_target_ref: Optional[str] = None
+    if baseline:
+        baseline, baseline_clamped, clamp_target_ref = _clamp_to_fork_point(
+            conn,
+            task_id,
+            workspace=workspace,
+            baseline=baseline,
+            baseline_kind=baseline_kind,
+            candidate=candidate,
+        )
     if (
         not baseline
         or not _git_succeeds(
@@ -652,6 +810,11 @@ def build_review_context(
             chain_accumulated=chain_accumulated,
             evidence_error="baseline_unavailable",
             accumulated_required=accumulated_required,
+            baseline_clamped_to_fork_point=baseline_clamped,
+            pre_clamp_baseline_commit=(
+                pre_clamp_baseline if baseline_clamped else None
+            ),
+            clamp_target_ref=clamp_target_ref,
         )
 
     changed_raw = _git(
@@ -682,6 +845,11 @@ def build_review_context(
             chain_accumulated=chain_accumulated,
             evidence_error="changed_path_scan_failed",
             accumulated_required=accumulated_required,
+            baseline_clamped_to_fork_point=baseline_clamped,
+            pre_clamp_baseline_commit=(
+                pre_clamp_baseline if baseline_clamped else None
+            ),
+            clamp_target_ref=clamp_target_ref,
         )
     changed = tuple(
         sorted(
@@ -711,6 +879,11 @@ def build_review_context(
         chain_accumulated,
         accumulated_required=accumulated_required,
         path_state_digest=_path_state_digest(workspace, path_risk),
+        baseline_clamped_to_fork_point=baseline_clamped,
+        pre_clamp_baseline_commit=(
+            pre_clamp_baseline if baseline_clamped else None
+        ),
+        clamp_target_ref=clamp_target_ref,
     )
 
 
@@ -845,7 +1018,7 @@ def defer_event_payload(
     worker_gate: dict,
 ) -> dict:
     """Persist enough cohort/baseline provenance for a safe future tip."""
-    return {
+    payload = {
         "worker_gate": worker_gate,
         "review_chain_kind": context.chain_kind,
         "review_chain_root_id": context.chain_root_id,
@@ -859,11 +1032,22 @@ def defer_event_payload(
         "merge_target": context.target_ref,
         "merge_target_head": context.target_head,
     }
+    if context.baseline_clamped_to_fork_point:
+        payload.update(
+            {
+                "diff_base_clamped_to_fork_point": True,
+                "diff_base_pre_clamp_commit": (
+                    context.pre_clamp_baseline_commit
+                ),
+                "diff_clamp_target": context.clamp_target_ref,
+            }
+        )
+    return payload
 
 
 def snapshot_provenance(context: ReviewDecisionContext) -> dict:
     total = len(context.changed_files)
-    return {
+    provenance = {
         "changed_files_total": total,
         "changed_files_truncated": total > 200,
         "review_evidence_complete": context.evidence_complete,
@@ -873,6 +1057,17 @@ def snapshot_provenance(context: ReviewDecisionContext) -> dict:
         "merge_target": context.target_ref,
         "merge_target_head": context.target_head,
     }
+    if context.baseline_clamped_to_fork_point:
+        provenance.update(
+            {
+                "diff_base_clamped_to_fork_point": True,
+                "diff_base_pre_clamp_commit": (
+                    context.pre_clamp_baseline_commit
+                ),
+                "diff_clamp_target": context.clamp_target_ref,
+            }
+        )
+    return provenance
 
 
 def capture_review_snapshot(
