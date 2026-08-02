@@ -502,6 +502,76 @@ def _gate_fix_lever(cause: dict[str, Any]) -> Lever:
     )
 
 
+def _extraction_anomaly_triage_lever(gate: str, fingerprint: str) -> Lever:
+    """Held escalation for a red gate whose failing files could not be extracted.
+
+    GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1 (AC-1): a gate that went red BECAUSE
+    tests failed but yields ZERO failing files is an EXTRACTION defect, never
+    "nothing to do". Filing the normal triage card here would list "(unbekannt)"
+    and send a worker out blind (the live 2026-08-02 ``GATE-TRIAGE-PYTHON-…``
+    card). This lever names the real work instead: repair the failing-file
+    extraction, using the night's raw green-gate log as ground truth.
+
+    Only STABLE fields (gate) reach the body, and the fingerprint the derive step
+    supplies is itself gate-stable, so a broken extraction that persists over
+    several nights dedups (``already_ingested``) rather than opening one chain
+    per night — the same no-spam contract the other gate levers hold (AC-2).
+    """
+    token = _cost_lane_token(gate) or "UNKNOWN"
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
+    key = f"GATE-TRIAGE-{token}-EXTRACTION-ANOMALY-{digest}"
+    return Lever(
+        key=key,
+        title=(
+            f"Extraktions-Anomalie am Gate '{gate}' beheben "
+            f"(rot aus Testfehlern, 0 extrahierte Dateien)"
+        ),
+        lane="premium",
+        target_metric=(
+            f"0 blinde Triage-Karten: das Gate '{gate}' ist aus Testfehlern rot, "
+            f"aber aus seiner Evidenz liess sich KEINE einzige failende Test-"
+            f"Datei extrahieren. Ziel ist, dass die Extraktion die failenden "
+            f"Dateien dieser Report-Form wieder liefert, sodass die naechtliche "
+            f"Triage handelbare Dateien statt '(unbekannt)' auflistet"
+        ),
+        roi=(
+            "hoch: eine leere Datei-Menge auf einem test-roten Gate blendet die "
+            "gesamte Nacht-Triage — ohne diesen Befund wuerde ein Worker gegen "
+            "eine leere Dateiliste losgeschickt und die eigentliche Roete bliebe "
+            "unbearbeitet stehen"
+        ),
+        counter_metric=(
+            "darf keinen Alarm-Laerm erzeugen: die Anomalie feuert NUR wenn das "
+            "Gate aus Testfehlern rot ist und trotzdem 0 Dateien extrahierbar "
+            "sind — ein legitim leeres Datei-Set (tsc/build/lint rot, oder ein "
+            "Test-Gate das vor dem ersten Test stirbt) loest sie NICHT aus. "
+            "Dedup ueber den gate-stabilen Fingerprint, sodass dieselbe kaputte "
+            "Extraktion keine zweite PlanSpec pro Nacht oeffnet"
+        ),
+        rationale=(
+            f"Der naechtliche green-gate-Heartbeat ist am Gate '{gate}' rot, und "
+            f"die Evidenz dieser Nacht belegt Testfehler — aber die Extraktion "
+            f"der failenden Test-Dateien lieferte eine LEERE Menge. Das ist "
+            f"immer ein Extraktionsfehler, nie 'nichts zu tun': ohne Dateien "
+            f"gaebe es nur eine blinde Triage-Karte. Vorgehen: den rohen "
+            f"green-gate-Log der roten Nacht "
+            f"(``<hermes_root>/logs/green-gate/<YYYYMMDD-HHMMSS>/{gate}.log``) "
+            f"und den ``first_fail.detail``-Eintrag im green-gate-ledger gegen "
+            f"die Parser in ``hermes_cli/vision_metrics.py`` "
+            f"(``_extract_failing_test_files``) und "
+            f"``hermes_cli/gate_leaker.parse_failed_files`` halten, die fehlende "
+            f"Report-Form ergaenzen und mit einem Regressionstest gegen genau "
+            f"diesen echten Log-Ausschnitt absichern. Danach die so gefundenen "
+            f"roten Test-Dateien normal triagieren."
+        ),
+        gain_weight=1.0,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=1.0,
+        source="gate-persistent-red-triage",
+    )
+
+
 def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
     """Build the held triage-PlanSpec lever for N-of-M persistent red nights.
 
@@ -520,10 +590,27 @@ def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
     chain opens — correct: the operator SHOULD see a new item for a new failure
     pattern. The volatile red-count / dates are deliberately NOT rendered, so
     the content hash that backs idempotency cannot drift while the window grows.
+
+    Empty-extraction guard (GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1): the file
+    list rendered here is ``red_files_effective`` — the strict extraction, or the
+    raw failing-list fallback the guard recovered. When the anchor night is red
+    FROM test failures yet NO failing file could be recovered at all, the derive
+    step hands over an ``extraction_anomaly`` and this builds a *different*
+    lever: an explicit, classifiable ``…-EXTRACTION-ANOMALY`` triage that tells
+    the operator the extraction is broken, instead of dispatching a worker
+    against a "(unbekannt)" file list. A legitimately empty set (tsc/build red,
+    no failing test file) carries no anomaly and renders exactly as before.
     """
     gate = str(cause.get("gate") or "unknown").strip().lower() or "unknown"
     fingerprint = str(cause.get("fingerprint") or gate)
-    red_files = cause.get("red_files") or set()
+    anomaly = cause.get("extraction_anomaly") or None
+    if anomaly:
+        return _extraction_anomaly_triage_lever(gate, fingerprint)
+    # ``red_files_effective`` is the guard-aware surface; fall back to the strict
+    # ``red_files`` so a hand-built / legacy cause dict still renders.
+    red_files = cause.get("red_files_effective")
+    if red_files is None:
+        red_files = cause.get("red_files") or set()
     token = _cost_lane_token(gate) or "UNKNOWN"
     # Short, stable digest of the file-set fingerprint so two distinct red-file
     # sets on the same gate get distinct keys while an identical set keys
@@ -1762,6 +1849,15 @@ def propose_persistent_red_triage(
         "dates": cause["dates"],
         "key": lever.key,
     }
+    # Empty-extraction guard visibility: which surface the card's file list came
+    # from, and — when nothing could be recovered — the classifiable anomaly.
+    if cause.get("red_files_source"):
+        summary["red_files_source"] = cause["red_files_source"]
+        summary["red_files_effective"] = sorted(
+            cause.get("red_files_effective") or set()
+        )
+    if cause.get("extraction_anomaly"):
+        summary["extraction_anomaly"] = cause["extraction_anomaly"]
 
     if strategist_specs.has_terminal_decision_for_lever(out_dir, lever.key):
         summary["ingested"] = None

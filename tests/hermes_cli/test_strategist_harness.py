@@ -7,6 +7,7 @@ beyond a temp file board. The PlanSpec quality judge is disabled by the autouse
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -1222,3 +1223,126 @@ def test_run_propose_files_deflake_before_budget_skipped_proposer_and_is_idempot
 def test_flake_debt_leaf_metric_has_negative_verdict_direction():
     """A falling unfiled-flake count is a measurable improvement."""
     assert strategist._resolve_verdict_direction("green_gate_streak.flake_debt.value") == -1
+
+
+# --------------------------------------------------------------------------- #
+# GATE-RED-NIGHT-EMPTY-EXTRACTION-GUARD-S1 — operator layer: a red gate must
+# never file a blind triage card with red_files=[]. Either the raw failing-list
+# fallback names the files, or an explicit extraction-anomaly card is opened.
+# --------------------------------------------------------------------------- #
+
+# The LIVE 2026-08-02 shape behind the blind GATE-TRIAGE-PYTHON-cd7a0054 card.
+_GUARD_DETAIL_ISOLATED = (
+    "python (isolated): tests/acp/test_bar.py\n"
+    "▶ launching test runner\n"
+    "No test files to run\n"
+)
+_GUARD_DETAIL_NO_PATHS = (
+    "python (run_tests.sh):\n"
+    "=========================== short test summary info ============================\n"
+    "========================= 3 failed, 8 passed in 0.97s ==========================\n"
+)
+
+
+def _guard_records(detail):
+    return [
+        {"date": "2026-08-01", "result": "fail", "ts": "2026-08-01T03:00:00+00:00",
+         "first_fail": {"gate": "python", "detail": detail}},
+        {"date": "2026-08-02", "result": "fail", "ts": "2026-08-02T03:00:00+00:00",
+         "first_fail": {"gate": "python", "detail": detail}},
+    ]
+
+
+def test_blind_triage_card_is_replaced_by_recovered_file_list(board_home):
+    """AC-1: the live blind card's evidence NAMED the failing file; the card now
+    lists it instead of '(unbekannt)'."""
+    records = _guard_records(_GUARD_DETAIL_ISOLATED)
+    result = strategist.propose_persistent_red_triage(
+        board=None, out_dir=board_home / "specs", gate_records=records,
+        min_reds=2, window=3, do_ingest=False,
+    )
+    assert result["triggered"] is True
+    assert result["red_files_source"] == "raw-failing-list"
+    assert result["red_files_effective"] == ["tests/acp/test_bar.py"]
+
+    lever = strategist._persistent_red_triage_lever(
+        vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    )
+    assert "(unbekannt)" not in lever.rationale
+    assert "tests/acp/test_bar.py" in lever.rationale
+    assert "EXTRACTION-ANOMALY" not in lever.key
+
+
+def test_unrecoverable_red_opens_classifiable_extraction_anomaly_card(board_home):
+    """AC-1: red FROM test failures with nothing extractable opens an explicit
+    extraction-anomaly item — a diagnosable defect, not a blind worker brief."""
+    records = _guard_records(_GUARD_DETAIL_NO_PATHS)
+    result = strategist.propose_persistent_red_triage(
+        board=None, out_dir=board_home / "specs", gate_records=records,
+        min_reds=2, window=3, do_ingest=False,
+    )
+    assert result["triggered"] is True
+    assert result["red_files_source"] == "extraction-anomaly"
+    assert result["extraction_anomaly"]["kind"] == "extraction-anomaly"
+    assert result["key"] == "GATE-TRIAGE-PYTHON-EXTRACTION-ANOMALY-" + hashlib.sha1(
+        result["fingerprint"].encode("utf-8")
+    ).hexdigest()[:8]
+
+    lever = strategist._persistent_red_triage_lever(
+        vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    )
+    # the brief must point at the extraction, never at a '(unbekannt)' file list
+    assert "(unbekannt)" not in lever.rationale
+    assert "Extraktions-Anomalie" in lever.title
+    assert "_extract_failing_test_files" in lever.rationale
+
+
+def test_extraction_anomaly_card_dedups_across_nights(board_home):
+    """AC-2 (no alarm noise): the same broken extraction on a further night must
+    render the SAME key/body — one chain, not one card per night."""
+    out_dir = board_home / "specs"
+    base = _guard_records(_GUARD_DETAIL_NO_PATHS)
+    later = base + [
+        {"date": "2026-08-03", "result": "fail", "ts": "2026-08-03T03:00:00+00:00",
+         "first_fail": {"gate": "python",
+                        "detail": _GUARD_DETAIL_NO_PATHS + "and again\n"}},
+    ]
+    a = strategist.propose_persistent_red_triage(
+        board=None, out_dir=out_dir, gate_records=base,
+        min_reds=2, window=3, do_ingest=False,
+    )
+    b = strategist.propose_persistent_red_triage(
+        board=None, out_dir=out_dir, gate_records=later,
+        min_reds=2, window=3, do_ingest=False,
+    )
+    assert a["key"] == b["key"]
+    lever_a = strategist._persistent_red_triage_lever(
+        vm.derive_persistent_red_triage(base, min_reds=2, window=3)
+    )
+    lever_b = strategist._persistent_red_triage_lever(
+        vm.derive_persistent_red_triage(later, min_reds=2, window=3)
+    )
+    assert lever_a.rationale == lever_b.rationale  # byte-stable body -> dedup
+
+
+def test_non_test_red_still_files_the_normal_triage_card(board_home):
+    """AC-2: a tsc red with a legitimately empty file set keeps the ORIGINAL
+    behaviour — normal triage card, no anomaly escalation."""
+    tsc_detail = (
+        "Frontend tsc --noEmit:\n"
+        "src/control/Panel.tsx(41,7): error TS2345: bad argument\n"
+    )
+    records = [
+        {"date": "2026-08-01", "result": "fail", "ts": "2026-08-01T03:00:00+00:00",
+         "first_fail": {"gate": "tsc", "detail": tsc_detail}},
+        {"date": "2026-08-02", "result": "fail", "ts": "2026-08-02T03:00:00+00:00",
+         "first_fail": {"gate": "tsc", "detail": tsc_detail}},
+    ]
+    result = strategist.propose_persistent_red_triage(
+        board=None, out_dir=board_home / "specs", gate_records=records,
+        min_reds=2, window=3, do_ingest=False,
+    )
+    assert result["triggered"] is True
+    assert result["red_files_source"] == "non-test-red"
+    assert "extraction_anomaly" not in result
+    assert "EXTRACTION-ANOMALY" not in result["key"]
