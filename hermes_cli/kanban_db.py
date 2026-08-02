@@ -21597,8 +21597,11 @@ def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
 
                 owner_task = get_task(conn, lease["task_id"])
                 if owner_task is not None:
-                    _kwt.prepare_reused_task_worktree(
-                        conn, owner_task, Path(lease["workspace_path"])
+                    _kwt.adopt_reaped_writer_wip(
+                        conn,
+                        owner_task,
+                        Path(lease["workspace_path"]),
+                        lease_run_id=int(lease["run_id"]),
                     )
                     observed_head, clean = _workspace_release_state(
                         lease["workspace_path"]

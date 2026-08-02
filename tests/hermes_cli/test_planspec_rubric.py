@@ -555,9 +555,10 @@ def test_every_documented_lane_is_accepted(lane: str, tmp_path: Path):
     body = CLEAN.replace("      lane: coder\n", f"      lane: {lane}\n", 1)
     path = _write(plans_root := tmp_path / "03-Agents", body, name=f"lane-{lane}.md")
     spec = planspecs.parse_binding_planspec(path, plans_root=plans_root)
-    # No lane finding for any documented lane.
+    # Advisory author rules may mention a valid lane, but membership validation
+    # must not reject any lane from the documented roster.
     findings = planspecs._collect_spec_rubric_findings(spec)
-    assert not any("lane" in f for f in findings), findings
+    assert not any(f.startswith("unknown lane:") for f in findings), findings
 
 
 # ---------------------------------------------------------------------------
@@ -830,15 +831,20 @@ def test_signed_clean_spec_ingests_and_skips_judge(kanban_home, tmp_path: Path, 
 # ---------------------------------------------------------------------------
 
 
-def test_validate_planspec_clean_signed_spec_is_clean(kanban_home, tmp_path: Path):
+def test_validate_planspec_signed_review_slice_reports_advisory_warning(
+    kanban_home, tmp_path: Path,
+):
     signed_clean = CLEAN.replace("status: freigegeben-komplett\n", "status: defined\napproved_by: Piet\n")
     path = _write(plans_root := tmp_path / "03-Agents", signed_clean, name="vclean.md")
 
     result = planspecs.validate_planspec(path, plans_root=plans_root)
 
-    assert result["disposition"] == "clean"
+    assert result["disposition"] == "warn"
     assert result["ok"] is True
-    assert result["findings"] == []
+    assert any(
+        finding.startswith("review_lane_non_terminal:")
+        for finding in result["findings"]
+    )
     assert result["signed"] is True
     assert _task_count() == 0  # read-only: nothing written
 
@@ -1153,14 +1159,15 @@ def test_noncritical_warnings_in_result(
     assert any("AC-less subtask: R1-S2" in finding for finding in result["rubric_warnings"])
 
 
-def test_clean_ingest_has_empty_rubric_warnings(kanban_home, tmp_path: Path):
+def test_ingest_reports_review_slice_authority_warning(kanban_home, tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write(plans_root, CLEAN)
 
     result = planspecs.ingest_planspec(path, plans_root=plans_root)
 
     assert result["ok"] is True
-    assert result["rubric_warnings"] == []
+    assert len(result["rubric_warnings"]) == 1
+    assert result["rubric_warnings"][0].startswith("review_lane_non_terminal:")
 
 
 def test_critical_plan_still_fully_gated(kanban_home, tmp_path: Path):

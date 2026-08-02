@@ -61,10 +61,14 @@ class BindingSubtask(BaseModel):
     review_tier: str = ""
     # B1: explicit per-subtask iteration budget (``--max-turns`` for the worker).
     # Default None ⇒ unset; the floor derived from severity (review_tier /
-    # live_test_depth) applies instead. An explicit value always WINS over the
-    # derived floor, so a PlanSpec author/operator keeps full control. Dropped
-    # from serialization when None so unmarked subtasks stay byte-identical.
+    # live_test_depth) applies instead. A value below that floor needs the exact
+    # acknowledgement defined by ``max_iterations_ack``. Dropped from
+    # serialization when None so unmarked subtasks stay byte-identical.
     max_iterations: int | None = None
+    # Keep acknowledgement details as a mapping: malformed author input is an
+    # advisory rubric finding and a mechanical floor correction, not a
+    # structural parse failure.
+    max_iterations_ack: dict[str, Any] | None = None
     # scope_files / instructions: a PlanSpec author may pin the exact edit paths
     # and implementation guidance for this subtask. Before these existed the
     # fields were silently dropped (extra=ignore), so a worker got only AC
@@ -113,6 +117,8 @@ class BindingSubtask(BaseModel):
             data.pop("review_tier", None)
         if data.get("max_iterations") is None:
             data.pop("max_iterations", None)
+        if data.get("max_iterations_ack") is None:
+            data.pop("max_iterations_ack", None)
         # scope_files/instructions are dropped when empty so an unmarked subtask
         # stays byte-identical to pre-scope-fields main (same rationale as kind).
         if not data.get("scope_files"):
@@ -426,7 +432,7 @@ def _kind_for_planspec_lane(lane: str) -> str:
 # multiple of the 90 default; promote to config if data warrants.
 #
 # Semantics are a strict, additive FLOOR:
-#   * an explicit per-subtask ``max_iterations`` always wins (even a lower one);
+#   * an explicit value below the floor wins only with an exact acknowledgement;
 #   * an unmarked subtask (no review_tier, no contract depth) gets no field, so
 #     the default 90 is unchanged and the child dict stays byte-identical.
 _TURN_FLOOR_BY_REVIEW_TIER: dict[str, int] = {"critical": 220, "review": 150}
@@ -450,6 +456,36 @@ def _derive_max_iterations_floor(
     if (live_test_depth or "").strip().lower() == "contract":
         floors.append(_TURN_FLOOR_CONTRACT_DEPTH)
     return max(floors) if floors else None
+
+
+def _max_iterations_floor_signals(
+    review_tier: str | None,
+    live_test_depth: str | None,
+) -> list[str]:
+    """Return the severity signals that participate in the budget floor."""
+    signals: list[str] = []
+    tier = (review_tier or "").strip().lower()
+    if tier in _TURN_FLOOR_BY_REVIEW_TIER:
+        signals.append(f"review_tier={tier}")
+    depth = (live_test_depth or "").strip().lower()
+    if depth == "contract":
+        signals.append("live_test_depth=contract")
+    return signals
+
+
+def _max_iterations_ack_is_valid(subtask: BindingSubtask) -> bool:
+    """Whether a below-floor budget has the exact author acknowledgement."""
+    ack = subtask.max_iterations_ack
+    if not isinstance(ack, dict) or set(ack) != {"value", "reason"}:
+        return False
+    value = ack.get("value")
+    reason = ack.get("reason")
+    return (
+        type(value) is int
+        and value == subtask.max_iterations
+        and isinstance(reason, str)
+        and bool(reason.strip())
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -661,18 +697,24 @@ def taskgraph_hints_to_children(
             child["planspec_source"] = planspec_source
         if (task.review_tier or "").strip():
             child["review_tier"] = task.review_tier.strip().lower()
-        # B1: iteration-budget floor. An explicit per-subtask max_iterations
-        # always wins; otherwise derive a floor from severity (review_tier +
-        # contract-depth). Emit nothing when no signal applies, so unmarked
-        # subtasks stay byte-identical and fall through to the profile default.
-        if task.max_iterations is not None:
-            child["max_iterations"] = int(task.max_iterations)
+        # B1: derive the floor even for explicit values. A below-floor budget
+        # survives only with an acknowledgement for that exact integer and a
+        # non-empty reason; malformed/missing acknowledgements are corrected.
+        derived = _derive_max_iterations_floor(
+            child.get("review_tier"), live_test_depth
+        )
+        if task.max_iterations is None:
+            effective_max_iterations = derived
+        elif (
+            derived is not None
+            and task.max_iterations < derived
+            and not _max_iterations_ack_is_valid(task)
+        ):
+            effective_max_iterations = derived
         else:
-            derived = _derive_max_iterations_floor(
-                child.get("review_tier"), live_test_depth
-            )
-            if derived is not None:
-                child["max_iterations"] = derived
+            effective_max_iterations = int(task.max_iterations)
+        if effective_max_iterations is not None:
+            child["max_iterations"] = effective_max_iterations
         children.append(child)
     return children
 

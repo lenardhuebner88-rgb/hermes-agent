@@ -762,7 +762,7 @@ def test_cli_json_success_reports_artifacts(tmp_path: Path, capsys):
 # worker times out and the chain blocks. taskgraph_hints_to_children derives a
 # per-child max_iterations FLOOR from the signals that actually predict effort
 # (review_tier + live_test_depth). Floor semantics, strictly additive:
-#   * an explicit per-subtask max_iterations always wins;
+#   * a below-floor explicit max_iterations needs an exact author acknowledgement;
 #   * an unmarked subtask emits no max_iterations field (default 90 unchanged).
 # ---------------------------------------------------------------------------
 
@@ -830,9 +830,7 @@ def test_max_iterations_floor_takes_max_of_signals():
     assert children[0]["max_iterations"] == 220
 
 
-def test_explicit_subtask_max_iterations_always_wins():
-    """An explicit per-subtask max_iterations overrides the derived floor (even a
-    LOWER explicit value), so an operator/PlanSpec author keeps full control."""
+def test_explicit_subtask_max_iterations_respects_floor_without_valid_ack():
     children = taskgraph_hints_to_children(
         {
             "binding": True,
@@ -841,11 +839,65 @@ def test_explicit_subtask_max_iterations_always_wins():
                  "review_tier": "critical", "max_iterations": 300, "deps": []},
                 {"id": "S2", "title": "Capped", "lane": "coder",
                  "review_tier": "critical", "max_iterations": 50, "deps": []},
+                {"id": "S3", "title": "Acknowledged cap", "lane": "coder",
+                 "review_tier": "critical", "max_iterations": 50,
+                 "max_iterations_ack": {"value": 50, "reason": "bounded edit"},
+                 "deps": []},
             ],
         }
     )
     assert children[0]["max_iterations"] == 300
-    assert children[1]["max_iterations"] == 50
+    assert children[1]["max_iterations"] == 220
+    assert children[2]["max_iterations"] == 50
+
+
+@pytest.mark.parametrize(
+    "max_iterations_ack",
+    [
+        None,
+        {"value": 3, "reason": ""},
+        {"reason": "bounded edit"},
+        {"value": 2, "reason": "bounded edit"},
+        {"value": 3, "reason": "bounded edit", "ticket": "extra"},
+    ],
+)
+def test_contract_floor_replaces_each_invalid_iteration_ack(max_iterations_ack):
+    task = {
+        "id": "S1",
+        "title": "Under-budget contract slice",
+        "lane": "coder",
+        "max_iterations": 3,
+        "deps": [],
+    }
+    if max_iterations_ack is not None:
+        task["max_iterations_ack"] = max_iterations_ack
+
+    children = taskgraph_hints_to_children(
+        {"binding": True, "subtasks": [task]},
+        live_test_depth="contract",
+    )
+
+    assert children[0]["max_iterations"] == 180
+
+
+def test_explicit_budget_above_contract_floor_remains_unchanged():
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {
+                    "id": "S1",
+                    "title": "Larger custom budget",
+                    "lane": "coder",
+                    "max_iterations": 181,
+                    "deps": [],
+                }
+            ],
+        },
+        live_test_depth="contract",
+    )
+
+    assert children[0]["max_iterations"] == 181
 
 
 def test_unmarked_subtask_has_no_max_iterations_field():
