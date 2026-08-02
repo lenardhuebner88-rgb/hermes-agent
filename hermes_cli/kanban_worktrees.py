@@ -5041,6 +5041,18 @@ def _ensure_worktree_deps_root_mounted(deps_root: Path) -> None:
 
 
 def _worktree_deps_tree(worktree: Path) -> Path:
+    """Spiegelt die Deps-Identitaet aus scripts/gate-frontend.sh.
+
+    Das Gate bildet sie als `basename(<physischer repo_root>)-<sha256[:16]>`
+    unter HERMES_WORKTREE_DEPS_ROOT und weist jedes node_modules zurueck, das
+    nicht exakt dorthin zeigt. Diese Formel darf deshalb nicht driften — und
+    sie darf auch nicht ein zweites Mal danebengeschrieben werden: eine
+    gleichnamige Zweitdefinition weiter unten im Modul beschattet diese hier
+    fuer *alle* Aufrufer, auch die aelteren, und hat auf genau diesem Weg
+    schon einmal die Absolutheits-Pruefung aus `_worktree_deps_root` still
+    ausgeschaltet (die verhindert, dass ein mehrere GiB grosses `npm ci` statt
+    auf die SSD auf `/` laeuft).
+    """
     canonical = Path(worktree).resolve(strict=False)
     digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
     return _worktree_deps_root() / f"{canonical.name}-{digest}"
@@ -5474,19 +5486,6 @@ def _set_review_snapshot_read_only(path: Path, *, read_only: bool) -> None:
 # Symlinks erwartet. Reihenfolge und Schreibweise muessen zu _GATE_NM_PATHS
 # passen — das Gate vergleicht das Linkziel exakt.
 _REVIEW_SNAPSHOT_DEPS_LINKS = ("node_modules", "web/node_modules")
-
-
-def _worktree_deps_tree(workspace_path: Path) -> Path:
-    """Spiegelt die Deps-Identitaet aus scripts/gate-frontend.sh.
-
-    Das Gate bildet sie als `basename(<physischer repo_root>)-<sha256[:16]>`
-    unter HERMES_WORKTREE_DEPS_ROOT und weist jedes node_modules zurueck, das
-    nicht exakt dorthin zeigt. Diese Formel darf deshalb nicht driften.
-    """
-    root = os.environ.get("HERMES_WORKTREE_DEPS_ROOT") or "/mnt/data/hermes-worktree-deps"
-    physical = str(workspace_path.resolve())
-    digest = hashlib.sha256(physical.encode("utf-8")).hexdigest()[:16]
-    return Path(os.path.normpath(root)) / f"{Path(physical).name}-{digest}"
 
 
 def _link_review_snapshot_deps(workspace_path: Path) -> list[str]:
