@@ -828,8 +828,14 @@ def _night_cause_and_purity(
 # block (``  tests/x.py  (k test failed)``) and pytest ``FAILED tests/x.py::…``
 # lines. Matching just these two shapes means the thousands of PASSED lines in a
 # full log (``✓ tests/x.py (…)``) never pollute the signature.
+# Both shapes are anchored to the exact column run_tests_parallel emits them at
+# (summary entries: exactly two leading spaces; ``FAILED``: column 0). The
+# "Failure output" dump replays a failing test's own fixture text, which can
+# contain byte-identical summary blocks (``tests/scripts/test_run_affected.py``
+# carries one) — always INDENTED by the traceback renderer, so the column anchor
+# keeps those phantom paths out of the signature.
 _FAIL_SUMMARY_FILE_RE = re.compile(
-    r"^\s+(tests/[\w./-]+\.py)\s+\(\d+\s+test", re.MULTILINE
+    r"^ {2}(tests/[\w./-]+\.py)\s+\(\d+\s+test", re.MULTILINE
 )
 _PYTEST_FAILED_RE = re.compile(r"^FAILED\s+(tests/[\w./-]+\.py)\b", re.MULTILINE)
 

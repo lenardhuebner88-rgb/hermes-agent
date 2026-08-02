@@ -1087,6 +1087,47 @@ def test_extract_failing_files_empty_when_no_failure_block():
     assert vm._extract_failing_test_files(None) == set()
 
 
+# a red night whose failing test (tests/scripts/test_run_affected.py) carries a
+# verbatim run_tests_parallel summary as a FIXTURE; the traceback renderer
+# replays it — indented — inside the "Failure output" dump, ahead of the run's
+# real summary. Pre-fix this minted red_files/GATE-DEFLAKE tasks for paths that
+# never ran (live baseline 2026-08-02).
+_POISONED_LOG = (
+    "=== Failure output ===\n"
+    "\n"
+    "--- tests/scripts/test_run_affected.py ---\n"
+    "        summary = '''\n"
+    "    === 2 files with test failures (3 tests failed) ===\n"
+    "      tests/hermes_cli/test_kanban_db.py  (2 tests failed)\n"
+    "      tests/tools/test_kanban_tools.py  (1 test failed)\n"
+    "    '''\n"
+    "    FAILED tests/hermes_cli/test_kanban_db.py::test_one\n"
+    "E   AssertionError\n"
+    "\n"
+    "=== 1 file with test failures (8 tests failed) ===\n"
+    "  tests/scripts/test_run_affected.py  (8 tests failed)\n"
+)
+
+
+def test_extract_failing_files_ignores_fixture_replay_in_failure_dump():
+    # AC-1: every extracted path is a really-failing file — the indented replay
+    # of a fixture summary contributes nothing.
+    files = vm._extract_failing_test_files(_POISONED_LOG)
+    assert files == {"tests/scripts/test_run_affected.py"}
+    assert "tests/hermes_cli/test_kanban_db.py" not in files
+    assert "tests/tools/test_kanban_tools.py" not in files
+
+
+def test_extract_failing_files_keeps_column0_failed_lines():
+    # AC-2 counter-metric: the column anchor must not cost recall — a genuine
+    # column-0 ``FAILED`` line from the raw dump still counts.
+    text = _POISONED_LOG + "FAILED tests/scripts/test_gate_diff_base.py::test_x\n"
+    assert vm._extract_failing_test_files(text) == {
+        "tests/scripts/test_run_affected.py",
+        "tests/scripts/test_gate_diff_base.py",
+    }
+
+
 def test_red_cause_backfills_legacy_unattributed_predecessor():
     # head attributed (python, 6 files); the older night is red but un-attributed.
     records = [

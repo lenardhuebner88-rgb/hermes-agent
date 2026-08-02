@@ -73,7 +73,18 @@ _PY_FAIL_SECTIONS = (
     "where no tests ran",
 )
 
-_PY_SUMMARY_FILE_RE = re.compile(r"^\s+(\S+\.py)\b")
+# A run_tests_parallel section header is printed at COLUMN 0 (``print("=== …")``)
+# and the failing-file sections additionally carry the ``<count> file(s)`` prefix.
+# Both anchors matter: the "Failure output" dump replays a failing test's own
+# captured/repr'd text, and that text can contain byte-identical ``=== N files
+# with test failures ===`` blocks (``tests/scripts/test_run_affected.py`` carries
+# exactly such a fixture). Those replays are always INDENTED by the traceback
+# renderer, so column-anchoring keeps fixture text out of the canonical list.
+_PY_SECTION_HEADER_RE = re.compile(r"^===.*===$")
+_PY_FAIL_HEADER_RE = re.compile(r"^=== \d+ files? \S")
+# Summary entries are emitted as exactly two leading spaces + the path; a
+# replayed fixture's entries inherit the dump's deeper indentation.
+_PY_SUMMARY_FILE_RE = re.compile(r"^ {2}(\S+\.py)\b")
 _PY_REPRO_RE = re.compile(r"Repro:\s*python -m pytest\s+(\S+\.py)\b")
 # vitest: " FAIL  src/foo.test.tsx > suite > name" and the file-summary
 # " ❯ src/foo.test.ts (5 tests | 2 failed)".
@@ -96,21 +107,30 @@ def _parse_python(log_text: str) -> list[str]:
     files: list[str] = []
     in_section = False
     for line in log_text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("===") and stripped.endswith("==="):
+        rstripped = line.rstrip()
+        if _PY_SECTION_HEADER_RE.match(rstripped):
             # Only the explicit failing-file summary sections count — the
             # "Failure output" raw dumps and the "Top 10 slowest" diagnostic
             # both mention tests/*.py paths that are NOT the canonical list.
-            in_section = any(h in stripped for h in _PY_FAIL_SECTIONS)
+            # Any other column-0 header closes an open section; an INDENTED
+            # ``=== … ===`` line is replayed fixture/traceback text and neither
+            # opens nor closes one.
+            in_section = bool(_PY_FAIL_HEADER_RE.match(rstripped)) and any(
+                h in rstripped for h in _PY_FAIL_SECTIONS
+            )
             continue
         if in_section:
             m = _PY_SUMMARY_FILE_RE.match(line)
             if m:
                 files.append(m.group(1))
+    if files:
+        return _dedup(files)
     # Fallback for a truncated log with no summary block: the per-file inline
-    # failures each print a ``Repro: python -m pytest <file>`` line.
-    files.extend(m.group(1) for m in _PY_REPRO_RE.finditer(log_text))
-    return _dedup(files)
+    # failures each print a ``Repro: python -m pytest <file>`` line. Strictly a
+    # fallback — every file with a ``Repro:`` line also has a summary entry, so
+    # when a summary exists this can only ADD replayed fixture paths (test
+    # fixtures in this repo carry ``Repro:`` lines verbatim).
+    return _dedup([m.group(1) for m in _PY_REPRO_RE.finditer(log_text)])
 
 
 def _parse_vitest(log_text: str) -> list[str]:
