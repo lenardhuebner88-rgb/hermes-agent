@@ -33,6 +33,17 @@ from typing import Any, Optional
 INTENTIONAL_SIGKILL_REASONS = frozenset(
     {"archive_worker_alive", "manual_reclaim_worker_alive"}
 )
+_FLAT_TERMINATION_KEYS = (
+    "prev_pid",
+    "host_local",
+    "termination_attempted",
+    "terminated",
+    "sigkill",
+    "invalid_worker_pid",
+    "dispatcher_group_rejected",
+    "term_error",
+    "kill_error",
+)
 
 # Event kind AND run outcome/status for an intentional external termination.
 # Deliberately distinct from ``crashed`` and ``rate_limited`` so board history
@@ -77,14 +88,22 @@ def intentional_sigkill_marker(
     payload = _payload_dict(row["payload"])
     if payload is None:
         return None
-    termination = payload.get("termination")
+    # The production producer flattens termination details into the event
+    # payload. Prefer that schema while retaining compatibility with older
+    # nested markers already persisted on boards.
+    if "sigkill" in payload:
+        termination = {
+            key: payload[key] for key in _FLAT_TERMINATION_KEYS if key in payload
+        }
+    else:
+        termination = payload.get("termination")
     if (
         payload.get("reason") not in INTENTIONAL_SIGKILL_REASONS
         or not isinstance(termination, dict)
         or termination.get("sigkill") is not True
     ):
         return None
-    return payload
+    return {**payload, "termination": termination}
 
 
 def classify_external_termination(
