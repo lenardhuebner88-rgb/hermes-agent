@@ -5,7 +5,7 @@
  * One-shot consume (AgentTerminalsView idiom) after board catalog load.
  */
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FleetView } from "./FleetView";
@@ -212,10 +212,16 @@ function setHookDefaults() {
   hooks.usePlanSpecDetail.mockReturnValue({ data: null, loading: false, error: null });
 }
 
+function LocationSearchProbe() {
+  const location = useLocation();
+  return <output data-testid="location-search">{location.search}</output>;
+}
+
 function renderFleet(initialEntry: string) {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <FleetView />
+      <LocationSearchProbe />
     </MemoryRouter>,
   );
 }
@@ -226,14 +232,20 @@ describe("FleetView deep-link ?board=&status=", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.localStorage.clear();
-    api.fetchJSON.mockResolvedValue({
-      columns: [{ name: "done", tasks: [] }],
-      tenants: [],
-      assignees: [],
-      latest_event_id: 0,
-      source_errors: [],
-      now: 10,
-      done_page: { next_cursor: null, total_count: 0, limit: 0 },
+    api.fetchJSON.mockImplementation(async (url: string) => {
+      if (url.includes("/runs/failures")) {
+        return { hours: 48, count: 0, truncated: false, failures: [] };
+      }
+      if (url.endsWith("/lanes")) return { lanes: [] };
+      return {
+        columns: [{ name: "done", tasks: [] }],
+        tenants: [],
+        assignees: [],
+        latest_event_id: 0,
+        source_errors: [],
+        now: 10,
+        done_page: { next_cursor: null, total_count: 0, limit: 0 },
+      };
     });
     setLgViewport(false);
     setHookDefaults();
@@ -242,6 +254,43 @@ describe("FleetView deep-link ?board=&status=", () => {
   function selectValue(name: string): string {
     return (screen.getByRole("combobox", { name }) as HTMLSelectElement).value;
   }
+
+  it.each([
+    ["heute", "Heute"],
+    ["worker", "Worker"],
+    ["ketten", "Ketten"],
+    ["board", "Board"],
+    ["plan", "Plan"],
+    ["risiko", "Risiko"],
+  ])("opens the %s subtab from ?subtab= and consumes the param", async (subtab, label) => {
+    renderFleet(`/control/fleet?subtab=${subtab}`);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: `Subtab ${label}` }).getAttribute("aria-pressed")).toBe("true");
+    });
+    expect(screen.getByTestId("location-search").textContent).toBe("");
+  });
+
+  it("ignores and consumes an unknown ?subtab= value without changing the default", async () => {
+    renderFleet("/control/fleet?subtab=quatsch");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location-search").textContent).toBe("");
+    });
+    expect(screen.getByRole("button", { name: "Subtab Heute" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it.each([
+    ["board=health-track", "Board"],
+    ["planSearch=Landing", "Plan"],
+  ])("keeps the feature deep-link priority for ?%s over ?subtab=risiko", async (feature, label) => {
+    renderFleet(`/control/fleet?${feature}&subtab=risiko`);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: `Subtab ${label}` }).getAttribute("aria-pressed")).toBe("true");
+    });
+    expect(screen.getByTestId("location-search").textContent).not.toContain("subtab=");
+  });
 
   it("selects board + status filter after catalog load and strips params (one-shot)", async () => {
     const { rerender } = render(
@@ -407,4 +456,3 @@ describe("FleetView deep-link ?board=&status=", () => {
     expect(screen.queryByText("Task t_blocked")).toBeNull();
   });
 });
-
