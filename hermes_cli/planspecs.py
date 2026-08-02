@@ -15,12 +15,16 @@ from typing import Any, Literal
 import yaml
 
 from hermes_constants import get_hermes_home
-from hermes_cli import kanban_db
+from hermes_cli import kanban_db, kanban_worktrees
 from hermes_cli.plan_compiler import (
     AcceptanceCriterion,
     CompileBlocked,
     TaskgraphHints,
     _extract_frontmatter,
+    _kind_for_planspec_lane,
+    _derive_max_iterations_floor,
+    _max_iterations_ack_is_valid,
+    _max_iterations_floor_signals,
     _normalize_acceptance_criteria,
     taskgraph_hints_to_children,
 )
@@ -99,6 +103,9 @@ _WARN_ONLY_RUBRIC_PREFIXES = (
     "over-decomposed: ",
     "role_misuse: ",
     "scope-less code subtask: ",
+    "lane_scope_mismatch: ",
+    "max_iterations_below_floor: ",
+    "review_lane_non_terminal: ",
 )
 _ROLE_MISUSE_PREFIX = "role_misuse: "
 _FO_VIEW_SURFACE_NAMES = frozenset({"admin", "kitchen", "lists", "shopping"})
@@ -1319,6 +1326,47 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
         sid = subtask.id
         child = children_by_id.get(sid, {})
         ac_statements = _ac_statements_for_child(child)
+
+        violating_paths, _expected_lane = kanban_worktrees._lane_scope_violations(
+            subtask.lane,
+            subtask.scope_files,
+        )
+        if violating_paths:
+            findings.append(
+                "lane_scope_mismatch: "
+                f"subtask {sid} lane={subtask.lane!r} contradicts scope_files: "
+                f"{', '.join(violating_paths)}; split into a backend kind plus a "
+                "dependent frontend kind as prescribed by the decomposer prompt"
+            )
+
+        floor = _derive_max_iterations_floor(
+            subtask.review_tier,
+            spec.live_test_depth,
+        )
+        if (
+            subtask.max_iterations is not None
+            and floor is not None
+            and subtask.max_iterations < floor
+            and not _max_iterations_ack_is_valid(subtask)
+        ):
+            floor_signals = _max_iterations_floor_signals(
+                subtask.review_tier,
+                spec.live_test_depth,
+            )
+            findings.append(
+                "max_iterations_below_floor: "
+                f"subtask {sid} sets max_iterations={subtask.max_iterations} below "
+                f"floor={floor} (signals: {', '.join(floor_signals)}); "
+                f"max_iterations_ack is missing or invalid, so the compiler raised to {floor}"
+            )
+
+        if _kind_for_planspec_lane(subtask.lane) == "review":
+            findings.append(
+                "review_lane_non_terminal: "
+                f"subtask {sid} lane={subtask.lane!r} maps to review kind. Its verdict "
+                "is documentation, not terminal authority, because only a run claimed "
+                "from the Review column may write a verdict"
+            )
 
         # 1) Every subtask needs >= 1 AC (own or inherited). The child's resolved
         #    acceptance_criteria_struct is empty exactly when no AC applies.

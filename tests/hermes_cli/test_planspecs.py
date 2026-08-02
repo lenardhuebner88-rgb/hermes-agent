@@ -9,7 +9,9 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban as kanban_cli
+from hermes_cli import kanban_worktrees as kwt
 from hermes_cli import planspecs
+from hermes_cli.plan_compiler import BindingSubtask, TaskgraphHints, taskgraph_hints_to_children
 from hermes_cli.subcommands import plan as plan_subcommand
 
 
@@ -59,6 +61,38 @@ taskgraph_hints:
         encoding="utf-8",
     )
     return path
+
+
+def _rubric_spec_for_subtask(
+    *,
+    live_test_depth: str = "smoke",
+    **task_overrides,
+) -> planspecs.BindingPlanSpec:
+    task_data = {
+        "id": "S1",
+        "title": "Scoped slice",
+        "lane": "coder",
+        "scope_files": ["hermes_cli/example.py"],
+    }
+    task_data.update(task_overrides)
+    hints = TaskgraphHints(
+        binding=True,
+        subtasks=[BindingSubtask.model_validate(task_data)],
+    )
+    return planspecs.BindingPlanSpec(
+        path=Path("/tmp/rubric-example.md"),
+        frontmatter={},
+        topic="Rubric example",
+        status="Entwurf",
+        freigabe="nicht signiert",
+        live_test_depth=live_test_depth,
+        board=None,
+        hints=hints,
+        children=taskgraph_hints_to_children(
+            hints,
+            live_test_depth=live_test_depth,
+        ),
+    )
 
 
 def _set_planspec_board(path: Path, board: str) -> None:
@@ -1599,3 +1633,220 @@ def test_ac_w2_s5_2_happy_path_supersede_clears_intent(kanban_home, tmp_path: Pa
         assert planspecs._list_open_planspec_mutation_intents(conn) == []
         assert kb.get_task(conn, first["root_task_id"]).status == "archived"
         assert kb.get_task(conn, second["root_task_id"]).status != "archived"
+
+
+@pytest.mark.parametrize(
+    ("lane", "scope_files", "violating_path"),
+    [
+        (
+            "coder",
+            ["hermes_cli/example.py", "web/src/control/Board.tsx"],
+            "web/src/control/Board.tsx",
+        ),
+        (
+            "coder-frontend",
+            ["web/src/control/Board.tsx", "hermes_cli/example.py"],
+            "hermes_cli/example.py",
+        ),
+    ],
+)
+def test_spec_rubric_warns_on_lane_scope_contradiction(
+    lane, scope_files, violating_path,
+):
+    spec = _rubric_spec_for_subtask(lane=lane, scope_files=scope_files)
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    finding = next(item for item in findings if item.startswith("lane_scope_mismatch:"))
+    assert violating_path in finding
+    assert "backend kind plus a dependent frontend kind" in finding
+    assert "impossible" not in finding
+    assert finding not in planspecs._blocking_spec_rubric_findings(findings)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "web/src/control/Board.tsx",
+        "web/src/App.tsx",
+        "hermes_cli/web_dist/index.html",
+        "visual-verify-output/t_example/board.png",
+    ],
+)
+def test_spec_rubric_lane_scope_matches_worker_gate_classification(path):
+    spec = _rubric_spec_for_subtask(lane="coder", scope_files=[path])
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+    violations, _expected_lane = kwt._lane_scope_violations("coder", [path])
+
+    assert any(item.startswith("lane_scope_mismatch:") for item in findings) is bool(
+        violations
+    )
+
+
+def test_spec_rubric_reproduces_backend_lane_with_mixed_backend_frontend_scope():
+    spec = _rubric_spec_for_subtask(
+        lane="coder",
+        scope_files=["hermes_cli/planspecs.py", "web/src/control/Board.tsx"],
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert any(
+        item.startswith("lane_scope_mismatch:")
+        and "web/src/control/Board.tsx" in item
+        for item in findings
+    )
+
+
+def test_spec_rubric_does_not_warn_for_mixed_scope_on_unchecked_lane():
+    spec = _rubric_spec_for_subtask(
+        lane="premium",
+        scope_files=["hermes_cli/planspecs.py", "web/src/control/Board.tsx"],
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(item.startswith("lane_scope_mismatch:") for item in findings)
+
+
+def _assert_invalid_iteration_ack_warns(ack_marker):
+    task_overrides = {"max_iterations": 3}
+    if ack_marker is not None:
+        task_overrides["max_iterations_ack"] = ack_marker
+    spec = _rubric_spec_for_subtask(
+        live_test_depth="contract",
+        **task_overrides,
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    finding = next(
+        item for item in findings if item.startswith("max_iterations_below_floor:")
+    )
+    assert "max_iterations=3" in finding
+    assert "floor=180" in finding
+    assert "live_test_depth=contract" in finding
+    assert "raised to 180" in finding
+    assert finding not in planspecs._blocking_spec_rubric_findings(findings)
+
+
+def test_spec_rubric_warns_when_iteration_ack_is_missing():
+    _assert_invalid_iteration_ack_warns(None)
+
+
+def test_spec_rubric_warns_when_iteration_ack_reason_is_missing_or_empty():
+    _assert_invalid_iteration_ack_warns({"value": 3, "reason": "   "})
+
+
+def test_spec_rubric_warns_when_iteration_ack_value_is_missing():
+    _assert_invalid_iteration_ack_warns({"reason": "bounded edit"})
+
+
+def test_spec_rubric_warns_when_iteration_ack_value_differs_from_budget():
+    _assert_invalid_iteration_ack_warns({"value": 2, "reason": "bounded edit"})
+
+
+def test_spec_rubric_warns_when_iteration_ack_has_extra_key():
+    _assert_invalid_iteration_ack_warns(
+        {"value": 3, "reason": "bounded edit", "ticket": "extra"}
+    )
+
+
+def test_spec_rubric_accepts_valid_iteration_ack_below_floor():
+    spec = _rubric_spec_for_subtask(
+        live_test_depth="contract",
+        max_iterations=3,
+        max_iterations_ack={"value": 3, "reason": "bounded edit"},
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(item.startswith("max_iterations_below_floor:") for item in findings)
+
+
+def test_spec_rubric_does_not_warn_for_iteration_budget_above_floor():
+    spec = _rubric_spec_for_subtask(
+        live_test_depth="contract",
+        max_iterations=181,
+    )
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(item.startswith("max_iterations_below_floor:") for item in findings)
+
+
+@pytest.mark.parametrize("lane", ["reviewer", "critic"])
+def test_spec_rubric_warns_review_kind_lane_has_no_terminal_authority(lane):
+    spec = _rubric_spec_for_subtask(lane=lane)
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    finding = next(
+        item for item in findings if item.startswith("review_lane_non_terminal:")
+    )
+    assert lane in finding
+    assert "documentation, not terminal authority" in finding
+    assert "Review column" in finding
+    assert finding not in planspecs._blocking_spec_rubric_findings(findings)
+
+
+def test_spec_rubric_does_not_warn_for_verifier_lane():
+    spec = _rubric_spec_for_subtask(lane="verifier")
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    assert not any(item.startswith("review_lane_non_terminal:") for item in findings)
+
+
+def test_frozen_clean_backend_planspec_triggers_no_new_rubric_rules():
+    fixture = Path(__file__).parent / "fixtures" / "planspec_clean_backend.md"
+    spec = planspecs.parse_binding_planspec(fixture, plans_root=fixture.parent)
+
+    findings = planspecs._collect_spec_rubric_findings(spec)
+
+    new_prefixes = (
+        "lane_scope_mismatch:",
+        "max_iterations_below_floor:",
+        "review_lane_non_terminal:",
+    )
+    assert not any(item.startswith(new_prefixes) for item in findings)
+
+
+def test_plan_validate_surfaces_new_author_rule_as_advisory_warning(tmp_path: Path):
+    plans_root = tmp_path / "plans"
+    plan = plans_root / "2026-08-02-lane-scope.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(
+        """---
+status: Entwurf
+freigabe: nicht signiert
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: Mixed backend frontend slice
+      lane: coder
+      scope_files:
+        - hermes_cli/planspecs.py
+        - web/src/control/Board.tsx
+      acceptance_criteria:
+        - id: AC-1
+          scope_level: child
+          statement: Focused rubric test passes
+          verification: Run the focused rubric test
+          done_signal: The focused rubric test is green
+---
+# Advisory preflight example
+""",
+        encoding="utf-8",
+    )
+
+    result = planspecs.validate_planspec(plan, plans_root=plans_root)
+
+    assert result["disposition"] == "warn"
+    assert result["would_block"] is False
+    assert any(
+        finding.startswith("lane_scope_mismatch:") for finding in result["findings"]
+    )
