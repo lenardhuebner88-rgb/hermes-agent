@@ -524,7 +524,6 @@ export const de = {
     laufEyebrowAngebrochen: (done: number, total: number) => `Angebrochen · Station ${done} von ${total} durch`,
     laufEyebrowGehaltenDurch: (done: number, total: number) => `Gehalten · Station ${done} von ${total} durch`,
     laufEyebrowGehaltenLeer: "Gehalten · nichts gelaufen",
-    laufEyebrowWartetLeer: "Wartet · nichts gelaufen",
     laufEyebrowFertig: (done: number, total: number) => `Fertig · ${done} von ${total} Stationen durch`,
     laufAgeLaeuft: (age: string) => `läuft seit ${age}`,
     laufAgeSteht: (age: string) => `steht seit ${age}`,

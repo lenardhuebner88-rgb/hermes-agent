@@ -136,6 +136,18 @@ def _ordered_chain_stations(
     return ordered
 
 
+def _derive_chain_state(statuses: set[str]) -> str:
+    done_statuses = {"done", "archived"}
+    active_statuses = {"running", "review"}
+    if statuses <= done_statuses:
+        return "fertig"
+    if not statuses & done_statuses and not statuses & active_statuses:
+        return "gehalten"
+    if statuses & done_statuses and not statuses & active_statuses:
+        return "angebrochen"
+    return "laeuft"
+
+
 def _task_chain_context(conn: sqlite3.Connection, task: Any) -> Optional[dict[str, Any]]:
     """Return additive navigation context when a task is linked into a chain."""
     tasks = kanban_db.list_tasks(conn, include_archived=True)
@@ -210,16 +222,7 @@ def _task_chain_context(conn: sqlite3.Connection, task: Any) -> Optional[dict[st
         ),
         None,
     )
-    statuses = {member.status for member in members}
-    done_statuses = {"done", "archived"}
-    if statuses <= done_statuses:
-        chain_state = "fertig"
-    elif statuses & done_statuses and "scheduled" in statuses:
-        chain_state = "angebrochen"
-    elif statuses == {"scheduled"}:
-        chain_state = "gehalten"
-    else:
-        chain_state = "laeuft"
+    chain_state = _derive_chain_state({member.status for member in members})
 
     def station(member: Any) -> dict[str, str]:
         return {"id": member.id, "title": member.title}
@@ -1014,7 +1017,7 @@ def get_board(
         # Keep summary costs and PlanSpec labels on the same constant-query
         # footing as card enrichment below. Both maps deliberately cover the
         # full board, because chain summaries are computed before done paging.
-        all_task_ids = [task.id for task in tasks]
+        all_task_ids = [task.id for task in summary_tasks]
         cost_map = kanban_db.batch_task_costs(conn, all_task_ids)
         planspec_source_map: dict[str, str] = {}
         if all_task_ids:
@@ -1026,14 +1029,14 @@ def get_board(
                     all_task_ids,
                 ).fetchall()
             }
-        chain_context_tasks = tasks
+        chain_context_tasks = summary_tasks
         chain_summaries: Optional[list[dict[str, Any]]] = None
         if done_limit is not None:
             # Authoritative roll-up over the FULL board, before the done page is
             # applied. This mirrors buildChainChips' flat root_id-or-self group
             # exactly; it deliberately does not walk parent/child membership.
             chain_groups: dict[str, list[Any]] = {}
-            for task in tasks:
+            for task in summary_tasks:
                 chain_groups.setdefault(_resolve_root(task.id), []).append(task)
             chain_summaries = []
             for root_id, members in chain_groups.items():
@@ -1077,19 +1080,16 @@ def get_board(
                 chain_identifier = (
                     Path(planspec_source).stem if planspec_source else first_member.title
                 )
-                statuses = {member.status for member in members}
-                done_statuses = {"done", "archived"}
-                if statuses <= done_statuses:
-                    chain_state = "fertig"
+                chain_state = _derive_chain_state(
+                    {member.status for member in members}
+                )
+                if chain_state == "fertig":
                     state_since = max(completed_values) if completed_values else None
-                elif statuses & done_statuses and "scheduled" in statuses:
-                    chain_state = "angebrochen"
+                elif chain_state == "angebrochen":
                     state_since = min(completed_values) if completed_values else None
-                elif statuses == {"scheduled"}:
-                    chain_state = "gehalten"
+                elif chain_state == "gehalten":
                     state_since = min(member.created_at for member in members)
                 else:
-                    chain_state = "laeuft"
                     state_since = min(member.created_at for member in members)
                 state_age_seconds = (
                     max(0, int(time.time() - state_since))

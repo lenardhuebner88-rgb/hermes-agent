@@ -321,11 +321,14 @@ export const BoardTaskSchema = z.object({
 // Zustand und Fortschritt — nie erfundene Stationen.
 const CHAIN_STATION_STATE_BY_STATUS: Record<string, ChainStationState> = {
   done: "fertig",
+  archived: "fertig",
   running: "laeuft",
+  review: "laeuft",
   blocked: "gehalten",
-  held: "gehalten",
-  parked: "gehalten",
   scheduled: "gehalten",
+  triage: "offen",
+  todo: "offen",
+  ready: "offen",
 };
 
 const CHAIN_SUMMARY_STATES: ReadonlySet<string> = new Set([

@@ -50,18 +50,17 @@ import "./ketten-v4.css";
 // Zusammenfassung die Liste noch nicht, degradiert die Karte sichtbar auf
 // Kennung, Zustand und Fortschritt — sie zeigt nie erfundene Stationen.
 
-type LaufChainState = "laeuft" | "angebrochen" | "gehalten" | "wartet" | "fertig";
+type LaufChainState = "laeuft" | "angebrochen" | "gehalten" | "fertig";
 
 /**
  * LK-2 AC-1: Sichtbarkeit folgt dem Bedarf an Aufmerksamkeit, nicht dem Alter.
- * angebrochen (höchste Aufmerksamkeit) → laeuft → gehalten → wartet → fertig.
+ * angebrochen (höchste Aufmerksamkeit) → laeuft → gehalten → fertig.
  */
 const LAUF_ATTENTION_RANK: Record<LaufChainState, number> = {
   angebrochen: 0,
   laeuft: 1,
   gehalten: 2,
-  wartet: 3,
-  fertig: 4,
+  fertig: 3,
 };
 
 /** Sichtbare Stationen, bevor die Kürzungszeile mit der Gesamtzahl greift (AC-6). */
@@ -71,13 +70,18 @@ const LAUF_VISIBLE_STATIONS = 4;
 function deriveChainState(chip: ChainChipDef, summary: ChainSummary | undefined): LaufChainState {
   const s = summary?.state;
   if (s === "laeuft" || s === "angebrochen" || s === "gehalten" || s === "fertig") return s;
-  switch (chip.state) {
-    case "completed": return "fertig";
-    case "active": return "laeuft";
-    case "blocked":
-    case "held": return chip.done > 0 ? "angebrochen" : "gehalten";
-    default: return chip.done > 0 ? "angebrochen" : "wartet";
-  }
+  const counts = summary?.status_counts;
+  const done = counts
+    ? (counts.done ?? 0) + (counts.archived ?? 0)
+    : chip.done;
+  const active = counts
+    ? (counts.running ?? 0) + (counts.review ?? 0) > 0
+    : chip.state === "active";
+  const total = summary?.total ?? chip.total;
+  if (total > 0 && done === total) return "fertig";
+  if (done === 0 && !active) return "gehalten";
+  if (done > 0 && !active) return "angebrochen";
+  return "laeuft";
 }
 
 /** Zustandszeile in Worten: Zustand UND Fortschritt, nie nur Farbe (AC-4). */
@@ -87,7 +91,6 @@ function laufEyebrow(state: LaufChainState, done: number, total: number): string
     case "angebrochen": return de.fleet.laufEyebrowAngebrochen(done, total);
     case "gehalten": return done > 0 ? de.fleet.laufEyebrowGehaltenDurch(done, total) : de.fleet.laufEyebrowGehaltenLeer;
     case "fertig": return de.fleet.laufEyebrowFertig(done, total);
-    default: return de.fleet.laufEyebrowWartetLeer;
   }
 }
 
@@ -149,7 +152,7 @@ function Laufkarte({ chip, summary, selected, now, readOnly, releaseBusy, releas
   // AC-7: der einzige Startknopf am Block wirkt auf die ganze Kette; es gibt
   // keine Möglichkeit, eine einzelne Station zu starten.
   const counts = summary?.status_counts;
-  const heldCount = (counts?.blocked ?? 0) + (counts?.parked ?? 0) + (counts?.scheduled ?? 0);
+  const heldCount = (counts?.blocked ?? 0) + (counts?.scheduled ?? 0);
   const runningCount = counts?.running ?? 0;
   const canRelease = !readOnly && (summary
     ? heldCount > 0 && runningCount === 0

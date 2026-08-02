@@ -499,7 +499,7 @@ const LAUF_BOARD: BoardResponse = {
     root_title: "Kettenweite Freigabe und Ketten-Sichtbarkeit im Fleet-Board",
     total: 6,
     done: 2,
-    status_counts: { done: 2, parked: 4 },
+    status_counts: { done: 2, blocked: 4 },
     latest_completed_at: null,
     state: "gehalten",
     kennung: "Kettenweite Freigabe",
@@ -702,7 +702,7 @@ describe("KettenTab LK-1 — Laufkarte mit Stanzkante und Stationen", () => {
         root_title: longTitle,
         total: 2,
         done: 0,
-        status_counts: { parked: 2 },
+        status_counts: { blocked: 2 },
         latest_completed_at: null,
       }],
     };
@@ -738,10 +738,10 @@ function lk2Summary(over: Partial<ChainSummary> & { root_id: string }): ChainSum
 const LK2_SUMMARIES: ChainSummary[] = [
   // Bewusst „falsche“ Eingabereihenfolge — die Komponente muss selbst ordnen.
   lk2Summary({ root_id: "t_lk2_done1", kennung: "Fertig alt", done: 3, status_counts: { done: 3 }, latest_completed_at: 900 }),
-  lk2Summary({ root_id: "t_lk2_hold", kennung: "Gehalten", done: 2, status_counts: { done: 2, parked: 1 }, state: "gehalten", state_age_seconds: 3600 }),
+  lk2Summary({ root_id: "t_lk2_hold", kennung: "Angebrochen blockiert", done: 2, status_counts: { done: 2, blocked: 1 }, state: "angebrochen", state_age_seconds: 3600 }),
   lk2Summary({ root_id: "t_lk2_run", kennung: "Laeuft", done: 1, status_counts: { done: 1, running: 1, todo: 1 }, state: "laeuft", state_age_seconds: 120 }),
   lk2Summary({ root_id: "t_lk2_brk1", kennung: "Angebrochen eins", done: 2, status_counts: { done: 2, todo: 1 }, state: "angebrochen", state_age_seconds: 7200 }),
-  lk2Summary({ root_id: "t_lk2_wait", kennung: "Wartet", done: 0, status_counts: { todo: 3 } }),
+  lk2Summary({ root_id: "t_lk2_wait", kennung: "Gehalten", done: 0, status_counts: { blocked: 3 } }),
   lk2Summary({ root_id: "t_lk2_brk2", kennung: "Angebrochen zwei", done: 1, status_counts: { done: 1, todo: 2 }, state: "angebrochen", state_age_seconds: 600 }),
   lk2Summary({ root_id: "t_lk2_done2", kennung: "Fertig neu", done: 3, status_counts: { done: 3 }, latest_completed_at: 1900 }),
   lk2Summary({ root_id: "t_lk2_done3", kennung: "Fertig mitte", done: 3, status_counts: { done: 3 }, latest_completed_at: 1400 }),
@@ -759,7 +759,7 @@ function lk2Board(summaries: ChainSummary[]): BoardResponse {
 }
 
 const LK2_KENNUNG_ORDER = [
-  "Angebrochen eins", "Angebrochen zwei", "Laeuft", "Gehalten", "Wartet",
+  "Angebrochen eins", "Angebrochen zwei", "Angebrochen blockiert", "Laeuft", "Gehalten",
   "Fertig neu", "Fertig mitte", "Fertig alt",
 ];
 
@@ -778,14 +778,14 @@ describe("KettenTab LK-2 — Aufmerksamkeits-Ordnung, Kopf-Zähler, Zustände", 
     cleanup();
   });
 
-  it("AC-1: ordnet angebrochen → laufend → gehalten → wartend → fertig, nicht nach Alter", () => {
+  it("AC-1: ordnet angebrochen → laufend → gehalten → fertig, nicht nach Alter", () => {
     const { container } = render(
       <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
     );
     const states = [...container.querySelectorAll(".lk-list > *")].map((el) =>
       el.classList.contains("lk-done-row") ? "fertig" : (el as HTMLElement).dataset.state);
     expect(states).toEqual([
-      "angebrochen", "angebrochen", "laeuft", "gehalten", "wartet", "fertig", "fertig", "fertig",
+      "angebrochen", "angebrochen", "angebrochen", "laeuft", "gehalten", "fertig", "fertig", "fertig",
     ]);
     expect(lk2ListKennungen(container)).toEqual(LK2_KENNUNG_ORDER);
   });
@@ -807,7 +807,7 @@ describe("KettenTab LK-2 — Aufmerksamkeits-Ordnung, Kopf-Zähler, Zustände", 
     render(
       <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
     );
-    expect(screen.getByText("8 · 2 angebrochen")).toBeTruthy();
+    expect(screen.getByText("8 · 3 angebrochen")).toBeTruthy();
   });
 
   it("AC-4: Reihenfolge ist bei gleichem Zustand stabil — permutierte Eingabe, gleiche Ausgabe", () => {
