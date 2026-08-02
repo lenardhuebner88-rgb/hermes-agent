@@ -1533,3 +1533,26 @@ def test_maybe_route_conflict_park_fixer_root_keyed_budget_across_chain_members(
     assert summary_b["conflict_fixer_dispatched"] == []
     assert summary_b["parked"] == []
     assert len(dispatched_events) == 1
+
+
+def test_prepare_reused_task_worktree_keeps_current_run_guard(
+    kanban_home, tmp_path,
+):
+    repo = tmp_path / "spawn-guard-repo"
+    _init_git_repo(repo)
+    with kb.connect_closing() as conn:
+        task_id, _claimed, workspace = _start_provisioned_worker_run(
+            conn, repo, "spawn guard remains run-bound",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
+                (task_id,),
+            )
+        task = kb.get_task(conn, task_id)
+
+        with pytest.raises(
+            kwt.WorktreeError,
+            match="current task run is missing before worker base preparation",
+        ):
+            kwt.prepare_reused_task_worktree(conn, task, workspace)

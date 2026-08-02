@@ -18,6 +18,8 @@ import unittest.mock
 from pathlib import Path
 import pytest
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
+from hermes_cli.kanban_dispatch_policy import chain_worktree_inflight_counts
 
 from tests.hermes_cli._kanban_test_helpers import (
     _insert_ended_run,
@@ -1539,3 +1541,232 @@ def test_worktree_writer_deferred_event_dedupes_until_state_changes(
         ]
         assert len(released) == 1
         assert released[0].payload["reason_class"] == "process_group_ended"
+
+
+def _lease_reaper_git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _insert_test_writer_lease(
+    conn,
+    task_id: str,
+    run_id: int,
+    claim_lock: str,
+    *,
+    worker_pid: int | None = None,
+) -> None:
+    task = kb.get_task(conn, task_id)
+    assert task is not None
+    identity = kb._worktree_writer_lease_identity(conn, task)
+    assert identity is not None
+    worktree_key, root_task_id, workspace_path = identity
+    candidate_sha, _clean = kb._workspace_release_state(workspace_path)
+    now = int(time.time())
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO worktree_writer_leases "
+            "(worktree_key, root_task_id, task_id, run_id, claim_lock, worker_pid, "
+            "workspace_path, candidate_sha, acquired_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                worktree_key,
+                root_task_id,
+                task_id,
+                run_id,
+                claim_lock,
+                worker_pid,
+                workspace_path,
+                candidate_sha,
+                now,
+                now,
+            ),
+        )
+
+
+def _blocked_chain_writer_with_wip(conn, tmp_path: Path) -> tuple[str, int, Path]:
+    repo = tmp_path / "lease-reaper-repo"
+    repo.mkdir()
+    _lease_reaper_git(repo, "init", "-b", "main")
+    _lease_reaper_git(repo, "config", "user.email", "test@example.com")
+    _lease_reaper_git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _lease_reaper_git(repo, "add", "tracked.txt")
+    _lease_reaper_git(repo, "commit", "-m", "base")
+
+    task_id = kb.create_task(
+        conn,
+        title="blocked chain writer",
+        assignee="coder",
+        kind="code",
+        workspace_kind="worktree",
+        workspace_path=str(repo),
+    )
+    claimed = kb.claim_task(conn, task_id, claimer="test-host:123")
+    assert claimed is not None and claimed.current_run_id is not None
+    run_id = int(claimed.current_run_id)
+    claim_lock = str(claimed.claim_lock)
+    workspace = kwt.provision_for_task(conn, claimed, repo)
+    (workspace / "tracked.txt").write_text("worker wip\n", encoding="utf-8")
+
+    assert kb.block_task(
+        conn,
+        task_id,
+        reason="worker gave up after leaving resumable WIP",
+        kind="needs_input",
+        expected_run_id=run_id,
+    )
+    task = kb.get_task(conn, task_id)
+    assert task.status == "blocked"
+    assert task.current_run_id is None
+    _insert_test_writer_lease(conn, task_id, run_id, claim_lock)
+    lease = conn.execute(
+        "SELECT run_id FROM worktree_writer_leases WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    assert lease is not None and int(lease["run_id"]) == run_id
+    return task_id, run_id, workspace
+
+
+def test_lease_reaper_adopts_blocked_chain_wip_from_lease_run(
+    kanban_home, tmp_path,
+):
+    with kb.connect_closing() as conn:
+        task_id, lease_run_id, workspace = _blocked_chain_writer_with_wip(
+            conn, tmp_path
+        )
+        later_run_id = _insert_ended_run(
+            conn,
+            task_id,
+            profile="coder",
+            metadata={"purpose": "prove lease run wins over latest closed run"},
+        )
+        assert later_run_id is not None
+        assert later_run_id > lease_run_id
+        before_counts = chain_worktree_inflight_counts(conn, lambda tid: tid)
+        released = kb._reap_worktree_writer_leases(conn)
+
+        assert released == [task_id]
+        assert _lease_reaper_git(workspace, "status", "--porcelain") == ""
+        message = _lease_reaper_git(workspace, "show", "-s", "--format=%B", "HEAD")
+        assert message == (
+            f"wip({task_id}): adopt uncommitted WIP from blocked run {lease_run_id}"
+        )
+        assert conn.execute(
+            "SELECT 1 FROM worktree_writer_leases WHERE task_id = ?", (task_id,)
+        ).fetchone() is None
+        events = kb.list_events(conn, task_id)
+        assert any(
+            event.kind == "worktree_writer_released"
+            and event.payload["reason_class"] == "process_group_ended"
+            for event in events
+        )
+        assert any(
+            event.kind == "wip_adopted"
+            and event.payload["run_id"] == lease_run_id
+            for event in events
+        )
+        assert chain_worktree_inflight_counts(conn, lambda tid: tid) == before_counts
+
+
+def test_lease_reaper_keeps_lease_when_wip_adoption_fails(
+    kanban_home, tmp_path, monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        task_id, _lease_run_id, _workspace = _blocked_chain_writer_with_wip(
+            conn, tmp_path
+        )
+        monkeypatch.setattr(
+            kwt,
+            "adopt_reaped_writer_wip",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                kwt.WorktreeError("simulated adoption failure")
+            ),
+        )
+
+        assert kb._reap_worktree_writer_leases(conn) == []
+        assert conn.execute(
+            "SELECT 1 FROM worktree_writer_leases WHERE task_id = ?", (task_id,)
+        ).fetchone() is not None
+        first_deferred = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "worktree_writer_release_deferred"
+        ]
+        assert len(first_deferred) == 1
+
+        assert kb._reap_worktree_writer_leases(conn) == []
+        deferred = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "worktree_writer_release_deferred"
+        ]
+        assert len(deferred) == 1
+
+
+def test_lease_reaper_keeps_matching_running_claim_without_pid_probe(
+    kanban_home, tmp_path, monkeypatch,
+):
+    workspace = tmp_path / "matching-claim"
+    workspace.mkdir()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn, title="live claim", assignee="coder", kind="code",
+            workspace_kind="dir", workspace_path=str(workspace),
+        )
+        claimed = kb.claim_task(conn, task_id, claimer="test-host:456")
+        assert claimed is not None and claimed.current_run_id is not None
+        _insert_test_writer_lease(
+            conn,
+            task_id,
+            int(claimed.current_run_id),
+            str(claimed.claim_lock),
+        )
+        monkeypatch.setattr(
+            kb,
+            "_pid_alive",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("pid probe ran")),
+        )
+
+        assert kb._reap_worktree_writer_leases(conn) == []
+        assert conn.execute(
+            "SELECT 1 FROM worktree_writer_leases WHERE task_id = ?", (task_id,)
+        ).fetchone() is not None
+
+
+def test_lease_reaper_keeps_live_process_without_matching_claim(
+    kanban_home, tmp_path, monkeypatch,
+):
+    workspace = tmp_path / "live-process"
+    workspace.mkdir()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn, title="live process", assignee="coder", kind="code",
+            workspace_kind="dir", workspace_path=str(workspace),
+        )
+        claimed = kb.claim_task(conn, task_id, claimer="test-host:789")
+        assert claimed is not None and claimed.current_run_id is not None
+        run_id = int(claimed.current_run_id)
+        claim_lock = str(claimed.claim_lock)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                "claim_expires = NULL, current_run_id = NULL WHERE id = ?",
+                (task_id,),
+            )
+        _insert_test_writer_lease(
+            conn, task_id, run_id, claim_lock, worker_pid=os.getpid()
+        )
+        probes = []
+        monkeypatch.setattr(kb, "_pid_alive", lambda pid: probes.append(pid) or True)
+
+        assert kb._reap_worktree_writer_leases(conn) == []
+        assert probes == [os.getpid()]
+        assert conn.execute(
+            "SELECT 1 FROM worktree_writer_leases WHERE task_id = ?", (task_id,)
+        ).fetchone() is not None

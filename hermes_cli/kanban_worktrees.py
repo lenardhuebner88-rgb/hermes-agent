@@ -1635,6 +1635,110 @@ def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return row is not None
 
 
+def _provisioned_merge_target(conn: sqlite3.Connection, root_id: str) -> str:
+    event = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'worktree_provisioned' "
+        "ORDER BY id ASC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if event and event["payload"]:
+        try:
+            payload = json.loads(event["payload"])
+            if isinstance(payload, dict):
+                return str(payload.get("merge_target") or "").strip()
+        except (TypeError, ValueError):
+            pass
+    return ""
+
+
+def adopt_reaped_writer_wip(
+    conn: sqlite3.Connection,
+    task,
+    workspace: Path | str,
+    *,
+    lease_run_id: int,
+) -> Optional[dict[str, Any]]:
+    """Adopt WIP left by a dead writer using the run recorded in its lease.
+
+    This recovery entry point is deliberately independent of
+    ``task.current_run_id``.  The spawn path remains guarded by
+    :func:`prepare_reused_task_worktree`; a reaper instead has exactly one
+    attributable run: the run retained in the writer lease.
+    """
+    if task.status != "blocked" or task.current_run_id is not None:
+        raise WorktreeError(
+            "dead writer WIP adoption requires a blocked task with no current run"
+        )
+    prior = split_provisioned_path(task.workspace_path)
+    current = split_provisioned_path(workspace)
+    if prior is None or current is None:
+        raise WorktreeError("dead writer WIP is not in a provisioned chain worktree")
+    prior_repo, prior_root_id, prior_wt = prior
+    repo_root, root_id, wt = current
+    if (
+        prior_repo.resolve() != repo_root.resolve()
+        or prior_root_id != root_id
+        or prior_wt.resolve() != wt.resolve()
+    ):
+        raise WorktreeError("provisioned worktree identity drifted before WIP adoption")
+
+    run = conn.execute(
+        "SELECT id FROM task_runs WHERE id = ? AND task_id = ?",
+        (lease_run_id, task.id),
+    ).fetchone()
+    if run is None:
+        raise WorktreeError(
+            f"writer lease run {lease_run_id} does not belong to task {task.id}"
+        )
+    expected_branch = str(task.branch_name or "").strip()
+    branch = current_branch(wt)
+    if expected_branch and branch != expected_branch:
+        raise WorktreeError(
+            "provisioned worktree branch drifted before WIP adoption: "
+            f"expected {expected_branch}, got {branch}"
+        )
+
+    dirty = dirty_files(wt)
+    if not dirty:
+        return None
+    adopted, skipped = _adopt_wip_commit(
+        wt,
+        task.id,
+        lease_run_id,
+        dirty,
+        merge_target=_provisioned_merge_target(conn, root_id),
+        scope_paths=_task_scope_paths(task.body, task.scope_contract),
+    )
+    if not adopted:
+        raise WorktreeError(
+            "dead writer WIP contained no attributable paths eligible for adoption"
+        )
+    result = {
+        "head": _git(wt, "rev-parse", "HEAD"),
+        "adopted_wip_files": adopted,
+        "skipped_wip_files": skipped,
+    }
+
+    from hermes_cli import kanban_db as kb
+
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            task.id,
+            "wip_adopted",
+            {
+                "run_id": lease_run_id,
+                "files": result["adopted_wip_files"],
+                "skipped_files": result["skipped_wip_files"],
+                "commit_sha": result["head"],
+                "source": "writer_lease_reaper",
+            },
+            run_id=lease_run_id,
+        )
+    return result
+
+
 def prepare_reused_task_worktree(
     conn: sqlite3.Connection,
     task,
@@ -1687,20 +1791,7 @@ def prepare_reused_task_worktree(
         (run_id, task.id),
     ).fetchone()
     recorded_head = str(run["pre_run_commit_sha"] or "").strip() if run else ""
-    event = conn.execute(
-        "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'worktree_provisioned' "
-        "ORDER BY id ASC LIMIT 1",
-        (root_id,),
-    ).fetchone()
-    merge_target = ""
-    if event and event["payload"]:
-        try:
-            payload = json.loads(event["payload"])
-            if isinstance(payload, dict):
-                merge_target = str(payload.get("merge_target") or "").strip()
-        except (TypeError, ValueError):
-            pass
+    merge_target = _provisioned_merge_target(conn, root_id)
     # WIP adoption evidence: walk prior runs of THIS task, most recent
     # first, SKIPPING outcomes where no worker process ever touched the
     # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
