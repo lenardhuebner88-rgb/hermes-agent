@@ -535,24 +535,6 @@ def upsert_run_facts(
         _upsert_run_facts(conn, str(run_id), fields)
 
 
-def finalize_run_tool_call_count(
-    run_id: str,
-    *,
-    path: Optional[os.PathLike[str] | str] = None,
-) -> None:
-    """Set an observed zero for a completed run without replacing measurements."""
-    normalized_run_id = str(run_id).strip()
-    if not normalized_run_id:
-        raise ValueError("run_id must be non-empty")
-    with _connection(path) as conn:
-        conn.execute(
-            "UPDATE run_usage_facts "
-            "SET tool_call_count=0 "
-            "WHERE run_id=? AND tool_call_count IS NULL",
-            (normalized_run_id,),
-        )
-
-
 def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
     row = conn.execute(
         """
@@ -625,7 +607,7 @@ def record_llm_call(
     run_fields: Optional[Mapping[str, Any]] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
-    """Upsert one completed model call and refresh nullable run aggregates."""
+    """Upsert one model call and refresh strictly nullable run aggregates."""
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
     call_index = int(call_index)
@@ -633,11 +615,6 @@ def record_llm_call(
         raise ValueError("call_index must be non-negative")
 
     values = _clean_fields(fields, LLM_CALL_COLUMNS)
-    inferred_zero_tool_count = "tool_call_count" not in values
-    if inferred_zero_tool_count:
-        # A persisted call is a completed model response.  No tool request in
-        # that response is an observed zero; later tool hooks increment it.
-        values["tool_call_count"] = 0
     if "origin" in values:
         values["origin"] = _origin(values["origin"])
     columns = ["run_id", "call_index", *values]
@@ -645,7 +622,6 @@ def record_llm_call(
     updates = [
         f"{column}=COALESCE(excluded.{column}, run_llm_calls.{column})"
         for column in values
-        if not (inferred_zero_tool_count and column == "tool_call_count")
     ]
     placeholders = ", ".join("?" for _ in columns)
     conflict = (

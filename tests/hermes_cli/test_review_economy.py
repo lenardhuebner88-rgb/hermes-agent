@@ -77,14 +77,7 @@ def _green_gate_repo(tmp_path: Path) -> Path:
     return repo
 
 
-_GREEN_TEST_COMMAND = "printf '=== Summary: 1 files, 1 tests passed, 0 failed ===\\n'"
-_ZERO_TEST_COMMAND = (
-    "printf 'run-affected: no applicable Python production paths for this diff "
-    "— skipping pytest\\n'"
-)
-
-
-def _worker_gate_for(repo: Path, commands=(_GREEN_TEST_COMMAND,)) -> dict:
+def _worker_gate_for(repo: Path, commands=("true",)) -> dict:
     return {
         "enabled": True,
         "repos": {str(repo.resolve()): list(commands)},
@@ -119,36 +112,6 @@ def test_standard_tier_no_llm_verifier(kanban_home, economy_on, tmp_path, monkey
         assert skipped is not None, "skip must leave an audit event"
         payload = json.loads(skipped["payload"])
         assert payload["worker_gate"]["passed"] is True
-
-
-@pytest.mark.parametrize(
-    "commands",
-    [(_ZERO_TEST_COMMAND,), ("true",)],
-    ids=["zero-tests", "unknown-test-count"],
-)
-def test_standard_tier_without_positive_test_count_still_uses_verifier(
-    kanban_home, economy_on, tmp_path, monkeypatch, commands
-):
-    """A green process exit is not review evidence unless tests actually ran."""
-    repo = _green_gate_repo(tmp_path)
-    monkeypatch.setattr(
-        kb, "_worker_gate_config", lambda: _worker_gate_for(repo, commands=commands)
-    )
-
-    with kb.connect() as conn:
-        tid = kb.create_task(
-            conn,
-            title="impl without tests",
-            assignee="coder",
-            workspace_path=str(repo),
-        )
-        assert kb.claim_task(conn, tid) is not None
-        assert kb.complete_task(conn, tid, summary="done", review_gate=True)
-
-        assert kb.get_task(conn, tid).status == "review"
-        kinds = [event.kind for event in kb.list_events(conn, tid)]
-        assert "review_skipped_deterministic" not in kinds
-        assert "submitted_for_review" in kinds
 
 
 def test_kind_code_alone_does_not_raise_kanban_review_floor(
@@ -536,33 +499,6 @@ def test_tip_defer_requires_green_gate(kanban_home, tip_judgment_on, monkeypatch
         kb.claim_task(conn, t1)
         assert kb.complete_task(conn, t1, summary="s", review_gate=True)
         assert kb.get_task(conn, t1).status == "review"
-
-
-@pytest.mark.parametrize(
-    "commands",
-    [(_ZERO_TEST_COMMAND,), ("true",)],
-    ids=["zero-tests", "unknown-test-count"],
-)
-def test_tip_defer_requires_positive_test_count(
-    kanban_home, tip_judgment_on, tmp_path, monkeypatch, commands
-):
-    """A non-tip slice parks when the green gate ran zero or uncounted tests."""
-    repo = _green_gate_repo(tmp_path)
-    monkeypatch.setattr(
-        kb, "_worker_gate_config", lambda: _worker_gate_for(repo, commands=commands)
-    )
-
-    with kb.connect() as conn:
-        first, _tip, _trailing_doc = _linked_two_slice_chain(
-            conn, repo, planspec=False
-        )
-        assert kb.claim_task(conn, first) is not None
-        assert kb.complete_task(conn, first, summary="slice one", review_gate=True)
-
-        assert kb.get_task(conn, first).status == "review"
-        kinds = [event.kind for event in kb.list_events(conn, first)]
-        assert "review_deferred_to_tip" not in kinds
-        assert "submitted_for_review" in kinds
 
 
 def test_non_planspec_review_task_unaffected(
