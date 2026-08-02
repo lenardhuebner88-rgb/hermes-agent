@@ -15360,6 +15360,25 @@ def _worker_gate_test_count(output: str, command_index: int) -> Optional[dict]:
     return None
 
 
+def _worker_gate_has_positive_test_count(stamp: dict) -> bool:
+    """Return whether a green code-worker gate proves that tests executed.
+
+    Review economy is fail-closed: an explicitly zero count and a missing or
+    unrecognized count are both insufficient to skip or defer review.  At least
+    one recognized runner summary must report more than zero passed tests.
+    """
+    test_counts = stamp.get("test_counts")
+    if not isinstance(test_counts, list):
+        return False
+    return any(
+        isinstance(count, dict)
+        and isinstance(count.get("tests_passed"), int)
+        and not isinstance(count.get("tests_passed"), bool)
+        and count["tests_passed"] > 0
+        for count in test_counts
+    )
+
+
 def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
     """Run the enforced light worker gate (``kanban.worker_gate``) for *task_id*.
 
@@ -15496,7 +15515,7 @@ def _deterministic_review_skip(
     ):
         return None
     stamp = _run_worker_gate(conn, task_id)
-    if stamp.get("passed") is True:
+    if stamp.get("passed") is True and _worker_gate_has_positive_test_count(stamp):
         return stamp
     return None
 
@@ -15567,7 +15586,7 @@ def _tip_defer_review(
     if not open_code_siblings:
         return None  # this IS the tip — the one judgment fires here
     stamp = _run_worker_gate(conn, task_id)
-    if stamp.get("passed") is True:
+    if stamp.get("passed") is True and _worker_gate_has_positive_test_count(stamp):
         return _review_policy.defer_event_payload(context, stamp)
     return None
 
