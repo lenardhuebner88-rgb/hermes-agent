@@ -4941,6 +4941,25 @@ CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP = 3600
 FIXER_RUNTIME_EXTENSION_GRANTED_EVENT = "fixer_runtime_extension_granted"
 
 
+def _conflict_fixer_profile() -> str:
+    """Resolve ``kanban.conflict_fixer_profile`` from the root config."""
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        config_path = get_default_hermes_root() / "config.yaml"
+        if config_path.is_file():
+            with open(config_path, "r", encoding="utf-8") as config_file:
+                root_config = yaml.safe_load(config_file) or {}
+            kanban_config = root_config.get("kanban") or {}
+            configured_profile = kanban_config.get("conflict_fixer_profile")
+            if isinstance(configured_profile, str) and configured_profile.strip():
+                return configured_profile.strip()
+    except Exception:
+        pass
+    return "premium"
+
+
 def _conflict_fingerprint(reason: str) -> str:
     """Return a stable identity for one integration-conflict context."""
     core = re.sub(r"^integration parked:\s*", "", reason.strip(), flags=re.I)
@@ -14844,7 +14863,9 @@ def _review_gate_should_apply(
     """Decide whether this completion should be parked in ``review``.
 
     All of: gate enabled, this run did NOT originate from review (anti-loop),
-    and the task's assignee is a code-bearing role. Profile availability is a
+    and the task's assignee is a code-bearing role. Conflict fixers always need
+    independent review, including while a newly configured fixer profile has
+    not yet been added to the code-role policy. Profile availability is a
     retryable runtime state handled after policy selection; it can never turn
     an enabled review gate into direct ``done``.
     """
@@ -14860,7 +14881,7 @@ def _review_gate_should_apply(
     if not row:
         return False
     assignee = (row["assignee"] or "").strip().lower()
-    return assignee in cfg["code_roles"] or (
+    return _is_conflict_fixer_task(conn, task_id) or assignee in cfg["code_roles"] or (
         bool(cfg.get("auto_tier"))
         and _review_policy.path_risk_requires_gate(
             conn,
@@ -26466,7 +26487,7 @@ def _create_conflict_park_fixer_subtask(
             conn,
             title=title,
             body=body,
-            assignee="premium",
+            assignee=_conflict_fixer_profile(),
             created_by="orchestrator",
             workspace_kind="dir",
             workspace_path=str(wt),

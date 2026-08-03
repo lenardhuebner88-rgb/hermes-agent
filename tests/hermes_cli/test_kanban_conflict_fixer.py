@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import hermes_cli.profiles as profiles_mod
@@ -37,6 +39,100 @@ def review_gate_on(monkeypatch):
     )
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     return True
+
+
+def _spawn_conflict_fixer(conn, tmp_path: Path) -> tuple[str, str]:
+    reason = "integration parked: merge conflict/failure (aborted): foo.py"
+    parent_id = kb.create_task(conn, title="parked finalizer", assignee="coder")
+    assert kb.claim_task(conn, parent_id) is not None
+    assert kb.block_task(conn, parent_id, reason=reason, kind="integration")
+    worktree = tmp_path / "repo" / ".worktrees" / "kanban" / parent_id
+    worktree.mkdir(parents=True)
+    kb.set_workspace_path(conn, parent_id, str(worktree))
+    parent = conn.execute("SELECT * FROM tasks WHERE id = ?", (parent_id,)).fetchone()
+    assert parent is not None
+    child_id = kb._create_conflict_park_fixer_subtask(
+        conn,
+        parent,
+        reason=reason,
+        root_id=parent_id,
+        wt=worktree,
+        attempt=1,
+    )
+    assert child_id is not None
+    return parent_id, child_id
+
+
+def test_conflict_fixer_uses_configured_profile(kanban_home, tmp_path):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  conflict_fixer_profile: conflict-fixer\n",
+        encoding="utf-8",
+    )
+
+    with kb.connect_closing() as conn:
+        _, child_id = _spawn_conflict_fixer(conn, tmp_path)
+        child = kb.get_task(conn, child_id)
+
+    assert child is not None
+    assert child.assignee == "conflict-fixer"
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    ["", "kanban:\n  conflict_fixer_profile: '  '\n"],
+    ids=["missing", "empty"],
+)
+def test_conflict_fixer_defaults_to_premium(kanban_home, tmp_path, config_text):
+    if config_text:
+        (kanban_home / "config.yaml").write_text(config_text, encoding="utf-8")
+
+    with kb.connect_closing() as conn:
+        _, child_id = _spawn_conflict_fixer(conn, tmp_path)
+        child = kb.get_task(conn, child_id)
+
+    assert child is not None
+    assert child.assignee == "premium"
+
+
+def test_unlisted_conflict_fixer_role_still_requires_independent_review(
+    kanban_home, tmp_path, monkeypatch, review_gate_on
+):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n  conflict_fixer_profile: conflict-fixer\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        kb,
+        "_worker_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+        },
+    )
+
+    with kb.connect_closing() as conn:
+        parent_id, child_id = _spawn_conflict_fixer(conn, tmp_path)
+        assert kb.claim_task(conn, child_id) is not None
+
+        assert kb.complete_task(
+            conn,
+            child_id,
+            result="conflict resolved",
+            summary="conflict fixed",
+            review_gate=True,
+        ) is True
+
+        child = kb.get_task(conn, child_id)
+        parent = kb.get_task(conn, parent_id)
+        resumed = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert child is not None and child.status == "review"
+    assert parent is not None and parent.status == "blocked"
+    assert resumed == []
 
 
 def test_conflict_fixer_brief_instructs_terminal_kanban_actions_and_keeps_cage():
