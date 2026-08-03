@@ -119,6 +119,7 @@ _VALID_ORIGINS = frozenset(
         "kimi_cli",
         "grok_cli",
         "qwen_cli",
+        "buzz_agent",
         "hermes_state_backfill",
     }
 )
@@ -469,6 +470,30 @@ def _origin(value: Any) -> str:
     return normalized
 
 
+def _origin_upsert_expression(table: str) -> str:
+    """Preserve proven Buzz attribution when a replay lacks its signal."""
+    if table not in {"run_usage_facts", "run_llm_calls"}:
+        raise ValueError(f"unsupported origin upsert table: {table}")
+    hermes_aux_cases = (
+        "WHEN run_usage_facts.origin='hermes_aux' "
+        "AND excluded.origin<>'hermes_aux' THEN excluded.origin "
+        "WHEN excluded.origin='hermes_aux' "
+        "AND run_usage_facts.origin<>'hermes_aux' "
+        "THEN run_usage_facts.origin "
+        if table == "run_usage_facts"
+        else ""
+    )
+    return (
+        "origin=CASE "
+        f"WHEN {table}.origin='buzz_agent' "
+        "AND excluded.origin IN "
+        "('claude_code','codex_cli','kimi_cli','grok_cli','qwen_cli') "
+        f"THEN {table}.origin "
+        f"{hermes_aux_cases}"
+        f"ELSE COALESCE(excluded.origin, {table}.origin) END"
+    )
+
+
 def _upsert_run_facts(
     conn: sqlite3.Connection,
     run_id: str,
@@ -485,15 +510,7 @@ def _upsert_run_facts(
     updates = []
     for column in values:
         if column == "origin":
-            updates.append(
-                "origin=CASE "
-                "WHEN run_usage_facts.origin='hermes_aux' "
-                "AND excluded.origin<>'hermes_aux' THEN excluded.origin "
-                "WHEN excluded.origin='hermes_aux' "
-                "AND run_usage_facts.origin<>'hermes_aux' "
-                "THEN run_usage_facts.origin "
-                "ELSE COALESCE(excluded.origin, run_usage_facts.origin) END"
-            )
+            updates.append(_origin_upsert_expression("run_usage_facts"))
         elif column == "call_kind":
             updates.append(
                 "call_kind=CASE "
@@ -533,6 +550,32 @@ def upsert_run_facts(
         raise ValueError("run_id must be non-empty")
     with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), fields)
+
+
+def reclassify_run_origin(
+    run_id: str,
+    origin: str,
+    *,
+    path: Optional[os.PathLike[str] | str] = None,
+) -> int:
+    """Atomically update a known run's origin in both usage-fact tables.
+
+    Returns the number of rows whose origin actually changed.  Related tables
+    without an origin column remain linked by ``run_id``.
+    """
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id must be non-empty")
+    normalized_origin = _origin(origin)
+    with _connection(path) as conn:
+        changed = 0
+        for table in ("run_usage_facts", "run_llm_calls"):
+            cursor = conn.execute(
+                f"UPDATE {table} SET origin=? WHERE run_id=? AND origin<>?",
+                (normalized_origin, normalized_run_id, normalized_origin),
+            )
+            changed += max(0, int(cursor.rowcount))
+        return changed
 
 
 def finalize_run_tool_call_count(
@@ -642,11 +685,16 @@ def record_llm_call(
         values["origin"] = _origin(values["origin"])
     columns = ["run_id", "call_index", *values]
     params = [str(run_id), call_index, *values.values()]
-    updates = [
-        f"{column}=COALESCE(excluded.{column}, run_llm_calls.{column})"
-        for column in values
-        if not (inferred_zero_tool_count and column == "tool_call_count")
-    ]
+    updates = []
+    for column in values:
+        if inferred_zero_tool_count and column == "tool_call_count":
+            continue
+        if column == "origin":
+            updates.append(_origin_upsert_expression("run_llm_calls"))
+        else:
+            updates.append(
+                f"{column}=COALESCE(excluded.{column}, run_llm_calls.{column})"
+            )
     placeholders = ", ".join("?" for _ in columns)
     conflict = (
         f"DO UPDATE SET {', '.join(updates)}"

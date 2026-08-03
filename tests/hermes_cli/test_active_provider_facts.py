@@ -100,6 +100,40 @@ def test_foreign_cli_provider_comes_from_lane_configuration(
     assert fact.provider == "openai-codex"
 
 
+def test_buzz_agent_cli_fact_keeps_source_origin_for_provider_recovery(
+    evidence_databases: tuple[Path, Path, Path],
+) -> None:
+    board_path, profiles_root, usage_path = evidence_databases
+    with sqlite3.connect(usage_path) as connection:
+        connection.execute(
+            "UPDATE run_usage_facts SET origin='buzz_agent' "
+            "WHERE run_id='codex_cli:session-redacted'"
+        )
+        connection.execute(
+            "INSERT INTO run_usage_facts "
+            "(run_id, provider, model, lane, profile, captured_at, origin, source) "
+            "SELECT 'claude_code:overlapping-session', provider, model, lane, "
+            "profile, captured_at, 'buzz_agent', source "
+            "FROM run_usage_facts WHERE run_id='codex_cli:session-redacted'"
+        )
+
+    [fact] = [
+        item
+        for item in provider_facts.resolve_active_provider_facts(
+            board_path,
+            profiles_root=profiles_root,
+            usage_facts_path=usage_path,
+        )
+        if item.run_id == "run-cli-redacted"
+    ]
+
+    assert fact.classification == provider_facts.CLASS_RECONSTRUCTED
+    assert fact.provider == "openai-codex"
+    assert fact.model == "gpt-5.6-sol"
+    assert fact.source == provider_facts.SOURCE_CLI_RAW
+    assert fact.origin == "codex_cli"
+
+
 def test_never_ran_status_precedes_null_or_seeded_provider(
     evidence_databases: tuple[Path, Path, Path],
 ) -> None:

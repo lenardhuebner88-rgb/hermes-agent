@@ -21,6 +21,10 @@ from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, TextIO
 from urllib.parse import quote
 
 from hermes_cli import usage_facts_db as usage_facts_db_mod
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    origin_for_workspace,
+)
 from hermes_cli.usage_facts_db import (
     initialize_usage_facts_db,
     usage_facts_db_path,
@@ -42,10 +46,16 @@ from hermes_cli.usage_facts_db import (
 # hardcoding anthropic — Claude Code here also runs Qwen models through the
 # Alibaba token-plan route.  The bump re-harvests captured files so the
 # misattributed rows are re-derived from source.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 9
+# v10 separates managed Buzz-agent work from human-interactive Claude Code
+# usage using the transcript's own cwd.  Missing cwd remains claude_code.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 10
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
+_CLAUDE_FACT_PREDICATE = (
+    f"(origin='{ORIGIN}' OR "
+    f"(origin='{BUZZ_AGENT_ORIGIN}' AND run_id LIKE 'claude_code:%'))"
+)
 # Provider of the metered API-key route inspected for billing-mode
 # derivation; per-row attribution comes from ``provider_for_model``.
 PROVIDER = "anthropic"
@@ -114,6 +124,7 @@ class _CallDraft:
     billing_mode_source: Optional[str] = None
     effort: Optional[str] = None
     timestamp: Optional[str] = None
+    workspaces: set[str] = field(default_factory=set)
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
@@ -443,6 +454,9 @@ def merge_assistant_fragment(
     draft.fragment_count += 1
     draft.session_id = _text(record.get("sessionId")) or draft.session_id
     draft.timestamp = _text(record.get("timestamp")) or draft.timestamp
+    workspace = _text(record.get("cwd"))
+    if workspace is not None:
+        draft.workspaces.add(workspace)
     draft.effort = _text(record.get("effort")) or draft.effort
     draft.model = _text(message.get("model")) or draft.model
     draft.stop_reason = _text(message.get("stop_reason")) or draft.stop_reason
@@ -658,9 +672,13 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
     lane = draft.session_id
     if draft.call_kind == "subagent" and draft.parent_session_id:
         lane = draft.parent_session_id
+    actual_origin = origin_for_workspace(
+        ORIGIN,
+        next(iter(draft.workspaces)) if len(draft.workspaces) == 1 else None,
+    )
 
     call_fields: dict[str, Any] = {
-        "origin": ORIGIN,
+        "origin": actual_origin,
         "provider": provider_for_model(draft.model),
         "model": draft.model,
         "requested_model": draft.model,
@@ -688,7 +706,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         # first_token_ms, duration_ms, context_window_used
     }
     run_fields: dict[str, Any] = {
-        "origin": ORIGIN,
+        "origin": actual_origin,
         "session_id": draft.session_id,
         "task_run_id": draft.task_run_id,
         "task_id": draft.task_id,
@@ -834,7 +852,11 @@ def _record_llm_call_on_conn(
     columns = ["run_id", "call_index", *values]
     params = [run_id, call_index, *values.values()]
     updates = [
-        f"{column}=COALESCE(excluded.{column}, run_llm_calls.{column})"
+        (
+            usage_facts_db_mod._origin_upsert_expression("run_llm_calls")
+            if column == "origin"
+            else f"{column}=COALESCE(excluded.{column}, run_llm_calls.{column})"
+        )
         for column in values
     ]
     placeholders = ", ".join("?" for _ in columns)
@@ -885,8 +907,8 @@ def write_calls_batch(
             if update_existing_only:
                 existing = conn.execute(
                     "SELECT 1 FROM run_usage_facts "
-                    "WHERE run_id=? AND origin=?",
-                    (draft.run_id, ORIGIN),
+                    f"WHERE run_id=? AND {_CLAUDE_FACT_PREDICATE}",
+                    (draft.run_id,),
                 ).fetchone()
                 if existing is None:
                     continue
@@ -947,11 +969,11 @@ def recorrelate_existing_calls(
                 "'claude_parent_session_id_%' OR "
                 "correlation_source='claude_worktree_path_run')))"
             )
-            ambiguous_params = (ORIGIN, *chunk, *chunk)
+            ambiguous_params = (*chunk, *chunk)
             if dry_run:
                 row = connection.execute(
                     "SELECT COUNT(*) FROM run_usage_facts "
-                    f"WHERE origin=? AND {ambiguous_predicate}",
+                    f"WHERE {_CLAUDE_FACT_PREDICATE} AND {ambiguous_predicate}",
                     ambiguous_params,
                 ).fetchone()
                 updated += int(row[0]) if row is not None else 0
@@ -959,7 +981,7 @@ def recorrelate_existing_calls(
             cursor = connection.execute(
                 "UPDATE run_usage_facts SET task_run_id=NULL, task_id=NULL, "
                 "chain_id=NULL, board=NULL, correlation_source=NULL "
-                f"WHERE origin=? AND {ambiguous_predicate}",
+                f"WHERE {_CLAUDE_FACT_PREDICATE} AND {ambiguous_predicate}",
                 ambiguous_params,
             )
             updated += max(0, int(cursor.rowcount))
@@ -973,10 +995,10 @@ def recorrelate_existing_calls(
                     "SELECT run_id, session_id, lane, call_kind, "
                     "task_run_id, task_id, chain_id, board, profile, "
                     "correlation_source FROM run_usage_facts "
-                    "WHERE origin=? AND (session_id IN ("
+                    f"WHERE {_CLAUDE_FACT_PREDICATE} AND (session_id IN ("
                     f"{placeholders}) OR (call_kind='subagent' AND lane IN ("
                     f"{placeholders}))) ORDER BY run_id",
-                    (ORIGIN, *chunk, *chunk),
+                    (*chunk, *chunk),
                 ).fetchall()
             except sqlite3.Error:
                 return 0
@@ -1037,7 +1059,7 @@ def recorrelate_existing_calls(
                 connection.execute(
                     "UPDATE run_usage_facts SET task_run_id=?, task_id=?, "
                     "chain_id=?, board=?, profile=?, correlation_source=? "
-                    "WHERE origin=? AND run_id=?",
+                    f"WHERE {_CLAUDE_FACT_PREDICATE} AND run_id=?",
                     (
                         resolved["task_run_id"],
                         resolved["task_id"],
@@ -1045,7 +1067,6 @@ def recorrelate_existing_calls(
                         resolved["board"],
                         resolved["profile"],
                         resolved["correlation_source"],
-                        ORIGIN,
                         row["run_id"],
                     ),
                 )
@@ -1073,8 +1094,8 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
             "AND lane IS NOT NULL AND TRIM(lane) != '' THEN lane "
             "ELSE session_id END AS correlation_session_id, "
             "correlation_source FROM run_usage_facts "
-            "WHERE origin=? AND session_id IS NOT NULL AND TRIM(session_id) != ''",
-            (ORIGIN,),
+            f"WHERE {_CLAUDE_FACT_PREDICATE} "
+            "AND session_id IS NOT NULL AND TRIM(session_id) != ''",
         )
         states: dict[str, str | None] = {}
         for session_id, source in rows:
@@ -1253,8 +1274,7 @@ def backfill_occurred_at(
     try:
         null_calls = connection.execute(
             "SELECT run_id, call_index FROM run_llm_calls "
-            "WHERE origin=? AND occurred_at IS NULL",
-            (ORIGIN,),
+            f"WHERE {_CLAUDE_FACT_PREDICATE} AND occurred_at IS NULL",
         ).fetchall()
         call_updates: list[tuple[str, int, str]] = []
         for row in null_calls:
@@ -1269,9 +1289,9 @@ def backfill_occurred_at(
             for timestamp, run_id, call_index in call_updates:
                 cursor = connection.execute(
                     "UPDATE run_llm_calls SET occurred_at=? "
-                    "WHERE run_id=? AND call_index=? AND origin=? "
+                    f"WHERE run_id=? AND call_index=? AND {_CLAUDE_FACT_PREDICATE} "
                     "AND occurred_at IS NULL",
-                    (timestamp, run_id, call_index, ORIGIN),
+                    (timestamp, run_id, call_index),
                 )
                 calls_filled += max(0, int(cursor.rowcount))
 
@@ -1279,8 +1299,7 @@ def backfill_occurred_at(
         projected_times: dict[str, list[str]] = {}
         for row in connection.execute(
             "SELECT run_id, occurred_at FROM run_llm_calls "
-            "WHERE origin=? AND occurred_at IS NOT NULL",
-            (ORIGIN,),
+            f"WHERE {_CLAUDE_FACT_PREDICATE} AND occurred_at IS NOT NULL",
         ):
             projected_times.setdefault(str(row["run_id"]), []).append(
                 str(row["occurred_at"])
@@ -1291,8 +1310,8 @@ def backfill_occurred_at(
 
         null_runs = connection.execute(
             "SELECT run_id, first_call_at, last_call_at FROM run_usage_facts "
-            "WHERE origin=? AND (first_call_at IS NULL OR last_call_at IS NULL)",
-            (ORIGIN,),
+            f"WHERE {_CLAUDE_FACT_PREDICATE} "
+            "AND (first_call_at IS NULL OR last_call_at IS NULL)",
         ).fetchall()
         run_updates: list[tuple[str | None, str | None, str]] = []
         for row in null_runs:
@@ -1320,8 +1339,8 @@ def backfill_occurred_at(
                     "UPDATE run_usage_facts SET "
                     "first_call_at=COALESCE(first_call_at, ?), "
                     "last_call_at=COALESCE(last_call_at, ?) "
-                    "WHERE run_id=? AND origin=?",
-                    (new_first, new_last, run_id, ORIGIN),
+                    f"WHERE run_id=? AND {_CLAUDE_FACT_PREDICATE}",
+                    (new_first, new_last, run_id),
                 )
                 runs_filled += max(0, int(cursor.rowcount))
             connection.commit()
@@ -1415,8 +1434,8 @@ def backfill_tool_calls(
         claude_run_ids = {
             str(row["run_id"])
             for row in connection.execute(
-                "SELECT run_id FROM run_usage_facts WHERE origin=?",
-                (ORIGIN,),
+                "SELECT run_id FROM run_usage_facts "
+                f"WHERE {_CLAUDE_FACT_PREDICATE}",
             )
         }
         has_tool_table = connection.execute(
@@ -1448,7 +1467,7 @@ def backfill_tool_calls(
                     "(run_id, tool_name, call_count, output_chars) "
                     "SELECT ?, ?, ?, ? WHERE EXISTS ("
                     "SELECT 1 FROM run_usage_facts "
-                    "WHERE run_id=? AND origin=?"
+                    f"WHERE run_id=? AND {_CLAUDE_FACT_PREDICATE}"
                     ") ON CONFLICT(run_id, tool_name) DO NOTHING",
                     (
                         run_id,
@@ -1456,7 +1475,6 @@ def backfill_tool_calls(
                         call_count,
                         output_chars,
                         run_id,
-                        ORIGIN,
                     ),
                 )
                 rows_filled += max(0, int(cursor.rowcount))
@@ -1544,8 +1562,7 @@ def _cache_write_split_candidates(
     call_filter = " AND call_index=0" if table == "run_llm_calls" else ""
     rows = connection.execute(
         f"SELECT {', '.join(select_columns)} FROM {table} "
-        f"WHERE origin=?{call_filter}",
-        (ORIGIN,),
+        f"WHERE {_CLAUDE_FACT_PREDICATE}{call_filter}",
     ).fetchall()
 
     candidates: list[dict[str, Any]] = []
@@ -1640,10 +1657,10 @@ def backfill_cache_write_splits(
                         "COALESCE(cache_write_1h_tokens, ?), "
                         "cache_write_5m_tokens="
                         "COALESCE(cache_write_5m_tokens, ?) "
-                        f"WHERE {key_where} AND origin=? AND "
+                        f"WHERE {key_where} AND {_CLAUDE_FACT_PREDICATE} AND "
                         "(cache_write_1h_tokens IS NULL OR "
                         "cache_write_5m_tokens IS NULL)",
-                        (*values, *candidate["key"], ORIGIN),
+                        (*values, *candidate["key"]),
                     )
                     if cursor.rowcount <= 0:
                         continue
@@ -1756,8 +1773,8 @@ def _parent_binding_candidates(
         for column in _PARENT_BINDING_COLUMNS
     )
     rows = connection.execute(
-        f"SELECT {', '.join(select_columns)} FROM {table} WHERE origin=?",
-        (ORIGIN,),
+        f"SELECT {', '.join(select_columns)} FROM {table} "
+        f"WHERE {_CLAUDE_FACT_PREDICATE}",
     ).fetchall()
 
     candidates: list[dict[str, Any]] = []
@@ -1869,7 +1886,7 @@ def backfill_parent_bindings(
                 key_where = " AND ".join(f"{key}=?" for key in keys)
                 for column in _PARENT_BINDING_COLUMNS:
                     params = [
-                        (candidate["updates"][column], *candidate["key"], ORIGIN)
+                        (candidate["updates"][column], *candidate["key"])
                         for candidate in candidates
                         if column in candidate["updates"]
                     ]
@@ -1878,7 +1895,8 @@ def backfill_parent_bindings(
                     before = connection.total_changes
                     connection.executemany(
                         f"UPDATE {table} SET {column}=COALESCE({column}, ?) "
-                        f"WHERE {key_where} AND origin=? AND {column} IS NULL",
+                        f"WHERE {key_where} AND {_CLAUDE_FACT_PREDICATE} "
+                        f"AND {column} IS NULL",
                         params,
                     )
                     report[table][f"{column}_filled"] = (
@@ -1894,7 +1912,7 @@ def backfill_parent_bindings(
                 )
                 key_where = " AND ".join(f"{key}=?" for key in keys)
                 params = [
-                    (*candidate["key"], ORIGIN, candidate["model_source"])
+                    (*candidate["key"], candidate["model_source"])
                     for candidate in candidates
                     if candidate["normalize_source"]
                 ]
@@ -1903,7 +1921,8 @@ def backfill_parent_bindings(
                 before = connection.total_changes
                 connection.executemany(
                     f"UPDATE {table} SET model_source='transcript' "
-                    f"WHERE {key_where} AND origin=? AND model_source IS ?",
+                    f"WHERE {key_where} AND {_CLAUDE_FACT_PREDICATE} "
+                    "AND model_source IS ?",
                     params,
                 )
                 report[table]["model_source_updated"] = (
@@ -1982,8 +2001,7 @@ def backfill_provider_attribution(
             rows = connection.execute(
                 f"SELECT run_id, {f'{key_column}, ' if key_column else ''}"
                 "model, provider FROM "
-                f"{table} WHERE origin=?",
-                (ORIGIN,),
+                f"{table} WHERE {_CLAUDE_FACT_PREDICATE}",
             ).fetchall()
             before_counts: dict[str, int] = {}
             transitions: dict[str, int] = {}
@@ -2022,8 +2040,7 @@ def backfill_provider_attribution(
             if apply:
                 after_rows = connection.execute(
                     f"SELECT provider, COUNT(*) AS n FROM {table} "
-                    "WHERE origin=? GROUP BY provider",
-                    (ORIGIN,),
+                    f"WHERE {_CLAUDE_FACT_PREDICATE} GROUP BY provider",
                 ).fetchall()
                 section["provider_counts_after"] = {
                     (row["provider"] if row["provider"] is not None else "<NULL>"): row["n"]

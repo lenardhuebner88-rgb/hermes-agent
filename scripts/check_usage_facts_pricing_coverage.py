@@ -41,6 +41,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from hermes_cli.usage_facts_db import usage_facts_db_path  # noqa: E402
+from hermes_cli.usage_facts_buzz_attribution import (  # noqa: E402
+    BUZZ_SOURCE_ORIGIN_SQL,
+)
 from hermes_cli.usage_facts_pricing import priceability  # noqa: E402
 
 SYNTHETIC_MODEL = "<synthetic>"
@@ -66,10 +69,11 @@ def coverage_report(
     connection = _connect_read_only(resolved)
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT model,
                    provider,
                    origin,
+                   {BUZZ_SOURCE_ORIGIN_SQL} AS source_origin,
                    COUNT(*) AS run_count,
                    COALESCE(SUM(input_tokens), 0)
                        + COALESCE(SUM(output_tokens), 0)
@@ -78,7 +82,7 @@ def coverage_report(
               FROM run_usage_facts
              WHERE captured_at >= datetime('now', ?)
                AND (model IS NULL OR model != ?)
-             GROUP BY model, provider, origin
+             GROUP BY model, provider, origin, source_origin
              ORDER BY run_count DESC
             """,
             (f"-{int(days)} days", SYNTHETIC_MODEL),
@@ -91,12 +95,14 @@ def coverage_report(
     for row in rows:
         model = row["model"]
         provider = row["provider"]
-        origin = row["origin"]
-        check = priceability(model, provider, origin)
+        origin = str(row["origin"])
+        source_origin = str(row["source_origin"])
+        check = priceability(model, provider, source_origin)
         item = {
             "model": model,
             "provider": provider,
             "origin": origin,
+            "source_origin": source_origin,
             "run_count": int(row["run_count"]),
             "token_count": int(row["token_count"]),
             "resolved_provider": check.get("resolved_provider"),

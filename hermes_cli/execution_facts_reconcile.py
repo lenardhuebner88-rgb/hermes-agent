@@ -45,6 +45,10 @@ from hermes_cli.usage_facts_pricing import (
     estimate_equivalent_cost,
     estimate_usage_cost,
 )
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    source_origin_for_run,
+)
 from hermes_cli.usage_facts_readmodel import (
     INPUT_CACHE_EXCLUSIVE,
     INPUT_CACHE_INCLUSIVE,
@@ -190,8 +194,18 @@ def _usage_surface(origin: str) -> ExecutionSurface:
     }.get(origin, ExecutionSurface.UNKNOWN)
 
 
+def _usage_workload_kind(
+    origin: str, task_run_id: str | None
+) -> WorkloadKind:
+    if task_run_id is not None:
+        return WorkloadKind.KANBAN_TASK
+    if origin == BUZZ_AGENT_ORIGIN:
+        return WorkloadKind.UNCLASSIFIED
+    return WorkloadKind.INTERACTIVE
+
+
 def _canonical_usage(row: Mapping[str, Any]) -> tuple[UsageFactsUsage, Validity]:
-    origin = str(row.get("origin") or "unknown")
+    origin = source_origin_for_run(row.get("origin"), row.get("run_id"))
     input_tokens = row.get("input_tokens")
     output_tokens = row.get("output_tokens")
     cache_read = row.get("cache_read_tokens")
@@ -353,7 +367,9 @@ def reconcile_usage_facts(
             usage_validity = source_validity
         model = _safe_class(row.get("model"))
         provider = _safe_class(row.get("provider"))
-        origin = _safe_class(row.get("origin"))
+        origin = source_origin_for_run(
+            row.get("origin"), row.get("run_id")
+        )
         equivalent = (
             equivalent_estimator(
                 model, usage, provider=provider, origin=origin
@@ -396,7 +412,9 @@ def reconcile_usage_facts(
             fees,
             month=month,
             provider=item["provider"],
-            origin=str(row.get("origin") or "unknown"),
+            origin=source_origin_for_run(
+                row.get("origin"), row.get("run_id")
+            ),
         )
         if month is None or fee_key is None:
             continue
@@ -444,12 +462,13 @@ def reconcile_usage_facts(
             continue
         origin = _safe_class(row.get("origin")) or "unknown"
         run_id = str(row["run_id"])
+        source_origin = source_origin_for_run(origin, run_id)
         run_identity = stable_idempotency_key(
             "usage-run-identity.v1",
-            origin,
+            source_origin,
             run_id,
         )
-        source_execution_id = f"usage:{origin}:{run_identity}"
+        source_execution_id = f"usage:{source_origin}:{run_identity}"
         task_run_id = _safe_class(row.get("task_run_id"))
         if task_run_id is None and known_task_run_ids and run_id in known_task_run_ids:
             # Some writers record the kanban run in `run_id` and leave
@@ -466,6 +485,7 @@ def reconcile_usage_facts(
             if task_run_id is not None
             else stable_execution_id("usage_facts", source_execution_id)
         )
+        workload_kind = _usage_workload_kind(origin, task_run_id)
         usage = item["usage"]
         attributes: dict[str, Any] = {}
         for key in (
@@ -505,6 +525,7 @@ def reconcile_usage_facts(
                 "task_id": _safe_class(row.get("task_id")),
                 "task_run_id": task_run_id,
                 "validity": item["usage_validity"].value,
+                "workload_kind": workload_kind.value,
             }
         )
         events.append(
@@ -516,12 +537,8 @@ def reconcile_usage_facts(
                 event_type=EventType.USAGE_OBSERVED,
                 validity=item["usage_validity"],
                 observed_at_ms=observed_at_ms,
-                workload_kind=(
-                    WorkloadKind.KANBAN_TASK
-                    if task_run_id is not None
-                    else WorkloadKind.INTERACTIVE
-                ),
-                execution_surface=_usage_surface(origin),
+                workload_kind=workload_kind,
+                execution_surface=_usage_surface(source_origin),
                 trigger_kind=(
                     TriggerKind.KANBAN
                     if task_run_id is not None
@@ -597,6 +614,7 @@ def reconcile_usage_facts(
                     "task_id": _safe_class(row.get("task_id")),
                     "task_run_id": task_run_id,
                     "validity": cost_validity.value,
+                    "workload_kind": workload_kind.value,
                 }
             )
             events.append(
@@ -608,12 +626,8 @@ def reconcile_usage_facts(
                     event_type=EventType.COST_OBSERVED,
                     validity=cost_validity,
                     observed_at_ms=observed_at_ms,
-                    workload_kind=(
-                        WorkloadKind.KANBAN_TASK
-                        if task_run_id is not None
-                        else WorkloadKind.INTERACTIVE
-                    ),
-                    execution_surface=_usage_surface(origin),
+                    workload_kind=workload_kind,
+                    execution_surface=_usage_surface(source_origin),
                     trigger_kind=(
                         TriggerKind.KANBAN
                         if task_run_id is not None

@@ -111,6 +111,49 @@ def test_audit_reports_exact_denominators_and_board_gap(tmp_path) -> None:
     }
 
 
+def test_buzz_claude_rows_keep_source_specific_correlation_alarm(tmp_path) -> None:
+    usage = tmp_path / "usage.db"
+    _seed_usage(usage, with_correlation=True)
+    with sqlite3.connect(usage) as connection:
+        connection.execute(
+            """
+            INSERT INTO run_usage_facts (
+                run_id, origin, profile, lane, model, input_tokens,
+                output_tokens, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "claude_code:buzz-real-shape",
+                "buzz_agent",
+                "codex",
+                "buzz",
+                "claude-opus-5",
+                10,
+                2,
+                "2026-07-28T00:00:00+00:00",
+            ),
+        )
+
+    report = audit(
+        usage_path=usage,
+        kanban_path=None,
+        days=7,
+        now=datetime(2026, 7, 29, tzinfo=timezone.utc),
+    )
+
+    assert report["origins"]["buzz_agent"]["rows"] == 1
+    assert report["source_origins"]["claude_code"]["coverage"]["task_id"] == {
+        "present": 0,
+        "ratio": 0.0,
+    }
+    assert any(
+        item["priority"] == "P1"
+        and item["adapter"] == "exact claude_session_id join"
+        and item["reason"] == "claude_code task correlation is 0.0%"
+        for item in report["recommendations"]
+    )
+
+
 def test_old_schema_is_a_visible_gap_not_a_query_failure(tmp_path) -> None:
     usage = tmp_path / "old-usage.db"
     _seed_usage(usage, with_correlation=False)

@@ -12,6 +12,7 @@ from hermes_cli.execution_facts_contract import (
     ExecutionSurface,
     LifecyclePhase,
     Validity,
+    WorkloadKind,
     stable_execution_id,
 )
 from hermes_cli.execution_facts_ledger import ExecutionFactsLedger
@@ -663,6 +664,97 @@ def test_usage_bridge_keeps_unknown_nullable_and_allocates_subscription_fee() ->
             actual_estimator=actual,
         )
     ] == [event.idempotency_key for event in revised]
+
+
+def test_buzz_reclassification_keeps_source_identity_usage_surface_and_fee() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.execute(
+        """
+        CREATE TABLE run_usage_facts (
+            run_id TEXT PRIMARY KEY, origin TEXT, task_run_id TEXT,
+            task_id TEXT, chain_id TEXT, board TEXT, provider TEXT, model TEXT,
+            profile TEXT, billing_mode TEXT, serving_tier TEXT,
+            reasoning_effort TEXT, input_tokens INTEGER, output_tokens INTEGER,
+            cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+            reasoning_tokens INTEGER, finish_reason TEXT, error_type TEXT,
+            duration_ms REAL, captured_at TEXT, source TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO run_usage_facts VALUES (
+            'codex_cli:buzz-stable', 'codex_cli', NULL, NULL, NULL, NULL,
+            'openai-codex', 'gpt-5.6-sol', NULL, 'subscription_included',
+            NULL, NULL, 100, 10, 40, 0, NULL, 'stop', NULL, 1000,
+            '2026-07-30T10:00:00+00:00', 'measured'
+        )
+        """
+    )
+
+    def equivalent(_model, usage, **_kwargs):
+        assert _kwargs["origin"] == "codex_cli"
+        return CostResult(
+            Decimal(usage.input_tokens),
+            "equivalent",
+            "official_docs_snapshot",
+            "fixture",
+            pricing_version="fixture-prices-v1",
+        )
+
+    def actual(_model, _usage, **_kwargs):
+        assert _kwargs["origin"] == "codex_cli"
+        return CostResult(
+            Decimal(0),
+            "included",
+            "none",
+            "included",
+            pricing_version="included-route",
+        )
+
+    kwargs = {
+        "subscription_fees": {"2026-07:codex_cli": "30"},
+        "fee_version": "codex-fee-2026-07",
+        "equivalent_estimator": equivalent,
+        "actual_estimator": actual,
+    }
+    before = reconcile_usage_facts(connection, **kwargs)
+    connection.execute(
+        "UPDATE run_usage_facts SET origin='buzz_agent' "
+        "WHERE run_id='codex_cli:buzz-stable'"
+    )
+    after = reconcile_usage_facts(connection, **kwargs)
+
+    assert [event.source_execution_id for event in after] == [
+        event.source_execution_id for event in before
+    ]
+    assert [event.execution_id for event in after] == [
+        event.execution_id for event in before
+    ]
+    assert all(
+        event.execution_surface is ExecutionSurface.CODEX_CLI
+        for event in after
+    )
+    assert all(
+        event.workload_kind is WorkloadKind.INTERACTIVE for event in before
+    )
+    assert all(
+        event.workload_kind is WorkloadKind.UNCLASSIFIED for event in after
+    )
+    # Reclassification is a content revision under the same stable execution,
+    # not a second execution and not a stale idempotent replay.
+    assert [event.idempotency_key for event in after] != [
+        event.idempotency_key for event in before
+    ]
+    usage = next(
+        event for event in after if event.event_type.value == "usage_observed"
+    )
+    cost = next(
+        event for event in after if event.event_type.value == "cost_observed"
+    )
+    assert usage.validity is Validity.EXACT
+    assert usage.attributes["total_tokens"] == 110
+    assert cost.attributes["allocated_subscription_cost"] == "30"
 
 
 def test_run_8802_control_sample_reproduces_exact_api_equivalent() -> None:

@@ -25,6 +25,11 @@ from hermes_cli.active_provider_facts import (
     reconstruction_source_counts,
     resolve_active_provider_facts,
 )
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    BUZZ_SOURCE_ORIGIN_PREFIXES,
+    BUZZ_SOURCE_ORIGIN_SQL,
+)
 from hermes_cli.usage_facts_pricing import (
     PRICE_COMPONENTS as _PRICE_COMPONENTS,
 )
@@ -97,6 +102,38 @@ def input_semantics(origin: str) -> str:
 def normalization_contract() -> dict[str, Any]:
     """Stable, machine-readable derivation table shipped with every payload."""
 
+    source_origins = sorted(
+        _CACHE_EXCLUSIVE_ORIGINS | _CACHE_INCLUSIVE_ORIGINS
+    )
+    origin_contracts = {
+        origin: {
+            "input_semantics": input_semantics(origin),
+            "context_input": (
+                "input_tokens + cache_read_tokens + cache_write_tokens"
+                if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                else "input_tokens"
+            ),
+            "new_input": (
+                "input_tokens + cache_write_tokens"
+                if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                else "input_tokens - cache_read_tokens"
+            ),
+            "uncached_input": (
+                "input_tokens"
+                if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                else "input_tokens - cache_read_tokens - cache_write_tokens"
+            ),
+        }
+        for origin in source_origins
+    }
+    origin_contracts[BUZZ_AGENT_ORIGIN] = {
+        "input_semantics": "source_dependent",
+        "source_origin_field": "groups[].key.source_origin",
+        "source_origins": {
+            origin: origin_contracts[origin]
+            for origin in BUZZ_SOURCE_ORIGIN_PREFIXES
+        },
+    }
     return {
         "version": NORMALIZATION_VERSION,
         "fields": {
@@ -112,32 +149,7 @@ def normalization_contract() -> dict[str, Any]:
                 "standard-rate input excluding cache reads and cache writes"
             ),
         },
-        "origins": {
-            origin: {
-                "input_semantics": input_semantics(origin),
-                "context_input": (
-                    "input_tokens + cache_read_tokens + cache_write_tokens"
-                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
-                    else "input_tokens"
-                ),
-                "new_input": (
-                    "input_tokens + cache_write_tokens"
-                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
-                    else "input_tokens - cache_read_tokens"
-                ),
-                "uncached_input": (
-                    "input_tokens"
-                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
-                    else (
-                        "input_tokens - cache_read_tokens - "
-                        "cache_write_tokens"
-                    )
-                ),
-            }
-            for origin in sorted(
-                _CACHE_EXCLUSIVE_ORIGINS | _CACHE_INCLUSIVE_ORIGINS
-            )
-        },
+        "origins": origin_contracts,
     }
 
 
@@ -331,14 +343,21 @@ def build_usage_facts_payload(
 
     pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector] = {}
     group_builders: dict[
-        tuple[str, str | None, str | None, str | None],
+        tuple[str, str, str | None, str | None, str | None],
         dict[str, Any],
     ] = {}
 
     for row in rows:
         raw = _row_metrics(row)
         origin = str(row["origin"])
-        key = (origin, row["profile"], row["lane"], row["model"])
+        source_origin = str(row["source_origin"])
+        key = (
+            origin,
+            source_origin,
+            row["profile"],
+            row["lane"],
+            row["model"],
+        )
         group = group_builders.setdefault(
             key,
             {
@@ -347,13 +366,13 @@ def build_usage_facts_payload(
             },
         )
         _add_metrics(group["raw"], raw)
-        normalized = _normalize_metrics(origin, raw)
+        normalized = _normalize_metrics(source_origin, raw)
         billing_category = _billing_category(row["billing_mode"])
         charge = _charge_for_breakdown(
             billing_category,
             provider=row["provider"],
             model=row["model"],
-            origin=origin,
+            origin=source_origin,
             normalized=normalized,
             raw=raw,
             pricing_cache=pricing_cache,
@@ -371,18 +390,21 @@ def build_usage_facts_payload(
 
     groups: list[dict[str, Any]] = []
     for key in sorted(group_builders, key=_sort_group_key):
-        origin, profile, lane, model = key
+        origin, source_origin, profile, lane, model = key
         builder = group_builders[key]
-        normalized = _normalize_metrics(origin, builder["raw"])
+        normalized = _normalize_metrics(source_origin, builder["raw"])
+        group_key = {
+            "origin": origin,
+            "profile": profile,
+            "lane": lane,
+            "model": model,
+            "model_label": model or UNATTRIBUTED_MODEL_LABEL,
+        }
+        if origin == BUZZ_AGENT_ORIGIN:
+            group_key["source_origin"] = source_origin
         groups.append(
             {
-                "key": {
-                    "origin": origin,
-                    "profile": profile,
-                    "lane": lane,
-                    "model": model,
-                    "model_label": model or UNATTRIBUTED_MODEL_LABEL,
-                },
+                "key": group_key,
                 "fact_rows": builder["raw"]["fact_rows"],
                 "tokens": normalized,
                 "billing": _billing_rollup(
@@ -487,13 +509,14 @@ def build_attributed_usage_payload(
     for row in rows:
         raw = _row_metrics(row)
         origin = str(row["origin"])
-        normalized = _normalize_metrics(origin, raw)
+        source_origin = str(row["source_origin"])
+        normalized = _normalize_metrics(source_origin, raw)
         category = _billing_category(row["billing_mode"])
         charge = _charge_for_breakdown(
             category,
             provider=row["provider"],
             model=row["model"],
-            origin=origin,
+            origin=source_origin,
             normalized=normalized,
             raw=raw,
             pricing_cache=pricing_cache,
@@ -724,7 +747,8 @@ def _attributed_aggregate_sql(where_sql: str) -> str:
     )
     token_present = _token_present_sql()
     return f"""
-        SELECT task_run_id, task_id, chain_id, board, origin, provider, model,
+        SELECT task_run_id, task_id, chain_id, board, origin,
+               {BUZZ_SOURCE_ORIGIN_SQL} AS source_origin, provider, model,
                billing_mode,
                COUNT(*) AS fact_rows,
                COUNT(DISTINCT run_id) AS distinct_runs,
@@ -734,8 +758,8 @@ def _attributed_aggregate_sql(where_sql: str) -> str:
                MAX(captured_at) AS latest_captured_at
           FROM run_usage_facts
           {where_sql}
-         GROUP BY task_run_id, task_id, chain_id, board, origin, provider,
-                  model, billing_mode
+         GROUP BY task_run_id, task_id, chain_id, board, origin,
+                  source_origin, provider, model, billing_mode
     """
 
 
@@ -766,7 +790,8 @@ def _aggregate_sql(where_sql: str) -> str:
         )
     )
     return f"""
-        SELECT origin, call_kind, profile, lane, model, provider, billing_mode,
+        SELECT origin, {BUZZ_SOURCE_ORIGIN_SQL} AS source_origin, call_kind,
+               profile, lane, model, provider, billing_mode,
                COUNT(*) AS fact_rows,
                COUNT(*) AS token_rows,
                {observed},
@@ -776,8 +801,10 @@ def _aggregate_sql(where_sql: str) -> str:
                SUM(COALESCE(llm_call_count, 1)) AS request_count
           FROM run_usage_facts
           {where_sql}
-         GROUP BY origin, call_kind, profile, lane, model, provider, billing_mode
-         ORDER BY origin, call_kind, profile, lane, model, provider, billing_mode
+         GROUP BY origin, source_origin, call_kind, profile, lane, model,
+                  provider, billing_mode
+         ORDER BY origin, source_origin, call_kind, profile, lane, model,
+                  provider, billing_mode
     """
 
 
@@ -864,7 +891,7 @@ def _workload_rollup(rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
         raw = _row_metrics(row)
         fact_rows_by_role[role] += raw["fact_rows"]
         normalized_by_role[role].append(
-            _normalize_metrics(str(row["origin"]), raw)
+            _normalize_metrics(str(row["source_origin"]), raw)
         )
 
     role_totals = {
@@ -2001,8 +2028,8 @@ def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
 
 
 def _sort_group_key(
-    key: tuple[str, str | None, str | None, str | None],
-) -> tuple[str, str, str, str]:
+    key: tuple[str, str, str | None, str | None, str | None],
+) -> tuple[str, str, str, str, str]:
     return tuple(part or "" for part in key)
 
 

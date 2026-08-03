@@ -32,6 +32,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from hermes_cli.usage_facts_db import usage_facts_db_path  # noqa: E402
+from hermes_cli.usage_facts_buzz_attribution import (  # noqa: E402
+    BUZZ_SOURCE_ORIGIN_SQL,
+)
 from hermes_cli.kanban_db import kanban_home  # noqa: E402
 
 CORRELATION_FIELDS = (
@@ -96,6 +99,7 @@ def _coverage_by_origin(
     *,
     since: str,
     columns: set[str],
+    origin_expression: str = "origin",
 ) -> dict[str, dict[str, Any]]:
     fields = [
         field for field in (*CORRELATION_FIELDS, *SIGNAL_FIELDS) if field in columns
@@ -105,9 +109,10 @@ def _coverage_by_origin(
         for field in fields
     )
     query = (
-        "SELECT origin, COUNT(*) AS rows"
+        f"SELECT {origin_expression} AS group_origin, COUNT(*) AS rows"
         + (f", {projections}" if projections else "")
-        + " FROM run_usage_facts WHERE captured_at >= ? GROUP BY origin ORDER BY rows DESC"
+        + " FROM run_usage_facts WHERE captured_at >= ? "
+        + "GROUP BY group_origin ORDER BY rows DESC"
     )
     result: dict[str, dict[str, Any]] = {}
     for row in connection.execute(query, (since,)):
@@ -119,7 +124,7 @@ def _coverage_by_origin(
             }
             for field in fields
         }
-        result[str(row["origin"])] = {"rows": total, "coverage": coverage}
+        result[str(row["group_origin"])] = {"rows": total, "coverage": coverage}
     return result
 
 
@@ -365,6 +370,12 @@ def audit(
         columns = _columns(connection, "run_usage_facts")
         schema_missing = sorted(set(CORRELATION_FIELDS) - columns)
         origins = _coverage_by_origin(connection, since=since, columns=columns)
+        source_origins = _coverage_by_origin(
+            connection,
+            since=since,
+            columns=columns,
+            origin_expression=BUZZ_SOURCE_ORIGIN_SQL,
+        )
         correlated_run_ids = (
             _non_null_ids(connection, column="task_run_id", since=since)
             if "task_run_id" in columns
@@ -397,11 +408,12 @@ def audit(
             "schema_missing": schema_missing,
         },
         "origins": origins,
+        "source_origins": source_origins,
         "kanban": board,
         "worker_release_invariant": worker_release_invariant,
         "recommendations": _recommendations(
             schema_missing=schema_missing,
-            origins=origins,
+            origins=source_origins,
             board=board,
         ),
         "structural_unknowns": {

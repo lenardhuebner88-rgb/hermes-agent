@@ -8,7 +8,8 @@ Sources (read-only):
   - foreign.sh run metas: ``~/.hermes/runs/*/meta`` (session correlation)
 
 Does not touch loop dispatch. Writes only into the S2 usage-facts schema
-with ``origin`` in {codex_cli, kimi_cli, grok_cli, qwen_cli}.
+with the native CLI origin, or ``buzz_agent`` when a managed workspace is
+positively identified.
 
 Codex aggregation: session-level totals come from the **last**
 ``total_token_usage`` on a rollout (cumulative). Summing every
@@ -36,12 +37,18 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
+    origin_for_workspace,
+)
 from hermes_cli.usage_facts_db import (
     finalize_run_tool_call_count,
     initialize_usage_facts_db,
     record_llm_call,
+    reclassify_run_origin,
     upsert_run_facts,
     usage_facts_db_path,
 )
@@ -60,7 +67,9 @@ CORRELATION_SOURCE_TRANSCRIPT = "foreign_transcript_spawn"
 DEFAULT_CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 DEFAULT_KIMI_INDEX = Path.home() / ".kimi-code" / "session_index.jsonl"
 DEFAULT_QWEN_USAGE_DIR = Path.home() / ".qwen" / "usage"
+DEFAULT_QWEN_PROJECTS = Path.home() / ".qwen" / "projects"
 DEFAULT_GROK_UNIFIED = Path.home() / ".grok" / "logs" / "unified.jsonl"
+DEFAULT_GROK_SESSIONS = Path.home() / ".grok" / "sessions"
 DEFAULT_RUNS_ROOT = Path.home() / ".hermes" / "runs"
 DEFAULT_CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 
@@ -291,7 +300,11 @@ def _int_or_none(value: Any) -> Optional[int]:
         return None
 
 
-def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
+def extract_codex_rollout(
+    path: Path | str,
+    *,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
+) -> Optional[ExtractedRun]:
     """Parse one Codex rollout JSONL into a run fact + optional turn calls.
 
     Aggregation: **last total_token_usage** for the session row. Per-turn
@@ -307,6 +320,7 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
     last_total: Optional[dict[str, Any]] = None
     last_rate_limits: Optional[dict[str, Any]] = None
     context_window: Optional[int] = None
+    workspaces: set[str] = set()
 
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -331,6 +345,9 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
             session_id = payload.get("session_id") or payload.get("id") or session_id
             provider = payload.get("model_provider") or provider
             captured_at = payload.get("timestamp") or ts or captured_at
+            cwd = payload.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                workspaces.add(cwd.strip())
             continue
 
         if top_type == "turn_context":
@@ -366,8 +383,13 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
         return None
 
     run_id = f"codex_cli:{session_id}"
+    actual_origin = origin_for_workspace(
+        ORIGIN_CODEX,
+        next(iter(workspaces)) if len(workspaces) == 1 else None,
+        root=buzz_workspaces_root,
+    )
     run_fields = {
-        "origin": ORIGIN_CODEX,
+        "origin": actual_origin,
         "provider": provider or "openai",
         "model": model,
         "requested_model": model,
@@ -395,7 +417,7 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
             ExtractedCall(
                 call_index=idx,
                 fields={
-                    "origin": ORIGIN_CODEX,
+                    "origin": actual_origin,
                     "provider": provider or "openai",
                     "model": model,
                     "requested_model": model,
@@ -415,6 +437,7 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
     rate = None
     if last_rate_limits is not None:
         rate = RateLimitSnapshot(
+            # Quota is an account/source fact, not an actor-class fact.
             origin=ORIGIN_CODEX,
             run_id=run_id,
             captured_at=run_fields["captured_at"],
@@ -424,7 +447,7 @@ def extract_codex_rollout(path: Path | str) -> Optional[ExtractedRun]:
 
     return ExtractedRun(
         run_id=run_id,
-        origin=ORIGIN_CODEX,
+        origin=actual_origin,
         run_fields=run_fields,
         calls=calls,
         rate_limit=rate,
@@ -517,6 +540,35 @@ def load_kimi_session_index(index_path: Path | str) -> dict[str, dict[str, Any]]
     return by_id
 
 
+def load_kimi_session_workspaces(index_path: Path | str) -> dict[str, str]:
+    """Return only session workDir values that never conflict in the index."""
+    candidates: dict[str, set[str]] = {}
+    try:
+        lines = Path(index_path).read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        session_id = record.get("sessionId")
+        workspace = record.get("workDir")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if isinstance(workspace, str) and workspace.strip():
+            candidates.setdefault(session_id, set()).add(workspace.strip())
+    return {
+        session_id: next(iter(workspaces))
+        for session_id, workspaces in candidates.items()
+        if len(workspaces) == 1
+    }
+
+
 def resolve_kimi_wire_path(
     resume_handle: str,
     *,
@@ -540,6 +592,8 @@ def extract_kimi_wire(
     wire_path: Path | str,
     *,
     session_id: str,
+    workspace: Optional[str] = None,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
 ) -> Optional[ExtractedRun]:
     """Sum turn-scoped usage.record lines from a Kimi wire.jsonl."""
     wire_path = Path(wire_path)
@@ -612,11 +666,18 @@ def extract_kimi_wire(
         captured_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
     run_id = f"kimi_cli:{session_id}"
+    actual_origin = origin_for_workspace(
+        ORIGIN_KIMI,
+        workspace,
+        root=buzz_workspaces_root,
+    )
+    for call in calls:
+        call.fields["origin"] = actual_origin
     return ExtractedRun(
         run_id=run_id,
-        origin=ORIGIN_KIMI,
+        origin=actual_origin,
         run_fields={
-            "origin": ORIGIN_KIMI,
+            "origin": actual_origin,
             "provider": "kimi-code",
             "model": model,
             "requested_model": model,
@@ -664,7 +725,12 @@ def load_kimi_usage_for_handle(
 # ---------------------------------------------------------------------------
 
 
-def extract_qwen_row(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
+def extract_qwen_row(
+    obj: Mapping[str, Any],
+    *,
+    workspace: Optional[str] = None,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
+) -> Optional[ExtractedRun]:
     """Map one Qwen usage JSONL row (schemaVersion-aware)."""
     version = obj.get("schemaVersion")
     if version not in QWEN_SUPPORTED_SCHEMA_VERSIONS:
@@ -690,13 +756,18 @@ def extract_qwen_row(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
     tool_count_observed = isinstance(tools, dict)
     if tool_count_observed:
         tool_calls = _int_or_none(tools.get("totalCalls"))
+    actual_origin = origin_for_workspace(
+        ORIGIN_QWEN,
+        workspace,
+        root=buzz_workspaces_root,
+    )
 
     return ExtractedRun(
         run_id=run_id,
-        origin=ORIGIN_QWEN,
+        origin=actual_origin,
         tool_count_observed=tool_count_observed,
         run_fields={
-            "origin": ORIGIN_QWEN,
+            "origin": actual_origin,
             "provider": "qwen",
             "model": model,
             "requested_model": model,
@@ -719,7 +790,7 @@ def extract_qwen_row(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
             ExtractedCall(
                 call_index=1,
                 fields={
-                    "origin": ORIGIN_QWEN,
+                    "origin": actual_origin,
                     "provider": "qwen",
                     "model": model,
                     "requested_model": model,
@@ -744,12 +815,54 @@ def iter_qwen_usage_files(usage_dir: Path | str = DEFAULT_QWEN_USAGE_DIR) -> lis
     return sorted(usage_dir.glob("token-usage-*.jsonl"))
 
 
+def load_qwen_session_workspaces(
+    projects_root: Path | str,
+    session_ids: set[str],
+) -> dict[str, str]:
+    """Return only unambiguous transcript cwd values for requested sessions."""
+    candidates: dict[str, set[str]] = {sid: set() for sid in session_ids}
+    root = Path(projects_root)
+    if not root.is_dir() or not session_ids:
+        return {}
+    for path in root.glob("*/chats/*.jsonl"):
+        file_session_id = path.stem
+        if file_session_id not in session_ids:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            declared = record.get("sessionId")
+            if declared not in (None, file_session_id):
+                continue
+            cwd = record.get("cwd")
+            if isinstance(cwd, str) and cwd.strip():
+                candidates[file_session_id].add(cwd.strip())
+    return {
+        session_id: next(iter(workspaces))
+        for session_id, workspaces in candidates.items()
+        if len(workspaces) == 1
+    }
+
+
 # ---------------------------------------------------------------------------
 # Grok
 # ---------------------------------------------------------------------------
 
 
-def extract_grok_inference_event(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
+def extract_grok_inference_event(
+    obj: Mapping[str, Any],
+    *,
+    workspace: Optional[str] = None,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
+) -> Optional[ExtractedRun]:
     """One shell.turn.inference_done log line → one run (sid+loop).
 
     Tokens live in ``ctx`` (prompt_tokens, cached_prompt_tokens,
@@ -787,8 +900,14 @@ def extract_grok_inference_event(obj: Mapping[str, Any]) -> Optional[ExtractedRu
     except (TypeError, ValueError):
         first_token_ms_f = None
 
+    actual_origin = origin_for_workspace(
+        ORIGIN_GROK,
+        workspace,
+        root=buzz_workspaces_root,
+    )
+
     fields = {
-        "origin": ORIGIN_GROK,
+        "origin": actual_origin,
         "provider": "xai",
         "model": None,  # not present on inference_done
         "model_source": "unified_log",
@@ -808,13 +927,13 @@ def extract_grok_inference_event(obj: Mapping[str, Any]) -> Optional[ExtractedRu
     }
     return ExtractedRun(
         run_id=run_id,
-        origin=ORIGIN_GROK,
+        origin=actual_origin,
         run_fields=fields,
         calls=[
             ExtractedCall(
                 call_index=1,
                 fields={
-                    "origin": ORIGIN_GROK,
+                    "origin": actual_origin,
                     "provider": "xai",
                     "model_source": "unified_log",
                     "input_tokens": prompt,
@@ -830,6 +949,38 @@ def extract_grok_inference_event(obj: Mapping[str, Any]) -> Optional[ExtractedRu
             )
         ],
     )
+
+
+def load_grok_session_workspaces(
+    sessions_root: Path | str,
+    session_ids: set[str],
+) -> dict[str, str]:
+    """Map a Grok sid to its sole URL-decoded session-parent workspace."""
+    candidates: dict[str, set[str]] = {sid: set() for sid in session_ids}
+    root = Path(sessions_root)
+    if not root.is_dir() or not session_ids:
+        return {}
+    try:
+        workspace_dirs = list(root.iterdir())
+    except OSError:
+        return {}
+    for workspace_dir in workspace_dirs:
+        if not workspace_dir.is_dir():
+            continue
+        workspace = unquote(workspace_dir.name)
+        try:
+            session_dirs = workspace_dir.iterdir()
+            for session_dir in session_dirs:
+                if session_dir.is_dir() and session_dir.name in candidates:
+                    candidates[session_dir.name].add(workspace)
+        except OSError:
+            # One unreadable workspace cannot abort the multi-lane harvest.
+            continue
+    return {
+        session_id: next(iter(workspaces))
+        for session_id, workspaces in candidates.items()
+        if len(workspaces) == 1
+    }
 
 
 def iter_grok_inference_events(path: Path | str) -> Iterator[dict[str, Any]]:
@@ -919,6 +1070,24 @@ def _run_exists(db_path: Path, run_id: str) -> bool:
         conn.close()
 
 
+def _run_origin(db_path: Path, run_id: str) -> Optional[str]:
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT origin FROM run_usage_facts WHERE run_id=? LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 def _run_missing_cache_write(db_path: Path, run_id: str) -> bool:
     """True when the stored run predates cache_write extraction.
 
@@ -968,6 +1137,20 @@ def write_extracted_run(
     db_path = Path(db_path)
     existed = _run_exists(db_path, extracted.run_id)
     if not force and existed:
+        existing_origin = _run_origin(db_path, extracted.run_id)
+        if existing_origin is not None and existing_origin != extracted.origin:
+            # Lack of a current workspace signal is not negative evidence.
+            # Never downgrade a previously proven Buzz classification —
+            # not even for a cache-write backfill rewrite (the COALESCE
+            # upsert would overwrite the stored origin with it).
+            if extracted.origin != BUZZ_AGENT_ORIGIN:
+                return 0, 0, 0
+            changed = reclassify_run_origin(
+                extracted.run_id,
+                extracted.origin,
+                path=db_path,
+            )
+            return (1 if changed else 0), 0, 0
         if not (
             backfill_incomplete
             and _run_missing_cache_write(db_path, extracted.run_id)
@@ -1051,6 +1234,7 @@ def harvest_codex(
     force: bool = False,
     include_calls: bool = False,
     backfill_incomplete: bool = False,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
 ) -> HarvestStats:
     t0 = time.perf_counter()
     stats = HarvestStats(origin=ORIGIN_CODEX)
@@ -1068,7 +1252,10 @@ def harvest_codex(
             stats.skipped_unchanged += 1
             continue
         try:
-            extracted = extract_codex_rollout(path)
+            extracted = extract_codex_rollout(
+                path,
+                buzz_workspaces_root=buzz_workspaces_root,
+            )
         except Exception:
             stats.errors += 1
             continue
@@ -1104,12 +1291,14 @@ def harvest_kimi(
     state: dict[str, Any],
     force: bool = False,
     include_calls: bool = False,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
 ) -> HarvestStats:
     t0 = time.perf_counter()
     stats = HarvestStats(origin=ORIGIN_KIMI)
     index_path = Path(index_path)
     bucket = _source_state(state, ORIGIN_KIMI)
     index = load_kimi_session_index(index_path)
+    workspaces = load_kimi_session_workspaces(index_path)
     for session_id, rec in index.items():
         stats.scanned += 1
         wire = resolve_kimi_wire_path(session_id, index=index)
@@ -1120,7 +1309,12 @@ def harvest_kimi(
             stats.skipped_unchanged += 1
             continue
         try:
-            extracted = extract_kimi_wire(wire, session_id=session_id)
+            extracted = extract_kimi_wire(
+                wire,
+                session_id=session_id,
+                workspace=workspaces.get(session_id),
+                buzz_workspaces_root=buzz_workspaces_root,
+            )
         except Exception:
             stats.errors += 1
             continue
@@ -1153,11 +1347,28 @@ def harvest_qwen(
     state: dict[str, Any],
     force: bool = False,
     include_calls: bool = False,
+    projects_root: Path | str = DEFAULT_QWEN_PROJECTS,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
 ) -> HarvestStats:
     t0 = time.perf_counter()
     stats = HarvestStats(origin=ORIGIN_QWEN)
     bucket = _source_state(state, ORIGIN_QWEN)
-    for path in iter_qwen_usage_files(usage_dir):
+    usage_paths = iter_qwen_usage_files(usage_dir)
+    session_ids: set[str] = set()
+    for path in usage_paths:
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                session_id = record.get("sessionId") if isinstance(record, dict) else None
+                if isinstance(session_id, str) and session_id:
+                    session_ids.add(session_id)
+        except OSError:
+            continue
+    workspaces = load_qwen_session_workspaces(projects_root, session_ids)
+    for path in usage_paths:
         if not force and _should_skip_file(bucket, path):
             stats.scanned += 1
             stats.skipped_unchanged += 1
@@ -1182,7 +1393,16 @@ def harvest_qwen(
             if obj.get("schemaVersion") not in QWEN_SUPPORTED_SCHEMA_VERSIONS:
                 stats.skipped_unsupported += 1
                 continue
-            extracted = extract_qwen_row(obj)
+            session_id = obj.get("sessionId")
+            extracted = extract_qwen_row(
+                obj,
+                workspace=(
+                    workspaces.get(session_id)
+                    if isinstance(session_id, str)
+                    else None
+                ),
+                buzz_workspaces_root=buzz_workspaces_root,
+            )
             if extracted is None:
                 stats.skipped_unsupported += 1
                 continue
@@ -1210,6 +1430,8 @@ def harvest_grok(
     state: dict[str, Any],
     force: bool = False,
     include_calls: bool = False,
+    sessions_root: Path | str = DEFAULT_GROK_SESSIONS,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
 ) -> HarvestStats:
     t0 = time.perf_counter()
     stats = HarvestStats(origin=ORIGIN_GROK)
@@ -1225,10 +1447,25 @@ def harvest_grok(
         stats.duration_s = time.perf_counter() - t0
         return stats
 
+    session_ids = {
+        str(obj["sid"])
+        for obj in iter_grok_inference_events(path)
+        if isinstance(obj.get("sid"), str) and obj.get("sid")
+    }
+    workspaces = load_grok_session_workspaces(sessions_root, session_ids)
     for obj in iter_grok_inference_events(path):
         stats.scanned += 1
         try:
-            extracted = extract_grok_inference_event(obj)
+            session_id = obj.get("sid")
+            extracted = extract_grok_inference_event(
+                obj,
+                workspace=(
+                    workspaces.get(session_id)
+                    if isinstance(session_id, str)
+                    else None
+                ),
+                buzz_workspaces_root=buzz_workspaces_root,
+            )
         except Exception:
             stats.errors += 1
             continue
@@ -1260,7 +1497,10 @@ def harvest_all(
     codex_sessions: Path | str = DEFAULT_CODEX_SESSIONS,
     kimi_index: Path | str = DEFAULT_KIMI_INDEX,
     qwen_usage_dir: Path | str = DEFAULT_QWEN_USAGE_DIR,
+    qwen_projects: Path | str = DEFAULT_QWEN_PROJECTS,
     grok_unified: Path | str = DEFAULT_GROK_UNIFIED,
+    grok_sessions: Path | str = DEFAULT_GROK_SESSIONS,
+    buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
     runs_root: Path | str = DEFAULT_RUNS_ROOT,
     origins: Optional[list[str]] = None,
     force: bool = False,
@@ -1301,6 +1541,7 @@ def harvest_all(
             force=force,
             include_calls=include_calls,
             backfill_incomplete=backfill_incomplete,
+            buzz_workspaces_root=buzz_workspaces_root,
         )
     if ORIGIN_KIMI in wanted:
         results[ORIGIN_KIMI] = harvest_kimi(
@@ -1309,6 +1550,7 @@ def harvest_all(
             state=state,
             force=force,
             include_calls=include_calls,
+            buzz_workspaces_root=buzz_workspaces_root,
         )
     if ORIGIN_QWEN in wanted:
         results[ORIGIN_QWEN] = harvest_qwen(
@@ -1317,6 +1559,8 @@ def harvest_all(
             state=state,
             force=force,
             include_calls=include_calls,
+            projects_root=qwen_projects,
+            buzz_workspaces_root=buzz_workspaces_root,
         )
     if ORIGIN_GROK in wanted:
         results[ORIGIN_GROK] = harvest_grok(
@@ -1325,6 +1569,8 @@ def harvest_all(
             state=state,
             force=force,
             include_calls=include_calls,
+            sessions_root=grok_sessions,
+            buzz_workspaces_root=buzz_workspaces_root,
         )
 
     save_state(state_file, state)
@@ -1650,8 +1896,14 @@ def find_run_ids_for_handle(
         # Session-level match: harvest stores Qwen sessionId on profile.
         rows = conn.execute(
             "SELECT run_id FROM run_usage_facts "
-            "WHERE origin=? AND profile=? AND run_id != ?",
-            (ORIGIN_QWEN, handle, f"{ORIGIN_QWEN}:{handle}"),
+            "WHERE origin IN (?, ?) AND run_id LIKE 'qwen_cli:%' "
+            "AND profile=? AND run_id != ?",
+            (
+                ORIGIN_QWEN,
+                BUZZ_AGENT_ORIGIN,
+                handle,
+                f"{ORIGIN_QWEN}:{handle}",
+            ),
         ).fetchall()
         for row in rows:
             found.append(str(row["run_id"]))
@@ -1679,8 +1931,9 @@ def _token_checksum(conn: sqlite3.Connection) -> dict[str, Any]:
         "SUM(CASE WHEN first_call_at IS NOT NULL THEN 1 ELSE 0 END) AS first_n, "
         "SUM(CASE WHEN last_call_at IS NOT NULL THEN 1 ELSE 0 END) AS last_n, "
         "SUM(CASE WHEN captured_at IS NOT NULL THEN 1 ELSE 0 END) AS cap_n "
-        "FROM run_usage_facts WHERE origin IN (?,?,?,?)",
-        (ORIGIN_CODEX, ORIGIN_KIMI, ORIGIN_GROK, ORIGIN_QWEN),
+        "FROM run_usage_facts WHERE "
+        "run_id LIKE 'codex_cli:%' OR run_id LIKE 'kimi_cli:%' OR "
+        "run_id LIKE 'grok_cli:%' OR run_id LIKE 'qwen_cli:%'",
     ).fetchone()
     return {
         "rows": int(row["n"] or 0),

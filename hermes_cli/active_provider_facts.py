@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote
 
+from hermes_cli.usage_facts_buzz_attribution import source_origin_for_run
+
 NEVER_RAN_STATUSES = frozenset({"reclaimed", "scheduled", "spawn_failed"})
 
 CLASS_NEVER_RAN = "nie_gelaufen"
@@ -587,19 +589,26 @@ def _load_cli_facts(
             for row in connection.execute(
                 "SELECT run_id, model, captured_at, origin "
                 "FROM run_usage_facts "
-                "WHERE origin GLOB '*_cli' "
+                "WHERE (origin GLOB '*_cli' OR origin='buzz_agent') "
                 "AND model IS NOT NULL AND trim(model) <> '' "
                 "AND captured_at IS NOT NULL"
             ):
                 captured_at = _timestamp(row["captured_at"])
                 model = _text(row["model"])
-                if captured_at is not None and model:
+                source_origin = source_origin_for_run(
+                    row["origin"], row["run_id"]
+                )
+                if (
+                    captured_at is not None
+                    and model
+                    and source_origin.endswith("_cli")
+                ):
                     result.append(
                         _CliFact(
                             fact_id=str(row["run_id"]),
                             model=model,
                             captured_at=captured_at,
-                            origin=str(row["origin"]),
+                            origin=source_origin,
                         )
                     )
             return result

@@ -69,7 +69,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 9
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 10
 
 
 def test_request_id_fallback_is_stable() -> None:

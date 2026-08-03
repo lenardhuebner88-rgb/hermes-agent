@@ -118,6 +118,53 @@ def test_unknown_origin_is_not_guessed() -> None:
     }
 
 
+def test_buzz_agent_pricing_uses_source_origin_on_both_read_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage_path = tmp_path / "usage.db"
+    upsert_run_facts(
+        "claude_code:buzz-real-shape",
+        {
+            "origin": "buzz_agent",
+            "task_run_id": "501",
+            "task_id": "task-buzz",
+            "chain_id": "chain-buzz",
+            "board": "default",
+            "provider": "alibaba",
+            "model": "qwen3-coder-plus",
+            "billing_mode": "api_key",
+            "input_tokens": 100,
+            "cache_read_tokens": 900,
+            "cache_write_tokens": 25,
+            "output_tokens": 10,
+            "captured_at": "2026-08-03T20:00:00+00:00",
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+    observed_origins: list[str | None] = []
+
+    def fake_estimator(model_name, usage, *, provider=None, origin=None):
+        observed_origins.append(origin)
+        return CostResult(
+            amount_usd=Decimal("1"),
+            status="estimated",
+            source="user_override",
+            label=f"{provider}:{model_name}",
+            pricing_version="fixture-v1",
+        )
+
+    monkeypatch.setattr(readmodel, "estimate_usage_cost", fake_estimator)
+    monkeypatch.setattr(readmodel, "estimate_equivalent_cost", fake_estimator)
+
+    readmodel.build_usage_facts_payload(usage_path)
+    readmodel.build_attributed_usage_payload(usage_path)
+
+    assert observed_origins
+    assert set(observed_origins) == {"claude_code"}
+
+
 def test_payload_separates_metered_quota_unattributed_and_kanban(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

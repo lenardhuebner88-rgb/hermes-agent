@@ -23,6 +23,10 @@ from hermes_cli.telemetry_contracts import (
     telemetry_contract,
     telemetry_contracts,
 )
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    BUZZ_SOURCE_ORIGIN_SQL,
+)
 from hermes_cli.usage_facts_readmodel import build_attributed_usage_payload
 
 CONTRACT_VERSION = "fleet-metrics.v1"
@@ -181,25 +185,30 @@ def _usage_source_freshness(
         params.extend(selected_origins)
     rows = connection.execute(
         f"""
-        SELECT origin,
+        SELECT origin, {BUZZ_SOURCE_ORIGIN_SQL} AS source_origin,
                SUM(CASE WHEN captured_at >= ? THEN 1 ELSE 0 END) AS fact_rows,
                MAX(captured_at) AS latest_captured_at
           FROM run_usage_facts
          {"WHERE " + " AND ".join(conditions) if conditions else ""}
-         GROUP BY origin
-         ORDER BY origin
+         GROUP BY origin, source_origin
+         ORDER BY origin, source_origin
         """,
         tuple(params),
     ).fetchall()
     threshold = 2 * 60 * 60
     sources: list[dict[str, Any]] = []
     for row in rows:
+        origin = str(row["origin"])
+        source_origin = str(row["source_origin"])
+        source_key = {"origin": origin}
+        if origin == BUZZ_AGENT_ORIGIN:
+            source_key["source_origin"] = source_origin
         latest = row["latest_captured_at"]
         parsed = _parse_datetime(latest)
         if parsed is None:
             sources.append(
                 {
-                    "origin": str(row["origin"]),
+                    **source_key,
                     "fact_rows": int(row["fact_rows"] or 0),
                     "latest_captured_at": latest,
                     "age_seconds": None,
@@ -212,7 +221,7 @@ def _usage_source_freshness(
         age = max(0, int((observed_at - parsed).total_seconds()))
         sources.append(
             {
-                "origin": str(row["origin"]),
+                **source_key,
                 "fact_rows": int(row["fact_rows"] or 0),
                 "latest_captured_at": latest,
                 "age_seconds": age,
@@ -249,7 +258,8 @@ def _provider_model_coverage(
     ) + ")"
     rows = connection.execute(
         f"""
-        SELECT origin, provider, model,
+        SELECT origin, {BUZZ_SOURCE_ORIGIN_SQL} AS source_origin,
+               provider, model,
                COUNT(*) AS fact_rows,
                SUM(CASE WHEN {token_present} THEN 1 ELSE 0 END) AS token_rows,
                COUNT(model) AS model_rows,
@@ -258,8 +268,8 @@ def _provider_model_coverage(
                MAX(captured_at) AS latest_captured_at
           FROM run_usage_facts
          WHERE {" AND ".join(conditions)}
-         GROUP BY origin, provider, model
-         ORDER BY origin, provider, model
+         GROUP BY origin, source_origin, provider, model
+         ORDER BY origin, source_origin, provider, model
         """,
         tuple(params),
     ).fetchall()
@@ -277,6 +287,7 @@ def _provider_model_coverage(
     }
     for row in rows:
         origin = str(row["origin"])
+        source_origin = str(row["source_origin"])
         fact_rows = int(row["fact_rows"] or 0)
         observed = {
             "tokens": int(row["token_rows"] or 0),
@@ -286,24 +297,27 @@ def _provider_model_coverage(
         }
         metric_coverage = {
             metric: _metric_coverage(
-                origin,
+                source_origin,
                 metric,
                 observed_rows=observed[metric],
                 fact_rows=fact_rows,
             )
             for metric in ("tokens", "model", "duration", "ttft")
         }
+        group_key = {
+            "origin": origin,
+            "provider": row["provider"],
+            "model": row["model"],
+        }
+        if origin == BUZZ_AGENT_ORIGIN:
+            group_key["source_origin"] = source_origin
         groups.append(
             {
-                "key": {
-                    "origin": origin,
-                    "provider": row["provider"],
-                    "model": row["model"],
-                },
+                "key": group_key,
                 "fact_rows": fact_rows,
                 "latest_captured_at": row["latest_captured_at"],
                 "source_contract": {
-                    metric: telemetry_contract(origin)[metric]
+                    metric: telemetry_contract(source_origin)[metric]
                     for metric in ("tokens", "model", "duration", "ttft")
                 },
                 "coverage": metric_coverage,
@@ -314,13 +328,13 @@ def _provider_model_coverage(
         totals["tokens"][1] += fact_rows
         totals["model_all"][0] += observed["model"]
         totals["model_all"][1] += fact_rows
-        if metric_is_eligible(origin, "model"):
+        if metric_is_eligible(source_origin, "model"):
             totals["model_eligible"][0] += observed["model"]
             totals["model_eligible"][1] += fact_rows
         for metric in ("duration", "ttft"):
             totals[f"{metric}_all"][0] += observed[metric]
             totals[f"{metric}_all"][1] += fact_rows
-            if metric_is_eligible(origin, metric):
+            if metric_is_eligible(source_origin, metric):
                 totals[f"{metric}_eligible"][0] += observed[metric]
                 totals[f"{metric}_eligible"][1] += fact_rows
 
