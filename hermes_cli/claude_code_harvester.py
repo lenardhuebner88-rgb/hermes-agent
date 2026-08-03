@@ -38,11 +38,19 @@ from hermes_cli.usage_facts_db import (
 # ``model_source`` to the provenance of the model name itself.
 # v7 stores Anthropic's observed cache-write split by 1h and 5m lifetime.
 # v8 stores the observed tool name and output size per run/tool aggregate.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 8
+# v9 derives the provider from the transcript's model name instead of
+# hardcoding anthropic — Claude Code here also runs Qwen models through the
+# Alibaba token-plan route.  The bump re-harvests captured files so the
+# misattributed rows are re-derived from source.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 9
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
+# Provider of the metered API-key route inspected for billing-mode
+# derivation; per-row attribution comes from ``provider_for_model``.
 PROVIDER = "anthropic"
+ALIBABA_TOKEN_PLAN_PROVIDER = "alibaba-token-plan"
+UNKNOWN_PROVIDER = "unknown"
 NO_REQUEST_ID = "__no_request_id__"
 RUN_ID_PREFIX = "claude_code"
 _EXACT_RUN_CORRELATION_SOURCES = frozenset(
@@ -154,6 +162,29 @@ def request_id_or_fallback(request_id: Any) -> str:
         return NO_REQUEST_ID
     text = str(request_id).strip()
     return text if text else NO_REQUEST_ID
+
+
+_MODEL_PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("claude", PROVIDER),
+    ("qwen", ALIBABA_TOKEN_PLAN_PROVIDER),
+)
+
+
+def provider_for_model(model: Optional[str]) -> str:
+    """Attribute a transcript row to a provider by its observed model name.
+
+    Fail-closed: a name without a known prefix yields ``unknown`` — a wrong
+    attribution is worse than a missing one.
+    """
+    if model is None:
+        return UNKNOWN_PROVIDER
+    normalized = str(model).strip().lower()
+    if not normalized:
+        return UNKNOWN_PROVIDER
+    for prefix, provider in _MODEL_PROVIDER_PREFIXES:
+        if normalized.startswith(prefix):
+            return provider
+    return UNKNOWN_PROVIDER
 
 
 def _draft_correlation(
@@ -630,7 +661,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
 
     call_fields: dict[str, Any] = {
         "origin": ORIGIN,
-        "provider": PROVIDER,
+        "provider": provider_for_model(draft.model),
         "model": draft.model,
         "requested_model": draft.model,
         "model_source": "transcript",
@@ -664,7 +695,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "chain_id": draft.chain_id,
         "board": draft.board,
         "correlation_source": draft.correlation_source,
-        "provider": PROVIDER,
+        "provider": provider_for_model(draft.model),
         "model": draft.model,
         "requested_model": draft.model,
         "model_source": "transcript",
@@ -1894,6 +1925,138 @@ def backfill_parent_bindings(
         connection.close()
 
 
+def _provider_attribution_report_skeleton() -> dict[str, Any]:
+    return {
+        "rows_checked": 0,
+        "mismatches": 0,
+        "updated": 0,
+        "by_transition": {},
+        "provider_counts_before": {},
+        "provider_counts_after": {},
+    }
+
+
+def backfill_provider_attribution(
+    *,
+    db_path: Path | str | None = None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Re-attribute stored claude_code rows with the model-name mapping.
+
+    The format-v9 re-harvest re-derives every row whose transcript still
+    exists.  This remainder pass covers rows whose transcript is gone: it
+    applies the same ``provider_for_model`` mapping and reports the
+    before/after provider distribution.  Preview opens the DB read-only;
+    ``apply`` is the only write path.
+    """
+    resolved_db = usage_facts_db_path(db_path)
+    if not resolved_db.is_file():
+        return {
+            "applied": apply,
+            "run_llm_calls": _provider_attribution_report_skeleton(),
+            "run_usage_facts": _provider_attribution_report_skeleton(),
+            "totals": _provider_attribution_report_skeleton(),
+        }
+    if apply:
+        initialize_usage_facts_db(resolved_db)
+        connection = usage_facts_db_mod._connect(resolved_db)
+    else:
+        connection = sqlite3.connect(
+            f"file:{quote(str(resolved_db.expanduser().resolve()), safe='/')}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+    connection.row_factory = sqlite3.Row
+    report = {
+        "applied": apply,
+        "run_llm_calls": _provider_attribution_report_skeleton(),
+        "run_usage_facts": _provider_attribution_report_skeleton(),
+        "totals": _provider_attribution_report_skeleton(),
+    }
+    try:
+        for table, key_column in (
+            ("run_llm_calls", "call_index"),
+            ("run_usage_facts", None),
+        ):
+            section = report[table]
+            rows = connection.execute(
+                f"SELECT run_id, {f'{key_column}, ' if key_column else ''}"
+                "model, provider FROM "
+                f"{table} WHERE origin=?",
+                (ORIGIN,),
+            ).fetchall()
+            before_counts: dict[str, int] = {}
+            transitions: dict[str, int] = {}
+            updates: list[tuple[str, ...]] = []
+            for row in rows:
+                stored = row["provider"]
+                stored_key = stored if stored is not None else "<NULL>"
+                before_counts[stored_key] = before_counts.get(stored_key, 0) + 1
+                derived = provider_for_model(row["model"])
+                if stored == derived:
+                    continue
+                section["mismatches"] += 1
+                transition = f"{stored_key}->{derived}"
+                transitions[transition] = transitions.get(transition, 0) + 1
+                if apply:
+                    identity = (derived, str(row["run_id"]))
+                    if key_column is not None:
+                        identity = (derived, str(row["run_id"]), row[key_column])
+                    updates.append(identity)
+            section["rows_checked"] = len(rows)
+            section["by_transition"] = dict(sorted(transitions.items()))
+            section["provider_counts_before"] = dict(sorted(before_counts.items()))
+            if apply and updates:
+                if key_column is None:
+                    connection.executemany(
+                        f"UPDATE {table} SET provider=? WHERE run_id=?",
+                        updates,
+                    )
+                else:
+                    connection.executemany(
+                        f"UPDATE {table} SET provider=? "
+                        f"WHERE run_id=? AND {key_column}=?",
+                        updates,
+                    )
+                section["updated"] = len(updates)
+            if apply:
+                after_rows = connection.execute(
+                    f"SELECT provider, COUNT(*) AS n FROM {table} "
+                    "WHERE origin=? GROUP BY provider",
+                    (ORIGIN,),
+                ).fetchall()
+                section["provider_counts_after"] = {
+                    (row["provider"] if row["provider"] is not None else "<NULL>"): row["n"]
+                    for row in after_rows
+                }
+        total_keys = (
+            "rows_checked",
+            "mismatches",
+            "updated",
+        )
+        totals = report["totals"]
+        for key in total_keys:
+            totals[key] = (
+                report["run_llm_calls"][key] + report["run_usage_facts"][key]
+            )
+        merged_transitions: dict[str, int] = {}
+        for table in ("run_llm_calls", "run_usage_facts"):
+            for transition, count in report[table]["by_transition"].items():
+                merged_transitions[transition] = (
+                    merged_transitions.get(transition, 0) + count
+                )
+        totals["by_transition"] = dict(sorted(merged_transitions.items()))
+        if apply:
+            connection.commit()
+        return report
+    except Exception:
+        if apply:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def harvest(
     *,
     projects_root: Path | str = DEFAULT_PROJECTS_ROOT,
@@ -2097,6 +2260,15 @@ def build_arg_parser():
         ),
     )
     parser.add_argument(
+        "--backfill-provider",
+        action="store_true",
+        help=(
+            "Preview re-attributing stored Claude rows whose provider "
+            "disagrees with the model-name mapping (remainder pass for "
+            "rows whose transcript is gone)"
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help=(
@@ -2132,6 +2304,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.backfill_parent_bindings,
             args.backfill_cache_writes,
             args.backfill_tool_calls,
+            args.backfill_provider,
         )
     )
     if backfill_modes > 1:
@@ -2174,6 +2347,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         report = backfill_tool_calls(
             db_path=args.db,
             projects_root=args.projects_root,
+            apply=args.apply,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    if args.backfill_provider:
+        report = backfill_provider_attribution(
+            db_path=args.db,
             apply=args.apply,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))

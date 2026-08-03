@@ -13,12 +13,14 @@ import hermes_cli.claude_code_harvester as harvester_mod
 from hermes_cli.claude_code_harvester import (
     CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION,
     NO_REQUEST_ID,
+    backfill_provider_attribution,
     draft_to_fields,
     harvest,
     load_agent_meta,
     make_run_id,
     merge_assistant_fragment,
     parse_transcript_file,
+    provider_for_model,
     request_id_or_fallback,
 )
 from hermes_cli.usage_facts_db import initialize_usage_facts_db, upsert_run_facts
@@ -67,7 +69,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 8
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 9
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -2583,3 +2585,178 @@ def test_merge_assistant_fragment_unions_tool_uses() -> None:
     assert draft.output_tokens == 10
     assert draft.tool_call_count == 1
     assert draft.stop_reason == "tool_use"
+
+
+QWEN_PROVIDER_PROJECT = PROJECTS / "qwen-provider-project"
+QWEN_RUN_ID = make_run_id("msg_96384cf2-cdcd-4328-81dc-db26d520f32a", None)
+CLAUDE_PROVIDER_RUN_ID = make_run_id(
+    "msg_011CdS6K294vCWNhkWS14wwu", "req_011CdS6K16oufr59gu5cwnKm"
+)
+SYNTHETIC_PROVIDER_RUN_ID = make_run_id(
+    "6a7b8c9d-0e1f-4a5b-8c9d-0e1f2a3b4c5d", None
+)
+
+
+def test_provider_for_model_mapping_is_fail_closed() -> None:
+    assert provider_for_model("claude-opus-5") == "anthropic"
+    assert provider_for_model("Claude-Sonnet-5") == "anthropic"
+    assert provider_for_model("qwen3.8-max-preview") == "alibaba-token-plan"
+    assert provider_for_model(" qwen3.7-max ") == "alibaba-token-plan"
+    assert provider_for_model("<synthetic>") == "unknown"
+    assert provider_for_model("gpt-5.6-sol") == "unknown"
+    assert provider_for_model("") == "unknown"
+    assert provider_for_model(None) == "unknown"
+
+
+def test_real_qwen_transcript_harvests_with_derived_provider(
+    db_path: Path, tmp_path: Path
+) -> None:
+    stats = harvest(
+        projects_root=QWEN_PROVIDER_PROJECT,
+        db_path=db_path,
+        state_path=tmp_path / "hwm.json",
+    )
+    assert stats.calls_written == 3
+    with _connect(db_path) as conn:
+        qwen_call = conn.execute(
+            "SELECT * FROM run_llm_calls WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+        qwen_run = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+        claude_call = conn.execute(
+            "SELECT provider FROM run_llm_calls WHERE run_id=?",
+            (CLAUDE_PROVIDER_RUN_ID,),
+        ).fetchone()
+        claude_run = conn.execute(
+            "SELECT provider FROM run_usage_facts WHERE run_id=?",
+            (CLAUDE_PROVIDER_RUN_ID,),
+        ).fetchone()
+        synthetic_call = conn.execute(
+            "SELECT provider FROM run_llm_calls WHERE run_id=?",
+            (SYNTHETIC_PROVIDER_RUN_ID,),
+        ).fetchone()
+        synthetic_run = conn.execute(
+            "SELECT provider FROM run_usage_facts WHERE run_id=?",
+            (SYNTHETIC_PROVIDER_RUN_ID,),
+        ).fetchone()
+    assert qwen_call is not None and qwen_run is not None
+    assert qwen_call["provider"] == "alibaba-token-plan"
+    assert qwen_run["provider"] == "alibaba-token-plan"
+    assert qwen_call["model"] == "qwen3.8-max-preview"
+    # Attribution changes nothing about the observed numbers.
+    assert qwen_call["input_tokens"] == 13840
+    assert qwen_call["output_tokens"] == 31
+    assert qwen_call["cache_write_tokens"] == 24720
+    assert qwen_call["cache_write_1h_tokens"] == 0
+    assert qwen_call["cache_write_5m_tokens"] == 24720
+    assert claude_call["provider"] == "anthropic"
+    assert claude_run["provider"] == "anthropic"
+    # Fail-closed: an unattributable model name is never guessed away.
+    assert synthetic_call["provider"] == "unknown"
+    assert synthetic_run["provider"] == "unknown"
+
+
+def _revert_qwen_rows_to_legacy_provider(db_path: Path) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE run_llm_calls SET provider='anthropic' "
+            "WHERE run_id=?",
+            (QWEN_RUN_ID,),
+        )
+        conn.execute(
+            "UPDATE run_usage_facts SET provider='anthropic' "
+            "WHERE run_id=?",
+            (QWEN_RUN_ID,),
+        )
+        conn.commit()
+
+
+def test_format_bump_reharvests_legacy_provider_rows(
+    db_path: Path, tmp_path: Path
+) -> None:
+    state = tmp_path / "hwm.json"
+    harvest(projects_root=QWEN_PROVIDER_PROJECT, db_path=db_path, state_path=state)
+    _revert_qwen_rows_to_legacy_provider(db_path)
+    # Simulate a pre-v9 high-water mark: same file entries, old format version.
+    hwm_data = json.loads(state.read_text(encoding="utf-8"))
+    hwm_data["format_version"] = CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION - 1
+    state.write_text(json.dumps(hwm_data), encoding="utf-8")
+
+    stats = harvest(
+        projects_root=QWEN_PROVIDER_PROJECT, db_path=db_path, state_path=state
+    )
+    assert stats.files_skipped_hwm == 0
+    assert stats.files_processed == 1
+    with _connect(db_path) as conn:
+        call = conn.execute(
+            "SELECT provider FROM run_llm_calls WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+        run = conn.execute(
+            "SELECT provider FROM run_usage_facts WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+    assert call["provider"] == "alibaba-token-plan"
+    assert run["provider"] == "alibaba-token-plan"
+    # Second pass: HWM is current again, nothing is reprocessed.
+    stats = harvest(
+        projects_root=QWEN_PROVIDER_PROJECT, db_path=db_path, state_path=state
+    )
+    assert stats.files_skipped_hwm == 1
+    assert stats.files_processed == 0
+
+
+def test_provider_backfill_preview_then_apply_fixes_remainder(
+    db_path: Path, tmp_path: Path
+) -> None:
+    harvest(
+        projects_root=QWEN_PROVIDER_PROJECT,
+        db_path=db_path,
+        state_path=tmp_path / "hwm.json",
+    )
+    _revert_qwen_rows_to_legacy_provider(db_path)
+
+    preview = backfill_provider_attribution(db_path=db_path)
+    assert preview["applied"] is False
+    assert preview["totals"]["mismatches"] == 2
+    assert preview["run_llm_calls"]["mismatches"] == 1
+    assert preview["run_usage_facts"]["mismatches"] == 1
+    assert preview["totals"]["by_transition"] == {
+        "anthropic->alibaba-token-plan": 2
+    }
+    assert preview["totals"]["updated"] == 0
+    with _connect(db_path) as conn:
+        untouched = conn.execute(
+            "SELECT provider FROM run_llm_calls WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+    assert untouched["provider"] == "anthropic"
+
+    applied = backfill_provider_attribution(db_path=db_path, apply=True)
+    assert applied["applied"] is True
+    assert applied["totals"]["updated"] == 2
+    assert applied["run_llm_calls"]["provider_counts_before"] == {
+        "anthropic": 2,
+        "unknown": 1,
+    }
+    assert applied["run_llm_calls"]["provider_counts_after"] == {
+        "alibaba-token-plan": 1,
+        "anthropic": 1,
+        "unknown": 1,
+    }
+    with _connect(db_path) as conn:
+        fixed_call = conn.execute(
+            "SELECT provider FROM run_llm_calls WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+        fixed_run = conn.execute(
+            "SELECT provider FROM run_usage_facts WHERE run_id=?", (QWEN_RUN_ID,)
+        ).fetchone()
+    assert fixed_call["provider"] == "alibaba-token-plan"
+    assert fixed_run["provider"] == "alibaba-token-plan"
+
+    rerun = backfill_provider_attribution(db_path=db_path)
+    assert rerun["totals"]["mismatches"] == 0
+
+
+def test_provider_backfill_missing_db_reports_empty(tmp_path: Path) -> None:
+    report = backfill_provider_attribution(db_path=tmp_path / "absent.db")
+    assert report["applied"] is False
+    assert report["totals"]["rows_checked"] == 0
