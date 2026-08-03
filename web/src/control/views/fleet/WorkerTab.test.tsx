@@ -72,6 +72,13 @@ function routeFetch(actionImpl: (url: string, opts?: FetchOpts) => Promise<unkno
       if (url.includes("/runs/outcomes")) {
         return extras.outcomes ? extras.outcomes(url) : Promise.resolve(EMPTY_OUTCOMES);
       }
+      if (url.includes("/api/fleet/agent-history")) {
+        return Promise.resolve({
+          days: 30,
+          generated_at: 1782500300,
+          agents: [],
+        });
+      }
       if (url.includes("/activity")) return Promise.resolve(EMPTY_ACTIVITY);
       if (url.includes("/timeline")) return Promise.resolve(EMPTY_TIMELINE);
       if (/\/tasks\/[^/?]+(\?|$)/.test(url)) {

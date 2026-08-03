@@ -6,12 +6,13 @@ import {
   WindowedRollupResponseSchema,
   ReliabilityResponseSchema,
   RunsDailyResponseSchema,
+  AgentHistoryResponseSchema,
   ChainCompletionResponseSchema,
   RunsIssuesResponseSchema,
   BlockedCompletionsResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, ChainCompletionResponse, RunsIssuesResponse, WindowedRollupResponse } from "../lib/schemas";
+import type { AgentHistoryProfile, RunSummaryResponse, ReliabilityResponse, RunsDailyResponse, ChainCompletionResponse, RunsIssuesResponse, WindowedRollupResponse } from "../lib/schemas";
 import type { BlockedCompletionsResponse, RecentResultsResponse, TodayDigestResponse } from "../lib/types";
 import { usePolling } from "./internal";
 
@@ -100,6 +101,24 @@ export function useHermesRunsDaily() {
 }
 
 
+export function useHermesFleetAgentHistory(profile?: string | null) {
+  const normalizedProfile = profile?.trim() ?? "";
+  return usePolling<AgentHistoryProfile | null>(
+    `fleet/agent-history:${normalizedProfile || "none"}`,
+    async () => {
+      if (!normalizedProfile) return null;
+      const response = parseOrThrow(
+        AgentHistoryResponseSchema,
+        await fetchJSON<unknown>("/api/fleet/agent-history?days=30"),
+        "fleet/agent-history",
+      );
+      return response.agents.find((agent) => agent.profile === normalizedProfile) ?? null;
+    },
+    60000,
+  );
+}
+
+
 // ST5 (Effizienz): die zwei ST2-Aggregate für die Flotten-Effizienz-Karte —
 // Ketten-Abschlussrate (eigener Endpunkt) und Queue-Wartezeit-p50 (aus dem
 // board_stats /stats-Payload). Gleiche langsame Aggregate-Kadenz wie F4.
@@ -142,4 +161,3 @@ export function useHermesBlockedCompletions() {
     20000,
   );
 }
-

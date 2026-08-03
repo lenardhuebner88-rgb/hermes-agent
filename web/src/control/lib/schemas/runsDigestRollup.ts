@@ -268,6 +268,36 @@ export const RunsDailyResponseSchema = z.object({
 });
 export type RunsDailyPoint = z.infer<typeof RunsDailyPointSchema>;
 export type RunsDailyResponse = z.infer<typeof RunsDailyResponseSchema>;
+
+// GET /api/fleet/agent-history — read-only 30-day time series per worker
+// profile. This contract is intentionally strict: missing or additive fields
+// must surface as a contract error instead of silently rendering invented
+// zeroes in the Fleet drawer.
+const AgentHistoryTotalsSchema = z.object({
+  runs: z.number().int().nonnegative(),
+  errors: z.number().int().nonnegative(),
+  error_rate: z.number().min(0).max(1),
+  cost_usd: z.number().nonnegative(),
+}).strict();
+
+const AgentHistoryPointSchema = AgentHistoryTotalsSchema.extend({
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+}).strict();
+
+export const AgentHistoryProfileSchema = z.object({
+  profile: z.string().trim().min(1),
+  series: z.array(AgentHistoryPointSchema),
+  totals: AgentHistoryTotalsSchema,
+}).strict();
+
+export const AgentHistoryResponseSchema = z.object({
+  days: z.number().int().min(1).max(90),
+  generated_at: z.number().int().nonnegative(),
+  agents: z.array(AgentHistoryProfileSchema),
+}).strict();
+
+export type AgentHistoryProfile = z.infer<typeof AgentHistoryProfileSchema>;
+export type AgentHistoryResponse = z.infer<typeof AgentHistoryResponseSchema>;
 // ST5 (Effizienz): die zwei ST2-Aggregate, die die Flotten-Effizienz-Karte
 // braucht. chain_completion_rate = done-Roots, deren Abhängigkeits-Leaves alle
 // done sind, / done-Roots (eigener Endpunkt /stats/chain-completion).

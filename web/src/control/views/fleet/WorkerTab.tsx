@@ -49,6 +49,7 @@ import { BoardBadge } from "../../components/fleet/BoardIdentity";
 import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { elapsedSeconds } from "../../lib/derive";
+import { AgentHistoryPanel } from "./AgentHistoryPanel";
 
 // ─── Worker-Subtab ────────────────────────────────────────────────────────────
 
@@ -764,6 +765,8 @@ function WorkerDrawer({
             </div>
           </div>
         ) : null}
+
+        <AgentHistoryPanel profile={w.profile} />
 
         {/* Ketten-Position */}
         {chainMembers.length > 0 ? (
