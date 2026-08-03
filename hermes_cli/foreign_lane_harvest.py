@@ -71,7 +71,12 @@ KIMI_SUMMABLE_SCOPE = "turn"
 # Qwen schemaVersion values this harvester understands.
 QWEN_SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
 
-STATE_VERSION = 1
+# v2 (2026-08-03): a stored version mismatch resets the source state and
+# enables a one-time codex cache-write backfill for runs harvested before
+# ``cache_write_input_tokens`` extraction existed (v1). The COALESCE upsert
+# only fills rows whose rollout actually carries the field; rows whose source
+# lacks it stay NULL (unknown stays unknown, never a fabricated 0).
+STATE_VERSION = 2
 
 # Run-dir timestamps from foreign.sh use local wall clock (`date +%Y%m%dT%H%M%S`).
 # Transcripts are UTC. Compare both as aware UTC datetimes.
@@ -873,6 +878,16 @@ def load_state(path: Path | str) -> dict[str, Any]:
         return {"version": STATE_VERSION, "sources": {}}
     if not isinstance(data, dict):
         return {"version": STATE_VERSION, "sources": {}}
+    stored_version = data.get("version", STATE_VERSION)
+    if stored_version != STATE_VERSION:
+        # Version bump invalidates the fingerprints (v9 precedent of the
+        # claude harvester): every source file is re-read once, and the
+        # resumed marker enables the targeted codex cache-write backfill.
+        return {
+            "version": STATE_VERSION,
+            "sources": {},
+            "resumed_from_version": stored_version,
+        }
     data.setdefault("version", STATE_VERSION)
     data.setdefault("sources", {})
     return data
@@ -904,6 +919,30 @@ def _run_exists(db_path: Path, run_id: str) -> bool:
         conn.close()
 
 
+def _run_missing_cache_write(db_path: Path, run_id: str) -> bool:
+    """True when the stored run predates cache_write extraction.
+
+    Rows whose rollout carries the field were written with a non-NULL
+    ``cache_write_tokens``; NULL marks a run harvested before the field
+    existed (or whose source lacks it — the re-write leaves those NULL).
+    """
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT cache_write_tokens FROM run_usage_facts WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return row is not None and row[0] is None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 def write_extracted_run(
     extracted: ExtractedRun,
     *,
@@ -911,6 +950,7 @@ def write_extracted_run(
     rate_limit_path: Optional[Path] = None,
     force: bool = False,
     include_calls: bool = False,
+    backfill_incomplete: bool = False,
 ) -> tuple[int, int, int]:
     """Write one extracted run. Returns (runs_written, calls_written, rate_limits_written).
 
@@ -919,10 +959,20 @@ def write_extracted_run(
     dozens of token_count events; writing each through a separate connection
     makes a full backfill impractically slow while the session total already
     lives on ``run_usage_facts`` via last ``total_token_usage``.
+
+    ``backfill_incomplete`` (STATE_VERSION bump path): an already-stored run
+    is re-written once when its ``cache_write_tokens`` is still NULL, so the
+    COALESCE upsert can fill it from a rollout that carries the field.
+    Rate-limit snapshots are not re-appended for such rewrites.
     """
     db_path = Path(db_path)
-    if not force and _run_exists(db_path, extracted.run_id):
-        return 0, 0, 0
+    existed = _run_exists(db_path, extracted.run_id)
+    if not force and existed:
+        if not (
+            backfill_incomplete
+            and _run_missing_cache_write(db_path, extracted.run_id)
+        ):
+            return 0, 0, 0
 
     calls_written = 0
     if include_calls and extracted.calls:
@@ -949,7 +999,13 @@ def write_extracted_run(
         finalize_run_tool_call_count(extracted.run_id, path=db_path)
 
     rl_written = 0
-    if extracted.rate_limit is not None and rate_limit_path is not None:
+    if (
+        extracted.rate_limit is not None
+        and rate_limit_path is not None
+        # A backfill rewrite of an already-stored run must not duplicate
+        # its rate-limit snapshot in the sidecar.
+        and not (existed and backfill_incomplete and not force)
+    ):
         _append_rate_limit(rate_limit_path, extracted.rate_limit)
         rl_written = 1
     return 1, calls_written, rl_written
@@ -994,6 +1050,7 @@ def harvest_codex(
     rate_limit_path: Optional[Path] = None,
     force: bool = False,
     include_calls: bool = False,
+    backfill_incomplete: bool = False,
 ) -> HarvestStats:
     t0 = time.perf_counter()
     stats = HarvestStats(origin=ORIGIN_CODEX)
@@ -1026,6 +1083,7 @@ def harvest_codex(
             rate_limit_path=rate_limit_path,
             force=force,
             include_calls=include_calls,
+            backfill_incomplete=backfill_incomplete,
         )
         if written == 0:
             stats.skipped_existing += 1
@@ -1223,6 +1281,9 @@ def harvest_all(
         else db.with_name("foreign_rate_limit_snapshots.jsonl")
     )
     state = load_state(state_file)
+    # STATE_VERSION bump: one-time targeted backfill of codex runs whose
+    # cache_write_tokens is still NULL (harvested before v2 extraction).
+    backfill_incomplete = state.pop("resumed_from_version", None) is not None
     wanted = set(origins) if origins else {
         ORIGIN_CODEX,
         ORIGIN_KIMI,
@@ -1239,6 +1300,7 @@ def harvest_all(
             rate_limit_path=rl_path,
             force=force,
             include_calls=include_calls,
+            backfill_incomplete=backfill_incomplete,
         )
     if ORIGIN_KIMI in wanted:
         results[ORIGIN_KIMI] = harvest_kimi(

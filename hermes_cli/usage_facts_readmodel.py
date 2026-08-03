@@ -159,6 +159,11 @@ def normalize_token_totals(
     cache_write_5m_tokens: int | None = None,
     cache_write_1h_observed_rows: int = 0,
     cache_write_5m_observed_rows: int = 0,
+    priced_subset_rows: int = 0,
+    priced_subset_input_tokens: int | None = None,
+    priced_subset_cache_read_tokens: int | None = None,
+    priced_subset_cache_write_tokens: int | None = None,
+    priced_subset_output_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Normalize one aggregate without filling unknown buckets with zero."""
 
@@ -231,6 +236,32 @@ def normalize_token_totals(
         uncached_tokens = None
         uncached_status = STATUS_UNAVAILABLE
 
+    # Cache-inclusive groups with mixed observability: the rows carrying a
+    # complete token split stay exactly priceable instead of being dragged
+    # into the all-or-nothing gate by rows whose source lacks a field.
+    priced_subset: Optional[dict[str, Any]] = None
+    if (
+        semantics == INPUT_CACHE_INCLUSIVE
+        and 0 < int(priced_subset_rows or 0) < int(token_rows or 0)
+        and priced_subset_input_tokens is not None
+        and priced_subset_cache_read_tokens is not None
+        and priced_subset_cache_write_tokens is not None
+        and priced_subset_output_tokens is not None
+    ):
+        subset_input = int(priced_subset_input_tokens)
+        subset_cache_read = int(priced_subset_cache_read_tokens)
+        subset_cache_write = int(priced_subset_cache_write_tokens)
+        priced_subset = {
+            "rows": int(priced_subset_rows),
+            "unpriced_rows": int(token_rows) - int(priced_subset_rows),
+            "uncached_input": max(
+                0, subset_input - subset_cache_read - subset_cache_write
+            ),
+            "output_tokens": int(priced_subset_output_tokens),
+            "cache_read_tokens": subset_cache_read,
+            "cache_write_tokens": subset_cache_write,
+        }
+
     return {
         "input_semantics": semantics,
         "raw_input_tokens": input_tokens,
@@ -261,6 +292,7 @@ def normalize_token_totals(
             "output": output_observed_rows,
             "reasoning": reasoning_observed_rows,
         },
+        "priced_subset": priced_subset,
     }
 
 
@@ -719,11 +751,28 @@ def _aggregate_sql(where_sql: str) -> str:
         )
         for item in pair
     )
+    priced_subset_cond = (
+        "input_tokens IS NOT NULL AND output_tokens IS NOT NULL "
+        "AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL"
+    )
+    priced_subset = ",\n       ".join(
+        f"SUM(CASE WHEN {priced_subset_cond} THEN {column} END) "
+        f"AS priced_subset_{column}"
+        for column in (
+            "input_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "output_tokens",
+        )
+    )
     return f"""
         SELECT origin, call_kind, profile, lane, model, provider, billing_mode,
                COUNT(*) AS fact_rows,
                COUNT(*) AS token_rows,
                {observed},
+               SUM(CASE WHEN {priced_subset_cond} THEN 1 ELSE 0 END)
+                   AS priced_subset_rows,
+               {priced_subset},
                SUM(COALESCE(llm_call_count, 1)) AS request_count
           FROM run_usage_facts
           {where_sql}
@@ -777,6 +826,21 @@ def _row_metrics(row: sqlite3.Row) -> dict[str, Any]:
         metrics[f"{column}_observed_rows"] = int(
             row[f"{column}_observed_rows"]
         )
+    # Priced-subset columns exist only in the main aggregate SQL; the
+    # attributed aggregate keeps the legacy shape.
+    keys = set(row.keys())
+    if "priced_subset_rows" in keys:
+        metrics["priced_subset_rows"] = int(row["priced_subset_rows"] or 0)
+        for column in (
+            "input_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "output_tokens",
+        ):
+            value = row[f"priced_subset_{column}"]
+            metrics[f"priced_subset_{column}"] = (
+                int(value) if value is not None else None
+            )
     return metrics
 
 
@@ -876,15 +940,23 @@ def _empty_metrics() -> dict[str, Any]:
         "fact_rows": 0,
         "token_rows": 0,
         "request_count": 0,
+        "priced_subset_rows": 0,
     }
     for column in _TOKEN_COLUMNS:
         metrics[column] = None
         metrics[f"{column}_observed_rows"] = 0
+    for column in (
+        "input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "output_tokens",
+    ):
+        metrics[f"priced_subset_{column}"] = None
     return metrics
 
 
 def _add_metrics(target: dict[str, Any], source: Mapping[str, Any]) -> None:
-    for key in ("fact_rows", "token_rows", "request_count"):
+    for key in ("fact_rows", "token_rows", "request_count", "priced_subset_rows"):
         target[key] += int(source.get(key) or 0)
     for column in _TOKEN_COLUMNS:
         value = source.get(column)
@@ -893,6 +965,16 @@ def _add_metrics(target: dict[str, Any], source: Mapping[str, Any]) -> None:
         target[f"{column}_observed_rows"] += int(
             source.get(f"{column}_observed_rows") or 0
         )
+    for column in (
+        "input_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "output_tokens",
+    ):
+        key = f"priced_subset_{column}"
+        value = source.get(key)
+        if value is not None:
+            target[key] = int(target.get(key) or 0) + int(value)
 
 
 def _normalize_metrics(
@@ -924,6 +1006,17 @@ def _normalize_metrics(
         ),
         cache_write_5m_observed_rows=int(
             metrics["cache_write_5m_tokens_observed_rows"]
+        ),
+        priced_subset_rows=int(metrics.get("priced_subset_rows") or 0),
+        priced_subset_input_tokens=metrics.get("priced_subset_input_tokens"),
+        priced_subset_cache_read_tokens=metrics.get(
+            "priced_subset_cache_read_tokens"
+        ),
+        priced_subset_cache_write_tokens=metrics.get(
+            "priced_subset_cache_write_tokens"
+        ),
+        priced_subset_output_tokens=metrics.get(
+            "priced_subset_output_tokens"
         ),
     )
 
@@ -985,6 +1078,73 @@ def _charge_for_breakdown(
     }
 
 
+def _price_priced_subset(
+    kind: str,
+    *,
+    subset: Mapping[str, Any],
+    provider: str | None,
+    model: str | None,
+    origin: str | None,
+    pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector],
+) -> dict[str, Any]:
+    """Price the fully observed subset of a mixed-observability group.
+
+    Rows whose source lacks the cache-write field stay a named unknown
+    subset instead of dragging the whole group into the all-or-nothing
+    split gate.
+    """
+    cache_key = (kind, provider, model, origin)
+    vector = pricing_cache.get(cache_key)
+    if vector is None:
+        estimator = (
+            estimate_equivalent_cost
+            if kind == "equivalent"
+            else estimate_usage_cost
+        )
+        vector = _pricing_vector(
+            estimator, provider=provider, model=model, origin=origin
+        )
+        pricing_cache[cache_key] = vector
+
+    token_values = {
+        "input_tokens": int(subset["uncached_input"] or 0),
+        "output_tokens": int(subset["output_tokens"] or 0),
+        "cache_read_tokens": int(subset["cache_read_tokens"] or 0),
+        "cache_write_tokens": int(subset["cache_write_tokens"] or 0),
+    }
+    amount = Decimal("0")
+    missing: list[str] = []
+    for component, tokens in token_values.items():
+        rate = vector.rates_per_million[component]
+        if tokens and rate is None:
+            missing.append(component)
+        elif rate is not None:
+            amount += Decimal(tokens) * rate / _ONE_MILLION
+    if missing:
+        return {
+            **_price_metadata(vector),
+            "amount_usd": None,
+            "status": "unknown",
+            "token_coverage": "partial",
+            "reason": "pricing_component_unavailable",
+            "unpriced_components": sorted(set(missing)),
+            "priced_rows": 0,
+            "unpriced_rows": int(subset["rows"])
+            + int(subset["unpriced_rows"]),
+        }
+    return {
+        **_price_metadata(vector),
+        "amount_usd": _decimal_string(amount),
+        "status": vector.status,
+        "token_coverage": "partial",
+        "reason": None,
+        "unpriced_components": [],
+        "priced_rows": int(subset["rows"]),
+        "unpriced_rows": int(subset["unpriced_rows"]),
+        "unpriced_reason": "cache_write_source_field_missing",
+    }
+
+
 def _price_normalized_usage(
     kind: str,
     *,
@@ -1002,6 +1162,16 @@ def _price_normalized_usage(
 
     uncached = normalized["uncached_input"]
     if uncached["status"] != STATUS_EXACT:
+        subset = normalized.get("priced_subset")
+        if subset:
+            return _price_priced_subset(
+                kind,
+                subset=subset,
+                provider=provider,
+                model=model,
+                origin=origin,
+                pricing_cache=pricing_cache,
+            )
         return _unknown_price("input_cache_split_unavailable")
 
     cache_key = (kind, provider, model, origin)
@@ -1251,6 +1421,12 @@ def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if item.get("amount_usd") is not None
         and item.get("token_coverage") != "complete"
     )
+    # Named row-level partial coverage from priced-subset breakdowns:
+    # rows whose source lacks a token field stay unknown but counted.
+    priced_rows = sum(int(item.get("priced_rows") or 0) for item in items)
+    unpriced_rows = sum(
+        int(item.get("unpriced_rows") or 0) for item in items
+    )
     return {
         "known_amount_usd": (
             _decimal_string(sum(known, Decimal("0"))) if known else None
@@ -1259,12 +1435,14 @@ def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             "unknown"
             if items and not known
             else "partial"
-            if unknown_count or lower_bound_count
+            if unknown_count or lower_bound_count or unpriced_rows
             else "complete"
         ),
         "priced_breakdowns": len(known),
         "unpriced_breakdowns": unknown_count,
         "lower_bound_breakdowns": lower_bound_count,
+        "priced_rows": priced_rows,
+        "unpriced_rows": unpriced_rows,
     }
 
 

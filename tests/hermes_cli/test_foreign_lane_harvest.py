@@ -17,6 +17,7 @@ from hermes_cli.foreign_lane_harvest import (
     ORIGIN_GROK,
     ORIGIN_KIMI,
     ORIGIN_QWEN,
+    STATE_VERSION,
     backfill_session_from_transcripts,
     correlate_from_run_metas,
     distill_foreign_events,
@@ -28,6 +29,7 @@ from hermes_cli.foreign_lane_harvest import (
     harvest_all,
     legacy_line_parser,
     load_kimi_usage_for_handle,
+    load_state,
     parse_foreign_spawn_command,
     parse_json_event_stream,
     parse_meta_file,
@@ -1122,3 +1124,131 @@ def test_usage_unavailable_is_not_an_error(empty_db: Path, tmp_path: Path):
     # Tokens stay as harvested (zeros here) — correlation did not invent usage.
     assert row["input_tokens"] == 0
     assert row["output_tokens"] == 0
+
+
+# ---------------------------------------------------------------------------
+# STATE_VERSION 2 — codex cache-write backfill (real rollout fixtures)
+# ---------------------------------------------------------------------------
+
+# Real Codex rollouts captured 2026-07-30 (field present, observed 0) and
+# 2026-07-10 (field absent from the source); session metadata redacted.
+CODEX_ROLLOUT_WITH_FIELD = FIXTURES / "codex" / "rollout-cache-write-real.jsonl"
+CODEX_ROLLOUT_WITHOUT_FIELD = (
+    FIXTURES / "codex" / "rollout-no-cache-write-field.jsonl"
+)
+RUN_WITH_FIELD = "codex_cli:019fb059-5754-70b3-aead-caf3fafd691b"
+RUN_WITHOUT_FIELD = "codex_cli:019f48ea-fd03-75d1-b84b-c3910fb5a758"
+
+
+def test_codex_real_rollout_extracts_observed_cache_write_zero() -> None:
+    """Real 2026-07-30 token_count event carries the field with observed 0.
+
+    An observed zero is a measurement, not a missing field: it must survive
+    extraction as 0 so the readmodel's split gate treats the row as complete.
+    """
+    extracted = extract_codex_rollout(CODEX_ROLLOUT_WITH_FIELD)
+    assert extracted is not None
+    assert extracted.run_id == RUN_WITH_FIELD
+    assert extracted.run_fields["cache_write_tokens"] == 0
+    assert extracted.run_fields["cache_read_tokens"] == 466432
+    assert extracted.run_fields["input_tokens"] == 514209
+
+
+def test_codex_real_rollout_without_field_extracts_none() -> None:
+    """Real 2026-07-10 rollout predates the field: unknown stays NULL."""
+    extracted = extract_codex_rollout(CODEX_ROLLOUT_WITHOUT_FIELD)
+    assert extracted is not None
+    assert extracted.run_id == RUN_WITHOUT_FIELD
+    assert extracted.run_fields["cache_write_tokens"] is None
+    assert extracted.run_fields["cache_read_tokens"] == 13147392
+
+
+def test_state_version_bump_resets_fingermarks_and_marks_resume(tmp_path: Path) -> None:
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps(
+            {"version": 1, "sources": {"codex_cli": {"files": {"x": "y"}}}}
+        ),
+        encoding="utf-8",
+    )
+    state = load_state(state_file)
+    assert state["version"] == STATE_VERSION
+    assert state["sources"] == {}
+    assert state["resumed_from_version"] == 1
+    # Current-version state is kept untouched.
+    state_file.write_text(
+        json.dumps({"version": STATE_VERSION, "sources": {"a": {}}}),
+        encoding="utf-8",
+    )
+    unchanged = load_state(state_file)
+    assert unchanged["sources"] == {"a": {}}
+    assert "resumed_from_version" not in unchanged
+
+
+def test_cache_write_backfill_fills_only_rows_with_source_field(
+    empty_db: Path, tmp_path: Path
+) -> None:
+    """v2 re-harvest fills NULL cache_write where the rollout carries the
+    field and leaves rows whose source lacks it at NULL (never a 0)."""
+    # Pre-v2 stored state: both runs exist with cache_write NULL.
+    for run_id in (RUN_WITH_FIELD, RUN_WITHOUT_FIELD):
+        upsert_run_facts(
+            run_id,
+            {
+                "origin": ORIGIN_CODEX,
+                "provider": "openai",
+                "billing_mode": "subscription_included",
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_read_tokens": 50,
+                "source": "measured",
+            },
+            path=empty_db,
+        )
+    sessions = tmp_path / "sessions"
+    (sessions / "2026" / "07" / "30").mkdir(parents=True)
+    (sessions / "2026" / "07" / "10").mkdir(parents=True)
+    import shutil
+
+    shutil.copy(
+        CODEX_ROLLOUT_WITH_FIELD,
+        sessions / "2026" / "07" / "30" / CODEX_ROLLOUT_WITH_FIELD.name,
+    )
+    shutil.copy(
+        CODEX_ROLLOUT_WITHOUT_FIELD,
+        sessions / "2026" / "07" / "10" / CODEX_ROLLOUT_WITHOUT_FIELD.name,
+    )
+    state_file = tmp_path / "foreign_state.json"
+    state_file.write_text(json.dumps({"version": 1, "sources": {}}))
+
+    first = harvest_all(
+        db_path=empty_db,
+        state_path=state_file,
+        codex_sessions=sessions,
+        kimi_index=tmp_path / "missing-kimi-index.jsonl",
+        qwen_usage_dir=tmp_path / "missing-qwen",
+        grok_unified=tmp_path / "missing-grok.jsonl",
+        origins=[ORIGIN_CODEX],
+    )
+    assert first["origins"][ORIGIN_CODEX]["written_runs"] == 2
+    with_row = _row(empty_db, RUN_WITH_FIELD)
+    without_row = _row(empty_db, RUN_WITHOUT_FIELD)
+    assert with_row["cache_write_tokens"] == 0
+    assert without_row["cache_write_tokens"] is None
+    # Re-harvest re-derives token fields from source (v9 precedent):
+    # incoming non-NULL values replace the stale stored totals.
+    assert with_row["input_tokens"] == 514209
+    assert without_row["input_tokens"] == 13618252
+
+    # Second pass: state is v2 with fingerprints, nothing is rewritten.
+    second = harvest_all(
+        db_path=empty_db,
+        state_path=state_file,
+        codex_sessions=sessions,
+        kimi_index=tmp_path / "missing-kimi-index.jsonl",
+        qwen_usage_dir=tmp_path / "missing-qwen",
+        grok_unified=tmp_path / "missing-grok.jsonl",
+        origins=[ORIGIN_CODEX],
+    )
+    assert second["origins"][ORIGIN_CODEX]["written_runs"] == 0
+    assert _row(empty_db, RUN_WITHOUT_FIELD)["cache_write_tokens"] is None

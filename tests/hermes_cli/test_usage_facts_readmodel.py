@@ -869,3 +869,131 @@ def test_attributed_payload_survives_rows_without_captured_at(
     assert bucket["key"]["task_id"] == "task-unstamped"
     assert bucket["freshness"]["latest_captured_at"] is None
     assert bucket["freshness"]["age_seconds"] is None
+
+
+# ---------------------------------------------------------------------------
+# Priced subset — mixed cache-write observability in cache-inclusive origins
+# ---------------------------------------------------------------------------
+
+
+def _codex_row(
+    run_id: str,
+    *,
+    cache_write: int | None,
+    input_tokens: int = 1000,
+    cache_read: int = 400,
+    output_tokens: int = 100,
+) -> dict[str, Any]:
+    return {
+        "origin": "codex_cli",
+        "provider": "openai-codex",
+        "model": "gpt-5.6-sol",
+        "billing_mode": "subscription_included",
+        "call_kind": "foreign_cli",
+        "profile": "codex",
+        "lane": "codex",
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "llm_call_count": 1,
+        "source": "measured",
+    }
+
+
+def test_mixed_codex_group_prices_complete_subset_and_names_rest(
+    tmp_path: Path,
+) -> None:
+    """Rows with a complete token split stay exactly priced; rows whose
+    source lacks cache_write pass through as a named unknown subset —
+    no more all-or-nothing ``input_cache_split_unavailable``."""
+    usage_path = tmp_path / "usage.db"
+    upsert_run_facts("codex-run-complete", _codex_row("codex-run-complete", cache_write=0), path=usage_path)
+    upsert_run_facts(
+        "codex-run-no-field",
+        _codex_row(
+            "codex-run-no-field",
+            cache_write=None,
+            input_tokens=2000,
+            cache_read=1000,
+            output_tokens=50,
+        ),
+        path=usage_path,
+    )
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path, generated_at="2026-08-03T12:00:00+00:00"
+    )
+    billing = payload["summary"]["billing"]["api_equivalent_usd"]
+    # Priced subset: uncached 600 x 5 + output 100 x 30 + cache_read 400 x 0.5.
+    assert billing["known_amount_usd"] == "0.0062"
+    assert billing["status"] == "partial"
+    assert billing["priced_rows"] == 1
+    assert billing["unpriced_rows"] == 1
+
+
+def test_complete_codex_group_stays_fully_priced(tmp_path: Path) -> None:
+    usage_path = tmp_path / "usage.db"
+    upsert_run_facts(
+        "codex-run-a", _codex_row("codex-run-a", cache_write=10), path=usage_path
+    )
+    upsert_run_facts(
+        "codex-run-b",
+        _codex_row("codex-run-b", cache_write=0, input_tokens=500, cache_read=0, output_tokens=10),
+        path=usage_path,
+    )
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path, generated_at="2026-08-03T12:00:00+00:00"
+    )
+    billing = payload["summary"]["billing"]["api_equivalent_usd"]
+    # a: uncached 590 x 5 + 100 x 30 + 400 x 0.5 + 10 x 6.25 = 6212.5 / 1M
+    # b: uncached 500 x 5 + 10 x 30 = 2800 / 1M
+    assert billing["known_amount_usd"] == "0.0090125"
+    assert billing["unpriced_rows"] == 0
+
+
+def test_exclusive_origin_keeps_legacy_gate_for_mixed_group(
+    tmp_path: Path,
+) -> None:
+    """Cache-exclusive origins keep the existing behaviour: a missing bucket
+    leaves the group unknown (no subset semantics for that contract)."""
+    usage_path = tmp_path / "usage.db"
+    upsert_run_facts(
+        "claude-run-complete",
+        {
+            "origin": "claude_code",
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            "billing_mode": "subscription_included",
+            "profile": "p",
+            "lane": "l",
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_read_tokens": 30,
+            "cache_write_tokens": 5,
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+    upsert_run_facts(
+        "claude-run-gap",
+        {
+            "origin": "claude_code",
+            "provider": "anthropic",
+            "model": "claude-opus-4-8",
+            "billing_mode": "subscription_included",
+            "profile": "p",
+            "lane": "l",
+            "output_tokens": 20,
+            "source": "measured",
+        },
+        path=usage_path,
+    )
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path, generated_at="2026-08-03T12:00:00+00:00"
+    )
+    billing = payload["summary"]["billing"]["api_equivalent_usd"]
+    assert billing["known_amount_usd"] is None
+    assert billing["status"] == "unknown"
