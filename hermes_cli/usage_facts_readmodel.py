@@ -20,16 +20,19 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 from urllib.parse import quote
 
-from agent.usage_pricing import (
-    CanonicalUsage,
-    CostResult,
-    estimate_equivalent_cost,
-    estimate_usage_cost,
-)
 from hermes_cli.active_provider_facts import (
     classification_counts,
     reconstruction_source_counts,
     resolve_active_provider_facts,
+)
+from hermes_cli.usage_facts_pricing import (
+    PRICE_COMPONENTS as _PRICE_COMPONENTS,
+)
+from hermes_cli.usage_facts_pricing import (
+    CostResult,
+    UsageFactsUsage,
+    estimate_equivalent_cost,
+    estimate_usage_cost,
 )
 
 CONTRACT_VERSION = "usage-facts.v1"
@@ -67,20 +70,7 @@ DEFAULT_RATE_LIMIT_SIDECAR_PATH = Path(
 )
 RATE_LIMIT_STALE_AFTER_SECONDS = 60 * 60
 
-_TOKEN_COLUMNS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-)
-_PRICE_COMPONENTS = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-)
+_TOKEN_COLUMNS = _PRICE_COMPONENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +155,10 @@ def normalize_token_totals(
     cache_read_observed_rows: int,
     cache_write_observed_rows: int,
     reasoning_observed_rows: int,
+    cache_write_1h_tokens: int | None = None,
+    cache_write_5m_tokens: int | None = None,
+    cache_write_1h_observed_rows: int = 0,
+    cache_write_5m_observed_rows: int = 0,
 ) -> dict[str, Any]:
     """Normalize one aggregate without filling unknown buckets with zero."""
 
@@ -251,6 +245,10 @@ def normalize_token_totals(
         },
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
+        # TTL split of cache writes. Present as a pair or not at all on
+        # run aggregates; kept verbatim like every other observation.
+        "cache_write_1h_tokens": cache_write_1h_tokens,
+        "cache_write_5m_tokens": cache_write_5m_tokens,
         "output_tokens": output_tokens,
         "reasoning_tokens": reasoning_tokens,
         "observed_rows": {
@@ -258,6 +256,8 @@ def normalize_token_totals(
             "input": input_observed_rows,
             "cache_read": cache_read_observed_rows,
             "cache_write": cache_write_observed_rows,
+            "cache_write_1h": cache_write_1h_observed_rows,
+            "cache_write_5m": cache_write_5m_observed_rows,
             "output": output_observed_rows,
             "reasoning": reasoning_observed_rows,
         },
@@ -915,6 +915,14 @@ def _normalize_metrics(
         reasoning_observed_rows=int(
             metrics["reasoning_tokens_observed_rows"]
         ),
+        cache_write_1h_tokens=metrics["cache_write_1h_tokens"],
+        cache_write_5m_tokens=metrics["cache_write_5m_tokens"],
+        cache_write_1h_observed_rows=int(
+            metrics["cache_write_1h_tokens_observed_rows"]
+        ),
+        cache_write_5m_observed_rows=int(
+            metrics["cache_write_5m_tokens_observed_rows"]
+        ),
     )
 
 
@@ -1005,9 +1013,28 @@ def _price_normalized_usage(
         "input_tokens": int(uncached["tokens"] or 0),
         "output_tokens": int(normalized["output_tokens"] or 0),
         "cache_read_tokens": int(normalized["cache_read_tokens"] or 0),
-        "cache_write_tokens": int(normalized["cache_write_tokens"] or 0),
         "reasoning_tokens": int(normalized["reasoning_tokens"] or 0),
     }
+    # Cache-write is priced from the TTL split where it was fully
+    # observed, and only then from the total (register Leseregel-Nachtrag:
+    # the split is the more complete observation).
+    observed = normalized["observed_rows"]
+    split_observed = (
+        observed["token_rows"] > 0
+        and observed["cache_write_1h"] == observed["token_rows"]
+        and observed["cache_write_5m"] == observed["token_rows"]
+    )
+    if split_observed:
+        token_values["cache_write_1h_tokens"] = int(
+            normalized["cache_write_1h_tokens"] or 0
+        )
+        token_values["cache_write_5m_tokens"] = int(
+            normalized["cache_write_5m_tokens"] or 0
+        )
+    else:
+        token_values["cache_write_tokens"] = int(
+            normalized["cache_write_tokens"] or 0
+        )
     amount = Decimal("0")
     missing: list[str] = []
     for component, tokens in token_values.items():
@@ -1050,10 +1077,15 @@ def _pricing_vector(
     results: list[CostResult] = []
     for component in _PRICE_COMPONENTS:
         usage_kwargs = {name: 0 for name in _PRICE_COMPONENTS}
+        # Probes must not claim an observed TTL split: a 0 split would
+        # route the cache_write probe through the split path and hide
+        # the total-column rate.
+        usage_kwargs["cache_write_1h_tokens"] = None
+        usage_kwargs["cache_write_5m_tokens"] = None
         usage_kwargs[component] = int(_ONE_MILLION)
         result = estimator(
             model,
-            CanonicalUsage(**usage_kwargs, request_count=0),
+            UsageFactsUsage(**usage_kwargs, request_count=0),
             provider=provider,
         )
         results.append(result)
@@ -1061,7 +1093,7 @@ def _pricing_vector(
 
     request_result = estimator(
         model,
-        CanonicalUsage(request_count=1),
+        UsageFactsUsage(request_count=1),
         provider=provider,
     )
     results.append(request_result)

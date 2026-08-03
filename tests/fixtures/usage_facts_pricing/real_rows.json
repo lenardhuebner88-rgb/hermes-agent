@@ -1,0 +1,33 @@
+{
+  "_comment": "Verbatim rows from the live /mnt/data/hermes-observability/usage_facts.db (read-only fetch 2026-08-03). fable5_row: regular run with a one-sided 1h TTL split (run-level splits are one-sided: 111.823 rows observed, zero rows with both sides > 0). opus48_outlier_row: one of the four register-verified outliers where the API reported cache_creation_input_tokens=0 while the cache_creation object carried 1h tokens (Canon 2026-07-31-metrik-ssot-register, Nachtrag; the 2.646 value is one of the four listed there).",
+  "fable5_row": {
+    "run_id": "claude_code:msg_0111LZKq6NjR4fCemmFdybGZ:req_011CcmWE9Xpqwk3p8iYCS8Lo",
+    "origin": "claude_code",
+    "provider": "anthropic",
+    "model": "claude-fable-5",
+    "billing_mode": "subscription_included",
+    "input_tokens": 266,
+    "output_tokens": 996,
+    "cache_read_tokens": 168835,
+    "cache_write_tokens": 708,
+    "cache_write_1h_tokens": 708,
+    "cache_write_5m_tokens": 0,
+    "reasoning_tokens": null,
+    "llm_call_count": 1
+  },
+  "opus48_outlier_row": {
+    "run_id": "claude_code:msg_011CctNYFwPM6kzApMFaGE7P:req_011CctNY4WJLLXhyf4qLcnwn",
+    "origin": "claude_code",
+    "provider": "anthropic",
+    "model": "claude-opus-4-8",
+    "billing_mode": "subscription_included",
+    "input_tokens": 2,
+    "output_tokens": 1529,
+    "cache_read_tokens": 148870,
+    "cache_write_tokens": 0,
+    "cache_write_1h_tokens": 2646,
+    "cache_write_5m_tokens": 0,
+    "reasoning_tokens": null,
+    "llm_call_count": 1
+  }
+}

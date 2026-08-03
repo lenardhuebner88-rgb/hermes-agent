@@ -24,12 +24,6 @@ import sqlite3
 import time
 from typing import Any
 
-from agent.usage_pricing import (
-    CanonicalUsage,
-    CostResult,
-    estimate_equivalent_cost,
-    estimate_usage_cost,
-)
 from hermes_cli.execution_facts_contract import (
     EventType,
     ExecutionEvent,
@@ -45,6 +39,12 @@ from hermes_cli.execution_facts_contract import (
     stable_span_id,
 )
 from hermes_cli.execution_facts_ledger import AppendResult, ExecutionFactsLedger
+from hermes_cli.usage_facts_pricing import (
+    CostResult,
+    UsageFactsUsage,
+    estimate_equivalent_cost,
+    estimate_usage_cost,
+)
 from hermes_cli.usage_facts_readmodel import (
     INPUT_CACHE_EXCLUSIVE,
     INPUT_CACHE_INCLUSIVE,
@@ -190,18 +190,20 @@ def _usage_surface(origin: str) -> ExecutionSurface:
     }.get(origin, ExecutionSurface.UNKNOWN)
 
 
-def _canonical_usage(row: Mapping[str, Any]) -> tuple[CanonicalUsage, Validity]:
+def _canonical_usage(row: Mapping[str, Any]) -> tuple[UsageFactsUsage, Validity]:
     origin = str(row.get("origin") or "unknown")
     input_tokens = row.get("input_tokens")
     output_tokens = row.get("output_tokens")
     cache_read = row.get("cache_read_tokens")
     cache_write = row.get("cache_write_tokens")
+    cache_write_1h = row.get("cache_write_1h_tokens")
+    cache_write_5m = row.get("cache_write_5m_tokens")
     reasoning = row.get("reasoning_tokens")
     if input_tokens is None or output_tokens is None:
-        return CanonicalUsage(), Validity.UNKNOWN
+        return UsageFactsUsage(request_count=0), Validity.UNKNOWN
     semantics = input_semantics(origin)
     if semantics not in {INPUT_CACHE_EXCLUSIVE, INPUT_CACHE_INCLUSIVE}:
-        return CanonicalUsage(), Validity.UNKNOWN
+        return UsageFactsUsage(request_count=0), Validity.UNKNOWN
     if (
         semantics == INPUT_CACHE_INCLUSIVE
         and (cache_read is None or cache_write is None)
@@ -210,7 +212,7 @@ def _canonical_usage(row: Mapping[str, Any]) -> tuple[CanonicalUsage, Validity]:
         # the entire inclusive input as standard-rate input would be neither an
         # exact value nor a lower bound, so the canonical/pricing view stays
         # unknown while the source-native fields remain on the usage event.
-        return CanonicalUsage(), Validity.UNKNOWN
+        return UsageFactsUsage(request_count=0), Validity.UNKNOWN
     normalized_input = int(input_tokens)
     if semantics == INPUT_CACHE_INCLUSIVE:
         normalized_input = max(
@@ -223,15 +225,20 @@ def _canonical_usage(row: Mapping[str, Any]) -> tuple[CanonicalUsage, Validity]:
         else Validity.LOWER_BOUND
     )
     return (
-        CanonicalUsage(
+        UsageFactsUsage(
             input_tokens=normalized_input,
             output_tokens=int(output_tokens),
             cache_read_tokens=int(cache_read or 0),
             cache_write_tokens=int(cache_write or 0),
+            # TTL split stays None unless observed; pricing falls back to
+            # the total where the split is absent (register Leseregel).
+            cache_write_1h_tokens=(
+                int(cache_write_1h) if cache_write_1h is not None else None
+            ),
+            cache_write_5m_tokens=(
+                int(cache_write_5m) if cache_write_5m is not None else None
+            ),
             reasoning_tokens=int(reasoning or 0),
-            cache_read_tokens_observed=cache_read is not None,
-            cache_write_tokens_observed=cache_write is not None,
-            reasoning_tokens_observed=reasoning is not None,
         ),
         validity,
     )
@@ -298,6 +305,17 @@ def reconcile_usage_facts(
         raise ValueError(
             "subscription fee allocation requires an unbounded monthly cohort"
         )
+    # The cache-write TTL split exists since the S10 fact layer; older
+    # shapes of the table simply have no split to price.
+    has_split_columns = connection.execute(
+        "SELECT 1 FROM pragma_table_info('run_usage_facts') "
+        "WHERE name='cache_write_1h_tokens'"
+    ).fetchone()
+    split_select = (
+        "cache_write_1h_tokens, cache_write_5m_tokens,"
+        if has_split_columns
+        else "NULL AS cache_write_1h_tokens, NULL AS cache_write_5m_tokens,"
+    )
     limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
     order_direction = "DESC" if limit is not None else "ASC"
     rows = _rows(
@@ -306,7 +324,9 @@ def reconcile_usage_facts(
         SELECT run_id, origin, task_run_id, task_id, chain_id, board,
                provider, model, profile, billing_mode, serving_tier,
                reasoning_effort, input_tokens, output_tokens,
-               cache_read_tokens, cache_write_tokens, reasoning_tokens,
+               cache_read_tokens, cache_write_tokens,
+               {split_select}
+               reasoning_tokens,
                finish_reason, error_type, duration_ms, captured_at, source
           FROM run_usage_facts
          ORDER BY captured_at {order_direction}, origin, run_id

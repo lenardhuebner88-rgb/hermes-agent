@@ -703,7 +703,11 @@ def test_run_8802_control_sample_reproduces_exact_api_equivalent() -> None:
     assert usage.attributes["total_tokens"] == 164654
     assert cost.attributes["api_equivalent_cost"] == "0.2116692"
     assert cost.attributes["marginal_cost"] == "0"
-    assert cost.attributes["pricing_version"] == "moonshot-k3-2026-07"
+    # The fork pricing seam stamps its own version on top of the base
+    # entry version (Canon kosten-ssot-im-lesepfad rule 2).
+    assert cost.attributes["pricing_version"] == (
+        "moonshot-k3-2026-07+usage-facts-pricing-2026-08-03"
+    )
     assert "allocated_subscription_cost" not in cost.attributes
 
 
