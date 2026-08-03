@@ -43,8 +43,10 @@ def test_fourth_orchestrator_card_blocks_latest_nonterminal_without_insert(
             "SELECT status FROM tasks WHERE id = ?", (created[-1],)
         ).fetchone()["status"] == "todo"
 
-        blocked_id = _create_orchestrator_child(conn, root_id, 4)
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            _create_orchestrator_child(conn, root_id, 4)
 
+        blocked_id = raised.value.blocked_id
         assert blocked_id == created[-1]
         assert conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE title LIKE 'orchestrated-%'"
@@ -74,6 +76,33 @@ def test_fourth_orchestrator_card_blocks_latest_nonterminal_without_insert(
             tuple(control_cards),
         ).fetchall()
         assert {row["status"] for row in statuses} == {"todo"}
+
+
+def test_orchestrator_created_root_counts_toward_limit(
+    kanban_home, monkeypatch, orchestrator_limit
+):
+    clock = iter(range(200, 300))
+    monkeypatch.setattr(kb.time, "time", lambda: next(clock))
+
+    with kb.connect_closing() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="orchestrator-created-root",
+            created_by="default",
+        )
+        created = [
+            _create_orchestrator_child(conn, root_id, index) for index in range(1, 3)
+        ]
+
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            _create_orchestrator_child(conn, root_id, 3)
+
+        assert raised.value.root_id == root_id
+        assert raised.value.blocked_id == created[-1]
+        assert raised.value.count == 3
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE created_by = 'default'"
+        ).fetchone()[0] == 3
 
 
 def test_only_exact_configured_creator_counts(kanban_home, monkeypatch):
@@ -123,14 +152,15 @@ def test_only_exact_configured_creator_counts(kanban_home, monkeypatch):
             )
             for index in range(1, 4)
         ]
-        blocked_id = kb.create_task(
-            conn,
-            title="dispatch-4",
-            parents=[root_id],
-            created_by="dispatch-orchestrator",
-        )
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            kb.create_task(
+                conn,
+                title="dispatch-4",
+                parents=[root_id],
+                created_by="dispatch-orchestrator",
+            )
 
-        assert blocked_id == counted[-1]
+        assert raised.value.blocked_id == counted[-1]
         ignored = conn.execute(
             "SELECT status FROM tasks WHERE id IN (" + ",".join("?" * len(ignored_ids)) + ")",
             tuple(ignored_ids),
@@ -212,14 +242,15 @@ def test_multiple_parents_use_smallest_parent_chain_root(
             _create_orchestrator_child(conn, smaller_root, index) for index in range(1, 4)
         ]
 
-        blocked_id = kb.create_task(
-            conn,
-            title="multi-parent-fourth",
-            parents=[larger_root, smaller_root],
-            created_by="default",
-        )
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            kb.create_task(
+                conn,
+                title="multi-parent-fourth",
+                parents=[larger_root, smaller_root],
+                created_by="default",
+            )
 
-        assert blocked_id == counted[-1]
+        assert raised.value.blocked_id == counted[-1]
         assert conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE title = 'multi-parent-fourth'"
         ).fetchone()[0] == 0

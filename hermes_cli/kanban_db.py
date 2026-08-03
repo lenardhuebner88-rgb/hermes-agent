@@ -5491,13 +5491,28 @@ def _orchestrator_card_limit_config() -> tuple[int, str]:
     return limit, profile
 
 
+class OrchestratorCardLimitReached(ValueError):
+    """A create attempt was rejected after blocking an existing chain task."""
+
+    def __init__(self, *, root_id: str, blocked_id: str, count: int, limit: int):
+        self.root_id = root_id
+        self.blocked_id = blocked_id
+        self.count = count
+        self.limit = limit
+        super().__init__(
+            f"orchestrator card limit reached for root {root_id}: "
+            f"count={count}, limit={limit}; no task created; "
+            f"blocked existing task {blocked_id}"
+        )
+
+
 def _enforce_orchestrator_card_limit(
     conn: sqlite3.Connection,
     *,
     parents: tuple[str, ...],
     created_by: Optional[str],
-) -> Optional[str]:
-    """Block the newest live chain card and return its id when the limit is full."""
+) -> Optional[OrchestratorCardLimitReached]:
+    """Block the newest live chain card and report a rejected create attempt."""
     limit, orchestrator_profile = _orchestrator_card_limit_config()
     if limit <= 0 or not parents:
         return None
@@ -5575,7 +5590,12 @@ def _enforce_orchestrator_card_limit(
         ),
     )
     _log.error("%s; blocked task %s instead of creating a card", reason, blocked_id)
-    return blocked_id
+    return OrchestratorCardLimitReached(
+        root_id=root_id,
+        blocked_id=blocked_id,
+        count=count,
+        limit=limit,
+    )
 
 
 def create_task(
@@ -5850,6 +5870,7 @@ def create_task(
             workspace_path = str(board_default)
 
     # Retry once on the extremely unlikely id collision.
+    limit_error: Optional[OrchestratorCardLimitReached] = None
     for attempt in range(2):
         task_id = _new_task_id()
         task_workspace_kind = workspace_kind
@@ -5935,13 +5956,15 @@ def create_task(
                             f"unknown parent task(s): {', '.join(missing)}"
                         )
 
-                limit_blocked_task_id = _enforce_orchestrator_card_limit(
+                limit_error = _enforce_orchestrator_card_limit(
                     conn,
                     parents=parents,
                     created_by=created_by,
                 )
-                if limit_blocked_task_id is not None:
-                    return limit_blocked_task_id
+                if limit_error is not None:
+                    # Exit normally so the existing task's block commits, then
+                    # tell callers unambiguously that no new task exists.
+                    break
 
                 conn.execute(
                     """
@@ -6104,6 +6127,8 @@ def create_task(
                 raise
             # Retry with a fresh id.
             continue
+    if limit_error is not None:
+        raise limit_error
     raise RuntimeError("unreachable")
 
 
