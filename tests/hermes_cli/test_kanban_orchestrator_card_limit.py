@@ -78,6 +78,62 @@ def test_fourth_orchestrator_card_blocks_latest_nonterminal_without_insert(
         assert {row["status"] for row in statuses} == {"todo"}
 
 
+def test_decomposed_chain_inverse_links_count_once_and_block_fourth(
+    kanban_home, monkeypatch, orchestrator_limit
+):
+    clock = iter(range(150, 250))
+    monkeypatch.setattr(kb.time, "time", lambda: next(clock))
+
+    with kb.connect_closing() as conn:
+        root_id = _create_root(conn, "decomposed-root")
+        created = [
+            kb.create_task(
+                conn,
+                title=f"decomposed-{index}",
+                created_by="default",
+            )
+            for index in range(1, 4)
+        ]
+        for child_id in created:
+            conn.execute(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (child_id, root_id),
+            )
+        # Exercise UNION de-duplication when a card is reachable in both directions.
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+            (root_id, created[0]),
+        )
+        kb._append_event(
+            conn,
+            root_id,
+            "decomposed",
+            {"child_ids": created},
+        )
+
+        from hermes_cli import kanban_worktrees as kwt
+
+        assert [kwt.chain_root_id(conn, child_id) for child_id in created] == [
+            root_id,
+            root_id,
+            root_id,
+        ]
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            kb.create_task(
+                conn,
+                title="decomposed-4",
+                parents=[created[0]],
+                created_by="default",
+            )
+
+        assert raised.value.root_id == root_id
+        assert raised.value.blocked_id == created[-1]
+        assert raised.value.count == 3
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title GLOB 'decomposed-[0-9]'"
+        ).fetchone()[0] == 3
+
+
 def test_orchestrator_created_root_counts_toward_limit(
     kanban_home, monkeypatch, orchestrator_limit
 ):

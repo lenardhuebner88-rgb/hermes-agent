@@ -5530,16 +5530,20 @@ def _enforce_orchestrator_card_limit(
     root_id = _kwt.chain_root_id(conn, min(parents))
     rows = conn.execute(
         """
-        WITH RECURSIVE descendants(id) AS (
+        WITH RECURSIVE chain_candidates(id) AS (
             SELECT ?
             UNION
             SELECT links.child_id
             FROM task_links AS links
-            JOIN descendants ON links.parent_id = descendants.id
+            JOIN chain_candidates ON links.parent_id = chain_candidates.id
+            UNION
+            SELECT links.parent_id
+            FROM task_links AS links
+            JOIN chain_candidates ON links.child_id = chain_candidates.id
         )
         SELECT tasks.id, tasks.status, tasks.created_at, tasks.created_by
         FROM tasks
-        JOIN descendants ON descendants.id = tasks.id
+        JOIN chain_candidates ON chain_candidates.id = tasks.id
         """,
         (root_id,),
     ).fetchall()
