@@ -129,13 +129,34 @@ Two orthogonal axes here; do not conflate them. **Capability levels** (1-4) are 
 scratch — this is not a retrofit of the current view, and "it already works" is not a reason to
 keep a layout.
 
-#### Design constraints that are not up for redesign
+#### Design freedom — explicit, and what it does and does not touch
 
-`web/src/control/DESIGN.md` is binding, tokens live in `web/src/control/theme.css`, and
-`scripts/gate-frontend.sh` enforces a ratchet over both. Greenfield applies to **layout,
-information hierarchy, and interaction model** — not to the token system. If a design genuinely
-needs the design language extended, that is an operator decision: **pause and ask**, do not
-quietly widen `DESIGN.md`.
+**The operator has granted full design freedom for this tab.** `web/src/control/DESIGN.md` and
+the existing token system are **input, not constraint**: read them to know what you are departing
+from, then depart if the tab is better for it. Layout, information hierarchy, interaction model,
+typography, colour, motion, new tokens — all open. This tab is meant to be *distinctive*, not
+consistent-by-default. Do not reach for the safe variant of an idea because it matches what the
+rest of the dashboard already does.
+
+Two mechanical facts, so the freedom does not collide with a red gate (both measured
+2026-08-03 in `scripts/gate-frontend.sh`):
+
+- **The hex-token ratchet has a baseline** (`scripts/check-design-tokens.sh` against
+  `scripts/design-token-baseline.txt`). New colour literals are allowed — update the baseline
+  deliberately, as a recorded design decision. Do not delete or disable the check.
+- **The WCAG AA contrast ratchet has no baseline and no exceptions**
+  (`scripts/check-contrast.py`, 4.5:1 against every surface). This one stays absolute, and it is
+  not a style rule: it exists because `--color-ink-3` failed on all four surfaces for the whole
+  life of the design system while sitting under full sentences. The same applies to the touch
+  target and reduced-motion guards. Accessibility floors are load-bearing for the phone case —
+  they *serve* this redesign rather than restrict it.
+
+One guard test anchors the *old* view by literal copy: `web/src/control/styles/
+inkThreeProse.guard.test.ts` asserts a paragraph containing "tmux speichert nur" in
+`AgentTerminalsView.tsx`, plus one in `TerminalHandoffPanel.tsx`. A greenfield rebuild that
+removes tmux necessarily breaks it. **Re-anchoring that guard onto the new view's equivalent prose
+is expected maintenance, not test-weakening** — keep the guard's intent (explanatory prose stays
+on the body-copy token, never the faint one) and move its anchor. Deleting the guard is not on.
 
 #### Mobile and desktop are equal targets
 
@@ -157,12 +178,13 @@ what happens at a 390px viewport. A design that only reads well on a wide screen
 - **4a Divergence.** At least **three** genuinely different drafts as HTML mockups, each covering
   desktop *and* phone. Different interaction models, not three skins of one idea — e.g. a
   status-first queue ("who is waiting on me"), a spatial workspace map, and a single-agent focus
-  view with the herd as periphery. Put them on the Hermes design board so they can be viewed
-  remotely; inline tool images are invisible to the operator on a phone.
-- **4b Critique and choice.** Judge each draft against the design language, the mobile failures
-  above, and the four capability levels below — every level must have a home in the layout. Then
-  **pause and let the operator choose.** This is a taste decision and it is not the agent's to
-  make alone.
+  view with the herd as periphery. At least one draft should be the one that would not survive a
+  consensus process: take the actual swing. Put them on the Hermes design board so they can be
+  viewed remotely; inline tool images are invisible to the operator on a phone.
+- **4b Critique and choice.** Judge each draft against the mobile failures above and the four
+  capability levels below — every level must have a home in the layout — then against the harder
+  question: is this *memorable*, or merely competent? Then **pause and let the operator choose.**
+  This is a taste decision and it is not the agent's to make alone.
 - **4c Refinement.** Build out the chosen draft, grafting the best ideas from the runners-up.
   Real data in the mockup, never Lorem — a status board full of placeholder text hides exactly the
   density problems it exists to expose.
@@ -239,6 +261,6 @@ Only after 1–9 are captured does `HERMES_TERMINAL_BACKEND` default flip to `he
 - Do not migrate the kanban worker spawn path (§1) — out of scope.
 - Do not create ADRs or Canon decision entries; those need the operator's explicit approval.
 - Pause and ask if: P1 in Phase 1 fails; the one-writer constraint would visibly degrade the tab
-  for the operator's normal two-tab usage; Level 3/4 needs a product decision; the operator has
-  to choose among the design drafts at 4b; or a design would require extending the design
-  language in `DESIGN.md`.
+  for the operator's normal two-tab usage; Level 3/4 needs a product decision; or the operator
+  has to choose among the design drafts at 4b. Design departures themselves need no approval —
+  that grant is already given above.
