@@ -628,13 +628,15 @@ def test_dispatch_auto_retry_second_attempt_escalates_to_spawnable_claude_model(
             "SELECT status, auto_retry_count, assignee, model_override FROM tasks WHERE id = ?",
             (t,),
         ).fetchone()
+        assert row is not None
         assert row["status"] == "ready"
         assert row["auto_retry_count"] == 2
-        assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
-        assert row["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
+        assert row["assignee"] == "premium"
+        assert row["model_override"] == "claude-opus-4-8"
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retried"][-1]
         assert event.payload["escalated"] is True
         assert event.payload["model_override"] == row["model_override"]
+        assert event.payload["assignee"] == row["assignee"]
 
         task = kb.get_task(conn, t)
         assert task is not None
@@ -672,6 +674,51 @@ def test_dispatch_auto_retry_second_attempt_escalates_to_spawnable_claude_model(
             (claimed.current_run_id,),
         ).fetchone()
         assert run["requested_model"] == kb.AUTO_RETRY_ESCALATION_MODEL
+
+
+def test_dispatch_auto_retry_second_attempt_uses_configured_escalation_route(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    (kanban_home / "config.yaml").write_text(
+        "kanban:\n"
+        "  auto_retry_escalation_profile: escalation-coder\n"
+        "  auto_retry_escalation_model: configured-escalation-model\n",
+        encoding="utf-8",
+    )
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="blocked", assignee="research")
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = 1 WHERE id = ?", (task_id,)
+        )
+        kb.claim_task(conn, task_id)
+        kb.block_task(conn, task_id, reason="tool crashed")
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        result = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert result.auto_retried_blocked == [(task_id, 2)]
+        row = conn.execute(
+            "SELECT status, auto_retry_count, assignee, model_override "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "ready"
+        assert row["auto_retry_count"] == 2
+        assert row["assignee"] == "escalation-coder"
+        assert row["model_override"] == "configured-escalation-model"
+
+        event = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "auto_retried"
+        ][-1]
+        assert event.payload["escalated"] is True
+        assert event.payload["assignee"] == row["assignee"]
+        assert event.payload["model_override"] == row["model_override"]
 
 
 def test_claude_worker_launch_spec_maps_persisted_claude_effort_to_effort_flag(
