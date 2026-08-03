@@ -224,6 +224,58 @@ def test_only_exact_configured_creator_counts(kanban_home, monkeypatch):
         assert all(row["status"] == "todo" for row in ignored)
 
 
+def test_limit_blocks_latest_qualifying_card_not_newer_foreign_card(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(
+        kb,
+        "_orchestrator_card_limit_config",
+        lambda: (3, "dispatch-orchestrator"),
+    )
+    clock = iter(range(400, 500))
+    monkeypatch.setattr(kb.time, "time", lambda: next(clock))
+
+    with kb.connect_closing() as conn:
+        root_id = _create_root(conn, "mixed-creator-root")
+        counted = [
+            kb.create_task(
+                conn,
+                title=f"dispatch-{index}",
+                parents=[root_id],
+                created_by="dispatch-orchestrator",
+            )
+            for index in range(1, 4)
+        ]
+        foreign_id = kb.create_task(
+            conn,
+            title="newer-coder-card",
+            parents=[root_id],
+            created_by="coder",
+        )
+
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            kb.create_task(
+                conn,
+                title="dispatch-4",
+                parents=[root_id],
+                created_by="dispatch-orchestrator",
+            )
+
+        assert raised.value.blocked_id == counted[-1]
+        assert raised.value.count == 3
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title = 'dispatch-4'"
+        ).fetchone()[0] == 0
+        statuses = conn.execute(
+            "SELECT id, status FROM tasks WHERE id IN (?, ?)",
+            (counted[-1], foreign_id),
+        ).fetchall()
+        assert {row["id"]: row["status"] for row in statuses} == {
+            counted[-1]: "blocked",
+            foreign_id: "todo",
+        }
+
+
 def test_profile_named_orchestrator_disables_limit_loudly(
     kanban_home, monkeypatch, caplog
 ):
