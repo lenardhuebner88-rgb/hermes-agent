@@ -4941,6 +4941,25 @@ CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP = 3600
 FIXER_RUNTIME_EXTENSION_GRANTED_EVENT = "fixer_runtime_extension_granted"
 
 
+def _conflict_fixer_profile() -> str:
+    """Resolve ``kanban.conflict_fixer_profile`` from the root config."""
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        config_path = get_default_hermes_root() / "config.yaml"
+        if config_path.is_file():
+            with open(config_path, "r", encoding="utf-8") as config_file:
+                root_config = yaml.safe_load(config_file) or {}
+            kanban_config = root_config.get("kanban") or {}
+            configured_profile = kanban_config.get("conflict_fixer_profile")
+            if isinstance(configured_profile, str) and configured_profile.strip():
+                return configured_profile.strip()
+    except Exception:
+        pass
+    return "premium"
+
+
 def _conflict_fingerprint(reason: str) -> str:
     """Return a stable identity for one integration-conflict context."""
     core = re.sub(r"^integration parked:\s*", "", reason.strip(), flags=re.I)
@@ -5420,6 +5439,169 @@ def _project_from_source_task(
     )
 
 
+def _orchestrator_card_limit_config() -> tuple[int, str]:
+    """Return the opt-in per-chain card limit and exact creator profile."""
+    import yaml
+    from hermes_constants import get_default_hermes_root
+
+    config_path = get_default_hermes_root() / "config.yaml"
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _log.warning(
+            "orchestrator_card_limit disabled: cannot read root config %s: %s",
+            config_path,
+            exc,
+        )
+        return 0, "default"
+
+    kanban_cfg = raw.get("kanban") if isinstance(raw, dict) else None
+    if not isinstance(kanban_cfg, dict):
+        return 0, "default"
+
+    profile_raw = kanban_cfg.get("orchestrator_profile", "default")
+    profile = str(profile_raw).strip() if profile_raw is not None else ""
+    if not profile:
+        profile = "default"
+
+    limit_raw = kanban_cfg.get("orchestrator_card_limit", 0)
+    if isinstance(limit_raw, bool):
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    if limit < 0:
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    return limit, profile
+
+
+class OrchestratorCardLimitReached(ValueError):
+    """A create attempt was rejected after blocking an existing chain task."""
+
+    def __init__(self, *, root_id: str, blocked_id: str, count: int, limit: int):
+        self.root_id = root_id
+        self.blocked_id = blocked_id
+        self.count = count
+        self.limit = limit
+        super().__init__(
+            f"orchestrator card limit reached for root {root_id}: "
+            f"count={count}, limit={limit}; no task created; "
+            f"blocked existing task {blocked_id}"
+        )
+
+
+def _enforce_orchestrator_card_limit(
+    conn: sqlite3.Connection,
+    *,
+    parents: tuple[str, ...],
+    created_by: Optional[str],
+) -> Optional[OrchestratorCardLimitReached]:
+    """Block the newest live chain card and report a rejected create attempt."""
+    limit, orchestrator_profile = _orchestrator_card_limit_config()
+    if limit <= 0 or not parents:
+        return None
+    if orchestrator_profile == "orchestrator":
+        _log.error(
+            "orchestrator_card_limit disabled: "
+            "kanban.orchestrator_profile='orchestrator' would count conflict-fixer cards"
+        )
+        return None
+    if created_by != orchestrator_profile:
+        return None
+
+    from hermes_cli import kanban_worktrees as _kwt
+
+    root_id = _kwt.chain_root_id(conn, min(parents))
+    rows = conn.execute(
+        """
+        WITH RECURSIVE chain_candidates(id) AS (
+            SELECT ?
+            UNION
+            SELECT links.child_id
+            FROM task_links AS links
+            JOIN chain_candidates ON links.parent_id = chain_candidates.id
+            UNION
+            SELECT links.parent_id
+            FROM task_links AS links
+            JOIN chain_candidates ON links.child_id = chain_candidates.id
+        )
+        SELECT tasks.id, tasks.status, tasks.created_at, tasks.created_by
+        FROM tasks
+        JOIN chain_candidates ON chain_candidates.id = tasks.id
+        """,
+        (root_id,),
+    ).fetchall()
+    chain_rows = [
+        row for row in rows if _kwt.chain_root_id(conn, row["id"]) == root_id
+    ]
+    count = sum(row["created_by"] == orchestrator_profile for row in chain_rows)
+    if count < limit:
+        return None
+
+    live_rows = [
+        row
+        for row in chain_rows
+        if row["status"] not in {"done", "archived", "cancelled"}
+    ]
+    if live_rows:
+        blocked_id = max(
+            live_rows,
+            key=lambda row: (int(row["created_at"] or 0), str(row["id"])),
+        )["id"]
+    else:
+        blocked_id = root_id
+
+    attempted_count = count + 1
+    reason = (
+        "orchestrator card limit reached: "
+        f"count={count}, attempted_count={attempted_count}, limit={limit}, root={root_id}"
+    )
+    _system_park_set_blocked(
+        conn,
+        task_id=blocked_id,
+        kind="capability",
+        where_sql="1 = 1",
+    )
+    _append_event(
+        conn,
+        blocked_id,
+        "blocked",
+        _system_blocked_event_payload(
+            reason,
+            "capability",
+            source="orchestrator_card_limit",
+            count=count,
+            attempted_count=attempted_count,
+            limit=limit,
+            root_id=root_id,
+            orchestrator_profile=orchestrator_profile,
+        ),
+    )
+    _log.error("%s; blocked task %s instead of creating a card", reason, blocked_id)
+    return OrchestratorCardLimitReached(
+        root_id=root_id,
+        blocked_id=blocked_id,
+        count=count,
+        limit=limit,
+    )
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -5692,6 +5874,7 @@ def create_task(
             workspace_path = str(board_default)
 
     # Retry once on the extremely unlikely id collision.
+    limit_error: Optional[OrchestratorCardLimitReached] = None
     for attempt in range(2):
         task_id = _new_task_id()
         task_workspace_kind = workspace_kind
@@ -5776,6 +5959,16 @@ def create_task(
                         raise ValueError(
                             f"unknown parent task(s): {', '.join(missing)}"
                         )
+
+                limit_error = _enforce_orchestrator_card_limit(
+                    conn,
+                    parents=parents,
+                    created_by=created_by,
+                )
+                if limit_error is not None:
+                    # Exit normally so the existing task's block commits, then
+                    # tell callers unambiguously that no new task exists.
+                    break
 
                 conn.execute(
                     """
@@ -5938,6 +6131,8 @@ def create_task(
                 raise
             # Retry with a fresh id.
             continue
+    if limit_error is not None:
+        raise limit_error
     raise RuntimeError("unreachable")
 
 
@@ -14844,7 +15039,9 @@ def _review_gate_should_apply(
     """Decide whether this completion should be parked in ``review``.
 
     All of: gate enabled, this run did NOT originate from review (anti-loop),
-    and the task's assignee is a code-bearing role. Profile availability is a
+    and the task's assignee is a code-bearing role. Conflict fixers always need
+    independent review, including while a newly configured fixer profile has
+    not yet been added to the code-role policy. Profile availability is a
     retryable runtime state handled after policy selection; it can never turn
     an enabled review gate into direct ``done``.
     """
@@ -14860,7 +15057,7 @@ def _review_gate_should_apply(
     if not row:
         return False
     assignee = (row["assignee"] or "").strip().lower()
-    return assignee in cfg["code_roles"] or (
+    return _is_conflict_fixer_task(conn, task_id) or assignee in cfg["code_roles"] or (
         bool(cfg.get("auto_tier"))
         and _review_policy.path_risk_requires_gate(
             conn,
@@ -26466,7 +26663,7 @@ def _create_conflict_park_fixer_subtask(
             conn,
             title=title,
             body=body,
-            assignee="premium",
+            assignee=_conflict_fixer_profile(),
             created_by="orchestrator",
             workspace_kind="dir",
             workspace_path=str(wt),

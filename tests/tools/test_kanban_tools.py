@@ -1536,6 +1536,83 @@ def test_create_planspec_source_inherited_from_parent(worker_env):
         conn.close()
 
 
+def test_create_limit_reports_no_card_without_corrupting_blocked_task(
+    worker_env, tmp_path, monkeypatch
+):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    (tmp_path / ".hermes" / "config.yaml").write_text(
+        "kanban:\n"
+        "  orchestrator_card_limit: 3\n"
+        "  orchestrator_profile: test-worker\n",
+        encoding="utf-8",
+    )
+    parent_source = "/vault/03-Agents/plans/parent.md"
+    blocked_source = "/vault/03-Agents/plans/existing-card.md"
+    conn = kb.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_by = ?, planspec_source = ? WHERE id = ?",
+                ("test-worker", parent_source, worker_env),
+            )
+        existing = [
+            kb.create_task(
+                conn,
+                title=f"existing orchestrator card {index}",
+                parents=[worker_env],
+                created_by="test-worker",
+            )
+            for index in range(2)
+        ]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                (blocked_source, existing[-1]),
+            )
+            conn.execute(
+                "UPDATE tasks SET created_at = 1 WHERE id = ?",
+                (worker_env,),
+            )
+            for created_at, task_id in enumerate(existing, start=2):
+                conn.execute(
+                    "UPDATE tasks SET created_at = ? WHERE id = ?",
+                    (created_at, task_id),
+                )
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        kt,
+        "_maybe_auto_subscribe",
+        lambda *_: pytest.fail(
+            "limit rejection must not auto-subscribe the blocked existing task"
+        ),
+    )
+
+    result = json.loads(kt._handle_create({
+        "title": "must not be created",
+        "assignee": "peer",
+        "parents": [worker_env],
+    }))
+
+    assert set(result) == {"error"}
+    assert "no task created" in result["error"]
+    assert existing[-1] in result["error"]
+    conn = kb.connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title = 'must not be created'"
+        ).fetchone()[0] == 0
+        assert kb.planspec_source_for_task(conn, existing[-1]) == blocked_source
+        blocked_task = kb.get_task(conn, existing[-1])
+        assert blocked_task is not None
+        assert blocked_task.status == "blocked"
+    finally:
+        conn.close()
+
+
 def test_create_no_planspec_source_when_parent_has_none(worker_env):
     """Control: a parent without planspec_source leaves the child's column
     unset — no inheritance side effect when there is nothing to inherit."""
