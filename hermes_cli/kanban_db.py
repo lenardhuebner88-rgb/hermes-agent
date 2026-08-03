@@ -5512,7 +5512,7 @@ def _enforce_orchestrator_card_limit(
     parents: tuple[str, ...],
     created_by: Optional[str],
 ) -> Optional[OrchestratorCardLimitReached]:
-    """Block the newest live chain card and report a rejected create attempt."""
+    """Block the newest qualifying live chain card and reject the create attempt."""
     limit, orchestrator_profile = _orchestrator_card_limit_config()
     if limit <= 0 or not parents:
         return None
@@ -5557,7 +5557,8 @@ def _enforce_orchestrator_card_limit(
     live_rows = [
         row
         for row in chain_rows
-        if row["status"] not in {"done", "archived", "cancelled"}
+        if row["created_by"] == orchestrator_profile
+        and row["status"] not in {"done", "archived", "cancelled"}
     ]
     if live_rows:
         blocked_id = max(
