@@ -1,4 +1,7 @@
+// @vitest-environment jsdom
+import { render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { PressureContent } from "./PressureContent";
 import type { PressureStatusResponse } from "../../lib/types";
@@ -127,5 +130,15 @@ describe("PressureContent", () => {
     // Kein erfundener Erfolgszustand: weder "0%"-Balken noch "0.0 / 8".
     expect(html).not.toContain(">0%<");
     expect(html).not.toContain("0.0 /");
+  });
+
+  it("Aktive Druckquellen trägt das stabile Sprungziel pressure-sources", () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={["/control/system"]}>
+        <PressureContent embedded data={busyPressure} lastUpdated={1782070000} isStale={false} />
+      </MemoryRouter>,
+    );
+
+    expect(container.querySelector("#pressure-sources")).toBeTruthy();
   });
 });

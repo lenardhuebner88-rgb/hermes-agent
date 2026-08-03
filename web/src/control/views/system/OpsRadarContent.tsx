@@ -1,4 +1,5 @@
 import { Bot, GitBranch, Radar, ShieldCheck, TriangleAlert, Wrench } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { StaleBadge } from "../../components/atoms";
 import { Card, Eyebrow, Panel, SkeletonCard } from "../../components/primitives";
 import { KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../../components/leitstand";
@@ -55,6 +56,37 @@ function worktreeRank(item: OperatorInventoryWorktree): number {
   return 5;
 }
 
+const WORKTREE_FILTERS = new Set(["dirty", "locked", "unknown", "orphaned"]);
+
+function matchesWorktreeFilter(item: OperatorInventoryWorktree, filter: string): boolean {
+  if (filter === "dirty") return item.state === "dirty" || item.state === "prunable";
+  if (filter === "locked") return item.locked;
+  if (filter === "unknown") return item.state === "unknown" || !item.status_checked;
+  if (filter === "orphaned") return item.orphaned;
+  return true;
+}
+
+function normalizeLeverTarget(target: string): string {
+  if (target.startsWith("/control/ops")) {
+    const params = new URLSearchParams(target.split("?")[1] ?? "");
+    const filter = params.get("filter");
+    if (filter === "agents") return "/control/system?filter=agents#actor-map";
+    if (filter && WORKTREE_FILTERS.has(filter)) return `/control/system?filter=${filter}#worktree-ledger`;
+    return "/control/system#worktree-ledger";
+  }
+  if (target === "/control/pressure" || target.startsWith("/control/pressure?")) {
+    return "/control/system#pressure-sources";
+  }
+  if (target.startsWith("/control/system")) {
+    const params = new URLSearchParams(target.split("?")[1] ?? "");
+    const filter = params.get("filter");
+    if (filter === "agents") return "/control/system?filter=agents#actor-map";
+    if (filter && WORKTREE_FILTERS.has(filter)) return `/control/system?filter=${filter}#worktree-ledger`;
+    return target;
+  }
+  return target;
+}
+
 function WorktreeRow({ item }: { item: OperatorInventoryWorktree }) {
   const tone = stateTone(item.state, item.orphaned);
   return (
@@ -108,6 +140,11 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
    *  eingebettet bleiben nur die Sektionen Worktrees + Akteure. */
   embedded?: boolean;
 }) {
+  const [searchParams] = useSearchParams();
+  const rawFilter = searchParams.get("filter");
+  const activeFilter = rawFilter && (WORKTREE_FILTERS.has(rawFilter) || rawFilter === "agents") ? rawFilter : null;
+  const worktreeFilter = activeFilter && WORKTREE_FILTERS.has(activeFilter) ? activeFilter : null;
+
   if (!data) {
     return (
       <div className="space-y-4">
@@ -119,7 +156,8 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
 
   const summary = data.summary;
   const mismatchCount = summary.worktrees_dirty + summary.worktrees_orphaned + summary.worktrees_status_unknown;
-  const worktrees = [...data.worktrees].sort((a, b) => worktreeRank(a) - worktreeRank(b) || a.path_label.localeCompare(b.path_label)).slice(0, 24);
+  const allWorktrees = [...data.worktrees].sort((a, b) => worktreeRank(a) - worktreeRank(b) || a.path_label.localeCompare(b.path_label)).slice(0, 24);
+  const worktrees = worktreeFilter ? allWorktrees.filter((item) => matchesWorktreeFilter(item, worktreeFilter)) : allWorktrees;
   const actors = [...data.actors].sort((a, b) => (b.source === "canonical" ? 1 : 0) - (a.source === "canonical" ? 1 : 0) || b.count - a.count || a.label.localeCompare(b.label));
   const next = data.next_lever;
 
@@ -150,7 +188,7 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
       <Panel title="Echte Hebel" eyebrow="read-only">
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
           {data.levers.map((lever) => (
-            <a key={lever.action} href={lever.target} className="min-h-12 rounded-card border border-line bg-surface-2 px-3 py-3 hover:border-live hover:bg-surface-3">
+            <a key={lever.action} href={normalizeLeverTarget(lever.target)} className="min-h-12 rounded-card border border-line bg-surface-2 px-3 py-3 hover:border-live hover:bg-surface-3">
               <div className="flex items-center justify-between gap-3">
                 <SignalChip tone={signalToneFromLegacy(lever.tone)} label={lever.label} />
                 <span className="font-data text-sec tabular-nums text-ink">{lever.count}</span>
@@ -162,34 +200,46 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
         </div>
       </Panel>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,.85fr)]">
-        <Panel title="Worktree-Ledger" eyebrow="Git Inventar">
-          {worktrees.length === 0 ? (
-            <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
-              <ShieldCheck className="h-5 w-5 text-ink-3" />
-              <div>
-                <p className="text-sec font-medium text-ink">Keine Worktrees gemeldet</p>
-                <p className="text-sec text-ink-2">Die Inventarquelle ist leer; ein Worktree-Zustand ist nicht bewertbar.</p>
-              </div>
-            </div>
-          ) : (
-            <div className="grid gap-2">{worktrees.map((item, idx) => <WorktreeRow key={`${item.id}:${item.branch}:${idx}`} item={item} />)}</div>
-          )}
-        </Panel>
+      {activeFilter ? (
+        <div className="flex min-w-0 items-center gap-3 rounded-card border border-live/30 bg-surface-2 px-3 py-2">
+          <SignalChip tone="neutral" label={`Fokus: ${activeFilter}`} />
+          <span className="min-w-0 flex-1 truncate text-sec text-ink-2">{worktreeFilter ? `${worktrees.length} von ${allWorktrees.length} Worktrees` : "Actor Map"}</span>
+          <a href="/control/system" className="shrink-0 rounded-card border border-line px-2 py-1 text-sec text-live hover:bg-surface-3">Fokus aufheben</a>
+        </div>
+      ) : null}
 
-        <Panel title="Actor Map" eyebrow="Worker, Agents, Daemons">
-          {actors.length === 0 ? (
-            <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
-              <ShieldCheck className="h-5 w-5 text-ink-3" />
-              <div>
-                <p className="text-sec font-medium text-ink">Keine Akteure aktiv</p>
-                <p className="text-sec text-ink-2">Die Actor Map ist leer; es gibt derzeit nichts zuzuordnen.</p>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,.85fr)]">
+        <div id="worktree-ledger">
+          <Panel title="Worktree-Ledger" eyebrow="Git Inventar">
+            {worktrees.length === 0 ? (
+              <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
+                <ShieldCheck className="h-5 w-5 text-ink-3" />
+                <div>
+                  <p className="text-sec font-medium text-ink">Keine Worktrees gemeldet</p>
+                  <p className="text-sec text-ink-2">Die Inventarquelle ist leer; ein Worktree-Zustand ist nicht bewertbar.</p>
+                </div>
               </div>
-            </div>
-          ) : (
-            <div className="grid gap-2">{actors.map((actor) => <ActorRow key={`${actor.role}-${actor.source}`} actor={actor} />)}</div>
-          )}
-        </Panel>
+            ) : (
+              <div className="grid gap-2">{worktrees.map((item, idx) => <WorktreeRow key={`${item.id}:${item.branch}:${idx}`} item={item} />)}</div>
+            )}
+          </Panel>
+        </div>
+
+        <div id="actor-map">
+          <Panel title="Actor Map" eyebrow="Worker, Agents, Daemons">
+            {actors.length === 0 ? (
+              <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
+                <ShieldCheck className="h-5 w-5 text-ink-3" />
+                <div>
+                  <p className="text-sec font-medium text-ink">Keine Akteure aktiv</p>
+                  <p className="text-sec text-ink-2">Die Actor Map ist leer; es gibt derzeit nichts zuzuordnen.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid gap-2">{actors.map((actor) => <ActorRow key={`${actor.role}-${actor.source}`} actor={actor} />)}</div>
+            )}
+          </Panel>
+        </div>
       </div>
 
       {data.errors.length > 0 ? (

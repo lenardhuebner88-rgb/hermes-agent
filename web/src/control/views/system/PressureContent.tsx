@@ -201,36 +201,38 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
         </Panel>
       </div>
 
-      <Panel title="Aktive Druckquellen" eyebrow="Rollen statt Cmdlines">
-        {data.pressure_sources.length === 0 ? (
-          <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
-            <ShieldCheck className="h-5 w-5 text-status-ok" />
-            <div>
-              <p className="text-sec font-medium text-ink">Keine auffaellige Quelle</p>
-              <p className="text-sec text-ink-2">Keine Tests, Browser oder Agenten als Druckquelle erkannt.</p>
-            </div>
-          </div>
-        ) : (
-          <div className="grid gap-2">
-            {data.pressure_sources.map((source) => (
-              <div key={`${source.kind}-${source.label}-${source.scope}`} className="grid min-w-0 gap-2 rounded-card border border-line bg-surface-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                <div className="min-w-0">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <SignalLabel tone={source.throttled ? "ok" : source.kind === "test" || source.kind === "browser_test" ? "warn" : "neutral"} label={source.throttled ? "gedrosselt" : "aktiv"} />
-                    <p className="truncate text-sec font-medium text-ink">{sourceLabel(source)}: {source.label}</p>
-                  </div>
-                  <p className="mt-0.5 truncate text-sec text-ink-2">{source.scope} - {source.throttled ? "gedrosselt" : "ohne harte Kappe"}</p>
-                </div>
-                <div className="grid grid-cols-3 gap-2 sm:w-64">
-                  <KpiTile label="Anzahl" value={source.count} />
-                  <KpiTile label="CPU" value={fmtNumber(source.cpu_percent, "%")} />
-                  <KpiTile label="RAM" value={fmtMb(source.rss_mb)} />
-                </div>
+      <div id="pressure-sources">
+        <Panel title="Aktive Druckquellen" eyebrow="Rollen statt Cmdlines">
+          {data.pressure_sources.length === 0 ? (
+            <div className="flex min-h-20 items-center gap-3 rounded-card border border-line bg-surface-2 px-3 py-3">
+              <ShieldCheck className="h-5 w-5 text-status-ok" />
+              <div>
+                <p className="text-sec font-medium text-ink">Keine auffaellige Quelle</p>
+                <p className="text-sec text-ink-2">Keine Tests, Browser oder Agenten als Druckquelle erkannt.</p>
               </div>
-            ))}
-          </div>
-        )}
-      </Panel>
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              {data.pressure_sources.map((source) => (
+                <div key={`${source.kind}-${source.label}-${source.scope}`} className="grid min-w-0 gap-2 rounded-card border border-line bg-surface-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <SignalLabel tone={source.throttled ? "ok" : source.kind === "test" || source.kind === "browser_test" ? "warn" : "neutral"} label={source.throttled ? "gedrosselt" : "aktiv"} />
+                      <p className="truncate text-sec font-medium text-ink">{sourceLabel(source)}: {source.label}</p>
+                    </div>
+                    <p className="mt-0.5 truncate text-sec text-ink-2">{source.scope} - {source.throttled ? "gedrosselt" : "ohne harte Kappe"}</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 sm:w-64">
+                    <KpiTile label="Anzahl" value={source.count} />
+                    <KpiTile label="CPU" value={fmtNumber(source.cpu_percent, "%")} />
+                    <KpiTile label="RAM" value={fmtMb(source.rss_mb)} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      </div>
 
       {data.errors.length > 0 ? (
         <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />Einige Pressure-Werte konnten nicht gelesen werden. Die Anzeige bleibt absichtlich vorsichtig und zeigt keine Rohpfade oder Cmdlines.</div>
