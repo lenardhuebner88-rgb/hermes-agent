@@ -103,6 +103,11 @@ class _RateTable:
     source: str
     pricing_version: Optional[str]
     notes: tuple[str, ...] = ()
+    # Mirrors upstream PricingEntry.reasoning_billing: with
+    # "included_in_output" reasoning tokens need no rate of their own
+    # (they are already paid through output_tokens); only
+    # "separate_rate" models require a sourced reasoning rate.
+    reasoning_billing: str = "included_in_output"
 
 
 @dataclass(frozen=True)
@@ -480,6 +485,7 @@ def _rate_table_for_route(
             else USAGE_FACTS_PRICING_VERSION
         ),
         notes=tuple(notes),
+        reasoning_billing=entry.reasoning_billing,
     )
 
 
@@ -541,8 +547,16 @@ def _estimate(
 
     missing: list[str] = []
     amount = _ZERO
+    reasoning_included = table.reasoning_billing != "separate_rate"
     for component, tokens in components.items():
         rate = table.rates.get(component)
+        if component == "reasoning_tokens" and reasoning_included:
+            # Reasoning is already billed through output_tokens (upstream
+            # PricingEntry semantics); an extra rate is optional here and a
+            # missing one must not fail-closed the whole row.
+            if rate is not None:
+                amount += Decimal(tokens) * rate / _ONE_MILLION
+            continue
         if tokens and rate is None:
             missing.append(component)
         elif rate is not None:
@@ -742,6 +756,8 @@ def priceability(
         # Rows without an observed split fall back to the total column,
         # so the total rate must exist alongside the split rates.
         required.extend(["cache_write_1h_tokens", "cache_write_5m_tokens"])
+    if table.reasoning_billing == "separate_rate":
+        required.append("reasoning_tokens")
     missing = [name for name in required if table.rates.get(name) is None]
     if missing:
         documented_reasons = [

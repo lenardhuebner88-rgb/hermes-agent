@@ -163,6 +163,25 @@ def test_qwen_explicit_path_for_anthropic_protocol_origin() -> None:
     assert probe("qwen3.6-flash", "cache_write_tokens") == Decimal("0.3125")
 
 
+def test_reasoning_included_in_output_does_not_fail_closed() -> None:
+    # gpt-5.6 runs report reasoning tokens. Upstream PricingEntry semantics
+    # bill them through output_tokens ("included_in_output"), so a missing
+    # separate reasoning rate must not fail-closed the whole row.
+    # Regression: the round-2 seam initially dropped these groups, flipping
+    # hermes_agent gpt-5.6 breakdowns to unknown in the readmodel.
+    result = estimate_equivalent_cost(
+        "gpt-5.6-sol",
+        UsageFactsUsage(input_tokens=_ONE_MILLION, reasoning_tokens=500_000),
+        provider="openai-codex",
+        origin="hermes_agent",
+    )
+    assert result.status == "equivalent"
+    assert result.amount_usd == Decimal("5.00")
+    assert priceability("gpt-5.6-sol", "openai-codex", "hermes_agent")[
+        "priceable"
+    ]
+
+
 def test_round2_entries_and_documented_absences() -> None:
     # gpt-5.5: priced, cache-write line item sourcedly absent.
     assert _probe_rate("gpt-5.5", "input_tokens", "openai") == Decimal("5.00")
