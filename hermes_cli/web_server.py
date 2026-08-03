@@ -22604,6 +22604,9 @@ register_loops_routes(app)
 from hermes_cli.projects_overview import register_projects_routes  # noqa: E402
 register_projects_routes(app)
 
+from hermes_cli.fleet_history import register_fleet_history_routes  # noqa: E402
+register_fleet_history_routes(app)
+
 from hermes_cli.pa_chat import register_pa_routes  # noqa: E402
 register_pa_routes(app)
 
