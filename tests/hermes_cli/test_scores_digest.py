@@ -317,6 +317,10 @@ def test_digest_high_cardinality_budgeted_output(tmp_path, monkeypatch):
                            value=float(i % 5 + 1),
                            created_at=int(monday.timestamp()))
 
+    # The CLI path uses the wall clock (now=None -> time.time()) while the
+    # seeds sit fixed on 2026-07-20; pin the clock to the seeded ``now`` so
+    # the test cannot rot once the real week drifts out of the window.
+    monkeypatch.setattr("hermes_cli.kanban_scores_digest.time.time", lambda: now)
     out = run_slash("scores --digest --weeks 2")
 
     # Must stay within Discord limit
@@ -791,6 +795,8 @@ def test_digest_top_findings_are_deterministic_and_rendered(tmp_path, monkeypatc
     assert all(finding["impact_eur"] >= 0 for finding in first)
     assert all(finding["data_source"] == "kanban.db/scores" for finding in first)
 
+    # CLI path uses the wall clock; pin it to the seeded ``now`` (see above).
+    monkeypatch.setattr("hermes_cli.kanban_scores_digest.time.time", lambda: now)
     markdown = run_slash("scores --digest --weeks 2")
     assert "Top-Befunde:" in markdown
     assert "Attempt-" in markdown
