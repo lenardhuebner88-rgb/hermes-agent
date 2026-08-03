@@ -5492,17 +5492,28 @@ def _orchestrator_card_limit_config() -> tuple[int, str]:
 
 
 class OrchestratorCardLimitReached(ValueError):
-    """A create attempt was rejected after blocking an existing chain task."""
+    """A create attempt was rejected by a chain-level card limit."""
 
-    def __init__(self, *, root_id: str, blocked_id: str, count: int, limit: int):
+    def __init__(
+        self,
+        *,
+        root_id: str,
+        blocked_id: Optional[str],
+        count: int,
+        limit: int,
+    ):
         self.root_id = root_id
         self.blocked_id = blocked_id
         self.count = count
         self.limit = limit
+        outcome = (
+            f"blocked existing task {blocked_id}"
+            if blocked_id is not None
+            else "no existing task blocked"
+        )
         super().__init__(
             f"orchestrator card limit reached for root {root_id}: "
-            f"count={count}, limit={limit}; no task created; "
-            f"blocked existing task {blocked_id}"
+            f"count={count}, limit={limit}; no task created; {outcome}"
         )
 
 
@@ -5512,7 +5523,7 @@ def _enforce_orchestrator_card_limit(
     parents: tuple[str, ...],
     created_by: Optional[str],
 ) -> Optional[OrchestratorCardLimitReached]:
-    """Block the newest qualifying live chain card and reject the create attempt."""
+    """Reject the create, blocking the newest qualifying live card when present."""
     limit, orchestrator_profile = _orchestrator_card_limit_config()
     if limit <= 0 or not parents:
         return None
@@ -5566,35 +5577,53 @@ def _enforce_orchestrator_card_limit(
             key=lambda row: (int(row["created_at"] or 0), str(row["id"])),
         )["id"]
     else:
-        blocked_id = root_id
+        blocked_id = None
 
     attempted_count = count + 1
     reason = (
         "orchestrator card limit reached: "
         f"count={count}, attempted_count={attempted_count}, limit={limit}, root={root_id}"
     )
-    _system_park_set_blocked(
-        conn,
-        task_id=blocked_id,
-        kind="capability",
-        where_sql="1 = 1",
-    )
-    _append_event(
-        conn,
-        blocked_id,
-        "blocked",
-        _system_blocked_event_payload(
-            reason,
-            "capability",
-            source="orchestrator_card_limit",
-            count=count,
-            attempted_count=attempted_count,
-            limit=limit,
-            root_id=root_id,
-            orchestrator_profile=orchestrator_profile,
-        ),
-    )
-    _log.error("%s; blocked task %s instead of creating a card", reason, blocked_id)
+    if blocked_id is not None:
+        _system_park_set_blocked(
+            conn,
+            task_id=blocked_id,
+            kind="capability",
+            where_sql="1 = 1",
+        )
+        _append_event(
+            conn,
+            blocked_id,
+            "blocked",
+            _system_blocked_event_payload(
+                reason,
+                "capability",
+                source="orchestrator_card_limit",
+                count=count,
+                attempted_count=attempted_count,
+                limit=limit,
+                root_id=root_id,
+                orchestrator_profile=orchestrator_profile,
+            ),
+        )
+        _log.error("%s; blocked task %s instead of creating a card", reason, blocked_id)
+    else:
+        _append_event(
+            conn,
+            root_id,
+            "orchestrator_card_limit_rejected",
+            {
+                "reason": reason,
+                "source": "orchestrator_card_limit",
+                "count": count,
+                "attempted_count": attempted_count,
+                "limit": limit,
+                "root_id": root_id,
+                "orchestrator_profile": orchestrator_profile,
+                "blocked_id": None,
+            },
+        )
+        _log.error("%s; rejected create with no qualifying live task to block", reason)
     return OrchestratorCardLimitReached(
         root_id=root_id,
         blocked_id=blocked_id,
@@ -5967,8 +5996,8 @@ def create_task(
                     created_by=created_by,
                 )
                 if limit_error is not None:
-                    # Exit normally so the existing task's block commits, then
-                    # tell callers unambiguously that no new task exists.
+                    # Exit normally so the limit event and any qualifying task's
+                    # block commit, then tell callers that no new task exists.
                     break
 
                 conn.execute(

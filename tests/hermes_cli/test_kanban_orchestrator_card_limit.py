@@ -276,6 +276,75 @@ def test_limit_blocks_latest_qualifying_card_not_newer_foreign_card(
         }
 
 
+def test_limit_without_live_qualifying_card_rejects_without_blocking_foreign_tasks(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(
+        kb,
+        "_orchestrator_card_limit_config",
+        lambda: (3, "dispatch-orchestrator"),
+    )
+
+    with kb.connect_closing() as conn:
+        root_id = _create_root(conn, "foreign-root")
+        counted = [
+            kb.create_task(
+                conn,
+                title=f"terminal-dispatch-{index}",
+                parents=[root_id],
+                created_by="dispatch-orchestrator",
+            )
+            for index in range(1, 4)
+        ]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id IN (?, ?, ?)",
+                tuple(counted),
+            )
+        foreign_id = kb.create_task(
+            conn,
+            title="live-foreign-card",
+            parents=[root_id],
+            created_by="coder",
+        )
+
+        with pytest.raises(kb.OrchestratorCardLimitReached) as raised:
+            kb.create_task(
+                conn,
+                title="rejected-dispatch-4",
+                parents=[root_id],
+                created_by="dispatch-orchestrator",
+            )
+
+        assert raised.value.root_id == root_id
+        assert raised.value.blocked_id is None
+        assert raised.value.count == 3
+        assert "no existing task blocked" in str(raised.value)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE title = 'rejected-dispatch-4'"
+        ).fetchone()[0] == 0
+        statuses = conn.execute(
+            "SELECT id, status FROM tasks WHERE id IN (?, ?, ?, ?, ?)",
+            (root_id, *counted, foreign_id),
+        ).fetchall()
+        assert {row["id"]: row["status"] for row in statuses} == {
+            root_id: "ready",
+            **{task_id: "done" for task_id in counted},
+            foreign_id: "todo",
+        }
+        event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'orchestrator_card_limit_rejected' "
+            "ORDER BY id DESC LIMIT 1",
+            (root_id,),
+        ).fetchone()
+        payload = json.loads(event["payload"])
+        assert payload["blocked_id"] is None
+        assert payload["count"] == 3
+        assert payload["attempted_count"] == 4
+        assert payload["orchestrator_profile"] == "dispatch-orchestrator"
+
+
 def test_profile_named_orchestrator_disables_limit_loudly(
     kanban_home, monkeypatch, caplog
 ):
