@@ -98,17 +98,21 @@ def test_sonnet_5_uses_list_price_not_introductory() -> None:
     assert _probe_rate("claude-sonnet-5", "cache_write_1h_tokens", "anthropic") == Decimal("6.00")
 
 
-def test_qwen_entries_price_input_and_cache_read_only() -> None:
+def test_qwen_implicit_path_prices_cache_read_at_20_percent() -> None:
     provider = "alibaba-token-plan"
+    # OpenAI-compatible paths (qwen_cli, hermes runtime) send no
+    # cache_control; the automatic implicit cache bills reads at 20% of
+    # input and does not bill writes at all.
     assert _probe_rate("qwen3.7-max", "input_tokens", provider) == Decimal("2.50")
     assert _probe_rate("qwen3.7-max", "output_tokens", provider) == Decimal("7.50")
-    assert _probe_rate("qwen3.7-max", "cache_read_tokens", provider) == Decimal("0.25")
+    assert _probe_rate("qwen3.7-max", "cache_read_tokens", provider) == Decimal("0.50")
     assert _probe_rate("qwen3.7-max", "cache_write_tokens", provider) is None
     assert _probe_rate("qwen3.6-flash", "input_tokens", provider) == Decimal("0.25")
-    assert _probe_rate("qwen3.6-flash", "cache_read_tokens", provider) == Decimal("0.025")
+    assert _probe_rate("qwen3.6-flash", "cache_read_tokens", provider) == Decimal("0.05")
     assert _probe_rate("qwen3.7-plus", "input_tokens", provider) == Decimal("0.40")
+    assert _probe_rate("qwen3.7-plus", "cache_read_tokens", provider) == Decimal("0.08")
 
-    # No cache-write rate: rows with cache-write tokens stay unknown
+    # No implicit write rate: rows with cache-write tokens stay unknown
     # (fail-closed, Canon rule 3); rows without cache price cleanly.
     with_cache = estimate_equivalent_cost(
         "qwen3.7-max",
@@ -123,6 +127,83 @@ def test_qwen_entries_price_input_and_cache_read_only() -> None:
         provider=provider,
     )
     assert without_cache.amount_usd == Decimal("2.50")
+
+
+def test_qwen_explicit_path_for_anthropic_protocol_origin() -> None:
+    provider = "alibaba-token-plan"
+
+    def probe(model: str, component: str) -> Decimal | None:
+        usage_kwargs = {name: 0 for name in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "cache_write_1h_tokens",
+            "cache_write_5m_tokens",
+            "reasoning_tokens",
+        )}
+        usage_kwargs["cache_write_1h_tokens"] = None
+        usage_kwargs["cache_write_5m_tokens"] = None
+        usage_kwargs[component] = _ONE_MILLION
+        result = estimate_equivalent_cost(
+            model,
+            UsageFactsUsage(**usage_kwargs, request_count=0),
+            provider=provider,
+            origin="claude_code",
+        )
+        return result.amount_usd
+
+    # claude_code speaks the Anthropic protocol with cache_control to the
+    # Token-Plan endpoint: explicit cache — read 10%, write 125% of input,
+    # no TTL differentiation on the Alibaba side.
+    assert probe("qwen3.7-max", "cache_read_tokens") == Decimal("0.25")
+    assert probe("qwen3.7-max", "cache_write_tokens") == Decimal("3.125")
+    assert probe("qwen3.7-max", "cache_write_1h_tokens") == Decimal("3.125")
+    assert probe("qwen3.7-max", "cache_write_5m_tokens") == Decimal("3.125")
+    assert probe("qwen3.6-flash", "cache_write_tokens") == Decimal("0.3125")
+
+
+def test_round2_entries_and_documented_absences() -> None:
+    # gpt-5.5: priced, cache-write line item sourcedly absent.
+    assert _probe_rate("gpt-5.5", "input_tokens", "openai") == Decimal("5.00")
+    assert _probe_rate("gpt-5.5", "cache_read_tokens", "openai") == Decimal("0.50")
+    assert _probe_rate("gpt-5.5", "cache_write_tokens", "openai") is None
+    check = priceability("gpt-5.5", "openai")
+    assert check["priceable"] is False
+    assert check["classification"] == "documented_absent"
+
+    # grok-4.5 (<200k tier): priced, write line item sourcedly absent.
+    assert _probe_rate("grok-4.5", "input_tokens", "xai-oauth") == Decimal("2.00")
+    assert _probe_rate("grok-4.5", "cache_read_tokens", "xai-oauth") == Decimal("0.30")
+    assert _probe_rate("grok-4.5", "cache_write_tokens", "xai-oauth") is None
+    check = priceability("grok-4.5", "xai-oauth")
+    assert check["classification"] == "documented_absent"
+
+    # kimi-k3: fully automatic cache, no separate write rate exists.
+    check = priceability("kimi-k3", "kimi-coding")
+    assert check["classification"] == "documented_absent"
+    assert "write rate does not exist" in check["reason"]
+
+    # gpt-5.6 terra/luna corrected to the current pricing page (the
+    # upstream launch-blog entries are outdated); sol unchanged upstream.
+    assert _probe_rate("gpt-5.6-terra", "input_tokens", "openai-codex") == Decimal("2.00")
+    assert _probe_rate("gpt-5.6-terra", "output_tokens", "openai-codex") == Decimal("12.00")
+    assert _probe_rate("gpt-5.6-terra", "cache_write_tokens", "openai-codex") == Decimal("2.50")
+    assert _probe_rate("gpt-5.6-luna", "input_tokens", "openai-codex") == Decimal("0.20")
+    assert _probe_rate("gpt-5.6-luna", "cache_write_tokens", "openai-codex") == Decimal("0.25")
+
+    # qwen3.8-*: PAYG rate does not exist — documented, fail-closed.
+    check = priceability("qwen3.8-max-preview", "alibaba-token-plan")
+    assert check["classification"] == "documented_absent"
+    assert "does not exist" in check["reason"]
+
+    # codex-auto-review: product feature, no vendor price.
+    check = priceability("codex-auto-review", "openai")
+    assert check["classification"] == "documented_absent"
+
+    # Capture gaps stay their own class.
+    assert priceability(None, "xai")["classification"] == "model_missing"
+    assert priceability("gpt-5.4-mini", None)["classification"] == "provider_missing"
 
 
 def test_qwen38_models_have_no_payg_rate() -> None:
@@ -294,6 +375,7 @@ def test_readmodel_prices_split_when_observed() -> None:
         "equivalent",
         provider="anthropic",
         model="claude-opus-4-8",
+        origin="claude_code",
         normalized=normalized,
         raw={"request_count": 1},
         pricing_cache=pricing_cache,

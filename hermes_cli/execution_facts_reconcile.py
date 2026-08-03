@@ -353,13 +353,18 @@ def reconcile_usage_facts(
             usage_validity = source_validity
         model = _safe_class(row.get("model"))
         provider = _safe_class(row.get("provider"))
+        origin = _safe_class(row.get("origin"))
         equivalent = (
-            equivalent_estimator(model, usage, provider=provider)
+            equivalent_estimator(
+                model, usage, provider=provider, origin=origin
+            )
             if model is not None and usage_validity is not Validity.UNKNOWN
             else CostResult(None, "unknown", "none", "n/a")
         )
         actual = (
-            actual_estimator(model, usage, provider=provider)
+            actual_estimator(
+                model, usage, provider=provider, origin=origin
+            )
             if model is not None and usage_validity is not Validity.UNKNOWN
             else CostResult(None, "unknown", "none", "n/a")
         )

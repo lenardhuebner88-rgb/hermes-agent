@@ -170,13 +170,31 @@ def resolve_model_alias(model: str) -> str:
     return _MODEL_ALIASES.get(basename.lower(), normalized)
 
 
-def _qwen_cache_read_rate(input_rate: Decimal) -> Decimal:
-    # Alibaba explicit context-cache read: 10% of the input rate
-    # (P1, alibabacloud.com model-studio context-cache docs, 2026-08-03).
-    return input_rate / Decimal("10")
+# Alibaba context-cache (alibabacloud.com model-studio context-cache docs,
+# Grok round 2, 2026-08-03): explicit caching (``cache_control: ephemeral``)
+# bills writes at 125% of input and hits at 10%; implicit caching activates
+# automatically without any header, cannot be disabled, and bills hits at
+# 20% — explicit and implicit are mutually exclusive.
+_ALIBABA_EXPLICIT_CACHE_READ_FACTOR = Decimal("0.10")
+_ALIBABA_IMPLICIT_CACHE_READ_FACTOR = Decimal("0.20")
+_ALIBABA_EXPLICIT_CACHE_WRITE_FACTOR = Decimal("1.25")
+
+# Which clients send ``cache_control``?  Verified 2026-08-03 on the
+# installed clients: Claude Code (claude-qwen wrapper) speaks the
+# Anthropic protocol to the Token-Plan Anthropic-compatible endpoint and
+# sends cache_control markers — the qwen transcripts bill
+# cache_creation_input_tokens, so explicit caching is active there.
+# Qwen Code (@qwen-code/qwen-code) sets cache_control only in its
+# anthropicContentGenerator, never in the OpenAI-compatible generator the
+# ``authType: openai`` lane uses; the hermes runtime sets it nowhere
+# outside agent/anthropic_adapter.py.  Hence: claude_code origin =
+# explicit rates, everything else = implicit read rate.
+_EXPLICIT_CACHE_ORIGINS = frozenset({"claude_code"})
 
 
-def _fork_override(route: BillingRoute) -> Optional[_RateTable]:
+def _fork_override(
+    route: BillingRoute, origin: Optional[str] = None
+) -> Optional[_RateTable]:
     """Fork rate decisions that upstream must not (and does not) carry."""
     key = (route.provider, route.model.lower())
     version = USAGE_FACTS_PRICING_VERSION
@@ -247,77 +265,63 @@ def _fork_override(route: BillingRoute) -> Optional[_RateTable]:
             ),
         )
 
-    if key == ("alibaba", "qwen3.7-max"):
-        # P1 list prices; the temporal 50% campaign is not used (Canon 7.2).
-        input_rate = Decimal("2.50")
+    qwen_list_rates = {
+        # Singapore list prices, <=256K context tier for plus/flash
+        # (alibabacloud.com model-studio model-pricing, Grok round 2,
+        # 2026-08-03). The temporal 50% campaign is not used (Canon 7.2).
+        "qwen3.7-max": (Decimal("2.50"), Decimal("7.50")),
+        "qwen3.7-plus": (Decimal("0.40"), Decimal("1.60")),
+        "qwen3.6-flash": (Decimal("0.25"), Decimal("1.50")),
+    }
+    if route.provider == "alibaba" and key[1] in qwen_list_rates:
+        input_rate, output_rate = qwen_list_rates[key[1]]
+        if origin in _EXPLICIT_CACHE_ORIGINS:
+            # Claude Code sends cache_control against the Anthropic-
+            # compatible Token-Plan endpoint: explicit cache pricing
+            # (read 10% of input, write 125% of input). Alibaba bills no
+            # TTL split, so all write components share the write rate.
+            cache_read = input_rate * _ALIBABA_EXPLICIT_CACHE_READ_FACTOR
+            cache_write = input_rate * _ALIBABA_EXPLICIT_CACHE_WRITE_FACTOR
+            notes = ("explicit cache (cache_control via Anthropic protocol)",)
+        else:
+            # OpenAI-compatible paths (qwen_cli, hermes runtime) send no
+            # cache_control, so the automatic implicit cache applies:
+            # reads at 20% of input; writes are not billed at all — the
+            # write rate does not exist (documented, fail-closed).
+            cache_read = input_rate * _ALIBABA_IMPLICIT_CACHE_READ_FACTOR
+            cache_write = None
+            notes = (
+                "implicit cache (no cache_control on this path); "
+                "write rate does not exist — only hits are billed",
+            )
         return _RateTable(
             rates={
                 "input_tokens": input_rate,
-                "output_tokens": Decimal("7.50"),
-                "cache_read_tokens": _qwen_cache_read_rate(input_rate),
-                # No sourced cache-write rate — rows with cache-write
-                # tokens stay unknown (fail-closed, Canon rule 3).
-                "cache_write_tokens": None,
-                "cache_write_1h_tokens": None,
-                "cache_write_5m_tokens": None,
+                "output_tokens": output_rate,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
+                "cache_write_1h_tokens": cache_write,
+                "cache_write_5m_tokens": cache_write,
                 "reasoning_tokens": None,
             },
             request_rate=None,
             status="priced",
             source=docs_source,
             pricing_version=version,
-            notes=("cache-write rate unsourced; unknown where observed",),
+            notes=notes,
         )
 
-    if key == ("alibaba", "qwen3.6-flash"):
-        # <=256K context tier; the 256K-1M tier is not derivable from the
-        # persisted facts and the base tier is the sourced default.
-        input_rate = Decimal("0.25")
-        return _RateTable(
-            rates={
-                "input_tokens": input_rate,
-                "output_tokens": Decimal("1.50"),
-                "cache_read_tokens": _qwen_cache_read_rate(input_rate),
-                "cache_write_tokens": None,
-                "cache_write_1h_tokens": None,
-                "cache_write_5m_tokens": None,
-                "reasoning_tokens": None,
-            },
-            request_rate=None,
-            status="priced",
-            source=docs_source,
-            pricing_version=version,
-            notes=(
-                "<=256K context tier; cache-write rate unsourced",
-            ),
-        )
-
-    if key == ("alibaba", "qwen3.7-plus"):
-        input_rate = Decimal("0.40")
-        return _RateTable(
-            rates={
-                "input_tokens": input_rate,
-                "output_tokens": Decimal("1.60"),
-                "cache_read_tokens": _qwen_cache_read_rate(input_rate),
-                "cache_write_tokens": None,
-                "cache_write_1h_tokens": None,
-                "cache_write_5m_tokens": None,
-                "reasoning_tokens": None,
-            },
-            request_rate=None,
-            status="priced",
-            source=docs_source,
-            pricing_version=version,
-            notes=(
-                "<=256K context tier; cache-write rate unsourced",
-            ),
-        )
-
-    if key in {("alibaba", "qwen3.8-max-preview"), ("alibaba", "qwen3.8-max")}:
-        # P1 (2026-08-03): no PAYG list rate exists for these models —
-        # Token-Plan access only. Upstream carries a proxy entry for
-        # qwen3.8-max-preview; the fork deliberately overrides it with
-        # unknown instead of pricing against another model's rates.
+    if key == ("alibaba", "qwen3.8-max-preview") or key == (
+        "alibaba",
+        "qwen3.8-max",
+    ):
+        # No PAYG list rate exists for these models — Token-Plan access
+        # only, credits without a $/MTok rate. Negative proof (Grok round
+        # 2, 2026-08-03): full scrape of the model-pricing page, 0 hits
+        # for qwen3.8 (positive control qwen3.7-max: 27 hits). Upstream
+        # carries a proxy entry for qwen3.8-max-preview; the fork
+        # deliberately overrides it with unknown instead of pricing
+        # against another model's rates.
         return _RateTable(
             rates={name: None for name in PRICE_COMPONENTS},
             request_rate=None,
@@ -325,15 +329,101 @@ def _fork_override(route: BillingRoute) -> Optional[_RateTable]:
             source="none",
             pricing_version=version,
             notes=(
-                "no PAYG list rate (P1 2026-08-03); Token-Plan-exclusive",
+                "PAYG rate does not exist — Token-Plan credits only "
+                "(model-pricing full scrape 0 hits, Grok 2026-08-03)",
+            ),
+        )
+
+    if key == ("openai", "gpt-5.5"):
+        # developers.openai.com/api/docs/pricing (Grok round 2,
+        # 2026-08-03), <272K context. The cache-writes column is empty
+        # for this model: no write line item exists, rows with
+        # cache-write tokens stay unknown (fail-closed).
+        return _RateTable(
+            rates={
+                "input_tokens": Decimal("5.00"),
+                "output_tokens": Decimal("30.00"),
+                "cache_read_tokens": Decimal("0.50"),
+                "cache_write_tokens": None,
+                "cache_write_1h_tokens": None,
+                "cache_write_5m_tokens": None,
+                "reasoning_tokens": None,
+            },
+            request_rate=None,
+            status="priced",
+            source=docs_source,
+            pricing_version=version,
+            notes=("cache-write line item does not exist",),
+        )
+
+    if key == ("xai", "grok-4.5"):
+        # docs.x.ai/developers/pricing, <200K prompt tier (Grok round 2,
+        # 2026-08-03). No separate cache-write line item exists.
+        return _RateTable(
+            rates={
+                "input_tokens": Decimal("2.00"),
+                "output_tokens": Decimal("6.00"),
+                "cache_read_tokens": Decimal("0.30"),
+                "cache_write_tokens": None,
+                "cache_write_1h_tokens": None,
+                "cache_write_5m_tokens": None,
+                "reasoning_tokens": None,
+            },
+            request_rate=None,
+            status="priced",
+            source=docs_source,
+            pricing_version=version,
+            notes=(
+                "<200K prompt tier; cache-write line item does not exist",
+            ),
+        )
+
+    if key in {("openai", "gpt-5.6-terra"), ("openai", "gpt-5.6-luna")}:
+        # Current OpenAI pricing page (Grok round 2, 2026-08-03). The
+        # upstream catalog still carries the outdated launch-blog rates
+        # for these two; sol matches upstream and is left alone.
+        terra_luna = {
+            "gpt-5.6-terra": (
+                Decimal("2.00"),
+                Decimal("0.20"),
+                Decimal("2.50"),
+                Decimal("12.00"),
+            ),
+            "gpt-5.6-luna": (
+                Decimal("0.20"),
+                Decimal("0.02"),
+                Decimal("0.25"),
+                Decimal("1.20"),
+            ),
+        }
+        input_rate, cached, write, output_rate = terra_luna[key[1]]
+        return _RateTable(
+            rates={
+                "input_tokens": input_rate,
+                "output_tokens": output_rate,
+                "cache_read_tokens": cached,
+                "cache_write_tokens": write,
+                "cache_write_1h_tokens": None,
+                "cache_write_5m_tokens": None,
+                "reasoning_tokens": None,
+            },
+            request_rate=None,
+            status="priced",
+            source=docs_source,
+            pricing_version=version,
+            notes=(
+                "developers.openai.com/api/docs/pricing 2026-08-03; "
+                "supersedes the upstream launch-blog entry",
             ),
         )
 
     return None
 
 
-def _rate_table_for_route(route: BillingRoute) -> _RateTable:
-    override = _fork_override(route)
+def _rate_table_for_route(
+    route: BillingRoute, origin: Optional[str] = None
+) -> _RateTable:
+    override = _fork_override(route, origin)
     if override is not None:
         return override
 
@@ -424,6 +514,7 @@ def _estimate(
     provider: Optional[str],
     base_url: Optional[str],
     result_status: str,
+    origin: Optional[str] = None,
 ) -> CostResult:
     resolved_model = resolve_model_alias(model_name)
     route = resolve_billing_route(
@@ -440,7 +531,7 @@ def _estimate(
             pricing_version="included-route",
         )
 
-    table = _rate_table_for_route(route)
+    table = _rate_table_for_route(route, origin)
     normalized = (
         usage
         if isinstance(usage, UsageFactsUsage)
@@ -495,6 +586,7 @@ def estimate_usage_cost(
     *,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> CostResult:
     """Metered pricing: subscription routes stay $0 'included'."""
     return _estimate(
@@ -503,6 +595,7 @@ def estimate_usage_cost(
         provider=provider,
         base_url=base_url,
         result_status="estimated",
+        origin=origin,
     )
 
 
@@ -512,6 +605,7 @@ def estimate_equivalent_cost(
     *,
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> CostResult:
     """List-price equivalent for any route (Canon 7.2 comparison currency)."""
     return _estimate(
@@ -520,33 +614,124 @@ def estimate_equivalent_cost(
         provider=provider,
         base_url=base_url,
         result_status="equivalent",
+        origin=origin,
     )
+
+
+# Rates whose non-existence is sourced, not merely an unpriced gap.
+# Fail-closed stays: rows needing these components remain unknown — but
+# the coverage report marks them "documented absent" instead of "open
+# gap" (Canon register 7.5 classes; Grok round 2, 2026-08-03).
+_DOCUMENTED_ABSENT_ROUTES: dict[tuple[str, str], str] = {
+    ("openai", "codex-auto-review"): (
+        "vendor price does not exist — Codex product feature, no public "
+        "API model id (OpenAI pricing page; openai/codex#25395; "
+        "Grok 2026-08-03)"
+    ),
+}
+_DOCUMENTED_ABSENT_COMPONENTS: dict[tuple[str, str, str], str] = {
+    ("moonshot", "k3", "cache_write_tokens"): (
+        "separate write rate does not exist — fully automatic caching "
+        "bills miss 3.00 / hit 0.30 only "
+        "(platform.kimi.ai/docs/pricing/chat-k3; Grok 2026-08-03)"
+    ),
+    ("openai", "gpt-5.5", "cache_write_tokens"): (
+        "cache-write line item does not exist "
+        "(developers.openai.com/api/docs/pricing; Grok 2026-08-03)"
+    ),
+    ("xai", "grok-4.5", "cache_write_tokens"): (
+        "cache-write line item does not exist "
+        "(docs.x.ai/developers/pricing; Grok 2026-08-03)"
+    ),
+    ("alibaba", "qwen3.7-max", "cache_write_tokens"): (
+        "implicit cache bills hits only; write rate does not exist "
+        "(alibabacloud.com model-studio context-cache; Grok 2026-08-03)"
+    ),
+    ("alibaba", "qwen3.7-plus", "cache_write_tokens"): (
+        "implicit cache bills hits only; write rate does not exist "
+        "(alibabacloud.com model-studio context-cache; Grok 2026-08-03)"
+    ),
+    ("alibaba", "qwen3.6-flash", "cache_write_tokens"): (
+        "implicit cache bills hits only; write rate does not exist "
+        "(alibabacloud.com model-studio context-cache; Grok 2026-08-03)"
+    ),
+}
+
+
+def _documented_absent_component(
+    route: BillingRoute, component: str, origin: Optional[str]
+) -> Optional[str]:
+    reason = _DOCUMENTED_ABSENT_COMPONENTS.get(
+        (route.provider, route.model.lower(), component)
+    )
+    if reason is None:
+        return None
+    # The qwen write-rate absence holds only on the implicit path; the
+    # Anthropic-protocol origin sends cache_control and has write rates.
+    if (
+        route.provider == "alibaba"
+        and component == "cache_write_tokens"
+        and origin in _EXPLICIT_CACHE_ORIGINS
+    ):
+        return None
+    return reason
 
 
 def priceability(
     model_name: Optional[str],
     provider: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> dict[str, Any]:
     """Report whether a (model, provider) pair is fully priceable.
 
     'Fully' means every component that can carry tokens has a sourced
-    rate (Canon 7.4 mechanical gate). Subscription eligibility is not a
-    priceability question — the equivalent path prices every route.
+    rate (Canon 7.4 mechanical gate). Where a rate is sourcedly absent,
+    the pair is classified ``documented_absent`` (fail-closed unknown
+    with negative proof) rather than ``open_gap``. Subscription
+    eligibility is not a priceability question — the equivalent path
+    prices every route.
     """
+    base = {
+        "resolved_provider": None,
+        "resolved_model": None,
+        "alias_of": None,
+        "origin": origin,
+    }
     if not model_name or not str(model_name).strip():
-        return {"priceable": False, "reason": "model_missing"}
+        return {
+            **base,
+            "priceable": False,
+            "classification": "model_missing",
+            "reason": "model not captured (harvest gap)",
+        }
+    if not provider or not str(provider).strip():
+        resolved_model = resolve_model_alias(str(model_name))
+        return {
+            **base,
+            "resolved_model": resolved_model,
+            "priceable": False,
+            "classification": "provider_missing",
+            "reason": "provider not captured (harvest gap)",
+        }
     resolved_model = resolve_model_alias(str(model_name))
     route = resolve_billing_route(resolved_model, provider=provider)
-    table = _rate_table_for_route(route)
+    base["resolved_provider"] = route.provider
+    base["resolved_model"] = route.model
+    base["alias_of"] = resolved_model if resolved_model != model_name else None
+    table = _rate_table_for_route(route, origin)
     if table.status != "priced":
+        documented = _DOCUMENTED_ABSENT_ROUTES.get(
+            (route.provider, route.model.lower())
+        )
         reason = table.notes[0] if table.notes else "no pricing entry"
-        return {
-            "priceable": False,
-            "reason": reason,
-            "resolved_provider": route.provider,
-            "resolved_model": route.model,
-            "alias_of": resolved_model if resolved_model != model_name else None,
-        }
+        if documented is not None:
+            reason = documented
+        classification = (
+            "documented_absent"
+            if documented is not None or "does not exist" in reason
+            else "open_gap"
+        )
+        return {**base, "priceable": False, "classification": classification, "reason": reason}
     required = [
         "input_tokens",
         "output_tokens",
@@ -559,17 +744,24 @@ def priceability(
         required.extend(["cache_write_1h_tokens", "cache_write_5m_tokens"])
     missing = [name for name in required if table.rates.get(name) is None]
     if missing:
+        documented_reasons = [
+            _documented_absent_component(route, name, origin)
+            for name in missing
+        ]
+        if all(documented_reasons):
+            return {
+                **base,
+                "priceable": False,
+                "classification": "documented_absent",
+                "reason": "; ".join(
+                    f"{name}: {reason}"
+                    for name, reason in zip(missing, documented_reasons)
+                ),
+            }
         return {
+            **base,
             "priceable": False,
+            "classification": "open_gap",
             "reason": "missing rates: " + ", ".join(missing),
-            "resolved_provider": route.provider,
-            "resolved_model": route.model,
-            "alias_of": resolved_model if resolved_model != model_name else None,
         }
-    return {
-        "priceable": True,
-        "reason": None,
-        "resolved_provider": route.provider,
-        "resolved_model": route.model,
-        "alias_of": resolved_model if resolved_model != model_name else None,
-    }
+    return {**base, "priceable": True, "classification": "priced", "reason": None}

@@ -297,7 +297,7 @@ def build_usage_facts_payload(
     query_ms = (time.perf_counter() - query_started) * 1000
     workload = _workload_rollup(rows)
 
-    pricing_cache: dict[tuple[str, str, str], _PriceVector] = {}
+    pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector] = {}
     group_builders: dict[
         tuple[str, str | None, str | None, str | None],
         dict[str, Any],
@@ -321,6 +321,7 @@ def build_usage_facts_payload(
             billing_category,
             provider=row["provider"],
             model=row["model"],
+            origin=origin,
             normalized=normalized,
             raw=raw,
             pricing_cache=pricing_cache,
@@ -445,7 +446,7 @@ def build_attributed_usage_payload(
             params,
         ).fetchall()
 
-    pricing_cache: dict[tuple[str, str, str], _PriceVector] = {}
+    pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector] = {}
     builders: dict[str, dict[Any, dict[str, Any]]] = {
         "tasks": {},
         "chains": {},
@@ -460,6 +461,7 @@ def build_attributed_usage_payload(
             category,
             provider=row["provider"],
             model=row["model"],
+            origin=origin,
             normalized=normalized,
             raw=raw,
             pricing_cache=pricing_cache,
@@ -940,14 +942,16 @@ def _charge_for_breakdown(
     *,
     provider: str | None,
     model: str | None,
+    origin: str | None,
     normalized: Mapping[str, Any],
     raw: Mapping[str, Any],
-    pricing_cache: dict[tuple[str, str, str], _PriceVector],
+    pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector],
 ) -> dict[str, Any]:
     equivalent = _price_normalized_usage(
         "equivalent",
         provider=provider,
         model=model,
+        origin=origin,
         normalized=normalized,
         raw=raw,
         pricing_cache=pricing_cache,
@@ -972,6 +976,7 @@ def _charge_for_breakdown(
             "metered",
             provider=provider,
             model=model,
+            origin=origin,
             normalized=normalized,
             raw=raw,
             pricing_cache=pricing_cache,
@@ -985,9 +990,10 @@ def _price_normalized_usage(
     *,
     provider: str | None,
     model: str | None,
+    origin: str | None,
     normalized: Mapping[str, Any],
     raw: Mapping[str, Any],
-    pricing_cache: dict[tuple[str, str, str], _PriceVector],
+    pricing_cache: dict[tuple[str, str, str, str | None], _PriceVector],
 ) -> dict[str, Any]:
     if not model:
         return _unknown_price("model_missing")
@@ -998,7 +1004,7 @@ def _price_normalized_usage(
     if uncached["status"] != STATUS_EXACT:
         return _unknown_price("input_cache_split_unavailable")
 
-    cache_key = (kind, provider, model)
+    cache_key = (kind, provider, model, origin)
     vector = pricing_cache.get(cache_key)
     if vector is None:
         estimator = (
@@ -1006,7 +1012,9 @@ def _price_normalized_usage(
             if kind == "equivalent"
             else estimate_usage_cost
         )
-        vector = _pricing_vector(estimator, provider=provider, model=model)
+        vector = _pricing_vector(
+            estimator, provider=provider, model=model, origin=origin
+        )
         pricing_cache[cache_key] = vector
 
     token_values = {
@@ -1072,6 +1080,7 @@ def _pricing_vector(
     *,
     provider: str,
     model: str,
+    origin: str | None,
 ) -> _PriceVector:
     rates: dict[str, Decimal | None] = {}
     results: list[CostResult] = []
@@ -1087,6 +1096,7 @@ def _pricing_vector(
             model,
             UsageFactsUsage(**usage_kwargs, request_count=0),
             provider=provider,
+            origin=origin,
         )
         results.append(result)
         rates[component] = result.amount_usd
@@ -1095,6 +1105,7 @@ def _pricing_vector(
         model,
         UsageFactsUsage(request_count=1),
         provider=provider,
+        origin=origin,
     )
     results.append(request_result)
     representative = next(

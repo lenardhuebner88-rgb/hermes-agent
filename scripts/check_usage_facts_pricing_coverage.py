@@ -9,6 +9,13 @@ remainder list.  Rows with ``model='<synthetic>'`` carry zero tokens in
 every bucket; they are excluded from the denominator (Fable D3): there
 is nothing to price, and attributing them would invent facts.
 
+Priceability is evaluated per observed origin, because cache semantics
+differ by client path (Anthropic protocol with cache_control vs
+OpenAI-compatible implicit caching).  Remainder entries carry a
+classification: ``documented_absent`` (the rate sourcedly does not
+exist — negative proof on file) vs ``open_gap`` vs capture gaps
+(``model_missing`` / ``provider_missing``).
+
 Read-only against the facts DB.  Exit 0 when coverage is complete,
 exit 1 when a remainder stays.
 
@@ -62,6 +69,7 @@ def coverage_report(
             """
             SELECT model,
                    provider,
+                   origin,
                    COUNT(*) AS run_count,
                    COALESCE(SUM(input_tokens), 0)
                        + COALESCE(SUM(output_tokens), 0)
@@ -70,7 +78,7 @@ def coverage_report(
               FROM run_usage_facts
              WHERE captured_at >= datetime('now', ?)
                AND (model IS NULL OR model != ?)
-             GROUP BY model, provider
+             GROUP BY model, provider, origin
              ORDER BY run_count DESC
             """,
             (f"-{int(days)} days", SYNTHETIC_MODEL),
@@ -83,15 +91,18 @@ def coverage_report(
     for row in rows:
         model = row["model"]
         provider = row["provider"]
-        check = priceability(model, provider)
+        origin = row["origin"]
+        check = priceability(model, provider, origin)
         item = {
             "model": model,
             "provider": provider,
+            "origin": origin,
             "run_count": int(row["run_count"]),
             "token_count": int(row["token_count"]),
             "resolved_provider": check.get("resolved_provider"),
             "resolved_model": check.get("resolved_model"),
             "alias_of": check.get("alias_of"),
+            "classification": check.get("classification"),
         }
         if check["priceable"]:
             priced.append(item)
@@ -107,12 +118,18 @@ def coverage_report(
     )
     priced_runs = sum(item["run_count"] for item in priced)
     priced_tokens = sum(item["token_count"] for item in priced)
+
+    classification_counts: dict[str, int] = {}
+    for item in remainder:
+        key = str(item["classification"])
+        classification_counts[key] = classification_counts.get(key, 0) + 1
+
     return {
         "db": str(resolved),
         "window_days": int(days),
         "synthetic_rows_excluded_from_denominator": True,
-        "combo_count": len(priced) + len(remainder),
-        "priced_combo_count": len(priced),
+        "observed_items": len(priced) + len(remainder),
+        "priced_items": len(priced),
         "run_coverage": {
             "priced": priced_runs,
             "total": total_runs,
@@ -124,6 +141,7 @@ def coverage_report(
             "ratio": (priced_tokens / total_tokens) if total_tokens else None,
         },
         "complete": not remainder,
+        "remainder_by_classification": classification_counts,
         "priced": priced,
         "remainder": remainder,
     }
