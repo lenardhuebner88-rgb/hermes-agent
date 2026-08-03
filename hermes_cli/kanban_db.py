@@ -5439,6 +5439,145 @@ def _project_from_source_task(
     )
 
 
+def _orchestrator_card_limit_config() -> tuple[int, str]:
+    """Return the opt-in per-chain card limit and exact creator profile."""
+    import yaml
+    from hermes_constants import get_default_hermes_root
+
+    config_path = get_default_hermes_root() / "config.yaml"
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        _log.warning(
+            "orchestrator_card_limit disabled: cannot read root config %s: %s",
+            config_path,
+            exc,
+        )
+        return 0, "default"
+
+    kanban_cfg = raw.get("kanban") if isinstance(raw, dict) else None
+    if not isinstance(kanban_cfg, dict):
+        return 0, "default"
+
+    profile_raw = kanban_cfg.get("orchestrator_profile", "default")
+    profile = str(profile_raw).strip() if profile_raw is not None else ""
+    if not profile:
+        profile = "default"
+
+    limit_raw = kanban_cfg.get("orchestrator_card_limit", 0)
+    if isinstance(limit_raw, bool):
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    try:
+        limit = int(limit_raw)
+    except (TypeError, ValueError):
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    if limit < 0:
+        _log.error(
+            "orchestrator_card_limit disabled: kanban.orchestrator_card_limit "
+            "must be a non-negative integer, got %r",
+            limit_raw,
+        )
+        return 0, profile
+    return limit, profile
+
+
+def _enforce_orchestrator_card_limit(
+    conn: sqlite3.Connection,
+    *,
+    parents: tuple[str, ...],
+    created_by: Optional[str],
+) -> Optional[str]:
+    """Block the newest live chain card and return its id when the limit is full."""
+    limit, orchestrator_profile = _orchestrator_card_limit_config()
+    if limit <= 0 or not parents:
+        return None
+    if orchestrator_profile == "orchestrator":
+        _log.error(
+            "orchestrator_card_limit disabled: "
+            "kanban.orchestrator_profile='orchestrator' would count conflict-fixer cards"
+        )
+        return None
+    if created_by != orchestrator_profile:
+        return None
+
+    from hermes_cli import kanban_worktrees as _kwt
+
+    root_id = _kwt.chain_root_id(conn, min(parents))
+    rows = conn.execute(
+        """
+        WITH RECURSIVE descendants(id) AS (
+            SELECT ?
+            UNION
+            SELECT links.child_id
+            FROM task_links AS links
+            JOIN descendants ON links.parent_id = descendants.id
+        )
+        SELECT tasks.id, tasks.status, tasks.created_at, tasks.created_by
+        FROM tasks
+        JOIN descendants ON descendants.id = tasks.id
+        """,
+        (root_id,),
+    ).fetchall()
+    chain_rows = [
+        row for row in rows if _kwt.chain_root_id(conn, row["id"]) == root_id
+    ]
+    count = sum(row["created_by"] == orchestrator_profile for row in chain_rows)
+    if count < limit:
+        return None
+
+    live_rows = [
+        row
+        for row in chain_rows
+        if row["status"] not in {"done", "archived", "cancelled"}
+    ]
+    if live_rows:
+        blocked_id = max(
+            live_rows,
+            key=lambda row: (int(row["created_at"] or 0), str(row["id"])),
+        )["id"]
+    else:
+        blocked_id = root_id
+
+    attempted_count = count + 1
+    reason = (
+        "orchestrator card limit reached: "
+        f"count={count}, attempted_count={attempted_count}, limit={limit}, root={root_id}"
+    )
+    _system_park_set_blocked(
+        conn,
+        task_id=blocked_id,
+        kind="capability",
+        where_sql="1 = 1",
+    )
+    _append_event(
+        conn,
+        blocked_id,
+        "blocked",
+        _system_blocked_event_payload(
+            reason,
+            "capability",
+            source="orchestrator_card_limit",
+            count=count,
+            attempted_count=attempted_count,
+            limit=limit,
+            root_id=root_id,
+            orchestrator_profile=orchestrator_profile,
+        ),
+    )
+    _log.error("%s; blocked task %s instead of creating a card", reason, blocked_id)
+    return blocked_id
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -5795,6 +5934,14 @@ def create_task(
                         raise ValueError(
                             f"unknown parent task(s): {', '.join(missing)}"
                         )
+
+                limit_blocked_task_id = _enforce_orchestrator_card_limit(
+                    conn,
+                    parents=parents,
+                    created_by=created_by,
+                )
+                if limit_blocked_task_id is not None:
+                    return limit_blocked_task_id
 
                 conn.execute(
                     """
