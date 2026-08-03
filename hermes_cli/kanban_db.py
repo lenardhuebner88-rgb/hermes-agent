@@ -4960,6 +4960,30 @@ def _conflict_fixer_profile() -> str:
     return "premium"
 
 
+def _auto_retry_escalation_route() -> tuple[str, str]:
+    """Resolve the auto-retry escalation profile and model from root config."""
+    profile = AUTO_RETRY_ESCALATION_PROFILE
+    model = AUTO_RETRY_ESCALATION_MODEL
+    try:
+        import yaml
+        from hermes_constants import get_default_hermes_root
+
+        config_path = get_default_hermes_root() / "config.yaml"
+        if config_path.is_file():
+            with open(config_path, "r", encoding="utf-8") as config_file:
+                root_config = yaml.safe_load(config_file) or {}
+            kanban_config = root_config.get("kanban") or {}
+            configured_profile = kanban_config.get("auto_retry_escalation_profile")
+            configured_model = kanban_config.get("auto_retry_escalation_model")
+            if isinstance(configured_profile, str) and configured_profile.strip():
+                profile = configured_profile.strip()
+            if isinstance(configured_model, str) and configured_model.strip():
+                model = configured_model.strip()
+    except Exception:
+        pass
+    return profile, model
+
+
 def _conflict_fingerprint(reason: str) -> str:
     """Return a stable identity for one integration-conflict context."""
     core = re.sub(r"^integration parked:\s*", "", reason.strip(), flags=re.I)
@@ -30772,12 +30796,15 @@ def auto_retry_blocked_tasks(
                 continue
         attempt = current_count + 1
         escalated = attempt >= 2
+        escalated_profile: Optional[str] = None
         escalated_model_override: Optional[str] = None
         if escalated:
-            # The escalation profile is a claude-cli lane. Its --model argument
-            # accepts Claude model IDs directly; an ``anthropic/`` provider
-            # prefix is forwarded literally and produces an API 404.
-            escalated_model_override = AUTO_RETRY_ESCALATION_MODEL
+            # The default escalation profile is a claude-cli lane. Its --model
+            # argument accepts Claude model IDs directly; an ``anthropic/``
+            # provider prefix is forwarded literally and produces an API 404.
+            escalated_profile, escalated_model_override = (
+                _auto_retry_escalation_route()
+            )
         with write_txn(conn):
             latest = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?",
@@ -30801,7 +30828,7 @@ def auto_retry_blocked_tasks(
                     """,
                 (
                     attempt,
-                    AUTO_RETRY_ESCALATION_PROFILE if escalated else None,
+                    escalated_profile,
                     escalated_model_override,
                     task_id,
                 ),
@@ -30844,7 +30871,7 @@ def auto_retry_blocked_tasks(
             }
             if escalated:
                 payload["model_override"] = escalated_model_override
-                payload["assignee"] = AUTO_RETRY_ESCALATION_PROFILE
+                payload["assignee"] = escalated_profile
             _append_event(conn, task_id, "auto_retried", payload)
         retried.append((task_id, attempt))
     return retried
