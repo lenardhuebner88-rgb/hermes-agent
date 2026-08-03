@@ -213,7 +213,6 @@ def test_exact_objpatch_only_symbol_set_remains_tested_after_channel_growth(
         "_worker_brief_input",
         "_worker_process_group_alive",
         "_worker_project_context_cwd",
-        "_workspace_release_state",
         "estimate_equivalent_cost_amount",
         "estimate_equivalent_cost_amounts",
         "validate_spawnable_assignee",
