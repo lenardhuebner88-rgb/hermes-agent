@@ -13811,12 +13811,9 @@ def _cron_default_profile() -> str:
     HERMES_HOME outside the profiles tree) has no profile-dir equivalent, so
     it keeps the legacy ``default`` fallback.
     """
-    try:
-        from hermes_cli.profiles import get_active_profile_name
+    from hermes_cli.profiles import get_active_profile_name
 
-        name = get_active_profile_name()
-    except Exception:
-        return "default"
+    name = get_active_profile_name()
     return "default" if name in ("default", "custom") else name
 
 
