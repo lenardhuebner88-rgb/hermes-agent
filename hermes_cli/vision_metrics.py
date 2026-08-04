@@ -45,7 +45,12 @@ DAY_SECONDS = 86_400
 # and `autonomy` now grades a conflict-class done task by whether the conflict
 # fixer actually CLOSED the park (see ``_conflict_fixer_episodes``) instead of
 # counting every unescalated conflict as a missed escalation.
-SCHEMA_VERSION = 3
+# v4 (METRICS-WINDOW-S4): purely additive — `conflict_fixer` keeps every v3
+# field (all-time) and gains `window_*` siblings computed over the snapshot's
+# `window_days`. No key is removed or reinterpreted; `autonomy` gets no window
+# fields because the rest of its cohort (done tasks, escalations, failed runs)
+# is all-time, so a windowed headline would mix two populations.
+SCHEMA_VERSION = 4
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 LANDING_GATE_LEDGER_FILENAME = "landing-gate-ledger.jsonl"
@@ -1591,7 +1596,9 @@ def _tasks_with_fixer_exhausted_escalation(conn: sqlite3.Connection) -> set[str]
     return out
 
 
-def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
+def _conflict_fixer_episodes(
+    conn: sqlite3.Connection, *, since: Optional[int] = None
+) -> list[dict]:
     """Grade every dispatched conflict-fixer budget by its real outcome.
 
     Returns one dict per episode, in dispatch order, with ``outcome``:
@@ -1607,9 +1614,17 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
     * ``unresolved_by_fixer`` — every fixer card is finished, the budget was
       never formally spent, and the parent was never resumed: the automation
       stopped without closing the park (a human or another lane did).
+
+    ``since`` (epoch seconds) selects episodes by DISPATCH activity: an
+    episode is kept when its latest dispatch happened at or after ``since``.
+    Episodes straddling the window edge stay whole (all attempts counted).
+    Resume proofs and exhaustion evidence are read all-time on purpose: an
+    in-window dispatch may only be proven resolved by a later resume, and
+    dropping that would slander a fixer that did close the park.
     """
     dispatched = conn.execute(
-        "SELECT id, task_id, payload FROM task_events WHERE kind = ? ORDER BY id",
+        "SELECT id, task_id, payload, created_at "
+        "FROM task_events WHERE kind = ? ORDER BY id",
         (kb.CONFLICT_FIXER_DISPATCHED_EVENT,),
     ).fetchall()
     if not dispatched:
@@ -1630,6 +1645,7 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
                 "children": set(),
                 "limit": kb.CONFLICT_FIXER_MAX_ATTEMPTS,
                 "last_dispatch_id": 0,
+                "last_dispatch_at": 0,
             }
         ep["parents"].add(parent_id)
         child_id = str(payload.get("child_id") or "").strip()
@@ -1640,6 +1656,16 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
         except (TypeError, ValueError):
             pass
         ep["last_dispatch_id"] = int(row["id"])
+        ep["last_dispatch_at"] = max(ep["last_dispatch_at"], int(row["created_at"]))
+
+    if since is not None:
+        cutoff = int(since)
+        episodes = {
+            key: ep for key, ep in episodes.items()
+            if ep["last_dispatch_at"] >= cutoff
+        }
+        if not episodes:
+            return []
 
     # Resume proof, per (parent, fingerprint).
     resumed: set[tuple[str, str]] = set()
@@ -1713,19 +1739,30 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def _conflict_fixer_failed_count(conn: sqlite3.Connection) -> int:
+def _conflict_fixer_failed_count(
+    conn: sqlite3.Connection, *, since: Optional[int] = None
+) -> int:
     """Count distinct fixer-failure signals emitted to a child and its parent.
 
     ``on_fixer_card_failed`` deliberately writes the same payload twice so both
     the fixer card and its chain can observe it.  A failure is uniquely keyed by
     its child card, attempt and conflict fingerprint; count that key rather than
     event rows to preserve the one-failure/one-count contract.
+
+    ``since`` (epoch seconds) restricts the count to failure events emitted at
+    or after that instant — the window sibling of the all-time count.
     """
     failures: set[tuple[str, int, str]] = set()
-    rows = conn.execute(
-        "SELECT payload FROM task_events WHERE kind = ?",
-        (CONFLICT_FIXER_FAILED_EVENT,),
-    ).fetchall()
+    if since is None:
+        rows = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = ?",
+            (CONFLICT_FIXER_FAILED_EVENT,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT payload FROM task_events WHERE kind = ? AND created_at >= ?",
+            (CONFLICT_FIXER_FAILED_EVENT, int(since)),
+        ).fetchall()
     for row in rows:
         payload = _event_payload(row["payload"])
         child_id = str(payload.get("child_id") or "").strip()
@@ -1811,6 +1848,39 @@ def _conflict_fixer_metric(episodes: list[dict], *, failed: int = 0) -> dict:
             ),
         },
     }
+
+
+# METRICS-WINDOW-S4: the all-time fields that get a `window_*` sibling.
+# `counter` deliberately stays all-time only — its windowed value is already
+# readable as `window_unresolved_by_fixer`, and a second nested counter would
+# be a new metric, not a window view of an existing one.
+_WINDOWED_CONFLICT_FIELDS = (
+    "success_rate_pct",
+    "episodes",
+    "resolved",
+    "failed",
+    "exhausted",
+    "unresolved_by_fixer",
+    "in_flight",
+)
+
+
+def _merge_windowed_conflict_fields(
+    base: dict,
+    windowed: dict,
+    *,
+    window_days: int,
+    since_epoch: int,
+) -> dict:
+    """Attach the window view as additive ``window_*`` siblings (schema v4).
+
+    ``base`` is the untouched all-time metric; every v3 key keeps its meaning.
+    """
+    for key in _WINDOWED_CONFLICT_FIELDS:
+        base[f"window_{key}"] = windowed[key]
+    base["window_days"] = int(window_days)
+    base["window_since_epoch"] = int(since_epoch)
+    return base
 
 
 def _autonomy_metric(
@@ -2448,8 +2518,13 @@ def compute_metrics_snapshot(
         gate_records = read_gate_records()
     generated = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
     # Graded once: the autonomy counter and the conflict_fixer headline are two
-    # readings of the SAME episodes, so they can never disagree.
+    # readings of the SAME episodes, so they can never disagree.  The autonomy
+    # cohort is all-time by design (see _autonomy_metric), so it keeps the
+    # all-time episodes; the windowed grading feeds ONLY the conflict_fixer
+    # `window_*` siblings (schema v4) — never the autonomy headline.
     conflict_episodes = _conflict_fixer_episodes(conn)
+    since_epoch = ts - int(window_days) * DAY_SECONDS
+    conflict_episodes_window = _conflict_fixer_episodes(conn, since=since_epoch)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated.isoformat(),
@@ -2459,9 +2534,17 @@ def compute_metrics_snapshot(
             "autonomy": _autonomy_metric(
                 conn, conflict_episodes=conflict_episodes
             ),
-            "conflict_fixer": _conflict_fixer_metric(
-                conflict_episodes,
-                failed=_conflict_fixer_failed_count(conn),
+            "conflict_fixer": _merge_windowed_conflict_fields(
+                _conflict_fixer_metric(
+                    conflict_episodes,
+                    failed=_conflict_fixer_failed_count(conn),
+                ),
+                _conflict_fixer_metric(
+                    conflict_episodes_window,
+                    failed=_conflict_fixer_failed_count(conn, since=since_epoch),
+                ),
+                window_days=window_days,
+                since_epoch=since_epoch,
             ),
             "cost_per_task": _cost_per_task_metric(
                 conn, now=ts, window_days=window_days
@@ -2572,4 +2655,15 @@ def render_snapshot_summary(snapshot: dict) -> str:
             f"{o.get('counter', {}).get('value')}"
         ),
     ]
+    # METRICS-WINDOW-S4: the window view exists only from schema v4 on; a v3
+    # snapshot simply gets no window line (never a crash or phantom zero).
+    if cf.get("window_episodes") is not None:
+        lines.insert(3, (
+            f"  fixer window:    {cf.get('window_success_rate_pct')}%  "
+            f"(last {cf.get('window_days')}d: "
+            f"resolved={cf.get('window_resolved')}, "
+            f"failed={cf.get('window_failed')}, "
+            f"exhausted={cf.get('window_exhausted')}, "
+            f"in-flight={cf.get('window_in_flight')})"
+        ))
     return "\n".join(lines)

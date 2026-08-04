@@ -1451,6 +1451,15 @@ def test_conflict_fixer_success_rate_direction_is_higher_is_better():
     ) == 1
 
 
+def test_conflict_fixer_window_success_rate_direction_is_higher_is_better():
+    """METRICS-WINDOW-S4: the windowed sibling of the trust metric must be a
+    usable lever target just like its all-time origin — a lever aiming at the
+    window rate may not be stamped 'unmeasurable'."""
+    assert strategist._resolve_verdict_direction(
+        "conflict_fixer.window_success_rate_pct"
+    ) == 1
+
+
 def test_direction_map_required_keys_mapped_minus_one():
     """The two keys the slice calls out explicitly are mapped -1 (lower is better)."""
     assert strategist._resolve_verdict_direction("classification_coverage.unclassified_share") == -1

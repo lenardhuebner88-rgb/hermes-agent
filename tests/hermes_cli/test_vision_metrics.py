@@ -450,6 +450,139 @@ def test_conflict_grading_leaves_operator_corrected_pct_untouched(conn):
 
 
 # ---------------------------------------------------------------------------
+# METRICS-WINDOW-S4: windowed conflict-fixer view (schema v4, additive)
+# ---------------------------------------------------------------------------
+
+def test_conflict_fixer_episodes_window_selects_by_dispatch_time(conn):
+    """The same DB must yield DIFFERENT episode sets for a narrow window vs
+    all-time: an episode is selected by its latest dispatch inside the window,
+    and a straddling episode (old + in-window dispatch) stays whole."""
+    now = 100 * DAY
+    # Episode 1: only pre-window dispatches -> excluded by a 7-day window.
+    _add_task(conn, "P_OLD", status="blocked")
+    _add_task(conn, "F_OLD", status="done", completed_at=now - 21 * DAY)
+    _dispatch_fixer(conn, "P_OLD", "F_OLD", root="R_OLD",
+                    created_at=now - 21 * DAY)
+    # Episode 2: dispatch inside the window -> included.
+    _add_task(conn, "P_NEW", status="blocked")
+    _add_task(conn, "F_NEW", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P_NEW", "F_NEW", root="R_NEW", created_at=now - DAY)
+    # Episode 3: straddles the window edge — one old and one in-window
+    # dispatch. Must stay in the window set with BOTH attempts counted.
+    _add_task(conn, "P_STRADDLE", status="blocked")
+    for child in ("F_S1", "F_S2"):
+        _add_task(conn, child, status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P_STRADDLE", "F_S1", root="R_S", attempt=1,
+                    created_at=now - 20 * DAY)
+    _dispatch_fixer(conn, "P_STRADDLE", "F_S2", root="R_S", attempt=2,
+                    created_at=now - DAY)
+
+    all_time = vm._conflict_fixer_episodes(conn)
+    windowed = vm._conflict_fixer_episodes(conn, since=now - 7 * DAY)
+
+    assert {ep["root_id"] for ep in all_time} == {"R_OLD", "R_NEW", "R_S"}
+    assert {ep["root_id"] for ep in windowed} == {"R_NEW", "R_S"}
+    straddling = next(ep for ep in windowed if ep["root_id"] == "R_S")
+    assert straddling["attempts"] == 2  # kept whole, not truncated
+
+
+def test_conflict_fixer_failed_count_window_only_counts_in_window_failures(conn):
+    now = 100 * DAY
+    failure_payload = {
+        "child_id": "FAILED-F",
+        "parent_id": "P",
+        "root_id": "R",
+        "attempt": 2,
+        "outcome": "gave_up",
+        "blocked": False,
+        "conflict_fingerprint": _park_reason_fingerprint(),
+    }
+    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
+               payload=failure_payload, created_at=now - 20 * DAY)
+    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
+               payload=dict(failure_payload, attempt=3), created_at=now - DAY)
+
+    assert vm._conflict_fixer_failed_count(conn) == 2
+    assert vm._conflict_fixer_failed_count(conn, since=now - 7 * DAY) == 1
+
+
+_V3_CONFLICT_FIXER_KEYS = frozenset({
+    "success_rate_pct", "episodes", "resolved", "failed", "exhausted",
+    "unresolved_by_fixer", "in_flight", "counter",
+})
+
+
+def test_snapshot_schema_v4_window_fields_are_purely_additive(conn):
+    """Schema v3 -> v4 adds ``window_*`` siblings ONLY: every v3 key survives
+    with its all-time meaning — proven by the all-time values being identical
+    across two snapshots computed with different windows on the same DB."""
+    now = 100 * DAY
+    _add_task(conn, "P_OLD", status="blocked")
+    _add_task(conn, "F_OLD", status="done", completed_at=now - 21 * DAY)
+    _dispatch_fixer(conn, "P_OLD", "F_OLD", root="R_OLD",
+                    created_at=now - 21 * DAY)
+    _add_task(conn, "P_NEW", status="blocked")
+    _add_task(conn, "F_NEW", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P_NEW", "F_NEW", root="R_NEW", created_at=now - DAY)
+    failure_payload = {
+        "child_id": "FAILED-F",
+        "parent_id": "P_NEW",
+        "root_id": "R_NEW",
+        "attempt": 1,
+        "outcome": "gave_up",
+        "blocked": False,
+        "conflict_fingerprint": _park_reason_fingerprint(),
+    }
+    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
+               payload=failure_payload, created_at=now - 20 * DAY)
+    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
+               payload=dict(failure_payload, attempt=2), created_at=now - DAY)
+
+    snap_narrow = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    snap_wide = vm.compute_metrics_snapshot(conn, now=now, window_days=365)
+
+    assert snap_narrow["schema_version"] == 4
+    cf = snap_narrow["metrics"]["conflict_fixer"]
+    cf_wide = snap_wide["metrics"]["conflict_fixer"]
+
+    # No v3 key removed or reinterpreted; all-time values ignore the window.
+    assert _V3_CONFLICT_FIXER_KEYS <= set(cf)
+    for key in _V3_CONFLICT_FIXER_KEYS:
+        assert cf[key] == cf_wide[key], key
+
+    # Window siblings exist and actually reflect the window.
+    assert cf["window_days"] == 7
+    assert cf["window_since_epoch"] == now - 7 * DAY
+    assert cf["window_episodes"] == 1       # only R_NEW dispatched within 7d
+    assert cf_wide["window_episodes"] == 2  # both within 365d
+    assert cf["episodes"] == cf_wide["episodes"] == 2  # all-time unchanged
+    assert cf["failed"] == cf_wide["failed"] == 2
+    assert cf["window_failed"] == 1
+    assert cf_wide["window_failed"] == 2
+
+    # Honesty rule: autonomy's cohort is all-time, so it gets no window fields
+    # (a windowed headline there would mix two populations).
+    assert not any(
+        key.startswith("window_") for key in snap_narrow["metrics"]["autonomy"]
+    )
+
+
+def test_render_snapshot_summary_shows_fixer_window_and_tolerates_v3(conn):
+    snap = vm.compute_metrics_snapshot(conn, now=100 * DAY, window_days=7)
+    text = vm.render_snapshot_summary(snap)
+    assert "fixer window:" in text
+    assert "last 7d" in text
+
+    # A v3-shaped snapshot (no window fields) renders without the window line
+    # and without crashing.
+    cf = snap["metrics"]["conflict_fixer"]
+    for key in [k for k in cf if k.startswith("window_")]:
+        del cf[key]
+    text_v3 = vm.render_snapshot_summary(snap)
+    assert "fixer window:" not in text_v3
+
+
+# ---------------------------------------------------------------------------
 # Escalation-rate metric + paired counter
 # ---------------------------------------------------------------------------
 

@@ -180,6 +180,9 @@ MATURITY_DAYS: int = 3
 #                                        parked parent) — higher means more real
 #                                        autonomy on merge conflicts
 #                                        (CONFLICT-FIXER-OUTCOME-HONESTY-S1)
+#   conflict_fixer.window_success_rate_pct +1 windowed sibling of the above
+#                                        (METRICS-WINDOW-S4): same meaning,
+#                                        restricted to the snapshot window
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
@@ -192,6 +195,7 @@ _VERDICT_DIRECTION: dict[str, int] = {
     "decision_latency_days_median": -1,
     "green_gate_streak.flake_debt.value": -1,
     "conflict_fixer.success_rate_pct": 1,
+    "conflict_fixer.window_success_rate_pct": 1,
 }
 
 # Keys with no defensible ROI direction: raw counts, denominators, coverage/
@@ -273,6 +277,17 @@ _DIRECTIONLESS: frozenset[str] = frozenset({
     "conflict_fixer.unresolved_by_fixer",
     "conflict_fixer.in_flight",
     "conflict_fixer.counter.value",
+    # conflict_fixer window siblings (METRICS-WINDOW-S4, schema v4): same
+    # convention as the all-time block above — only window_success_rate_pct
+    # carries a direction (in _VERDICT_DIRECTION); the buckets remain raw
+    # counts. window_days is covered by the bare "window_days" entry.
+    "conflict_fixer.window_episodes",
+    "conflict_fixer.window_resolved",
+    "conflict_fixer.window_failed",
+    "conflict_fixer.window_exhausted",
+    "conflict_fixer.window_unresolved_by_fixer",
+    "conflict_fixer.window_in_flight",
+    "conflict_fixer.window_since_epoch",
     # autonomy's conflict split: raw counts behind autonomy_pct / its counter.
     "autonomy.conflict_fixer_resolved",
     "autonomy.conflict_escalations",
