@@ -14,8 +14,13 @@ from typing import Any, Mapping, Optional
 
 from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
 from agent.usage_pricing import resolve_billing_route
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    buzz_agent_unit_for_workspace,
+)
 from hermes_cli.usage_facts_db import (
     increment_tool_call,
+    max_call_index,
     purge_expired_traces,
     record_llm_call,
     record_tool_result,
@@ -135,6 +140,21 @@ def _worker_dimensions() -> dict[str, str]:
         return resolve_observability_context()
     except Exception:
         return {}
+
+
+def _buzz_unit_for_process() -> Optional[str]:
+    """Buzz agent unit when this process runs inside a managed workspace.
+
+    Same lexical contract as the harvesters (no symlink resolution, no
+    existence check): the buzz-agent@hermes unit's consumption is otherwise
+    indistinguishable from Kanban hermes_agent work — measured as a B6
+    attribution gap.  Fail-closed None on any error.
+    """
+    try:
+        return buzz_agent_unit_for_workspace(os.getcwd())
+    except Exception:
+        logger.debug("board_facts buzz workspace probe failed", exc_info=True)
+        return None
 
 
 def _usage_bucket(usage: Mapping[str, Any], name: str) -> Optional[int]:
@@ -278,9 +298,11 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
     )
     environment_profile = _text(os.environ.get("HERMES_PROFILE"))
     worker_dimensions = _worker_dimensions()
+    buzz_unit = _buzz_unit_for_process()
     lane = _first(
         _text(kwargs.get("lane")),
         _text(worker_dimensions.get("lane")),
+        buzz_unit,
         existing.lane if reuse_existing else None,
         environment_profile,
     )
@@ -290,6 +312,11 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
         environment_profile,
     )
     event_origin = _text(kwargs.get("origin")) or "hermes_agent"
+    if buzz_unit is not None and event_origin in ("hermes_agent", "hermes_aux"):
+        # B6: the buzz-agent@hermes unit runs the hermes runtime inside its
+        # managed workspace; attribute by process cwd (same contract as the
+        # harvesters) instead of letting it blend into Kanban consumption.
+        event_origin = BUZZ_AGENT_ORIGIN
     ctx = (
         existing
         if reuse_existing
@@ -366,12 +393,30 @@ def _is_aux_call(kwargs: Mapping[str, Any]) -> bool:
     ) == "aux"
 
 
+def _persisted_max_aux_call_index(run_id: str) -> Optional[int]:
+    """Highest aux call_index already stored for this run; fail-soft None.
+
+    Aux events carry no shared correlation key (each wrapper event brings a
+    fresh ``api_request_id``), so every aux call resolves a brand-new
+    _RunContext.  Without this seed the in-memory counter restarts at
+    _AUX_CALL_INDEX_START and later aux calls of the same run silently
+    upsert over the first one's row — measured live on run 8816: 8
+    distinct aux api_request_ids, exactly 1 surviving call row.
+    """
+    try:
+        return max_call_index(run_id, min_call_index=_AUX_CALL_INDEX_START)
+    except Exception:
+        logger.debug("board_facts aux index seed failed", exc_info=True)
+        return None
+
+
 def _next_aux_call_index(ctx: _RunContext) -> int:
-    next_index = (
-        _AUX_CALL_INDEX_START
-        if ctx.last_aux_call_index is None
-        else ctx.last_aux_call_index + 1
-    )
+    if ctx.last_aux_call_index is None:
+        persisted = _persisted_max_aux_call_index(ctx.run_id)
+        ctx.last_aux_call_index = (
+            persisted if persisted is not None else _AUX_CALL_INDEX_START - 1
+        )
+    next_index = ctx.last_aux_call_index + 1
     ctx.last_aux_call_index = next_index
     return next_index
 

@@ -23,6 +23,7 @@ from urllib.parse import quote
 from hermes_cli import usage_facts_db as usage_facts_db_mod
 from hermes_cli.usage_facts_buzz_attribution import (
     BUZZ_AGENT_ORIGIN,
+    buzz_agent_unit_for_workspace,
     origin_for_workspace,
 )
 from hermes_cli.usage_facts_db import (
@@ -669,13 +670,15 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
             + draft.cache_write_tokens
         )
 
-    lane = draft.session_id
-    if draft.call_kind == "subagent" and draft.parent_session_id:
-        lane = draft.parent_session_id
-    actual_origin = origin_for_workspace(
-        ORIGIN,
-        next(iter(draft.workspaces)) if len(draft.workspaces) == 1 else None,
-    )
+    # Canon metrik-ssot-register 7.6: lane is a category from a closed
+    # vocabulary, never an identity.  Transcripts carry no lane category —
+    # the only derivable one is the Buzz agent unit from the workspace.
+    # Session identities stay in session_id / parent_session_id.  Older
+    # rows keep their historic session-UUID lane (upserts never erase an
+    # observation); readers must treat UUID-shaped lanes as uncategorized.
+    workspace = next(iter(draft.workspaces)) if len(draft.workspaces) == 1 else None
+    lane = buzz_agent_unit_for_workspace(workspace)
+    actual_origin = origin_for_workspace(ORIGIN, workspace)
 
     call_fields: dict[str, Any] = {
         "origin": actual_origin,
@@ -963,7 +966,7 @@ def recorrelate_existing_calls(
                 f"{placeholders}) "
                 "AND (correlation_source LIKE 'claude_session_id_%' "
                 "OR correlation_source='claude_worktree_path_run')) "
-                "OR (call_kind='subagent' AND lane IN ("
+                "OR (call_kind='subagent' AND COALESCE(parent_session_id, lane) IN ("
                 f"{placeholders}) "
                 "AND (correlation_source LIKE "
                 "'claude_parent_session_id_%' OR "
@@ -992,11 +995,12 @@ def recorrelate_existing_calls(
             placeholders = ", ".join("?" for _ in chunk)
             try:
                 candidates = connection.execute(
-                    "SELECT run_id, session_id, lane, call_kind, "
+                    "SELECT run_id, session_id, parent_session_id, lane, call_kind, "
                     "task_run_id, task_id, chain_id, board, profile, "
                     "correlation_source FROM run_usage_facts "
                     f"WHERE {_CLAUDE_FACT_PREDICATE} AND (session_id IN ("
-                    f"{placeholders}) OR (call_kind='subagent' AND lane IN ("
+                    f"{placeholders}) OR (call_kind='subagent' AND "
+                    f"COALESCE(parent_session_id, lane) IN ("
                     f"{placeholders}))) ORDER BY run_id",
                     (*chunk, *chunk),
                 ).fetchall()
@@ -1010,7 +1014,7 @@ def recorrelate_existing_calls(
                     session_id=_text(row["session_id"]),
                     call_kind=call_kind,
                     parent_session_id=(
-                        _text(row["lane"])
+                        _text(row["parent_session_id"]) or _text(row["lane"])
                         if call_kind == "subagent"
                         else None
                     ),
@@ -1091,7 +1095,9 @@ def _existing_claude_correlation_state(db_path: Path) -> dict[str, str | None]:
             "WHEN (correlation_source LIKE 'claude_parent_session_id_%' "
             "OR (correlation_source='claude_worktree_path_run' "
             "AND call_kind='subagent')) "
-            "AND lane IS NOT NULL AND TRIM(lane) != '' THEN lane "
+            "AND COALESCE(parent_session_id, lane) IS NOT NULL "
+            "AND TRIM(COALESCE(parent_session_id, lane)) != '' "
+            "THEN COALESCE(parent_session_id, lane) "
             "ELSE session_id END AS correlation_session_id, "
             "correlation_source FROM run_usage_facts "
             f"WHERE {_CLAUDE_FACT_PREDICATE} "

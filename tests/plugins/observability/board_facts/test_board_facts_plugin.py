@@ -346,6 +346,74 @@ def test_main_and_aux_calls_use_disjoint_indices_for_the_same_run(
     assert fact["llm_call_count"] == 2
 
 
+def test_aux_calls_without_shared_correlation_keys_get_distinct_indices(
+    monkeypatch,
+    tmp_path,
+):
+    """Regression for the live-measured aux overwrite (run 8816).
+
+    Aux wrapper events carry only a fresh api_request_id each — no shared
+    turn/session/task key — so every aux call resolves a new _RunContext.
+    The index seed must come from the persisted rows, not process memory.
+    """
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "run-aux-only")
+
+    for request_id in ("request-aux-1", "request-aux-2", "request-aux-3"):
+        plugin.on_post_llm_call(
+            api_request_id=request_id,
+            origin="hermes_aux",
+            call_kind="aux",
+            duration_ms=5,
+            usage={"input_tokens": 3, "output_tokens": 1},
+        )
+
+    with sqlite3.connect(path) as conn:
+        indices = [
+            row[0]
+            for row in conn.execute(
+                "SELECT call_index FROM run_llm_calls "
+                "WHERE run_id='run-aux-only' ORDER BY call_index"
+            )
+        ]
+
+    start = plugin._AUX_CALL_INDEX_START
+    assert indices == [start, start + 1, start + 2]
+
+
+def test_hermes_runtime_inside_buzz_workspace_is_attributed(
+    monkeypatch,
+    tmp_path,
+):
+    """B6: the buzz-agent@hermes unit must not blend into Kanban usage."""
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    monkeypatch.setattr(
+        board_facts.os,
+        "getcwd",
+        lambda: "/mnt/data/services/buzz-agent-workspaces/hermes/REPOS/hermes-agent",
+    )
+
+    plugin.on_post_llm_call(
+        api_request_id="request-buzz-hermes",
+        origin="hermes_agent",
+        call_kind="main_loop",
+        duration_ms=5,
+        usage={"input_tokens": 10, "output_tokens": 2},
+    )
+
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT origin, lane FROM run_usage_facts "
+            "WHERE run_id='request-buzz-hermes'"
+        ).fetchone()
+
+    assert tuple(row) == ("buzz_agent", "hermes")
+
+    assert tuple(row) == ("buzz_agent", "hermes")
+
+
 def test_request_trace_persists_each_growing_message_once(
     monkeypatch,
     tmp_path,

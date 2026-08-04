@@ -220,9 +220,17 @@ def test_round2_entries_and_documented_absences() -> None:
     check = priceability("codex-auto-review", "openai")
     assert check["classification"] == "documented_absent"
 
-    # Capture gaps stay their own class.
+    # Capture gaps stay their own class.  A missing provider is a mapping
+    # problem, not a price gap: gpt-5.4-mini resolves unambiguously to
+    # openai (provider_inferred), where the sourcedly-absent write rate
+    # classifies it — only unresolvable models stay provider_missing.
     assert priceability(None, "xai")["classification"] == "model_missing"
-    assert priceability("gpt-5.4-mini", None)["classification"] == "provider_missing"
+    check = priceability("gpt-5.4-mini", None)
+    assert check["provider_inferred"] is True
+    assert check["resolved_provider"] == "openai"
+    assert check["classification"] == "documented_absent"
+    check = priceability("<synthetic>", None)
+    assert check["classification"] == "model_missing"
 
 
 def test_qwen38_models_have_no_payg_rate() -> None:
@@ -276,6 +284,71 @@ def test_ttl_split_replaces_total_in_billing() -> None:
     assert result.amount_usd == Decimal("10.00") + Decimal("3.125")
     assert result.pricing_version is not None
     assert USAGE_FACTS_PRICING_VERSION in result.pricing_version
+
+
+def test_billable_input_subtracts_cache_when_contained() -> None:
+    """Canon register §5f: OpenAI-convention rows count cached reads inside
+    input_tokens; pricing both bills them twice (measured 8.1x on codex/kimi
+    lanes over 30d).  gpt-5.5 rates: input $5.00, cache_read $0.50."""
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=400_000)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    # billable input 600k * $5 + 400k * $0.50
+    assert result.amount_usd == Decimal("3.00") + Decimal("0.20")
+
+
+def test_billable_input_untouched_for_anthropic_convention() -> None:
+    """Anthropic input excludes cache; cache reads far above input must not
+    trigger the subtraction.  claude-sonnet-5: input $3.00, cache_read $0.30."""
+    usage = UsageFactsUsage(input_tokens=1_000, cache_read_tokens=50_000)
+    result = estimate_equivalent_cost("claude-sonnet-5", usage, provider="anthropic")
+    assert result.amount_usd == (
+        Decimal("1000") * Decimal("3.00") / Decimal(_ONE_MILLION)
+        + Decimal("50000") * Decimal("0.30") / Decimal(_ONE_MILLION)
+    )
+
+
+def test_anthropic_row_with_small_cache_is_not_subtracted() -> None:
+    """Review-1-Blocker: 77 production rows carry cache_read <= input on the
+    Anthropic path — their input is real billed input, never cache-inclusive.
+    The subtraction must NOT fire for provider=anthropic even then."""
+    usage = UsageFactsUsage(input_tokens=24_798, cache_read_tokens=22_837)
+    result = estimate_equivalent_cost(
+        "claude-fable-5", usage, provider="anthropic", origin="claude_code"
+    )
+    assert result.amount_usd == (
+        Decimal("24798") * Decimal("10.00") / Decimal(_ONE_MILLION)
+        + Decimal("22837") * Decimal("1.00") / Decimal(_ONE_MILLION)
+    )
+
+
+def test_qwen_under_claude_code_is_anthropic_convention() -> None:
+    """The qwen token-plan traffic runs the Anthropic protocol through
+    claude_code (explicit cache, cf. _EXPLICIT_CACHE_ORIGINS): no
+    subtraction — while the same model on the OpenAI-compatible qwen_cli
+    path subtracts."""
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=400_000)
+    explicit = estimate_equivalent_cost(
+        "qwen3.7-max", usage, provider="alibaba-token-plan", origin="claude_code"
+    )
+    implicit = estimate_equivalent_cost(
+        "qwen3.7-max", usage, provider="qwen", origin="qwen_cli"
+    )
+    # explicit: full input 2.50 + read 400k*0.25 (10% of 2.50)
+    assert explicit.amount_usd == Decimal("2.50") + Decimal("0.10")
+    # implicit: billable input 600k*2.50 + read 400k*0.50 (20% of 2.50)
+    assert implicit.amount_usd == Decimal("1.50") + Decimal("0.20")
+
+
+def test_billable_input_fully_cached_row_prices_zero_uncached_input() -> None:
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=1_000_000)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    assert result.amount_usd == Decimal("0.50")
+
+
+def test_billable_input_neutral_without_cache() -> None:
+    usage = UsageFactsUsage(input_tokens=_ONE_MILLION)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    assert result.amount_usd == Decimal("5.00")
 
 
 def test_no_split_falls_back_to_total() -> None:

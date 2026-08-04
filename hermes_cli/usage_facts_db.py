@@ -578,6 +578,36 @@ def reclassify_run_origin(
         return changed
 
 
+def max_call_index(
+    run_id: str,
+    *,
+    min_call_index: Optional[int] = None,
+    path: Optional[os.PathLike[str] | str] = None,
+) -> Optional[int]:
+    """Highest persisted call_index for a run; None when no row matches.
+
+    Read-only.  Writers use this to resume an index namespace that process
+    memory cannot carry (e.g. aux calls, whose events resolve a fresh
+    context per call).
+    """
+    normalized_run_id = str(run_id).strip()
+    if not normalized_run_id:
+        raise ValueError("run_id must be non-empty")
+    with _connection(path) as conn:
+        if min_call_index is None:
+            row = conn.execute(
+                "SELECT MAX(call_index) FROM run_llm_calls WHERE run_id = ?",
+                (normalized_run_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT MAX(call_index) FROM run_llm_calls "
+                "WHERE run_id = ? AND call_index >= ?",
+                (normalized_run_id, int(min_call_index)),
+            ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
 def finalize_run_tool_call_count(
     run_id: str,
     *,
