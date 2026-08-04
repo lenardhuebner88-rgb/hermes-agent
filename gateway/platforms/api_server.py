@@ -6544,14 +6544,17 @@ class APIServerAdapter(BasePlatformAdapter):
         if agent is None and task is None:
             return web.json_response(_openai_error(f"Run not found: {run_id}", code="run_not_found"), status=404)
 
-        self._set_run_status(run_id, "stopping", last_event="run.stopping")
-        self._stopping_run_ids.add(run_id)
-
         if agent is not None:
             try:
                 agent.interrupt("Stop requested via API")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.exception("[api_server] stop failed for run %s", run_id)
+                return web.json_response(
+                    _openai_error(str(exc), code="run_stop_failed"), status=500
+                )
+
+        self._set_run_status(run_id, "stopping", last_event="run.stopping")
+        self._stopping_run_ids.add(run_id)
 
         return web.json_response({"run_id": run_id, "status": "stopping"})
 
