@@ -37,9 +37,12 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    Ein früher als „legitim" verworfener Kandidat wird nur mit NEUER Evidenz erneut
    geprüft.
 
-2. **Revier wählen.** {{PARAMS}} nennt die Reviere; nimm das, das im Ledger am
-   längsten nicht dran war. Rotation ist Pflicht — sonst frisst sich der Loop in
-   ein Modul fest.
+2. **Revier wählen — maschinenlesbar, nicht nach Gefühl.**
+   Jede Ledger-Zeile dieses Packs beginnt mit `REVIER=<n>`. Lies die letzten
+   Zeilen, nimm die kleinste Nummer, die am längsten nicht vorkam, und schreibe
+   sie in deine eigene Ledger-Zeile in exakt derselben Form. Ohne dieses Feld
+   liest die nächste Runde die Rotation falsch und frisst sich in ein Modul fest.
+   Kommt kein `REVIER=` vor, beginne bei 1.
 
 3. **Kandidaten mechanisch sammeln — per AST, nicht per grep.**
    `rg` zählt hier falsch: mehrzeilige Handler, verschachtelte `try`, und
@@ -90,6 +93,12 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    plausiblem Ersatzwert. Halte dich an das Idiom, das das betroffene Modul an
    anderer Stelle bereits richtig verwendet, und zitiere diese Stelle im Commit.
    NICHT: das Verhalten umbauen, Signaturen ändern, andere Aufrufer mitziehen.
+
+   **Ein Commit, der nur eine Testdatei anfasst, ist kein Fix.** Wenn dein Diff
+   keine Produktionsdatei berührt, hast du die Lüge dokumentiert statt behoben —
+   dann gehört der Fund nach ESCALATIONS.md und `last-status` lautet `BLOCKED`,
+   nicht `FIXED`. Ein grüner Test um einen ungefixten Bug herum ist Reward-Hacking
+   und fliegt in der Morgen-Review raus.
 
 7. **Grün messen + Gate.** `git add -A && ./loops/gate.sh`
    (`git add -A` VOR dem Gate — neue Dateien sind für `git diff HEAD` sonst

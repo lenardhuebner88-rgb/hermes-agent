@@ -183,3 +183,28 @@ def test_the_ast_recipe_in_the_prompt_actually_runs(prompt):
     snippet = prompt[start:prompt.index("PY", start)]
     snippet = snippet.replace("<revier>", "loops")
     ast.parse(inspect.cleandoc(snippet))
+
+
+# ── Iterationsstufen 1–2 ────────────────────────────────────────────────────
+
+def test_revier_rotation_is_machine_readable(prompt):
+    """Stufe 1: Rotation nach Gefuehl ist keine Rotation.
+
+    dashboard-experience plante drei Naechte hintereinander denselben Slice, weil
+    der Planner den Ledger-Zustand frei interpretierte. Ein maschinenlesbares
+    Feld laesst sich nicht wegargumentieren.
+    """
+    assert "REVIER=" in prompt
+    assert "kleinste Nummer" in prompt
+    assert "beginne bei 1" in prompt, "der leere Erstfall muss definiert sein"
+
+
+def test_a_test_only_diff_is_not_a_fix(prompt):
+    """Stufe 2: Anti-Reward-Hacking.
+
+    Ein Commit, der nur eine Testdatei anfasst, dokumentiert die Luege, statt sie
+    zu beheben — sieht im Ledger aber wie FIXED aus.
+    """
+    assert "nur eine Testdatei anfasst, ist kein Fix" in prompt
+    assert "Reward-Hacking" in prompt
+    assert "`BLOCKED`" in prompt
