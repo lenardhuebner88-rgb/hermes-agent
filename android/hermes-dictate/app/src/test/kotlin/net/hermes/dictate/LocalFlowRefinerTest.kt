@@ -50,6 +50,51 @@ class LocalFlowRefinerTest {
     }
 
     @Test
+    fun `accepts the natural German phrasings for undo and delete`() {
+        for (spoken in listOf("Streich das.", "Vergiss das", "Lösch das!", "Das war falsch", "Scratch that")) {
+            assertEquals(spoken, DictationTransform.UndoLastSegment, LocalFlowRefiner.transform(spoken, "de-DE"))
+        }
+        for (spoken in listOf("Letzten Satz löschen", "Streich den letzten Satz", "delete last sentence")) {
+            assertEquals(spoken, DictationTransform.DeleteLastSentence, LocalFlowRefiner.transform(spoken, "de-DE"))
+        }
+    }
+
+    @Test
+    fun `a command word inside a longer sentence stays dictated text`() {
+        for (spoken in listOf(
+            "streich das Meeting am Montag",
+            "vergiss das nicht",
+            "das war falsch berechnet",
+            "lösche den letzten Satz aus dem Protokoll",
+        )) {
+            val transform = LocalFlowRefiner.transform(spoken, "de-DE")
+            assertEquals(spoken, DictationTransform.Text::class.java, transform.javaClass)
+        }
+    }
+
+    @Test
+    fun `ordinary prose survives the correction and filler cleanup`() {
+        for (sentence in listOf(
+            "Es funktioniert besser jetzt",
+            "das läuft besser als gestern",
+            "wir haben nein gesagt",
+            "was ich meine ist ganz einfach",
+            "im Grunde genommen ist es fertig",
+            "nein danke das reicht mir",
+        )) {
+            assertEquals(sentence, LocalFlowRefiner.refine(sentence, "de-DE"))
+        }
+    }
+
+    @Test
+    fun `repeated punctuation command words are not collapsed`() {
+        assertEquals(
+            "Absatz eins neuer Absatz Absatz zwei",
+            LocalFlowRefiner.refine("Absatz eins neuer Absatz Absatz zwei", "de-DE"),
+        )
+    }
+
+    @Test
     fun `does not damage URLs email addresses numbers or code fragments`() {
         val input = "mail a.b+test@example.com URL https://x.dev/a_a Wert 82,4 code foo_bar()"
         assertEquals(input, LocalFlowRefiner.refine(input, "de-DE"))

@@ -57,7 +57,7 @@ class DictateInputMethodService :
     }
 
     /** Audio captured for the cloud path, alive only between StopRecording and Upload. */
-    private var pendingAudio: ByteArray? = null
+    private var pendingAudio: RecordedAudio? = null
     private var cloudAppCategory: String? = null
     private var cloudStyle: String? = null
     private var cloudPolishAllowed = true
@@ -88,7 +88,10 @@ class DictateInputMethodService :
             languageTag = { prefs.recognitionLanguageTag.takeIf(String::isNotBlank) },
             localRefine = { prefs.localRefine },
         )
-        controller = DictationController(pipeline::process)
+        controller = DictationController(
+            previewTransform = pipeline::processPartial,
+            transform = pipeline::process,
+        )
         uploadExecutor = Executors.newSingleThreadExecutor()
         statusExecutor = Executors.newSingleThreadExecutor()
         // A process killed mid-recording must not leave audio in the cache indefinitely.
@@ -263,9 +266,9 @@ class DictateInputMethodService :
     }
 
     private fun stopRecordingAndReport() {
-        val bytes = recorder?.stopAndRead()
-        pendingAudio = bytes
-        mainHandler.post { run(controller.recordingReady(bytes != null)) }
+        val audio = recorder?.stopAndRead()
+        pendingAudio = audio
+        mainHandler.post { run(controller.recordingReady(audio != null)) }
     }
 
     private fun startUpload(token: Int) {
@@ -277,8 +280,8 @@ class DictateInputMethodService :
         }
         uploadExecutor.execute {
             val outcome = transcriber.transcribe(
-                audio,
-                "audio/mp4",
+                audio.bytes,
+                audio.mimeType,
                 language = prefs.languageHint,
                 polish = prefs.flowPolish && cloudPolishAllowed,
                 appCategory = cloudAppCategory,
@@ -450,6 +453,11 @@ class DictateInputMethodService :
         when (status) {
             UiStatus.Idle -> showStatus(getString(R.string.status_idle), error = false)
             UiStatus.Listening -> showStatus(getString(R.string.status_listening), error = false)
+            UiStatus.Processing -> showStatus(getString(R.string.status_processing), error = false)
+            UiStatus.Done -> {
+                showStatus(getString(R.string.status_done), error = false)
+                mainHandler.postDelayed(statusResetRunnable, 1_200)
+            }
             UiStatus.Recording -> showStatus(getString(R.string.status_recording), error = false)
             UiStatus.Uploading -> showStatus(getString(R.string.status_uploading), error = false)
             is UiStatus.CloudDone -> {

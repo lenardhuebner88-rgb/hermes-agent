@@ -53,6 +53,29 @@ object PunctuationMapper {
 
     private val sentenceEnders = setOf('.', '!', '?')
 
+    // "Punkt", "Komma" and "Bindestrich" are also ordinary German nouns. After a determiner —
+    // directly or across one inflected adjective — the noun reading is the only sensible one,
+    // so "wir bringen es auf den Punkt" keeps its last word.
+    private val nounCapable = setOf("punkt", "komma", "bindestrich", "period", "comma", "hyphen")
+    private val determiners = setOf(
+        "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "eines",
+        "kein", "keine", "keinen", "keinem", "mein", "meine", "meinen", "dein", "deine",
+        "sein", "seine", "ihr", "ihre", "unser", "unsere", "euer", "eure", "jeder", "jede",
+        "jeden", "dieser", "diese", "dieses", "diesen", "jener", "jene", "am", "zum", "zur",
+        "beim", "vom", "im", "ans", "aufs",
+    )
+    private val inflectedAdjective = Regex("(?iu)^[\\p{L}]{3,}(?:er|es|en|em|e)$")
+
+    private fun isSpokenNoun(words: List<String>, index: Int, rule: Rule): Boolean {
+        if (rule.words.size != 1 || rule.words[0] !in nounCapable) return false
+        if (index == 0) return false
+        val previous = words[index - 1].lowercase()
+        if (previous in determiners) return true
+        return index >= 2 &&
+            inflectedAdjective.matches(previous) &&
+            words[index - 2].lowercase() in determiners
+    }
+
     fun map(raw: String): String {
         if (raw.isBlank()) return ""
         val words = raw.trim().split(Regex("\\s+"))
@@ -61,7 +84,7 @@ object PunctuationMapper {
         var joinNext = false
         var i = 0
         while (i < words.size) {
-            val rule = matchAt(words, i)
+            val rule = matchAt(words, i)?.takeUnless { isSpokenNoun(words, i, it) }
             if (rule != null) {
                 when (rule.kind) {
                     Kind.ATTACH -> {

@@ -1,58 +1,110 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Expanded state while dictating: [cancel] [live text / status] [confirm]. -->
-<LinearLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Calm, touch-safe expanded state: cancel · explicit state + transcript · Hermes · confirm. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/pill_root"
     android:layout_width="wrap_content"
-    android:layout_height="56dp"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
+    android:layout_height="@dimen/pill_height"
     android:background="@drawable/bg_pill"
-    android:elevation="8dp"
-    android:paddingStart="6dp"
-    android:paddingEnd="6dp">
+    android:elevation="@dimen/overlay_elevation">
 
-    <ImageButton
-        android:id="@+id/pill_cancel"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_close"
-        android:padding="12dp"
-        android:contentDescription="@string/overlay_cancel_desc" />
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="@dimen/pill_content_height"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/pill_padding_horizontal"
+        android:paddingEnd="@dimen/pill_padding_horizontal">
 
-    <TextView
-        android:id="@+id/pill_text"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:layout_marginStart="4dp"
-        android:layout_marginEnd="4dp"
-        android:maxWidth="220dp"
-        android:minWidth="80dp"
-        android:maxLines="1"
-        android:ellipsize="start"
-        android:textColor="@color/text_primary"
-        android:textSize="14sp"
-        android:text="@string/status_listening" />
+        <ImageButton
+            android:id="@+id/pill_cancel"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@android:color/transparent"
+            android:contentDescription="@string/overlay_cancel_desc"
+            android:padding="@dimen/overlay_icon_inset"
+            android:src="@drawable/ic_close" />
 
-    <Button
-        android:id="@+id/pill_hermes"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@drawable/bg_key"
-        android:contentDescription="@string/send_to_hermes"
-        android:text="H"
-        android:textColor="@color/accent"
-        android:textStyle="bold" />
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="@dimen/pill_column_margin"
+            android:layout_marginEnd="@dimen/pill_column_margin"
+            android:layout_weight="1"
+            android:minWidth="@dimen/pill_column_min_width"
+            android:gravity="center_vertical"
+            android:orientation="vertical">
 
-    <ImageButton
-        android:id="@+id/pill_confirm"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_check"
-        android:backgroundTint="@color/accent"
-        android:padding="12dp"
-        android:contentDescription="@string/overlay_confirm_desc" />
-</LinearLayout>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <!-- Recognition mode at a glance: on-device or cloud. The status copy names the
+                     mode as well, so color is never the only carrier. -->
+                <View
+                    android:id="@+id/pill_mode"
+                    android:layout_width="@dimen/overlay_mode_dot"
+                    android:layout_height="@dimen/overlay_mode_dot"
+                    android:layout_marginEnd="@dimen/overlay_mode_dot_margin"
+                    android:background="@drawable/bg_mode_dot"
+                    android:importantForAccessibility="yes" />
+
+                <TextView
+                    android:id="@+id/pill_status"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:accessibilityLiveRegion="polite"
+                    android:importantForAccessibility="yes"
+                    android:text="@string/status_listening"
+                    android:textAllCaps="true"
+                    android:textColor="@color/listening"
+                    android:textSize="@dimen/overlay_text_status"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/pill_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="start"
+                android:maxLines="2"
+                android:importantForAccessibility="yes"
+                android:text="@string/overlay_speak_now"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/overlay_text_body" />
+        </LinearLayout>
+
+        <!-- Secondary action: the inset background keeps it visually quieter than stop/cancel
+             while the 48dp box stays the touch target. -->
+        <ImageButton
+            android:id="@+id/pill_hermes"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@drawable/bg_hermes_action"
+            android:contentDescription="@string/send_to_hermes"
+            android:padding="@dimen/overlay_icon_inset"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_hermes"
+            android:tint="@color/accent" />
+
+        <ImageButton
+            android:id="@+id/pill_confirm"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@android:color/transparent"
+            android:backgroundTint="@color/accent"
+            android:contentDescription="@string/overlay_confirm_unavailable_desc"
+            android:padding="@dimen/overlay_icon_inset"
+            android:src="@drawable/ic_check" />
+    </LinearLayout>
+
+    <net.hermes.dictate.OverlayLevelView
+        android:id="@+id/pill_level"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/pill_level_height"
+        android:layout_gravity="bottom" />
+</FrameLayout>

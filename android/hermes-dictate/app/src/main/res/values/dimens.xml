@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Overlay measurement tokens. The layouts and OverlayGeometry must not carry their own copies;
+     OverlayGeometryTokenTest asserts the Kotlin constants still match the values below. -->
+<resources>
+    <!-- Touch and shape -->
+    <dimen name="overlay_touch_target">48dp</dimen>
+    <dimen name="overlay_icon_inset">12dp</dimen>
+    <dimen name="overlay_elevation">8dp</dimen>
+    <dimen name="overlay_stroke">1dp</dimen>
+    <dimen name="overlay_action_corner">12dp</dimen>
+
+    <!-- Pill frame -->
+    <dimen name="pill_height">72dp</dimen>
+    <dimen name="pill_content_height">68dp</dimen>
+    <dimen name="pill_padding_horizontal">6dp</dimen>
+    <dimen name="pill_column_margin">6dp</dimen>
+    <dimen name="pill_column_min_width">104dp</dimen>
+    <dimen name="pill_level_height">3dp</dimen>
+
+    <!-- Bubble -->
+    <dimen name="bubble_size">48dp</dimen>
+
+    <!-- Type scale -->
+    <dimen name="overlay_text_status">11sp</dimen>
+    <dimen name="overlay_text_body">15sp</dimen>
+    <dimen name="overlay_text_action">16sp</dimen>
+
+    <!-- Mode indicator -->
+    <dimen name="overlay_mode_dot">8dp</dimen>
+    <dimen name="overlay_mode_dot_margin">6dp</dimen>
+</resources>

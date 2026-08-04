@@ -5,9 +5,11 @@
 
     <!-- Keyboard panel -->
     <string name="status_idle">Bereit</string>
-    <string name="status_listening">Ich höre zu – zum Stoppen tippen</string>
-    <string name="status_recording">Cloud-Aufnahme läuft – zum Senden tippen</string>
-    <string name="status_uploading">Übertrage an Hermes …</string>
+    <string name="status_listening">Hört zu</string>
+    <string name="status_processing">Verarbeitet …</string>
+    <string name="status_done">Fertig</string>
+    <string name="status_recording">Cloud hört zu</string>
+    <string name="status_uploading">Verarbeitet in Hermes …</string>
     <string name="status_cloud_done">Cloud-Diktat eingefügt</string>
     <string name="status_cloud_done_provider">Cloud-Diktat eingefügt (%1$s)</string>
     <string name="chip_on_device">On-Device</string>
@@ -21,9 +23,18 @@
     <!-- Overlay bubble (Wispr-Flow style, works in any app) -->
     <string name="overlay_service_label">Hermes Diktat – Blase</string>
     <string name="overlay_service_description">Zeigt eine schwebende Diktier-Blase über anderen Apps: liest, ob ein Textfeld fokussiert ist (um die Blase ein-/auszublenden), und fügt diktierten Text in dieses Feld ein. Es wird kein Bildschirminhalt protokolliert oder übertragen.</string>
-    <string name="overlay_bubble_desc">Diktat starten</string>
+    <string name="overlay_bubble_desc">Diktat starten. Lange drücken für Einstellungen.</string>
     <string name="overlay_cancel_desc">Diktat abbrechen</string>
-    <string name="overlay_confirm_desc">Diktat übernehmen</string>
+    <string name="overlay_dismiss_desc">Diktat-Hinweis schließen</string>
+    <string name="overlay_stop_desc">Diktat beenden und übernehmen</string>
+    <string name="overlay_undo_desc">Eingefügten Text zurücknehmen</string>
+    <string name="overlay_retry_exhausted_desc">Kein weiterer Versuch möglich</string>
+    <string name="overlay_confirm_unavailable_desc">Keine Aktion verfügbar</string>
+    <string name="overlay_mode_on_device">Erkennung auf dem Gerät</string>
+    <string name="overlay_mode_cloud">Erkennung über die Cloud</string>
+    <string name="overlay_speak_now">Sprich jetzt …</string>
+    <string name="overlay_status_error">Hinweis</string>
+    <string name="overlay_status_copy">Eingefügt</string>
 
     <!-- Errors (always visible, never silent) -->
     <string name="err_no_speech">Nichts gehört – Diktat gestoppt</string>

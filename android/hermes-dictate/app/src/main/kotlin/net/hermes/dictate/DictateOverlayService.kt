@@ -8,19 +8,23 @@ import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
+import android.view.WindowInsets
+import android.view.animation.DecelerateInterpolator
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ImageButton
-import android.widget.Button
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
@@ -60,7 +64,7 @@ class DictateOverlayService :
 
     private var dictation: OnDeviceDictation? = null
     private var recorder: CloudRecorder? = null
-    private var pendingAudio: ByteArray? = null
+    private var pendingAudio: RecordedAudio? = null
     private var cloudAppCategory: String? = null
     private var cloudStyle: String? = null
     private var cloudPolishAllowed = true
@@ -74,6 +78,7 @@ class DictateOverlayService :
     private var expanded = false
     private var destroyed = false
     private var cloudLoggedIn = false
+    private var currentStatus: UiStatus = UiStatus.Idle
 
     private val statusResetRunnable = Runnable { applyStatus(UiStatus.Idle) }
 
@@ -86,7 +91,10 @@ class DictateOverlayService :
             languageTag = { prefs.recognitionLanguageTag.takeIf(String::isNotBlank) },
             localRefine = { prefs.localRefine },
         )
-        controller = DictationController(pipeline::process)
+        controller = DictationController(
+            previewTransform = pipeline::processPartial,
+            transform = pipeline::process,
+        )
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         committer = AccessibilityNodeCommitter(this)
         CloudRecorder.cleanupStale(this)
@@ -167,9 +175,14 @@ class DictateOverlayService :
     private fun addBubbleWindow() {
         val bubble = layoutInflater().inflate(R.layout.overlay_bubble, null)
         overlayView = bubble
-        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getMetrics(it) }
+        val screen = currentScreen()
+        val density = resources.displayMetrics.density
+        val sizePx = (BubbleAppearance.sizeDp(prefs.overlayBubbleSize, prefs.overlayShrinkIdle) * density).toInt()
+        val marginPx = edgeMarginPx()
         val onRight = prefs.overlayBubbleOnRight
-        val y = prefs.overlayBubbleY.takeIf { it >= 0 } ?: (metrics.heightPixels / 2)
+        val y = prefs.overlayBubbleY.takeIf { it >= 0 }
+            ?.let { BubblePlacement.clampY(it, sizePx, screen, marginPx) }
+            ?: BubblePlacement.centeredY(sizePx, screen, marginPx)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -178,7 +191,7 @@ class DictateOverlayService :
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-            x = 0
+            x = marginPx
             this.y = y
         }
         overlayParams = params
@@ -196,7 +209,7 @@ class DictateOverlayService :
     private fun updateBubbleVisibility() {
         // While actively dictating the pill must stay visible even if focus tracking races
         // (rotation, transient window changes) — only hide the idle bubble on no-focus.
-        val visible = focusedNode != null || controller.phase != DictationController.Phase.IDLE
+        val visible = OverlaySafety.shouldShow(focusedNode != null, controller.phase)
         overlayView?.visibility = if (visible) View.VISIBLE else View.GONE
         if (!expanded) applyBubbleAppearance(active = controller.phase != DictationController.Phase.IDLE)
     }
@@ -211,6 +224,8 @@ class DictateOverlayService :
         )
         params.width = (sizeDp * density).toInt()
         params.height = (sizeDp * density).toInt()
+        params.x = edgeMarginPx()
+        params.y = BubblePlacement.clampY(params.y, params.height, currentScreen(), edgeMarginPx())
         view.alpha = prefs.overlayBubbleOpacity / 100f
         runCatching { windowManager.updateViewLayout(view, params) }
     }
@@ -219,11 +234,10 @@ class DictateOverlayService :
     private fun wireBubbleTouch(view: View, params: WindowManager.LayoutParams) {
         var startY = 0
         var startRawY = 0f
-        var startRawX = 0f
-        var moved = false
         var longPressed = false
+        val gesture = BubbleGesture(ViewConfiguration.get(this).scaledTouchSlop.toFloat())
         val longPress = Runnable {
-            if (!moved) {
+            if (!gesture.moved) {
                 longPressed = true
                 view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                 startActivity(
@@ -236,37 +250,42 @@ class DictateOverlayService :
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     startY = params.y
-                    startRawX = event.rawX
                     startRawY = event.rawY
-                    moved = false
+                    gesture.begin(event.rawX, event.rawY)
                     longPressed = false
                     mainHandler.postDelayed(longPress, LONG_PRESS_MS)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dy = (event.rawY - startRawY).toInt()
-                    val dx = event.rawX - startRawX
-                    if (kotlin.math.abs(dx) > DRAG_SLOP || kotlin.math.abs(dy) > DRAG_SLOP) moved = true
+                    val moved = gesture.move(event.rawX, event.rawY)
                     if (moved) mainHandler.removeCallbacks(longPress)
                     if (moved) {
                         // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted Y the
                         // bubble could otherwise be parked off-screen permanently.
-                        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getMetrics(it) }
-                        val maxY = (metrics.heightPixels - v.height).coerceAtLeast(0)
-                        params.y = (startY + dy).coerceIn(0, maxY)
+                        params.y = BubblePlacement.clampY(
+                            startY + dy,
+                            v.height,
+                            currentScreen(),
+                            edgeMarginPx(),
+                        )
                         runCatching { windowManager.updateViewLayout(v, params) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(longPress)
-                    if (moved) {
-                        snapToEdge(v, params, event.rawX)
-                        prefs.overlayBubbleY = params.y
-                    } else if (!longPressed && event.actionMasked == MotionEvent.ACTION_UP) {
-                        v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        v.performClick()
-                        onMicTapped()
+                    when (gesture.finish(event.actionMasked == MotionEvent.ACTION_CANCEL, longPressed)) {
+                        BubbleGesture.Finish.DRAG -> {
+                            snapToEdge(v, params, event.rawX)
+                            prefs.overlayBubbleY = params.y
+                        }
+                        BubbleGesture.Finish.TAP -> {
+                            v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            v.performClick()
+                            onMicTapped()
+                        }
+                        BubbleGesture.Finish.LONG_PRESS, BubbleGesture.Finish.CANCEL -> {}
                     }
                     true
                 }
@@ -276,12 +295,41 @@ class DictateOverlayService :
     }
 
     private fun snapToEdge(v: View, params: WindowManager.LayoutParams, lastRawX: Float) {
-        val metrics = DisplayMetrics().also { windowManager.defaultDisplay.getMetrics(it) }
-        val onRight = lastRawX >= metrics.widthPixels / 2f
+        val screen = currentScreen()
+        val onRight = BubblePlacement.isRight(lastRawX, screen.widthPx)
         prefs.overlayBubbleOnRight = onRight
         params.gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-        params.x = 0
+        params.x = edgeMarginPx()
+        params.y = BubblePlacement.clampY(params.y, v.height, screen, edgeMarginPx())
         runCatching { windowManager.updateViewLayout(v, params) }
+    }
+
+    private fun currentScreen(): BubbleScreen {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val metrics = windowManager.currentWindowMetrics
+            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars())
+            return BubbleScreen(
+                widthPx = metrics.bounds.width(),
+                heightPx = metrics.bounds.height(),
+                topInsetPx = insets.top,
+                bottomInsetPx = insets.bottom,
+            )
+        }
+        @Suppress("DEPRECATION")
+        val legacy = DisplayMetrics().also { windowManager.defaultDisplay.getMetrics(it) }
+        return BubbleScreen(legacy.widthPixels, legacy.heightPixels, 0, 0)
+    }
+
+    private fun edgeMarginPx(): Int = (BUBBLE_EDGE_MARGIN_DP * resources.displayMetrics.density).toInt()
+
+    private fun applyPillGeometry(view: View, params: WindowManager.LayoutParams) {
+        val density = resources.displayMetrics.density
+        val screen = currentScreen()
+        params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density)
+        params.height = OverlayGeometry.pillHeightPx(density)
+        params.x = edgeMarginPx()
+        params.y = BubblePlacement.clampY(params.y, params.height, screen, edgeMarginPx())
+        if (view.isAttachedToWindow) runCatching { windowManager.updateViewLayout(view, params) }
     }
 
     /** Swaps the collapsed bubble layout for the expanded pill layout, or back. */
@@ -294,29 +342,58 @@ class DictateOverlayService :
         val layout = if (expand) R.layout.overlay_pill else R.layout.overlay_bubble
         val view = layoutInflater().inflate(layout, null)
         overlayView = view
+        val pillEntryDuration = if (expand) preparePillEntry(view) else 0L
         if (expand) {
-            params.width = WindowManager.LayoutParams.WRAP_CONTENT
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT
-            view.findViewById<ImageButton>(R.id.pill_cancel).setOnClickListener {
-                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                run(controller.interrupted())
-                clearPillPreview()
-            }
-            view.findViewById<ImageButton>(R.id.pill_confirm).setOnClickListener {
-                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                run(controller.micTapped())
-            }
-            view.findViewById<Button>(R.id.pill_hermes).setOnClickListener {
-                handoffToHermes()
-            }
+            applyPillGeometry(view, params)
         } else {
             wireBubbleTouch(view, params)
         }
         overlayParams = params
         windowManager.addView(view, params)
+        if (expand) {
+            view.post {
+                val liveParams = overlayParams ?: return@post
+                liveParams.y = BubblePlacement.clampY(
+                    liveParams.y,
+                    view.height.takeIf { it > 0 }
+                        ?: OverlayGeometry.pillHeightPx(resources.displayMetrics.density),
+                    currentScreen(),
+                    edgeMarginPx(),
+                )
+                runCatching { windowManager.updateViewLayout(view, liveParams) }
+                playPillEntry(view, pillEntryDuration)
+            }
+        }
         if (!expand) applyBubbleAppearance(active = false)
-        applyPillPreview(lastPreview)
         updateBubbleVisibility()
+    }
+
+    private fun preparePillEntry(view: View): Long {
+        val animatorScale = runCatching {
+            Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
+        }.getOrDefault(1f)
+        val duration = OverlayMotion.durationMs(OverlayMotion.PILL_ENTER_MS, animatorScale)
+        if (duration == 0L) {
+            view.alpha = 1f
+            view.scaleX = 1f
+            view.scaleY = 1f
+        } else {
+            view.alpha = 0f
+            view.scaleX = PILL_ENTER_SCALE
+            view.scaleY = PILL_ENTER_SCALE
+        }
+        return duration
+    }
+
+    private fun playPillEntry(view: View, duration: Long) {
+        if (duration == 0L) return
+        view.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(duration)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
     }
 
     private fun layoutInflater() = android.view.LayoutInflater.from(this)
@@ -442,9 +519,9 @@ class DictateOverlayService :
     }
 
     private fun stopRecordingAndReport() {
-        val bytes = recorder?.stopAndRead()
-        pendingAudio = bytes
-        mainHandler.post { run(controller.recordingReady(bytes != null)) }
+        val audio = recorder?.stopAndRead()
+        pendingAudio = audio
+        mainHandler.post { run(controller.recordingReady(audio != null)) }
     }
 
     private fun startUpload(token: Int) {
@@ -456,8 +533,8 @@ class DictateOverlayService :
         }
         uploadExecutor.execute {
             val outcome = transcriber.transcribe(
-                audio,
-                "audio/mp4",
+                audio.bytes,
+                audio.mimeType,
                 language = prefs.languageHint,
                 polish = prefs.flowPolish && cloudPolishAllowed,
                 appCategory = cloudAppCategory,
@@ -482,6 +559,10 @@ class DictateOverlayService :
 
     override fun onPartial(text: String) = run(controller.recognizerPartial(text))
     override fun onFinal(text: String) = run(controller.recognizerFinal(text))
+    override fun onLevel(rmsDb: Float) {
+        val normalized = (((rmsDb + 2f) / 12f) * 100f).toInt().coerceIn(0, 100)
+        overlayView?.findViewById<OverlayLevelView>(R.id.pill_level)?.level = normalized
+    }
     override fun onError(failure: RecognizerFailure) {
         if (failure == RecognizerFailure.BUSY) dictation?.recreate()
         run(controller.recognizerError(failure))
@@ -501,18 +582,12 @@ class DictateOverlayService :
 
     private fun showPreview(text: String) {
         lastPreview = text
-        applyPillPreview(text)
+        renderOverlay()
     }
 
     private fun clearPillPreview() {
         lastPreview = ""
-        applyPillPreview("")
-    }
-
-    private fun applyPillPreview(text: String) {
-        if (!expanded) return
-        overlayView?.findViewById<TextView>(R.id.pill_text)?.text =
-            text.ifEmpty { getString(R.string.status_listening) }
+        renderOverlay()
     }
 
     private fun commitSegment(text: String) {
@@ -521,17 +596,14 @@ class DictateOverlayService :
             ?.takeIf { it.isEditable }
         // Only ever commit into the field the dictation started in. Live focus on a DIFFERENT
         // node means the user moved on — fail visibly rather than write into the wrong field.
-        val target = when {
-            live != null && (focusedNode == null || live == focusedNode) -> live
-            live == null -> focusedNode
-            else -> null
-        }
+        val target = OverlaySafety.commitTarget(focusedNode, live)
         val committed = target?.let { committer.commit(it, text) }
         if (committed == null) {
             // Dictated text would be silently lost — surface it in the pill instead.
             applyStatus(UiStatus.Failed(ErrorKind.INSERT_FAILED))
         } else {
             lastCommittedText = committed
+            lastPreview = ""
             if (prefs.localRecoveryEnabled) prefs.lastRecoveryText = committed
             reportStatus(DictateStatusEvent.SUCCESS)
         }
@@ -554,45 +626,139 @@ class DictateOverlayService :
 
     private fun applyStatus(status: UiStatus) {
         mainHandler.removeCallbacks(statusResetRunnable)
-        val active = status is UiStatus.Listening || status is UiStatus.Recording ||
-            status is UiStatus.Uploading
-        setExpanded(active || status is UiStatus.Failed)
+        currentStatus = status
+        if (status is UiStatus.Failed) {
+            reportStatus(DictateStatusEvent.FAILURE, error = status.kind)
+        }
+        renderOverlay()
         when (status) {
-            UiStatus.Listening -> setPillStatus(R.string.status_listening, R.color.listening)
-            UiStatus.Recording -> setPillStatus(R.string.status_recording, R.color.cloud)
-            UiStatus.Uploading -> setPillStatus(R.string.status_uploading, R.color.cloud)
-            is UiStatus.Failed -> {
-                reportStatus(DictateStatusEvent.FAILURE, error = status.kind)
-                overlayView?.findViewById<TextView>(R.id.pill_text)?.apply {
-                    text = getString(errorText(status.kind))
-                    setTextColor(ContextCompat.getColor(context, R.color.status_error))
-                }
-                if (
-                    pendingAudio != null &&
-                    (status.kind == ErrorKind.CLOUD_NETWORK || status.kind == ErrorKind.CLOUD_SERVER)
-                ) {
-                    overlayView?.findViewById<ImageButton>(R.id.pill_confirm)?.apply {
-                        contentDescription = getString(R.string.retry_cloud)
-                        setOnClickListener {
-                            retryUsed = true
-                            reportStatus(DictateStatusEvent.RETRY)
-                            run(controller.retryCloud())
-                        }
-                    }
-                }
-                mainHandler.postDelayed(statusResetRunnable, 2_500)
-            }
-            is UiStatus.CloudDone -> showCopyAction()
-            UiStatus.Idle -> setExpanded(false)
+            // A visible undo needs time to be seen and hit; without one the success state stays brief.
+            UiStatus.Done -> mainHandler.postDelayed(
+                statusResetRunnable,
+                if (lastCommittedText != null) DONE_UNDOABLE_MS else DONE_VISIBLE_MS,
+            )
+            is UiStatus.Failed -> mainHandler.postDelayed(statusResetRunnable, 2_500)
+            is UiStatus.CloudDone -> mainHandler.postDelayed(statusResetRunnable, 3_500)
+            else -> {}
         }
         updateBubbleVisibility()
     }
 
-    private fun setPillStatus(textId: Int, colorId: Int) {
-        overlayView?.findViewById<TextView>(R.id.pill_text)?.apply {
-            text = getString(textId)
-            setTextColor(ContextCompat.getColor(context, colorId))
+    private fun renderOverlay() {
+        val retryAvailable = currentStatus is UiStatus.Failed && pendingAudio != null &&
+            ((currentStatus as UiStatus.Failed).kind == ErrorKind.CLOUD_NETWORK ||
+                (currentStatus as UiStatus.Failed).kind == ErrorKind.CLOUD_SERVER)
+        val presentation = OverlayViewState.from(
+            status = currentStatus,
+            previewText = lastPreview,
+            committedText = lastCommittedText,
+            retryAvailable = retryAvailable,
+            errorText = { getString(errorText(it)) },
+            cloudMode = controller.mode == Mode.CLOUD,
+        )
+        val semantics = OverlayActionSemantics.from(presentation)
+        setExpanded(presentation.expanded)
+        if (!presentation.expanded) return
+        val view = overlayView ?: return
+        overlayParams?.let { applyPillGeometry(view, it) }
+        val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
+        view.findViewById<TextView>(R.id.pill_status)?.apply {
+            text = getString(labelText(presentation.label))
+            setTextColor(toneColor)
         }
+        view.findViewById<TextView>(R.id.pill_text)?.apply {
+            text = OverlayText.visibleBody(presentation) ?: getString(R.string.overlay_speak_now)
+            contentDescription = presentation.body ?: getString(R.string.overlay_speak_now)
+            setTextColor(ContextCompat.getColor(context, R.color.text_primary))
+        }
+        view.findViewById<OverlayLevelView>(R.id.pill_level)?.fillColor = toneColor
+        view.findViewById<View>(R.id.pill_mode)?.apply {
+            backgroundTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(context, toneColor(presentation.modeTone)),
+            )
+            contentDescription = getString(
+                if (presentation.cloudMode) R.string.overlay_mode_cloud else R.string.overlay_mode_on_device,
+            )
+        }
+
+        view.findViewById<ImageButton>(R.id.pill_cancel)?.apply {
+            setActionEnabled(presentation.cancelEnabled)
+            contentDescription = getString(semantics.cancelDescription)
+            setOnClickListener(if (presentation.cancelEnabled) View.OnClickListener {
+                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                val commands = controller.interrupted()
+                run(commands)
+                lastPreview = ""
+                if (commands.isEmpty()) applyStatus(UiStatus.Idle)
+            } else null)
+        }
+        view.findViewById<ImageButton>(R.id.pill_hermes)?.apply {
+            setActionEnabled(presentation.hermesEnabled)
+            contentDescription = getString(R.string.send_to_hermes)
+            setOnClickListener(if (presentation.hermesEnabled) View.OnClickListener {
+                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                handoffToHermes()
+            } else null)
+        }
+        view.findViewById<ImageButton>(R.id.pill_confirm)?.apply {
+            val action = presentation.confirmAction
+            setActionEnabled(action != OverlayConfirmAction.NONE)
+            contentDescription = getString(semantics.confirmDescription)
+            setImageResource(semantics.confirmIcon)
+            setOnClickListener(when (action) {
+                OverlayConfirmAction.STOP -> View.OnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    run(controller.micTapped())
+                }
+                OverlayConfirmAction.RETRY -> View.OnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    retryUsed = true
+                    reportStatus(DictateStatusEvent.RETRY)
+                    run(controller.retryCloud())
+                }
+                OverlayConfirmAction.COPY -> View.OnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    lastCommittedText?.let { text ->
+                        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("hermes_dictate", text))
+                    }
+                    applyStatus(UiStatus.Idle)
+                }
+                OverlayConfirmAction.UNDO -> View.OnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    editFocusedField(undoLast = true)
+                    lastPreview = ""
+                    applyStatus(UiStatus.Idle)
+                }
+                OverlayConfirmAction.NONE -> null
+            })
+        }
+    }
+
+    private fun View.setActionEnabled(enabled: Boolean) {
+        isEnabled = enabled
+        isClickable = enabled
+        alpha = if (enabled) 1f else DISABLED_ACTION_ALPHA
+    }
+
+    private fun labelText(label: OverlayLabel): Int = when (label) {
+        OverlayLabel.READY -> R.string.status_idle
+        OverlayLabel.LISTENING -> R.string.status_listening
+        OverlayLabel.PROCESSING -> R.string.status_processing
+        OverlayLabel.DONE -> R.string.status_done
+        OverlayLabel.RECORDING -> R.string.status_recording
+        OverlayLabel.UPLOADING -> R.string.status_uploading
+        OverlayLabel.ERROR -> R.string.overlay_status_error
+        OverlayLabel.COPY -> R.string.overlay_status_copy
+    }
+
+    private fun toneColor(tone: OverlayTone): Int = when (tone) {
+        OverlayTone.READY -> R.color.accent
+        OverlayTone.LISTENING -> R.color.listening
+        OverlayTone.PROCESSING -> R.color.processing
+        OverlayTone.SUCCESS -> R.color.state_ok
+        OverlayTone.ERROR -> R.color.status_error
+        OverlayTone.CLOUD -> R.color.cloud
     }
 
     private fun reportStatus(event: DictateStatusEvent, error: ErrorKind? = null) {
@@ -640,21 +806,6 @@ class DictateOverlayService :
         }
     }
 
-    private fun showCopyAction() {
-        val text = lastCommittedText ?: return setExpanded(false)
-        setExpanded(true)
-        setPillStatus(R.string.copy_recent, R.color.state_ok)
-        overlayView?.findViewById<ImageButton>(R.id.pill_confirm)?.apply {
-            contentDescription = getString(R.string.copy_recent)
-            setOnClickListener {
-                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("hermes_dictate", text))
-                setExpanded(false)
-            }
-        }
-        mainHandler.postDelayed({ if (controller.phase == DictationController.Phase.IDLE) setExpanded(false) }, 3_500)
-    }
-
     private fun errorText(kind: ErrorKind): Int = when (kind) {
         ErrorKind.NO_SPEECH -> R.string.err_no_speech
         ErrorKind.LANGUAGE_UNAVAILABLE -> R.string.err_language_unavailable
@@ -672,10 +823,15 @@ class DictateOverlayService :
     }
 
     companion object {
-        private const val DRAG_SLOP = 12
         private const val LOGIN_PROBE_INTERVAL_MS = 60_000L
         private const val FOCUS_LOSS_CONFIRM_MS = 300L
         private const val LONG_PRESS_MS = 500L
         private const val VOICE_HANDOFF_DELAY_MS = 150L
+        private const val DONE_VISIBLE_MS = 1_200L
+        private const val DONE_UNDOABLE_MS = 3_500L
+        private const val DISABLED_ACTION_ALPHA = 0.28f
+        private const val BUBBLE_EDGE_MARGIN_DP = 8
+        private const val PILL_ENTER_SCALE = 0.96f
+
     }
 }

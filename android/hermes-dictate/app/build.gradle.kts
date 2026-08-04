@@ -6,12 +6,16 @@ android {
     namespace = "net.hermes.dictate"
     compileSdk = 37
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "net.hermes.dictate"
         minSdk = 29
         targetSdk = 37
-        versionCode = 6
-        versionName = "1.5"
+        versionCode = 7
+        versionName = "1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -37,4 +41,10 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.18.0")
     testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.4.0")
+
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:rules:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
 }

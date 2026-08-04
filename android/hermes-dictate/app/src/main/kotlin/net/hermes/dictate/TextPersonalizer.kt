@@ -68,7 +68,11 @@ class DictationTextPipeline(
     private val languageTag: () -> String? = { null },
     private val localRefine: () -> Boolean = { true },
 ) {
-    fun process(raw: String): DictationTransform {
+    fun process(raw: String): DictationTransform = process(raw, final = true)
+
+    fun processPartial(raw: String): DictationTransform = process(raw, final = false)
+
+    private fun process(raw: String, final: Boolean): DictationTransform {
         val transformed = if (localRefine()) {
             LocalFlowRefiner.transform(raw, languageTag())
         } else {
@@ -77,11 +81,14 @@ class DictationTextPipeline(
         if (transformed !is DictationTransform.Text) return transformed
         val rules = dictionaryRules()
         val exact = TextPersonalizer.applyDictionary(
-            PunctuationMapper.map(transformed.value),
+            GermanDictationNormalizer.apply(PunctuationMapper.map(transformed.value)),
             rules,
         )
         val personalized = CanonicalTermCorrector.apply(exact, rules)
-        return DictationTransform.Text(TextPersonalizer.expandSnippet(personalized, snippetRules()))
+        val styled = if (final) FlowTextFormatter.finalize(personalized) else FlowTextFormatter.preview(personalized)
+        return DictationTransform.Text(
+            if (final) TextPersonalizer.expandSnippet(styled, snippetRules()) else styled,
+        )
     }
 }
 

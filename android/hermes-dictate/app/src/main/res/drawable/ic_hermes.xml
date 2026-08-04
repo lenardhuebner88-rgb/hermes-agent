@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Hand-off to Hermes: the text moves out of this field and into Hermes. An arrow meeting a
+     boundary reads as "pass it on" and keeps the pill's icon language consistent with cancel,
+     stop, retry and copy — the previous bare letter "H" did not. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@color/icon_on_surface"
+        android:pathData="M3,11h8.2l-3.1,-3.1 1.4,-1.4 5.5,5.5 -5.5,5.5 -1.4,-1.4 3.1,-3.1H3z" />
+    <path
+        android:fillColor="@color/icon_on_surface"
+        android:pathData="M18,4h2v16h-2z" />
+</vector>
