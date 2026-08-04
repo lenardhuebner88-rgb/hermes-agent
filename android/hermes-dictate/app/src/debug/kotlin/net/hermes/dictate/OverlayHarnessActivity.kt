@@ -35,6 +35,7 @@ class OverlayHarnessActivity : Activity() {
                 requested,
                 partial = intent.getStringExtra(EXTRA_PARTIAL),
                 level = intent.getIntExtra(EXTRA_LEVEL, 0),
+                levels = intent.getStringExtra(EXTRA_LEVELS),
                 retryAvailable = intent.getBooleanExtra(EXTRA_RETRY, false),
             )
         }
@@ -45,7 +46,13 @@ class OverlayHarnessActivity : Activity() {
         super.onDestroy()
     }
 
-    fun drive(status: UiStatus, partial: String? = null, level: Int = 0, retryAvailable: Boolean = false) {
+    fun drive(
+        status: UiStatus,
+        partial: String? = null,
+        level: Int = 0,
+        retryAvailable: Boolean = false,
+        levels: String? = null,
+    ) {
         val presentation = OverlayViewState.from(
             status = status,
             previewText = partial.orEmpty(),
@@ -71,18 +78,24 @@ class OverlayHarnessActivity : Activity() {
             text = OverlayText.visibleBody(presentation) ?: getString(R.string.overlay_speak_now)
             contentDescription = presentation.body ?: getString(R.string.overlay_speak_now)
         }
-        pill.findViewById<OverlayLevelView>(R.id.pill_level).apply {
+        // Same two faces as production: the wave while the microphone is open, the message
+        // otherwise. Driving the real layout is the point of this harness.
+        val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
+            presentation.label == OverlayLabel.PROCESSING ||
+            presentation.label == OverlayLabel.UPLOADING
+        pill.findViewById<View>(R.id.pill_message).visibility = if (listening) View.GONE else View.VISIBLE
+        pill.findViewById<OverlayWaveView>(R.id.pill_wave).apply {
+            visibility = if (listening) View.VISIBLE else View.GONE
+            // A single sample cannot show a wave; a replayed sequence renders the real thing.
+            levels?.split(",")?.mapNotNull { it.trim().toIntOrNull() }?.forEach { this.level = it }
             this.level = level
             fillColor = ContextCompat.getColor(context, colorId)
+            contentDescription = getString(textId)
         }
         val semantics = OverlayActionSemantics.from(presentation)
         pill.findViewById<ImageButton>(R.id.pill_cancel).apply {
             applyActionState(presentation.cancelEnabled)
             contentDescription = getString(semantics.cancelDescription)
-        }
-        pill.findViewById<ImageButton>(R.id.pill_hermes).apply {
-            applyActionState(presentation.hermesEnabled)
-            contentDescription = getString(R.string.send_to_hermes)
         }
         pill.findViewById<ImageButton>(R.id.pill_confirm).apply {
             applyActionState(presentation.confirmAction != OverlayConfirmAction.NONE)
@@ -100,14 +113,14 @@ class OverlayHarnessActivity : Activity() {
     fun snapshot(): Snapshot = Snapshot(
         status = pill.findViewById<TextView>(R.id.pill_status).text.toString(),
         text = pill.findViewById<TextView>(R.id.pill_text).text.toString(),
-        level = pill.findViewById<OverlayLevelView>(R.id.pill_level).level,
+        level = pill.findViewById<OverlayWaveView>(R.id.pill_wave).level,
         width = pill.width,
         height = pill.height,
         cancelEnabled = pill.findViewById<ImageButton>(R.id.pill_cancel).isEnabled,
-        hermesEnabled = pill.findViewById<ImageButton>(R.id.pill_hermes).isEnabled,
         confirmEnabled = pill.findViewById<ImageButton>(R.id.pill_confirm).isEnabled,
         cancelDescription = pill.findViewById<ImageButton>(R.id.pill_cancel).contentDescription.toString(),
         confirmDescription = pill.findViewById<ImageButton>(R.id.pill_confirm).contentDescription.toString(),
+        waveDescription = pill.findViewById<OverlayWaveView>(R.id.pill_wave).contentDescription.toString(),
     )
 
     data class Snapshot(
@@ -117,16 +130,17 @@ class OverlayHarnessActivity : Activity() {
         val width: Int,
         val height: Int,
         val cancelEnabled: Boolean,
-        val hermesEnabled: Boolean,
         val confirmEnabled: Boolean,
         val cancelDescription: String,
         val confirmDescription: String,
+        val waveDescription: String,
     )
 
     companion object {
         const val EXTRA_STATUS = "status"
         const val EXTRA_PARTIAL = "partial"
         const val EXTRA_LEVEL = "level"
+        const val EXTRA_LEVELS = "levels"
         const val EXTRA_RETRY = "retry"
 
         private const val DISABLED_ACTION_ALPHA = 0.28f

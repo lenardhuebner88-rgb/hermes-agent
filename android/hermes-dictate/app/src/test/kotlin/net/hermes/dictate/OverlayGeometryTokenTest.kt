@@ -43,9 +43,10 @@ class OverlayGeometryTokenTest {
     }
 
     @Test
-    fun `the level bar fits inside the pill content band`() {
-        assertTrue(dimen("pill_content_height") < dimen("pill_height"))
-        assertTrue(dimen("pill_level_height") <= dimen("pill_height") - dimen("pill_content_height"))
+    fun `the wave fits between the pill edges without touching them`() {
+        assertTrue("the wave must leave breathing room", dimen("pill_wave_height") < dimen("pill_height"))
+        // The circular actions define the pill's inner height; the wave has to stay under them.
+        assertTrue(dimen("pill_wave_height") < dimen("overlay_touch_target"))
     }
 
     @Test
@@ -61,7 +62,7 @@ class OverlayGeometryTokenTest {
     @Test
     fun `overlay drawables reference color resources instead of literals`() {
         val literal = Regex("android:(?:fillColor|color)=\"#")
-        for (name in listOf("bg_pill.xml", "bg_bubble.xml", "bg_chip.xml", "bg_hermes_action.xml")) {
+        for (name in listOf("bg_pill.xml", "bg_bubble.xml", "bg_bubble_active.xml", "bg_chip.xml", "bg_pill_action.xml", "bg_pill_action_primary.xml")) {
             val text = File(resourceDir(), "drawable/$name").readText()
             assertTrue("$name must use @color tokens", literal.find(text) == null)
         }

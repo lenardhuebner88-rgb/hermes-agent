@@ -16,5 +16,5 @@ object OverlayGeometry {
     private const val MIN_PILL_WIDTH_DP = 280
     private const val MAX_PILL_WIDTH_DP = 384
     /** Mirrors @dimen/pill_height; OverlayGeometryTokenTest asserts they stay equal. */
-    const val PILL_HEIGHT_DP = 72
+    const val PILL_HEIGHT_DP = 64
 }

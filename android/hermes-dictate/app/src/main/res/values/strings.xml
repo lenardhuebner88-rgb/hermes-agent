@@ -27,6 +27,10 @@
     <string name="overlay_cancel_desc">Diktat abbrechen</string>
     <string name="overlay_dismiss_desc">Diktat-Hinweis schließen</string>
     <string name="overlay_stop_desc">Diktat beenden und übernehmen</string>
+    <string name="hermes_handoff_last">Letztes Diktat an Hermes Voice übergeben</string>
+    <string name="hermes_handoff_empty">Kein gemerktes Diktat vorhanden</string>
+    <string name="hermes_handoff_missing">Hermes Voice ist nicht installiert</string>
+    <string name="err_undo_failed">Text konnte nicht zurückgenommen werden</string>
     <string name="overlay_undo_desc">Eingefügten Text zurücknehmen</string>
     <string name="overlay_retry_exhausted_desc">Kein weiterer Versuch möglich</string>
     <string name="overlay_confirm_unavailable_desc">Keine Aktion verfügbar</string>

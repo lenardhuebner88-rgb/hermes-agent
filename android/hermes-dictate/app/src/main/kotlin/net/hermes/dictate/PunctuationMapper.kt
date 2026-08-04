@@ -64,7 +64,10 @@ object PunctuationMapper {
         "jeden", "dieser", "diese", "dieses", "diesen", "jener", "jene", "am", "zum", "zur",
         "beim", "vom", "im", "ans", "aufs",
     )
-    private val inflectedAdjective = Regex("(?iu)^[\\p{L}]{3,}(?:er|es|en|em|e)$")
+    // Deliberately without "-en": that ending belongs to infinitives and plurals far more often
+    // than to a pre-nominal adjective, and "das machen Komma wenn du zustimmst" must still get
+    // its comma.
+    private val inflectedAdjective = Regex("(?iu)^[\\p{L}]{3,}(?:er|es|em|e)$")
 
     private fun isSpokenNoun(words: List<String>, index: Int, rule: Rule): Boolean {
         if (rule.words.size != 1 || rule.words[0] !in nounCapable) return false

@@ -74,4 +74,25 @@ class GermanDictationNormalizerTest {
     fun `small cardinals stay words in prose`() {
         assertEquals("wir brauchen zwei Stunden", normalize("wir brauchen zwei Stunden"))
     }
+
+    // --- Regressions from the Codex review of 2026-08-04 ---
+
+    @Test
+    fun `clock rules accept digits the regex already allows`() {
+        assertEquals("um 14:30 Uhr", normalize("um 14 Uhr dreißig"))
+        assertEquals("um 14:30 Uhr", normalize("um vierzehn Uhr 30"))
+        assertEquals("um 8:10 Uhr", normalize("um 10 nach acht"))
+    }
+
+    @Test
+    fun `midnight wraps backwards to twenty three`() {
+        assertEquals("um 23:30 Uhr", normalize("um halb 0"))
+        assertEquals("um 23:45 Uhr", normalize("um viertel vor 0"))
+    }
+
+    @Test
+    fun `a spoken enumeration is not turned into a decimal`() {
+        assertEquals("eins, zwei, drei", normalize("eins, zwei, drei"))
+        assertEquals("Version 1,5 ist installiert", normalize("Version eins, fünf ist installiert"))
+    }
 }

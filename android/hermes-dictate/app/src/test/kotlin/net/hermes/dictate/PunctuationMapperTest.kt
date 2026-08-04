@@ -70,4 +70,21 @@ class PunctuationMapperTest {
     fun `existing capitalization is never lowered`() {
         assertEquals("Berlin ist toll.", PunctuationMapper.map("Berlin ist toll punkt"))
     }
+
+    @Test
+    fun `an infinitive before a comma command is not read as an adjective`() {
+        assertEquals(
+            "Wir werden das machen, wenn du zustimmst",
+            PunctuationMapper.map("Wir werden das machen Komma wenn du zustimmst"),
+        )
+    }
+
+    @Test
+    fun `punctuation words after a determiner stay nouns`() {
+        assertEquals("wir bringen es auf den Punkt", PunctuationMapper.map("wir bringen es auf den Punkt"))
+        assertEquals(
+            "das ist ein wichtiger Punkt für uns",
+            PunctuationMapper.map("das ist ein wichtiger Punkt für uns"),
+        )
+    }
 }

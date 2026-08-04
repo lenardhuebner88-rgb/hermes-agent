@@ -15,6 +15,10 @@
     <color name="overlay_action_surface">#161B26</color>
     <color name="overlay_border">#334155</color>
     <color name="overlay_track">#1E293B</color>
+    <!-- Top edge of the overlay surfaces; the gradient partner of overlay_surface. -->
+    <color name="overlay_surface_top">#171B26</color>
+    <!-- Idle bubble ring: accent at low opacity so the disc reads as a control, not a dot. -->
+    <color name="bubble_ring">#5C8B7CF6</color>
     <!-- Tinted cloud-chip fill; the alpha channel keeps the surface readable underneath. -->
     <color name="cloud_surface">#1A38BDF8</color>
     <!-- Base color of the icon vectors. Every icon is re-tinted at use site. -->

@@ -34,6 +34,30 @@ und trägt eine Ratsche, die nur nach unten bewegt werden darf.
 | 7 | Auffindbarkeit | Undo ist eine sichtbare Aktion im Erfolgszustand statt einer unsichtbaren Sprachphrase; die Bubble nennt den Long-Press für Einstellungen; ein erschöpfter Retry sagt das, statt "keine Aktion". |
 | 8 | Abnahme | Volles Gate, Emulator-Belege, Doku, APK. |
 
+## Nachtrag: greenfield-Neuschnitt der Pill
+
+Nach den acht Iterationen kam die Operator-Vorgabe, die Pill wie bei Wispr Flow auf das
+Wesentliche zu reduzieren — und keine Hermes-Beschriftung darauf. Ergebnis:
+
+- **Die Welle ersetzt Text.** Während das Mikrofon offen ist, zeigt die Pill nur noch
+  Abbrechen · Welle · Stopp. Kein Statuswort, kein mitlaufender Text: der erkannte Text
+  gehört ins Zielfeld, nicht auf einen schwebenden Chip. Nur Ergebnis- und Fehlerzustände
+  tauschen die Welle gegen eine kurze Textzeile.
+- **`Waveform` ist reine, getestete Mathematik**; `OverlayWaveView` zeichnet nur. Zwei
+  Designfehler fielen erst am echten Render auf und stehen als Test fest:
+  die Verjüngung erstickte anfangs das *neueste* Sample am rechten Rand (jetzt klingt nur
+  die Historie nach links aus), und ein Per-Schritt-Decay von 0.86 löschte die gesprochene
+  Form binnen zwölf Balken zu einer punktierten Linie (jetzt scrollt die Welle ohne Abfall;
+  Stille erzeugt die Ausblendung von selbst, weil Stille Nullen schiebt).
+- **Der Hermes-Knopf ist aus der Pill verschwunden** und hat in den Einstellungen ein
+  sichtbares Zuhause bekommen („Letztes Diktat an Hermes Voice übergeben"), statt als toter
+  Code zurückzubleiben.
+- **Bubble und App-Icon** wurden mitgezogen: die Bubble bekommt einen akzentfarbenen Ring, der
+  im aktiven Zustand voll durchfärbt; das Launcher-Icon ist jetzt dieselbe Welle, die die App
+  beim Zuhören zeichnet.
+
+Beleg: `screenshots/wave/wave-listening.png`, `screenshots/app-icon.png`.
+
 ## Bewusste Nicht-Behebung
 
 Ein bares "besser" gilt nicht mehr als Korrekturmarker. Damit bleibt

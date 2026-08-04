@@ -67,6 +67,9 @@ enum class ErrorKind {
 
     /** Overlay only: the recognized text could not be inserted into the focused field. */
     INSERT_FAILED,
+
+    /** Overlay only: the visible undo could not take the committed text back out again. */
+    UNDO_FAILED,
 }
 
 /** Semantic view of SpeechRecognizer error codes; the service does the int mapping. */

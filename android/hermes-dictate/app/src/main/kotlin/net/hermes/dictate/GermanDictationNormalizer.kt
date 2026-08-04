@@ -23,7 +23,13 @@ object GermanDictationNormalizer {
     private val quarterHour = Regex("(?iu)\\b(um)\\s+viertel\\s+(nach|vor)\\s+([\\p{L}]+|\\d{1,2})\\b")
     private val relativeMinute = Regex("(?iu)\\b(um)\\s+([\\p{L}]+|\\d{1,2})\\s+(nach|vor)\\s+([\\p{L}]+|\\d{1,2})\\b")
     private val bareHour = Regex("(?iu)\\b([\\p{L}]+)\\s+Uhr\\b")
-    private val decimal = Regex("(?iu)\\b([\\p{L}]+|\\d+),\\s*([\\p{L}]+|\\d+)\\b")
+    // A decimal is exactly two numbers around one comma. A comma-separated number on either side
+    // makes it an enumeration ("eins, zwei, drei") — both neighbours have to be checked, because
+    // blocking only the leading pair still lets the trailing pair match.
+    private val decimal = Regex(
+        "(?iu)(?<!,\\s{0,2})\\b([\\p{L}]+|\\d+),\\s*([\\p{L}]+|\\d+)\\b" +
+            "(?!\\s*,\\s*(?:[\\p{L}]+|\\d+)\\b)",
+    )
 
     fun apply(text: String): String {
         var result = digitSequence.replace(text) { match ->
@@ -43,7 +49,7 @@ object GermanDictationNormalizer {
             "${match.groupValues[1]} ${clock(previousHour(anchor), 30)}"
         }
         result = relativeMinute.replace(result) { match ->
-            val minute = number(match.groupValues[2]) ?: return@replace match.value
+            val minute = value(match.groupValues[2]) ?: return@replace match.value
             val anchor = clockHour(match.groupValues[4]) ?: return@replace match.value
             if (minute !in 1..59) return@replace match.value
             if (match.groupValues[3].equals("nach", ignoreCase = true)) {
@@ -53,8 +59,8 @@ object GermanDictationNormalizer {
             }
         }
         result = time.replace(result) { match ->
-            val hour = number(match.groupValues[1])
-            val minute = number(match.groupValues[2])
+            val hour = value(match.groupValues[1])
+            val minute = value(match.groupValues[2])
             if (hour != null && minute != null && hour in 0..23 && minute in 0..59) {
                 clock(hour, minute)
             } else {
@@ -70,8 +76,8 @@ object GermanDictationNormalizer {
             if (day != null && day in 1..31) "$day. ${canonicalMonth(match.groupValues[2])}" else match.value
         }
         result = decimal.replace(result) { match ->
-            val whole = number(match.groupValues[1])
-            val fraction = number(match.groupValues[2])
+            val whole = value(match.groupValues[1])
+            val fraction = value(match.groupValues[2])
             if (whole != null && fraction != null) "$whole,$fraction" else match.value
         }
         return word.replace(result) { match ->
@@ -84,11 +90,20 @@ object GermanDictationNormalizer {
     private fun clock(hour: Int, minute: Int): String =
         String.format(Locale.ROOT, "%d:%02d Uhr", hour, minute)
 
-    /** "halb drei" and "viertel vor sechs" name the hour they run up to. */
-    private fun previousHour(hour: Int): Int = if (hour <= 1) hour + 11 else hour - 1
+    /**
+     * "halb drei" and "viertel vor sechs" name the hour they run up to. "halb eins" keeps the
+     * colloquial 12:30 reading; midnight wraps to 23, not to 11.
+     */
+    private fun previousHour(hour: Int): Int = when (hour) {
+        0 -> 23
+        1 -> 12
+        else -> hour - 1
+    }
 
-    private fun clockHour(value: String): Int? =
-        (value.toIntOrNull() ?: number(value))?.takeIf { it in 0..23 }
+    /** A spoken number word or an already-recognized digit group. */
+    private fun value(text: String): Int? = text.toIntOrNull() ?: number(text)
+
+    private fun clockHour(text: String): Int? = value(text)?.takeIf { it in 0..23 }
 
     private fun canonicalMonth(value: String): String =
         months.firstOrNull { it.equals(value, ignoreCase = true) } ?: value

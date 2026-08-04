@@ -10,9 +10,13 @@ sealed class DictationTransform {
 object LocalFlowRefiner {
     private val germanFillers = Regex("(?iu)(?<![\\p{L}\\p{N}_])(?:äh+m?|hm+|mhm+)(?![\\p{L}\\p{N}_])")
     private val englishFillers = Regex("(?iu)(?<![\\p{L}\\p{N}_])(?:uh+|um+|erm+)(?![\\p{L}\\p{N}_])")
-    private val leadingDiscourseFiller = Regex("(?iu)^\\s*also\\s*,?\\s+")
+    // "also" is only a filler in front of the subject of the sentence. Before a verb it is the
+    // causal conjunction — "Also folgt daraus der Beweis" must keep it.
+    private const val AFTER_ALSO = "(?=(?:wir|ich|er|sie|es|du|ihr|man|dann|jetzt)(?![\\p{L}]))"
+    private val leadingDiscourseFiller = Regex("(?iu)^\\s*also\\s*(?:,\\s*|\\s+$AFTER_ALSO)")
     // "okay also dann ..." — the same filler, one interjection later.
-    private val interjectionAlso = Regex("(?iu)^(\\s*(?:okay|ok|ja|gut|so|na)\\s*,?\\s+)also\\s*,?\\s+")
+    private val interjectionAlso =
+        Regex("(?iu)^(\\s*(?:okay|ok|ja|gut|so|na)\\s*,?\\s+)also\\s*(?:,\\s*|\\s+$AFTER_ALSO)")
     // "im Grunde genommen" is a phrase the speaker meant; only the bare hedge is stripped.
     private val discourseFillers = Regex(
         "(?iu)(?<![\\p{L}\\p{N}_])(?:quasi|sozusagen|gewissermaßen|im\\s+grunde(?!\\s+genommen))(?![\\p{L}\\p{N}_])",
@@ -27,17 +31,17 @@ object LocalFlowRefiner {
             "no\\s*,?\\s*(?:wait\\s*,?\\s*)?i\\s+mean)\\s+" +
             "([\\p{L}\\p{N}_-]+)",
     )
-    // A leading "nein" is only a correction when the speaker paused or qualified it. Plain
-    // "nein danke das reicht mir" must keep its first word.
+    // A leading correction must be explicitly qualified. "Nein, danke das reicht mir" and
+    // "Ich meine das ernst" are ordinary sentences and keep every word; only an unmistakable
+    // backtrack ("nein, halt, eher …", "nein, besser …") drops its opener.
     private val correctionAtStart = Regex(
-        "(?iu)^\\s*(?:nein\\s*,\\s*(?:halt\\s*,?\\s*)?(?:eher\\s+)?|" +
-            "nein\\s+(?:halt|eher)\\s*,?\\s*|ich\\s+meine\\s+)",
+        "(?iu)^\\s*nein\\s*[,\\s]\\s*(?:halt\\s*,?\\s*)?(?:eher\\s+|besser\\s+|ich\\s+meine\\s+)",
     )
 
     /** After these words "ich meine"/"nein" opens a relative clause, never a correction. */
     private val relativeOpeners = setOf(
-        "was", "wie", "wer", "wen", "wem", "das", "dass", "welche", "welches", "welcher",
-        "wenn", "weil", "ob", "so", "sofern",
+        "was", "wie", "wer", "wen", "wem", "dass", "welche", "welches", "welcher",
+        "wenn", "weil", "ob", "sofern",
     )
 
     /** "... nein gesagt" reports a refusal; it does not replace the previous word. */

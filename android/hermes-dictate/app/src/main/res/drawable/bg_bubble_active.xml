@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Idle bubble: a dark disc with an accent-tinted ring. The ring is what makes it read as a
-     control rather than as a stray dot, and it keeps the mic legible on light wallpapers. -->
+<!-- Active bubble: the ring becomes the accent itself, so "I am listening" is visible before the
+     pill even expands. Shape and size are identical, so the swap never moves the window. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="oval">
     <gradient
         android:angle="270"
         android:startColor="@color/overlay_surface_top"
         android:endColor="@color/overlay_surface" />
-    <stroke android:width="@dimen/bubble_ring" android:color="@color/bubble_ring" />
+    <stroke android:width="@dimen/bubble_ring" android:color="@color/accent" />
 </shape>

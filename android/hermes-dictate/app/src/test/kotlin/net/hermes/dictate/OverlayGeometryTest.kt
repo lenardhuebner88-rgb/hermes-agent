@@ -16,7 +16,7 @@ class OverlayGeometryTest {
         assertEquals(352, OverlayGeometry.pillWidthPx(400, 2f))
     }
 
-    @Test fun `height is one stable 72dp token`() {
-        assertEquals(189, OverlayGeometry.pillHeightPx(2.625f))
+    @Test fun `height is one stable token shared with the layout`() {
+        assertEquals(168, OverlayGeometry.pillHeightPx(2.625f))
     }
 }

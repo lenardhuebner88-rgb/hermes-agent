@@ -538,6 +538,7 @@ class DictateInputMethodService :
         // Not reachable from the IME path (InputConnection commits directly), but the when
         // must stay exhaustive.
         ErrorKind.INSERT_FAILED -> R.string.err_insert_failed
+        ErrorKind.UNDO_FAILED -> R.string.err_undo_failed
     }
 
     private fun showStatus(text: String, error: Boolean) {

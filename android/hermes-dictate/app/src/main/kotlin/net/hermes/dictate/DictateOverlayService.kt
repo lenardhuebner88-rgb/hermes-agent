@@ -69,6 +69,9 @@ class DictateOverlayService :
     private var cloudStyle: String? = null
     private var cloudPolishAllowed = true
     private var lastCommittedText: String? = null
+    // The exact node the last commit went into. A visible undo must never delete from a
+    // different field just because its text happens to end the same way.
+    private var lastCommitNode: AccessibilityNodeInfo? = null
     private var retryUsed = false
     private var dictationStartedAtMs: Long? = null
 
@@ -228,6 +231,9 @@ class DictateOverlayService :
         params.y = BubblePlacement.clampY(params.y, params.height, currentScreen(), edgeMarginPx())
         view.alpha = prefs.overlayBubbleOpacity / 100f
         runCatching { windowManager.updateViewLayout(view, params) }
+        overlayView?.takeIf { !expanded }?.setBackgroundResource(
+            if (active) R.drawable.bg_bubble_active else R.drawable.bg_bubble,
+        )
     }
 
     /** Drag-to-move with edge snap; a plain tap (no meaningful drag) starts/stops dictation. */
@@ -398,25 +404,6 @@ class DictateOverlayService :
 
     private fun layoutInflater() = android.view.LayoutInflater.from(this)
 
-    private fun handoffToHermes() {
-        val draft = lastPreview.trim().takeIf { it.isNotEmpty() }
-            ?: lastCommittedText?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return
-        // Hard-close every possible mic owner before the separate Voice app starts.
-        run(controller.hidden())
-        dictation?.recreate()
-        recorder?.abort()
-        pendingAudio = null
-        val intent = Intent().apply {
-            setClassName("net.hermes.voice", "net.hermes.voice.MainActivity")
-            action = Intent.ACTION_SEND
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, draft.take(4_000))
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        }
-        mainHandler.postDelayed({ runCatching { startActivity(intent) } }, VOICE_HANDOFF_DELAY_MS)
-    }
-
     // --- Mic + permission ---
 
     private fun onMicTapped() {
@@ -561,7 +548,7 @@ class DictateOverlayService :
     override fun onFinal(text: String) = run(controller.recognizerFinal(text))
     override fun onLevel(rmsDb: Float) {
         val normalized = (((rmsDb + 2f) / 12f) * 100f).toInt().coerceIn(0, 100)
-        overlayView?.findViewById<OverlayLevelView>(R.id.pill_level)?.level = normalized
+        overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = normalized
     }
     override fun onError(failure: RecognizerFailure) {
         if (failure == RecognizerFailure.BUSY) dictation?.recreate()
@@ -603,23 +590,29 @@ class DictateOverlayService :
             applyStatus(UiStatus.Failed(ErrorKind.INSERT_FAILED))
         } else {
             lastCommittedText = committed
+            lastCommitNode = target
             lastPreview = ""
             if (prefs.localRecoveryEnabled) prefs.lastRecoveryText = committed
             reportStatus(DictateStatusEvent.SUCCESS)
         }
     }
 
-    private fun editFocusedField(undoLast: Boolean) {
+    private fun editFocusedField(undoLast: Boolean, requireCommitNode: Boolean = false): Boolean {
         val target = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?.takeIf { it.isEditable } ?: focusedNode ?: return
+            ?.takeIf { it.isEditable } ?: focusedNode ?: return false
+        // Same invariant as the commit path: an edit belongs to exactly one field.
+        if (requireCommitNode && lastCommitNode != null && target != lastCommitNode) return false
         val text = target.text?.toString().orEmpty()
         val cursor = target.textSelectionStart.takeIf { it in 0..text.length } ?: text.length
         val edit = if (undoLast) {
             DictationEdits.undoLastSegment(text, cursor, lastCommittedText)
         } else {
             DictationEdits.deleteLastSentence(text, cursor)
-        } ?: return
-        if (committer.applyEdit(target, edit)) lastCommittedText = null
+        } ?: return false
+        if (!committer.applyEdit(target, edit)) return false
+        lastCommittedText = null
+        lastCommitNode = null
+        return true
     }
 
     // --- Panel state ---
@@ -662,23 +655,28 @@ class DictateOverlayService :
         val view = overlayView ?: return
         overlayParams?.let { applyPillGeometry(view, it) }
         val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
+        val statusText = getString(labelText(presentation.label))
+        // Two faces in one pill: while the microphone is open only the voice is shown; result and
+        // error states swap in the short message that actually has something to say.
+        val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
+            presentation.label == OverlayLabel.PROCESSING ||
+            presentation.label == OverlayLabel.UPLOADING
+        view.findViewById<View>(R.id.pill_message)?.visibility = if (listening) View.GONE else View.VISIBLE
+        view.findViewById<OverlayWaveView>(R.id.pill_wave)?.apply {
+            visibility = if (listening) View.VISIBLE else View.GONE
+            fillColor = toneColor
+            // The wave replaces the status word visually, so it has to carry it for a screen reader.
+            contentDescription = statusText
+            if (!listening) reset()
+        }
         view.findViewById<TextView>(R.id.pill_status)?.apply {
-            text = getString(labelText(presentation.label))
+            text = statusText
             setTextColor(toneColor)
         }
         view.findViewById<TextView>(R.id.pill_text)?.apply {
             text = OverlayText.visibleBody(presentation) ?: getString(R.string.overlay_speak_now)
             contentDescription = presentation.body ?: getString(R.string.overlay_speak_now)
             setTextColor(ContextCompat.getColor(context, R.color.text_primary))
-        }
-        view.findViewById<OverlayLevelView>(R.id.pill_level)?.fillColor = toneColor
-        view.findViewById<View>(R.id.pill_mode)?.apply {
-            backgroundTintList = ColorStateList.valueOf(
-                ContextCompat.getColor(context, toneColor(presentation.modeTone)),
-            )
-            contentDescription = getString(
-                if (presentation.cloudMode) R.string.overlay_mode_cloud else R.string.overlay_mode_on_device,
-            )
         }
 
         view.findViewById<ImageButton>(R.id.pill_cancel)?.apply {
@@ -690,14 +688,6 @@ class DictateOverlayService :
                 run(commands)
                 lastPreview = ""
                 if (commands.isEmpty()) applyStatus(UiStatus.Idle)
-            } else null)
-        }
-        view.findViewById<ImageButton>(R.id.pill_hermes)?.apply {
-            setActionEnabled(presentation.hermesEnabled)
-            contentDescription = getString(R.string.send_to_hermes)
-            setOnClickListener(if (presentation.hermesEnabled) View.OnClickListener {
-                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                handoffToHermes()
             } else null)
         }
         view.findViewById<ImageButton>(R.id.pill_confirm)?.apply {
@@ -726,9 +716,14 @@ class DictateOverlayService :
                 }
                 OverlayConfirmAction.UNDO -> View.OnClickListener {
                     it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                    editFocusedField(undoLast = true)
-                    lastPreview = ""
-                    applyStatus(UiStatus.Idle)
+                    // Not every field accepts ACTION_SET_TEXT. Saying "done" when the text is
+                    // still standing there would be the worse failure.
+                    if (editFocusedField(undoLast = true, requireCommitNode = true)) {
+                        lastPreview = ""
+                        applyStatus(UiStatus.Idle)
+                    } else {
+                        applyStatus(UiStatus.Failed(ErrorKind.UNDO_FAILED))
+                    }
                 }
                 OverlayConfirmAction.NONE -> null
             })
@@ -820,6 +815,7 @@ class DictateOverlayService :
         ErrorKind.CLOUD_TOO_LARGE -> R.string.err_cloud_too_large
         ErrorKind.CLOUD_EMPTY -> R.string.err_cloud_empty
         ErrorKind.INSERT_FAILED -> R.string.err_insert_failed
+        ErrorKind.UNDO_FAILED -> R.string.err_undo_failed
     }
 
     companion object {

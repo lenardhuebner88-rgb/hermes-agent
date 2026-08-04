@@ -99,4 +99,26 @@ class LocalFlowRefinerTest {
         val input = "mail a.b+test@example.com URL https://x.dev/a_a Wert 82,4 code foo_bar()"
         assertEquals(input, LocalFlowRefiner.refine(input, "de-DE"))
     }
+
+    // --- Regressions from the Codex review of 2026-08-04 ---
+
+    @Test
+    fun `a leading correction marker needs an explicit qualifier`() {
+        assertEquals("Ich meine das ernst", LocalFlowRefiner.refine("Ich meine das ernst", "de-DE"))
+        assertEquals("Nein, danke das reicht mir", LocalFlowRefiner.refine("Nein, danke das reicht mir", "de-DE"))
+        // The unmistakable backtrack still loses its opener.
+        assertEquals("Kanban Board öffnen", LocalFlowRefiner.refine("nein, halt, eher Kanban Board öffnen", "de-DE"))
+    }
+
+    @Test
+    fun `a correction after a demonstrative still resolves`() {
+        assertEquals("Nimm jenes", LocalFlowRefiner.refine("Nimm das nein jenes", "de-DE"))
+    }
+
+    @Test
+    fun `causal also is kept and filler also is dropped`() {
+        assertEquals("Also folgt daraus der Beweis", LocalFlowRefiner.refine("Also folgt daraus der Beweis", "de-DE"))
+        assertEquals("wir prüfen den Build", LocalFlowRefiner.refine("also wir prüfen den Build", "de-DE"))
+        assertEquals("Okay dann starten wir", LocalFlowRefiner.refine("Okay also dann starten wir", "de-DE"))
+    }
 }

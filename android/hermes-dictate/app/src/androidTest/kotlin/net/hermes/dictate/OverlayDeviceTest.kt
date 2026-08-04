@@ -59,7 +59,6 @@ class OverlayDeviceTest {
         assertEquals("Hermes", first.text)
         assertEquals(28, first.level)
         assertTrue(first.cancelEnabled)
-        assertFalse(first.hermesEnabled)
         assertTrue(first.confirmEnabled)
         assertEquals(targetContext.getString(R.string.overlay_cancel_desc), first.cancelDescription)
         assertEquals(targetContext.getString(R.string.overlay_stop_desc), first.confirmDescription)
@@ -76,17 +75,17 @@ class OverlayDeviceTest {
         val processing = snapshot(harness)
         assertEquals(targetContext.getString(R.string.status_processing), processing.status)
         assertFalse(processing.confirmEnabled)
-        assertFalse(processing.hermesEnabled)
 
         drive(harness, UiStatus.Done, partial = "Hermes erstellt eine PlanSpec")
         val done = snapshot(harness)
         assertEquals(targetContext.getString(R.string.status_done), done.status)
         assertFalse(done.cancelEnabled)
-        assertTrue(done.hermesEnabled)
         // The success state offers a visible undo for the text that was just written; it used to
         // leave the confirm slot dead, which hid the only way to take a wrong commit back.
         assertTrue(done.confirmEnabled)
         assertEquals(targetContext.getString(R.string.overlay_undo_desc), done.confirmDescription)
+        // The wave replaces the visible status word, so it must announce the state itself.
+        assertEquals(targetContext.getString(R.string.status_listening), first.waveDescription)
 
         drive(
             harness,
