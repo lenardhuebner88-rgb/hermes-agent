@@ -41,7 +41,7 @@ const SERIES_COLORS = [
   "var(--color-data-7)",
 ];
 
-const WINDOW_OPTIONS = [7, 30, 90] as const;
+const WINDOW_OPTIONS = ["7", "30", "90"] as const;
 const BREAKDOWN_OPTIONS: ReadonlyArray<{ id: ConsumptionBreakdown; label: string }> = [
   { id: "origin", label: "Quelle" },
   { id: "model", label: "Modell" },
@@ -125,8 +125,8 @@ function VerbrauchBody({
         actions={
           <SubtabChips
             items={WINDOW_OPTIONS.map((w) => ({ id: w, label: `${w} Tage` }))}
-            active={days}
-            onSelect={onDays}
+            active={String(days)}
+            onSelect={(id) => onDays(Number(id))}
             ariaLabelPrefix="Zeitfenster"
           />
         }
