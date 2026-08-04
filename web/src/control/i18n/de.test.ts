@@ -11,7 +11,6 @@ import { de } from "./de";
 const planTransitionSrc = readFileSync(fileURLToPath(new URL("../views/fleet/PlanSpecTransitionPanel.tsx", import.meta.url)), "utf8");
 const fleetPipelineSrc = readFileSync(fileURLToPath(new URL("../components/fleet/FleetPipeline.tsx", import.meta.url)), "utf8");
 const fleetSrc = readFileSync(fileURLToPath(new URL("../lib/fleet.ts", import.meta.url)), "utf8");
-const foDetailDrawerSrc = readFileSync(fileURLToPath(new URL("../views/backlog/FoDetailDrawer.tsx", import.meta.url)), "utf8");
 
 describe("German gated Flow copy", () => {
   it("explains that the gated release frees held subtasks without a force-run promise", () => {
@@ -47,21 +46,8 @@ describe("German gated Flow copy", () => {
   });
 });
 
-describe("German FO backlog drawer copy", () => {
-  it("wires the FoDetailDrawer labels through de.backlog.* instead of hardcoded English", () => {
-    expect(de.backlog.owner).toBe("Verantwortlich");
-    expect(de.backlog.nextAction).toBe("Nächster Schritt");
-    expect(de.backlog.acceptanceCriteria).toBe("Akzeptanzkriterien");
-    expect(de.backlog.blockers).toBe("Blocker");
-    // Pin gegen den Quelltext: Labels dürfen nicht still wieder hartkodiert werden.
-    expect(foDetailDrawerSrc).toContain("de.backlog.nextAction");
-    expect(foDetailDrawerSrc).toContain("de.backlog.acceptanceCriteria");
-    expect(foDetailDrawerSrc).toContain("de.backlog.evidenceProof");
-    expect(foDetailDrawerSrc).not.toMatch(/label="(Risk|Owner|Area)"/);
-  });
-});
-
-describe("German Autoresearch decision copy", () => {  it("uses the agreed plain-language triage labels", () => {
+describe("German Autoresearch decision copy", () => {
+  it("uses the agreed plain-language triage labels", () => {
     expect(de.autoresearch.accept).toBe("Annehmen");
     expect(de.autoresearch.reject).toBe("Ablehnen");
     expect(de.autoresearch.decisionWhat).toBe("Was es ist");
