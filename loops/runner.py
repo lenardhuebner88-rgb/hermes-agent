@@ -1530,6 +1530,22 @@ class LoopRunner:
         updates = {
             "HERMES_KANBAN_TASK": f"loop-{self.pack.name}-{phase}",
             "HERMES_LOOP_WORKER": "1",
+            # Lastdeckel für den GANZEN Agent-Turn, nicht nur für loops/gate.sh.
+            # Ein Pack-Prompt ruft `scripts/gate-frontend.sh` und teils auch
+            # `scripts/run_tests.sh` direkt — die erbten sonst weiter das
+            # `HERMES_TEST_WORKERS=8` aus dem systemd-User-Environment und den
+            # vitest-Default von 4 Workern. Seit mehrere Packs parallel bauen,
+            # summiert sich das: am 2026-08-04 riss ein jsdom-Render-Test bei
+            # Load 9,2 seinen bereits auf 30 s angehobenen Timeout, isoliert
+            # lief dieselbe Datei in 1,8 s durch. Timeouts weiter hochzudrehen
+            # ist Whack-a-Mole (die Warnung steht in web/vite.config.ts) — die
+            # Last gehört gedeckelt, nicht die Uhr verstellt.
+            # vitest-Worker wiegen schwerer als pytest-Worker (je eine
+            # jsdom-Umgebung), daher der eigene, niedrigere Hebel.
+            "HERMES_TEST_WORKERS": os.environ.get("HERMES_LOOP_TEST_WORKERS", "4"),
+            "GATE_FRONTEND_MAX_WORKERS": os.environ.get(
+                "HERMES_LOOP_FRONTEND_WORKERS", "2"
+            ),
             "PATH": f"{worker_bin}{os.pathsep}{os.environ.get('PATH', '')}",
             "GIT_CONFIG_COUNT": str(git_config_count + len(git_config)),
             "GIT_CONFIG_GLOBAL": "/dev/null",

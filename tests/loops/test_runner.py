@@ -5389,3 +5389,47 @@ def test_timeout_in_verify_is_not_excused_by_a_stale_base(tmp_path, fake_engine)
     # Genau die Requeue-Zeile darf NICHT stehen. Nicht auf "Basis stale" pruefen:
     # das steht auch in der harmlosen Vorbeuge-Zeile des Rundenstart-Refresh.
     assert "Verify ungültig (Basis stale, Gate lief nicht)" not in ledger
+
+
+def test_worker_environment_caps_load_for_the_whole_turn(tmp_path, fake_engine, monkeypatch):
+    """Der Lastdeckel muss den GANZEN Agent-Turn erfassen, nicht nur loops/gate.sh.
+
+    Pack-Prompts rufen scripts/gate-frontend.sh und teils scripts/run_tests.sh
+    direkt; die erbten sonst weiter HERMES_TEST_WORKERS=8 aus dem
+    systemd-User-Environment und den vitest-Default. Seit mehrere Packs parallel
+    bauen, riss darunter ein jsdom-Test seinen 30-s-Timeout, waehrend dieselbe
+    Datei isoliert in 1,8 s durchlief.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "deckel", "sweep", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "deckel"), state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    monkeypatch.setenv("HERMES_TEST_WORKERS", "8")          # so wie systemd es vererbt
+    monkeypatch.delenv("HERMES_LOOP_TEST_WORKERS", raising=False)
+    monkeypatch.delenv("HERMES_LOOP_FRONTEND_WORKERS", raising=False)
+
+    with runner._worker_environment("round"):
+        pytest_workers = os.environ["HERMES_TEST_WORKERS"]
+        vitest_workers = os.environ["GATE_FRONTEND_MAX_WORKERS"]
+    assert pytest_workers == "4", "geerbte 8 muessen ueberschrieben werden"
+    assert int(vitest_workers) <= int(pytest_workers), (
+        "vitest-Worker wiegen schwerer (je eine jsdom-Umgebung) und duerfen den "
+        "pytest-Deckel nicht ueberschreiten"
+    )
+    # Nach dem Turn exakt wiederhergestellt — sonst leckt der Deckel in den Driver.
+    assert os.environ["HERMES_TEST_WORKERS"] == "8"
+    assert "GATE_FRONTEND_MAX_WORKERS" not in os.environ
+
+
+def test_operator_can_raise_the_turn_load_cap(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "hebel", "sweep", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "hebel"), state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    monkeypatch.setenv("HERMES_TEST_WORKERS", "8")
+    monkeypatch.setenv("HERMES_LOOP_TEST_WORKERS", "6")
+    monkeypatch.setenv("HERMES_LOOP_FRONTEND_WORKERS", "3")
+
+    with runner._worker_environment("round"):
+        assert os.environ["HERMES_TEST_WORKERS"] == "6"
+        assert os.environ["GATE_FRONTEND_MAX_WORKERS"] == "3"
