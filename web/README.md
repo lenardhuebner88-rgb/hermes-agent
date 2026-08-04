@@ -23,7 +23,7 @@ npm run dev
 
 Open the **Vite URL** printed in the terminal (usually `http://localhost:5173`). That is the live-reload UI.
 
-`hermes dashboard` on port 9119 serves the **built** bundle from `hermes_cli/web_dist/`, not the Vite dev server — changes in `web/src/` will not appear there until you run `npm run build` and restart the dashboard (or use `web --no-open` + Vite as above).
+`hermes dashboard` on port 9119 serves the **built** bundle from `hermes_cli/web_dist/`, not the Vite dev server — changes in `web/src/` will not appear there until you run `npm run build` (or use `web --no-open` + Vite as above). The running dashboard reads the rebuilt files on subsequent requests; a restart is not required for frontend-only changes.
 
 The Vite dev server proxies `/api` requests to `http://127.0.0.1:9119` (the FastAPI backend).
 
@@ -101,4 +101,3 @@ Typography is **opt-in per surface**, not global on layout shells — the app sh
 - Prefer **semantic tokens** (`text-text-*`, `bg-card`, `border-border`, `text-foreground`, `text-destructive`, `text-success`, `text-warning`) over raw layer references (`text-midground`, `text-foreground`).
 - `text-muted-foreground` is now wired to `--color-text-secondary`, so existing call sites stay correct, but new code should prefer the semantic name.
 - When you genuinely need a non-token color (icon de-emphasis on a chart, terminal foreground via inline style), keep alpha at `≥ 0.7` for any text.
-
