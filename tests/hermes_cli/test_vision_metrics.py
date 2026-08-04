@@ -579,6 +579,70 @@ def test_conflict_fixer_window_does_not_credit_old_resumes_to_new_attempts(conn)
     assert cf["window_success_rate_pct"] is None
 
 
+def test_conflict_fixer_window_orders_resume_and_dispatch_by_event_id(conn):
+    """``created_at`` stamps WHOLE seconds (kanban_db stamps int(time.time())),
+    so a resume sandwiched between two dispatches in the SAME second must be
+    ordered by event id: the resume closed the older attempt, and the window
+    must grade the newer open attempt ``in_flight`` — not ``fixer_resolved``.
+    All-time keeps the membership rule (v3 semantics unchanged)."""
+    ts = 5_000
+    _add_task(conn, "P", status="blocked")
+    # Attempt 1, resume, attempt 2 — all in the same second.
+    _add_task(conn, "F1", status="done", completed_at=ts)
+    _dispatch_fixer(conn, "P", "F1", root="R", attempt=1, limit=3, created_at=ts)
+    _resume_parent_via_real_emitter(conn, "P", "F1", resume_at=ts)
+    _add_task(conn, "F2", status="running")
+    _dispatch_fixer(conn, "P", "F2", root="R", attempt=2, limit=3, created_at=ts)
+
+    windowed = vm._conflict_fixer_episodes(conn, since=ts)
+    assert [ep["outcome"] for ep in windowed] == [vm.CONFLICT_EPISODE_IN_FLIGHT]
+
+    all_time = vm._conflict_fixer_episodes(conn)
+    assert [ep["outcome"] for ep in all_time] == [vm.CONFLICT_EPISODE_RESOLVED]
+
+    snap = vm.compute_metrics_snapshot(conn, now=ts + 7 * DAY, window_days=7)
+    cf = snap["metrics"]["conflict_fixer"]
+    assert cf["resolved"] == 1  # all-time wertgleich
+    assert cf["window_resolved"] == 0
+    assert cf["window_in_flight"] == 1
+    assert cf["window_success_rate_pct"] is None
+
+
+def test_conflict_fixer_window_does_not_credit_stale_exhaustion_to_new_episodes(conn):
+    """Stale budget-spent evidence (an operator escalation for an OLD conflict
+    on the same parent) must not grade a NEWER still-running episode in the
+    window: the evidence event predates that episode's dispatch. All-time
+    keeps the historical attribution (v3 semantics unchanged)."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="blocked")
+    # Conflict A: old episode, budget spent, escalated long ago.
+    _add_task(conn, "FA", status="done", completed_at=now - 20 * DAY)
+    _dispatch_fixer(conn, "P", "FA", root="R", attempt=1, limit=3,
+                    created_at=now - 21 * DAY)
+    _add_event(conn, "P", kb.OPERATOR_ESCALATION_EVENT,
+               payload={"evidence": {"attempts": 1, "fixer_exhausted": True}},
+               created_at=now - 20 * DAY)
+    # Conflict B on the same parent: new episode in the window, fixer running.
+    _add_task(conn, "FB", status="running")
+    _dispatch_fixer(conn, "P", "FB", root="R", attempt=2, limit=3,
+                    reason=OTHER_PARK_REASON, created_at=now - DAY)
+
+    new_fp = _park_reason_fingerprint(OTHER_PARK_REASON)
+    windowed = vm._conflict_fixer_episodes(conn, since=now - 7 * DAY)
+    assert {ep["fingerprint"]: ep["outcome"] for ep in windowed} == {
+        new_fp: vm.CONFLICT_EPISODE_IN_FLIGHT
+    }
+
+    # All-time wertgleich: the historical attribution still grades the newest
+    # unresolved episode exhausted, and the old episode unresolved (v3).
+    all_time = {
+        ep["fingerprint"]: ep["outcome"]
+        for ep in vm._conflict_fixer_episodes(conn)
+    }
+    assert all_time[new_fp] == vm.CONFLICT_EPISODE_EXHAUSTED
+    assert all_time[_park_reason_fingerprint()] == vm.CONFLICT_EPISODE_UNRESOLVED
+
+
 _V3_CONFLICT_FIXER_KEYS = frozenset({
     "success_rate_pct", "episodes", "resolved", "failed", "exhausted",
     "unresolved_by_fixer", "in_flight", "counter",

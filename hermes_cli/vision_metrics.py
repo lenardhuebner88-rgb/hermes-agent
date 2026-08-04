@@ -1582,24 +1582,31 @@ _FIXER_CHILD_TERMINAL_STATUSES = frozenset(
 )
 
 
-def _tasks_with_fixer_exhausted_escalation(conn: sqlite3.Connection) -> set[str]:
-    """Tasks whose operator escalation carries the fixer's own budget-spent
-    evidence (``_maybe_route_conflict_park_fixer`` → ``_escalate({..
-    "fixer_exhausted": True})``).
+def _fixer_exhausted_escalation_event_ids(conn: sqlite3.Connection) -> dict[str, int]:
+    """Latest budget-spent evidence event id per escalated parent task.
 
-    Needed alongside the structural attempt count because the budget is
-    ROOT-keyed: a cascade can spend the budget across several parents, so a
-    single parent may show one dispatch and still be the one that escalated.
+    The operator escalation carries the fixer's own budget-spent evidence
+    (``_maybe_route_conflict_park_fixer`` → ``_escalate({..
+    "fixer_exhausted": True})``). Needed alongside the structural attempt
+    count because the budget is ROOT-keyed: a cascade can spend the budget
+    across several parents, so a single parent may show one dispatch and
+    still be the one that escalated.
+
+    Returns the newest evidence EVENT ID per task, not just membership: the
+    window view only accepts evidence that postdates the graded episode's
+    latest dispatch, and ``created_at`` stamps whole seconds only, so the
+    event id is the reliable order.
     """
-    out: set[str] = set()
+    latest: dict[str, int] = {}
     for r in conn.execute(
-        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        "SELECT id, task_id, payload FROM task_events WHERE kind = ?",
         (kb.OPERATOR_ESCALATION_EVENT,),
     ).fetchall():
         evidence = _event_payload(r["payload"]).get("evidence")
         if isinstance(evidence, dict) and evidence.get("fixer_exhausted"):
-            out.add(r["task_id"])
-    return out
+            task_id = str(r["task_id"])
+            latest[task_id] = max(latest.get(task_id, 0), int(r["id"]))
+    return latest
 
 
 def _conflict_fixer_episodes(
@@ -1626,10 +1633,13 @@ def _conflict_fixer_episodes(
     Episodes straddling the window edge stay whole (all attempts counted).
 
     Resume proofs are read across all time, but in the window view a proof
-    only counts when it landed at or after the episode's LATEST dispatch: a
-    resume in between two dispatches closed the OLDER attempt, and crediting
-    it to a newer still-open attempt would report success while work is
-    pending. All-time grading keeps the plain membership rule unchanged.
+    only counts when its EVENT ID is greater than the episode's latest
+    dispatch event id: a resume in between two dispatches closed the OLDER
+    attempt, and crediting it to a newer still-open attempt would report
+    success while work is pending. The event id decides the order because
+    ``created_at`` stamps whole seconds only (kanban_db stamps
+    ``int(time.time())``), so same-second events are otherwise unordered.
+    All-time grading keeps the plain membership rule unchanged.
     """
     dispatched = conn.execute(
         "SELECT id, task_id, payload, created_at "
@@ -1677,17 +1687,17 @@ def _conflict_fixer_episodes(
             return []
 
     # Resume proof, per (parent, fingerprint). The window view additionally
-    # needs each proof's time (see the docstring's dispatch-order rule).
+    # needs each proof's event id (see the docstring's dispatch-order rule).
     resumed: set[tuple[str, str]] = set()
-    resumed_at: dict[tuple[str, str], int] = {}
+    resumed_id: dict[tuple[str, str], int] = {}
     for r in conn.execute(
-        "SELECT task_id, payload, created_at FROM task_events WHERE kind = ?",
+        "SELECT id, task_id, payload FROM task_events WHERE kind = ?",
         (CONFLICT_FIXER_RESUMED_EVENT,),
     ).fetchall():
         payload = _event_payload(r["payload"])
         key = (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
         resumed.add(key)
-        resumed_at[key] = max(resumed_at.get(key, 0), int(r["created_at"]))
+        resumed_id[key] = max(resumed_id.get(key, 0), int(r["id"]))
     for (_root, fingerprint), ep in episodes.items():
         if since is None:
             ep["resolved"] = any(
@@ -1695,7 +1705,7 @@ def _conflict_fixer_episodes(
             )
         else:
             ep["resolved"] = any(
-                resumed_at.get((parent, fingerprint), -1) >= ep["last_dispatch_at"]
+                resumed_id.get((parent, fingerprint), -1) > ep["last_dispatch_id"]
                 for parent in ep["parents"]
             )
 
@@ -1709,12 +1719,18 @@ def _conflict_fixer_episodes(
         for parent in ep["parents"]:
             unresolved_by_parent.setdefault(parent, []).append(key)
     exhausted_keys: set[tuple[str, str]] = set()
-    for parent in _tasks_with_fixer_exhausted_escalation(conn):
+    for parent, evidence_id in _fixer_exhausted_escalation_event_ids(conn).items():
         keys = unresolved_by_parent.get(parent)
-        if keys:
-            exhausted_keys.add(
-                max(keys, key=lambda k: episodes[k]["last_dispatch_id"])
-            )
+        if not keys:
+            continue
+        latest_key = max(keys, key=lambda k: episodes[k]["last_dispatch_id"])
+        # All-time keeps the historical attribution; the window view only
+        # accepts evidence newer than the episode's latest dispatch — older
+        # evidence belongs to an earlier conflict on the same parent, and a
+        # stale exhaustion must not grade a still-running fixer (event ids
+        # order reliably; created_at stamps whole seconds only).
+        if since is None or evidence_id > episodes[latest_key]["last_dispatch_id"]:
+            exhausted_keys.add(latest_key)
 
     all_children = sorted(
         {child for ep in episodes.values() for child in ep["children"]}
