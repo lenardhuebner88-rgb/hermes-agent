@@ -868,6 +868,39 @@ def _build_consumption_payload_uncached(
             }
         )
 
+    # Small multiples (D3): per-origin daily series for the top origins by
+    # equivalent cost (cap 7 — the data palette).  Comparison is the
+    # question; one stacked chart would hide it.
+    origin_day: dict[str, dict[str, list[PricedGroup]]] = {}
+    origin_totals: dict[str, Decimal] = {}
+    for item in priced_rich:
+        origin = item.group.dims["origin"]
+        origin_day.setdefault(origin, {}).setdefault(
+            item.group.dims["day"], []
+        ).append(item)
+        if item.priceable and item.equivalent_usd is not None:
+            origin_totals[origin] = (
+                origin_totals.get(origin, Decimal("0")) + item.equivalent_usd
+            )
+    top_origins = sorted(
+        origin_totals, key=lambda o: -origin_totals[o]
+    )[:7]
+    daily_by_origin = {}
+    for origin in top_origins:
+        entries = []
+        for day, items in sorted(origin_day[origin].items()):
+            s = _sums(items)
+            entries.append(
+                {
+                    "day": day,
+                    "equivalent_usd": round(s["equivalent_usd"], 4),
+                    "token_coverage": _rate(
+                        s["tokens"], s["tokens"] + s["unpriced_tokens"]
+                    ),
+                }
+            )
+        daily_by_origin[origin] = entries
+
     # Cache-hit rate: hits over the observed prompt volume.  The prompt
     # convention is self-detecting per row (Canon §5f): OpenAI-style rows
     # already include the cache in input; Anthropic-style rows add it on
@@ -1069,6 +1102,7 @@ def _build_consumption_payload_uncached(
         "component_shares": component_shares,
         "breakdown": {"dimension": breakdown, "series": series},
         "daily": daily,
+        "daily_by_origin": daily_by_origin,
         "distributions": {
             "tokens_per_run": _distribution(token_values),
             "tokens_per_tool_call": _distribution(tool_values),

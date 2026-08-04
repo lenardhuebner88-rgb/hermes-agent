@@ -99,3 +99,79 @@ export function RateBar({ rate, color = "var(--color-status-ok)" }: { rate: numb
     </div>
   );
 }
+
+/** Ein Tagesbalken mit Abdeckungsgrad (0..1 oder null = unbekannt). */
+export interface CoveragePoint extends SeriesPoint {
+  coverage?: number | null;
+}
+
+/**
+ * Tages-Balken, deren Sättigung die Datenabdeckung zeigt (Verbrauch-Tab,
+ * D3): volle Deckung = volle Farbe, 70 % = sichtbar matter, unbekannt =
+  * neutral. Unsicherheit wird gezeigt, nicht versteckt. Null-Achse wie
+ * DayBars; Tooltips tragen Wert UND Abdeckung.
+ */
+export function DayBarsCoverage({ points, color = "var(--color-live)", valueFmt }: {
+  points: CoveragePoint[];
+  color?: string;
+  valueFmt?: (v: number) => string;
+}) {
+  if (!points.length) return null;
+  const max = Math.max(...points.map((p) => p.value), 1);
+  const gap = 1.5;
+  const bw = (W - PAD * 2 - gap * (points.length - 1)) / points.length;
+  const opacityFor = (coverage: number | null | undefined, positive: boolean) => {
+    if (!positive) return 0.6;
+    if (coverage == null) return 0.45;
+    return 0.35 + 0.6 * Math.max(0, Math.min(1, coverage));
+  };
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="block h-14 w-full" role="img">
+      {points.map((p, i) => {
+        const x = PAD + i * (bw + gap);
+        const y = scaleY(p.value, max);
+        const positive = p.value > 0;
+        return (
+          <rect
+            key={p.label}
+            x={x.toFixed(1)}
+            y={positive ? y.toFixed(1) : H - PAD - 1}
+            width={Math.max(0.5, bw).toFixed(1)}
+            height={positive ? (H - PAD - y).toFixed(1) : 1}
+            rx="1"
+            fill={positive ? color : "var(--color-line)"}
+            opacity={opacityFor(p.coverage, positive).toFixed(2)}
+          >
+            <title>{`${p.label}: ${valueFmt ? valueFmt(p.value) : p.value}${p.coverage != null ? ` · Abdeckung ${(p.coverage * 100).toFixed(0)} %` : " · Abdeckung unbekannt"}`}</title>
+          </rect>
+        );
+      })}
+    </svg>
+  );
+}
+
+/** Zwei Balken nebeneinander (Ist vs. Gegenrechnung) für die Hebel-Karten.
+ *  Geldachsen beginnen bei null (D3). */
+export function VsBars({ current, counter, color = "var(--color-live)", counterColor = "var(--color-data-3)", valueFmt }: {
+  current: number;
+  counter: number;
+  color?: string;
+  counterColor?: string;
+  valueFmt?: (v: number) => string;
+}) {
+  const max = Math.max(current, counter, 0.0001);
+  const bar = (v: number, c: string, label: string) => {
+    const h = Math.max(1, (v / max) * (H - PAD * 2));
+    return (
+      <rect x={0} y={H - PAD - h} width={34} height={h.toFixed(1)} rx="2" fill={c} opacity={0.9}>
+        <title>{`${label}: ${valueFmt ? valueFmt(v) : v}`}</title>
+      </rect>
+    );
+  };
+  return (
+    <svg viewBox={`0 0 76 ${H}`} className="block h-14 w-20" role="img" aria-label={`Ist ${valueFmt ? valueFmt(current) : current}, Gegenrechnung ${valueFmt ? valueFmt(counter) : counter}`}>
+      <g>{bar(current, color, "Ist")}</g>
+      <g transform="translate(40,0)">{bar(counter, counterColor, "Gegenrechnung")}</g>
+    </svg>
+  );
+}

@@ -76,6 +76,10 @@ export const CONTROL_ROUTES = [
   { id: "scorecard", path: "/control/scorecard", segment: "scorecard", label: "Scorecard", icon: BadgeCheck, nav: "more", exportName: "ScorecardView", load: () => import("./views/ScorecardView") },
   // Hebel (S7): Kosten-SSOT-Tab auf dem usage-facts.v1 Read-Pfad.
   { id: "hebel", path: "/control/hebel", segment: "hebel", label: "Hebel", icon: Gauge, nav: "more", exportName: "HebelView", load: () => import("./views/HebelView") },
+  // Verbrauch (usage-observability-Goal): PAYG-Äquivalent + Hebel auf
+  // usage-consumption.v1. Label literal (wie "Lanes"): i18n/de.ts wird von
+  // parallelen Sessions editiert.
+  { id: "verbrauch", path: "/control/verbrauch", segment: "verbrauch", label: "Verbrauch", icon: ChartSpline, nav: "more", exportName: "VerbrauchView", load: () => import("./views/VerbrauchView") },
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt in der
   // Haupt-Nav, dafür wohnt Autoresearch hier.
   { id: "research", path: "/control/research", segment: "research", label: "Recherche", icon: SearchCheck, nav: "more", exportName: "ResearchView", load: () => import("./views/ResearchView") },
