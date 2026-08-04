@@ -1410,6 +1410,86 @@ def test_expire_stale_building_bounces_orphans(tmp_path, fake_engine):
     assert runner.qcount("10-building") == 0
 
 
+def test_expire_stale_building_on_resume_path_discards_unverified_commit(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Codex-Blocker 2026-08-04: usage-limit im Verifier lässt Plan in
+    10-building UND Commit auf dem Loop-Branch liegen (runner.py, verify-
+    usage-limit-Zweig). Der nächste Lauf sprang vor der Pipeline in den
+    Resume-Zweig (_autoland_pending wahr) und _autoland_queue_ready() blockte
+    wegen building=1 — der in _run_pipeline liegende Verfall wurde NIE
+    erreicht (Live-Wedge dashboard-experience, 27.07.–04.08.).
+    Der Verfall muss vor dem Resume-Urteil greifen: Plan → 90-bounced,
+    unverifizierter Commit verworfen (reversibel per Anker-Tag), der Lauf
+    fällt in den Normalpfad statt zu blocken."""
+    behaviors, calls = fake_engine
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    # Stand nach usage-limit im Verifier: unverifizierter Commit + Plan in 10-building.
+    commit_control_in(runner.wt, "unverified")
+    (runner.queue / "10-building" / "P1-haengt.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    assert runner._autoland_pending() is True  # PRE, wie in Codex' Reproduktion
+
+    def plan_dry(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "DRY /control/route\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_dry
+
+    assert runner.cmd_night() is True
+
+    # Plan verfallen, Queue frei.
+    assert runner.qcount("10-building") == 0
+    assert (runner.queue / "90-bounced" / "P1-haengt.md").is_file()
+    # Der unverifizierte Commit ist verworfen — der Branch steht wieder auf main ...
+    assert g(repo, "rev-parse", pack.branch).stdout == g(repo, "rev-parse", "main").stdout
+    # ... aber reversibel: der Anker-Tag hält den alten Tip fest.
+    assert "loop-expire/" in g(repo, "tag", "--list", "loop-expire/*").stdout
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "building-expired" in ledger
+    assert "expire-reset" in ledger
+    assert "AUTOLAND blocked" not in ledger
+    # Normalpfad erreicht (Planner lief, DRY-Ende) statt Resume-Blockade.
+    assert calls == ["plan"]
+
+
+def test_expire_stale_building_keeps_branch_when_verified_pending(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Sicherheitsgabel: liegt neben dem verwaisten Build Verifiziertes in
+    20-verified (z. B. Runde 1 PASS, Runde 2 usage-limit), darf der Branch
+    NICHT geresettet werden — sonst läge verifizierte Arbeit im Reset.
+    Stattdessen: Plan verfällt, Branch bleibt, Alarm ins Ledger."""
+    repo, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "verified-work")
+    branch_head = runner.rev_parse()
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    (runner.queue / "10-building" / "P1-haengt.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+
+    runner._expire_stale_building()
+
+    assert (runner.queue / "90-bounced" / "P1-haengt.md").is_file()
+    assert runner.rev_parse() == branch_head, "Branch mit Verifiziertem angefasst"
+    assert "loop-expire/" not in g(repo, "tag", "--list", "loop-expire/*").stdout
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "gemischter Stand" in ledger
+    assert "expire-reset" not in ledger
+
+
+
 def test_ensure_wt_uses_base_branch(tmp_path, fake_engine):
     repo = init_repo(tmp_path / "repo")
     g(repo, "branch", "-m", "main", "trunk")

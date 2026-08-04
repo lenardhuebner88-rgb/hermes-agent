@@ -1845,6 +1845,7 @@ class LoopRunner:
         stage = self.queue / "10-building"
         if not stage.is_dir():
             return
+        bounced = False
         for plan in sorted(stage.glob("*.md")):
             target = self.queue / "90-bounced" / plan.name
             if target.exists():  # Namens-Wiederverwendung: alte Evidenz nicht überschreiben
@@ -1859,6 +1860,73 @@ class LoopRunner:
                 phase="expire", verdict="bounced", plan=target.name,
                 fail_kind="stale_building", reason="verwaist in 10-building",
             )
+            bounced = True
+        if bounced:
+            self._discard_expired_build_commits()
+
+    def _discard_expired_build_commits(self) -> None:
+        """Räumt den unverifizierten Commit ab, der zu einem verfallenen
+        10-building-Plan gehört (usage-limit im Build/Verify lässt Plan UND
+        Commit absichtlich liegen, :2164/:2209). Würde nur der Plan verfallen,
+        bliebe der Netto-Diff bestehen: _autoland_pending() wahr, aber
+        _autoland_queue_ready() blockt für immer (verified=0/ahead=1) — der
+        Live-Wedge von dashboard-experience (27.07.–04.08.2026).
+
+        Verlustfrei für Verifiziertes: ein Commit gilt erst nach PASS als
+        verifiziert, und genau dann wandert sein Plan nach 20-verified
+        (:2301-2303). qcount("20-verified") == 0 heißt also: der gesamte
+        Netto-Diff ist unverifiziert oder netto-null (Build+Revert-Paare).
+        Liegt doch Verifiziertes vor (gemischter Stand, z. B. Runde 1 PASS,
+        Runde 2 usage-limit), wird der Branch NICHT angefasst, sondern
+        alarmiert — das ist eine Menschen-Entscheidung, keine Runner-Automatik.
+        Der Anker-Tag macht den Reset selbst reversibel (Muster wie
+        _auto_rebase)."""
+        if self.qcount("20-verified") > 0:
+            self.ledger(
+                "expire: gemischter Stand (20-verified nicht leer + verworfener "
+                "Build) — Loop-Branch bleibt unangetastet, manuell klären"
+            )
+            self.notify(
+                f"⛔ {self.pack.name}: verwaisten Build verworfen, aber "
+                "20-verified ist nicht leer — Loop-Branch manuell prüfen."
+            )
+            return
+        net = self.git(
+            "diff", "--name-only",
+            f"{self.pack.base_branch}...{self.pack.branch}", cwd=self.pack.repo,
+        ).stdout.strip()
+        if not net:
+            return
+        anchor = (
+            f"loop-expire/{self.pack.name}/"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        if self.git("tag", anchor, self.pack.branch, cwd=self.pack.repo).returncode != 0:
+            self.ledger(
+                "expire: Anker-Tag ließ sich nicht setzen — Branch bleibt "
+                "unangetastet (Autoland-Wächter blockiert weiter)"
+            )
+            return
+        self.ensure_wt()
+        if not self.guard_clean():
+            self.ledger(
+                "expire: Branch-Räumung abgebrochen (Worktree nicht heilbar) — "
+                f"Anker {anchor}, Autoland-Wächter blockiert weiter"
+            )
+            return
+        res = self.git("reset", "--hard", self.pack.base_branch)
+        if res.returncode != 0:
+            self.ledger(
+                f"⚠️ EXPIRE-RESET FEHLGESCHLAGEN "
+                f"({self.pack.branch} → {self.pack.base_branch}, Anker {anchor}): "
+                f"{res.stderr.strip()[:200]}"
+            )
+            return
+        self.ledger(
+            f"expire-reset: unverifizierte Commits verworfen "
+            f"({self.pack.branch} → {self.pack.base_branch}, Anker {anchor}): "
+            + ", ".join(net.splitlines()[:5])
+        )
 
     # ── Kommandos ──
     def cmd_plan(self, fresh: bool = False) -> bool:
@@ -2494,6 +2562,14 @@ class LoopRunner:
         # _autoland_pending() geloest (Netto-Diff statt Commitzahl → netto-leerer
         # Branch ist nicht mehr "pending", cmd_night faellt in den Round-Loop und
         # arbeitet den Retry ab). Hier braucht es KEINEN zusaetzlichen Guard.
+        # Verfall auch auf dem Resume-Pfad, BEVOR _autoland_queue_ready()
+        # urteilt: ein verwaister 10-building-Eintrag (usage-limit lässt Plan
+        # UND Commit liegen) blockte den Wächter sonst jede Nacht erneut — der
+        # Verfall lief nur in _run_pipeline und wurde dort nie erreicht,
+        # solange _autoland_pending() wahr war (Live-Wedge 27.07.–04.08.2026,
+        # Codex-Review 04.08.).
+        if self.autoland_active:
+            self._expire_stale_building()
         if self.autoland_active and self._autoland_pending():
             if self._manual_land_required("resume"):
                 return True
