@@ -51,6 +51,12 @@ DAY_SECONDS = 86_400
 # fields because the rest of its cohort (done tasks, escalations, failed runs)
 # is all-time, so a windowed headline would mix two populations.
 SCHEMA_VERSION = 4
+# Schema versions that differ only by ADDED keys (no removal, no
+# reinterpretation), so a baseline recorded on one remains a valid comparison
+# basis for an observation on another — see
+# outcome_verification.compare_observations. A future schema that removes or
+# reinterprets keys must NOT join this set.
+ADDITIVE_SCHEMA_VERSIONS = frozenset({3, 4})
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 LANDING_GATE_LEDGER_FILENAME = "landing-gate-ledger.jsonl"
@@ -1618,9 +1624,12 @@ def _conflict_fixer_episodes(
     ``since`` (epoch seconds) selects episodes by DISPATCH activity: an
     episode is kept when its latest dispatch happened at or after ``since``.
     Episodes straddling the window edge stay whole (all attempts counted).
-    Resume proofs and exhaustion evidence are read all-time on purpose: an
-    in-window dispatch may only be proven resolved by a later resume, and
-    dropping that would slander a fixer that did close the park.
+
+    Resume proofs are read across all time, but in the window view a proof
+    only counts when it landed at or after the episode's LATEST dispatch: a
+    resume in between two dispatches closed the OLDER attempt, and crediting
+    it to a newer still-open attempt would report success while work is
+    pending. All-time grading keeps the plain membership rule unchanged.
     """
     dispatched = conn.execute(
         "SELECT id, task_id, payload, created_at "
@@ -1667,20 +1676,28 @@ def _conflict_fixer_episodes(
         if not episodes:
             return []
 
-    # Resume proof, per (parent, fingerprint).
+    # Resume proof, per (parent, fingerprint). The window view additionally
+    # needs each proof's time (see the docstring's dispatch-order rule).
     resumed: set[tuple[str, str]] = set()
+    resumed_at: dict[tuple[str, str], int] = {}
     for r in conn.execute(
-        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        "SELECT task_id, payload, created_at FROM task_events WHERE kind = ?",
         (CONFLICT_FIXER_RESUMED_EVENT,),
     ).fetchall():
         payload = _event_payload(r["payload"])
-        resumed.add(
-            (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
-        )
+        key = (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
+        resumed.add(key)
+        resumed_at[key] = max(resumed_at.get(key, 0), int(r["created_at"]))
     for (_root, fingerprint), ep in episodes.items():
-        ep["resolved"] = any(
-            (parent, fingerprint) in resumed for parent in ep["parents"]
-        )
+        if since is None:
+            ep["resolved"] = any(
+                (parent, fingerprint) in resumed for parent in ep["parents"]
+            )
+        else:
+            ep["resolved"] = any(
+                resumed_at.get((parent, fingerprint), -1) >= ep["last_dispatch_at"]
+                for parent in ep["parents"]
+            )
 
     # The ``fixer_exhausted`` escalation carries no fingerprint, so attribute it
     # to that task's LATEST still-unresolved episode — bounded and never able to
@@ -1732,6 +1749,7 @@ def _conflict_fixer_episodes(
             "root_id": ep["root_id"],
             "fingerprint": ep["fingerprint"],
             "parents": sorted(ep["parents"]),
+            "children": sorted(ep["children"]),
             "attempts": attempts,
             "limit": int(ep["limit"]),
             "outcome": outcome,
@@ -1739,30 +1757,19 @@ def _conflict_fixer_episodes(
     return out
 
 
-def _conflict_fixer_failed_count(
-    conn: sqlite3.Connection, *, since: Optional[int] = None
-) -> int:
+def _conflict_fixer_failed_count(conn: sqlite3.Connection) -> int:
     """Count distinct fixer-failure signals emitted to a child and its parent.
 
     ``on_fixer_card_failed`` deliberately writes the same payload twice so both
     the fixer card and its chain can observe it.  A failure is uniquely keyed by
     its child card, attempt and conflict fingerprint; count that key rather than
     event rows to preserve the one-failure/one-count contract.
-
-    ``since`` (epoch seconds) restricts the count to failure events emitted at
-    or after that instant — the window sibling of the all-time count.
     """
     failures: set[tuple[str, int, str]] = set()
-    if since is None:
-        rows = conn.execute(
-            "SELECT payload FROM task_events WHERE kind = ?",
-            (CONFLICT_FIXER_FAILED_EVENT,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT payload FROM task_events WHERE kind = ? AND created_at >= ?",
-            (CONFLICT_FIXER_FAILED_EVENT, int(since)),
-        ).fetchall()
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (CONFLICT_FIXER_FAILED_EVENT,),
+    ).fetchall()
     for row in rows:
         payload = _event_payload(row["payload"])
         child_id = str(payload.get("child_id") or "").strip()
@@ -1775,6 +1782,48 @@ def _conflict_fixer_failed_count(
         except (TypeError, ValueError):
             continue
         if child_id and fingerprint and attempt >= 1:
+            failures.add((child_id, attempt, fingerprint))
+    return len(failures)
+
+
+def _conflict_fixer_failed_count_for_episodes(
+    conn: sqlite3.Connection, episodes: list[dict]
+) -> int:
+    """Count distinct failure keys belonging to the given episodes' fixer cards.
+
+    The window sibling of the all-time failed count must use the SAME cohort
+    as the episode buckets it sits next to: a failure is attributed when its
+    child card was dispatched as part of one of *episodes* (matching
+    fingerprint). Time-windowing the failure events instead would mix two
+    differently-selected populations into one rate.
+    """
+    child_fingerprints: dict[str, str] = {}
+    for ep in episodes:
+        for child in ep["children"]:
+            child_fingerprints[child] = ep["fingerprint"]
+    if not child_fingerprints:
+        return 0
+    failures: set[tuple[str, int, str]] = set()
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (CONFLICT_FIXER_FAILED_EVENT,),
+    ).fetchall():
+        payload = _event_payload(row["payload"])
+        child_id = str(payload.get("child_id") or "").strip()
+        fingerprint = str(payload.get("conflict_fingerprint") or "").strip()
+        raw_attempt = payload.get("attempt")
+        if raw_attempt is None:
+            continue
+        try:
+            attempt = int(raw_attempt)
+        except (TypeError, ValueError):
+            continue
+        if (
+            child_id
+            and fingerprint
+            and attempt >= 1
+            and child_fingerprints.get(child_id) == fingerprint
+        ):
             failures.add((child_id, attempt, fingerprint))
     return len(failures)
 
@@ -2541,7 +2590,9 @@ def compute_metrics_snapshot(
                 ),
                 _conflict_fixer_metric(
                     conflict_episodes_window,
-                    failed=_conflict_fixer_failed_count(conn, since=since_epoch),
+                    failed=_conflict_fixer_failed_count_for_episodes(
+                        conn, conflict_episodes_window
+                    ),
                 ),
                 window_days=window_days,
                 since_epoch=since_epoch,

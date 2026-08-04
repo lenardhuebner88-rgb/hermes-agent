@@ -169,13 +169,17 @@ def _dispatch_fixer(conn, parent, child, *, root=None, attempt=1, limit=2,
     )
 
 
-def _resume_parent_via_real_emitter(conn, parent, child, *, reason=PARK_REASON):
+def _resume_parent_via_real_emitter(conn, parent, child, *, reason=PARK_REASON,
+                                    resume_at=None):
     """Drive ``kanban_db._resume_parent_for_completed_conflict_fixer`` — the ONE
     producer of the resume proof this metric reads.
 
     Deliberately NOT a hand-written ``conflict_fixer_parent_resumed`` row: if the
     event name or payload shape is ever renamed in kanban_db, this test fails
     instead of the metric silently reading 0 resolved episodes forever.
+
+    ``resume_at`` restamps the emitted resume event (the real emitter writes
+    wall-clock time); window tests need the proof placed between dispatches.
     """
     _add_event(
         conn, child, "conflict_fixer_for",
@@ -188,6 +192,11 @@ def _resume_parent_via_real_emitter(conn, parent, child, *, reason=PARK_REASON):
     conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (parent,))
     conn.commit()
     assert kb._resume_parent_for_completed_conflict_fixer(conn, child) is True
+    if resume_at is not None:
+        conn.execute(
+            "UPDATE task_events SET created_at = ? WHERE kind = ?",
+            (int(resume_at), vm.CONFLICT_FIXER_RESUMED_EVENT),
+        )
     conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
     conn.commit()
 
@@ -486,24 +495,88 @@ def test_conflict_fixer_episodes_window_selects_by_dispatch_time(conn):
     assert straddling["attempts"] == 2  # kept whole, not truncated
 
 
-def test_conflict_fixer_failed_count_window_only_counts_in_window_failures(conn):
+def test_conflict_fixer_window_failed_uses_the_episode_cohort(conn):
+    """``window_failed`` must count failures of the window-selected episodes'
+    cards — NOT failure events inside the window. Two populations that a
+    time-based count would mix: an in-window episode whose failure events are
+    OLD (counts), and an out-of-window episode whose failure event is NEW
+    (does not count)."""
     now = 100 * DAY
-    failure_payload = {
-        "child_id": "FAILED-F",
-        "parent_id": "P",
-        "root_id": "R",
-        "attempt": 2,
-        "outcome": "gave_up",
-        "blocked": False,
-        "conflict_fingerprint": _park_reason_fingerprint(),
-    }
-    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
-               payload=failure_payload, created_at=now - 20 * DAY)
-    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
-               payload=dict(failure_payload, attempt=3), created_at=now - DAY)
+    # Episode R_IN: latest dispatch inside the window, two failures on its
+    # older attempts — both events OUTSIDE the 7-day window.
+    _add_task(conn, "P_IN", status="blocked")
+    _dispatch_fixer(conn, "P_IN", "F_IN_A", root="R_IN", attempt=1, limit=4,
+                    created_at=now - 22 * DAY)
+    _dispatch_fixer(conn, "P_IN", "F_IN_B", root="R_IN", attempt=2, limit=4,
+                    created_at=now - 20 * DAY)
+    _dispatch_fixer(conn, "P_IN", "F_IN_C", root="R_IN", attempt=3, limit=4,
+                    created_at=now - DAY)
+    for child in ("F_IN_A", "F_IN_B", "F_IN_C"):
+        _add_task(conn, child, status="done", completed_at=now - DAY)
+    _add_event(conn, "F_IN_A", "conflict_fixer_failed",
+               payload={"child_id": "F_IN_A", "parent_id": "P_IN",
+                        "root_id": "R_IN", "attempt": 1, "outcome": "gave_up",
+                        "blocked": False,
+                        "conflict_fingerprint": _park_reason_fingerprint()},
+               created_at=now - 21 * DAY)
+    _add_event(conn, "F_IN_B", "conflict_fixer_failed",
+               payload={"child_id": "F_IN_B", "parent_id": "P_IN",
+                        "root_id": "R_IN", "attempt": 2, "outcome": "gave_up",
+                        "blocked": False,
+                        "conflict_fingerprint": _park_reason_fingerprint()},
+               created_at=now - 19 * DAY)
+    # Episode R_OUT: dispatch far outside the window, but its failure event is
+    # NEW — a time-based failed count would wrongly include it.
+    _add_task(conn, "P_OUT", status="blocked")
+    _add_task(conn, "F_OUT", status="done", completed_at=now - 21 * DAY)
+    _dispatch_fixer(conn, "P_OUT", "F_OUT", root="R_OUT",
+                    created_at=now - 21 * DAY)
+    _add_event(conn, "F_OUT", "conflict_fixer_failed",
+               payload={"child_id": "F_OUT", "parent_id": "P_OUT",
+                        "root_id": "R_OUT", "attempt": 1, "outcome": "gave_up",
+                        "blocked": False,
+                        "conflict_fingerprint": _park_reason_fingerprint()},
+               created_at=now - DAY)
 
-    assert vm._conflict_fixer_failed_count(conn) == 2
-    assert vm._conflict_fixer_failed_count(conn, since=now - 7 * DAY) == 1
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    cf = snap["metrics"]["conflict_fixer"]
+
+    assert cf["failed"] == 3  # all-time counts every failure event
+    assert cf["window_episodes"] == 1  # only R_IN dispatched within 7d
+    assert cf["window_failed"] == 2  # R_IN's cohort failures, old events incl.
+
+
+def test_conflict_fixer_window_does_not_credit_old_resumes_to_new_attempts(conn):
+    """A resume that landed BETWEEN two dispatches closed the OLDER attempt:
+    the window view must grade the newer still-open attempt ``in_flight``
+    instead of crediting it the stale win, while all-time keeps the
+    historical resolution (v3 fields unchanged)."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="blocked")
+    # Attempt 1: old dispatch, resumed BEFORE attempt 2 was dispatched.
+    _add_task(conn, "F1", status="done", completed_at=now - 20 * DAY)
+    _dispatch_fixer(conn, "P", "F1", root="R", attempt=1, limit=3,
+                    created_at=now - 21 * DAY)
+    _resume_parent_via_real_emitter(conn, "P", "F1", resume_at=now - 20 * DAY)
+    # Attempt 2: dispatched inside the window, fixer card still open.
+    _add_task(conn, "F2", status="running")
+    _dispatch_fixer(conn, "P", "F2", root="R", attempt=2, limit=3,
+                    created_at=now - DAY)
+
+    all_time = vm._conflict_fixer_episodes(conn)
+    windowed = vm._conflict_fixer_episodes(conn, since=now - 7 * DAY)
+
+    assert [ep["outcome"] for ep in all_time] == [vm.CONFLICT_EPISODE_RESOLVED]
+    assert [ep["outcome"] for ep in windowed] == [vm.CONFLICT_EPISODE_IN_FLIGHT]
+
+    snap = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
+    cf = snap["metrics"]["conflict_fixer"]
+    assert cf["resolved"] == 1
+    assert cf["success_rate_pct"] == 100.0  # all-time keeps the win
+    assert cf["window_resolved"] == 0
+    assert cf["window_in_flight"] == 1
+    # Undecided in the window — never a flattering fake 100%.
+    assert cf["window_success_rate_pct"] is None
 
 
 _V3_CONFLICT_FIXER_KEYS = frozenset({
@@ -524,19 +597,26 @@ def test_snapshot_schema_v4_window_fields_are_purely_additive(conn):
     _add_task(conn, "P_NEW", status="blocked")
     _add_task(conn, "F_NEW", status="done", completed_at=now - DAY)
     _dispatch_fixer(conn, "P_NEW", "F_NEW", root="R_NEW", created_at=now - DAY)
+    _add_task(conn, "FAILED-F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P_NEW", "FAILED-F", root="R_NEW", attempt=2,
+                    created_at=now - DAY)
     failure_payload = {
         "child_id": "FAILED-F",
         "parent_id": "P_NEW",
         "root_id": "R_NEW",
-        "attempt": 1,
+        "attempt": 2,
         "outcome": "gave_up",
         "blocked": False,
         "conflict_fingerprint": _park_reason_fingerprint(),
     }
+    # One failure in the in-window episode's cohort, one in the out-of-window
+    # episode's cohort — window_failed follows episode cohorts, not event time.
     _add_event(conn, "FAILED-F", "conflict_fixer_failed",
-               payload=failure_payload, created_at=now - 20 * DAY)
-    _add_event(conn, "FAILED-F", "conflict_fixer_failed",
-               payload=dict(failure_payload, attempt=2), created_at=now - DAY)
+               payload=failure_payload, created_at=now - DAY)
+    _add_event(conn, "F_OLD", "conflict_fixer_failed",
+               payload=dict(failure_payload, child_id="F_OLD",
+                            parent_id="P_OLD", root_id="R_OLD", attempt=1),
+               created_at=now - 20 * DAY)
 
     snap_narrow = vm.compute_metrics_snapshot(conn, now=now, window_days=7)
     snap_wide = vm.compute_metrics_snapshot(conn, now=now, window_days=365)
