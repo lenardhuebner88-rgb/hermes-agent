@@ -188,7 +188,6 @@ fun CaptureSheet(
 fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> Unit) {
     val deck = LocalDeck.current
     val snapshot by viewModel.snapshot.collectAsState()
-    val agents by viewModel.agents.collectAsState()
     val channel = snapshot.channels.firstOrNull { it.id == task.channelId }
     var note by remember { mutableStateOf("") }
 
@@ -251,8 +250,10 @@ fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> U
             } else {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(members, key = { it }) { pubkey ->
-                        val name = agents.agents.firstOrNull { it.stem.isNotBlank() }?.let { null }
-                            ?: pubkey.take(6)
+                        // Buzz stores display names in kind:0 profiles, which the
+                        // deck does not sync yet; a short key is honest, a guessed
+                        // name would not be. Tracked as a follow-up.
+                        val name = pubkey.take(8)
                         Box(
                             Modifier
                                 .clip(RoundedCornerShape(DeckMetrics.chipRadius))
