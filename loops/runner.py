@@ -1980,6 +1980,42 @@ class LoopRunner:
             + ", ".join(net.splitlines()[:5])
         )
 
+    def base_stale_blocks_gate(self) -> bool:
+        """Würde der branch-age-Preflight das Gate im Pack-Worktree blocken?
+
+        Objektive Probe am echten Skript statt an Agent-Prosa: `check-branch-age.sh`
+        ist die einzige Quelle seiner eigenen Schwelle, damit sie nicht in zwei
+        Stellen driftet. Läuft es rot, kann `run-affected.sh` (und damit
+        `loops/gate.sh`) gar keinen Test ausgeführt haben — ein Verifier-FAIL in
+        diesem Zustand ist eine Aussage über die Basis, nicht über den Kandidaten.
+
+        Fehlt das Skript oder lässt es sich nicht starten, lautet die Antwort
+        False: eine unbeantwortbare Probe darf keine Runde entwerten.
+        """
+        script = self.wt / "scripts" / "check-branch-age.sh"
+        if not script.is_file():
+            return False
+        try:
+            res = subprocess.run(
+                [str(script)], cwd=str(self.wt), capture_output=True,
+                encoding="utf-8", errors="replace", timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return res.returncode != 0
+
+    def _refresh_base_if_stale(self, why: str) -> bool:
+        """Basis nachziehen, wenn sie das Gate blocken würde. True = wieder frisch."""
+        if not self.base_stale_blocks_gate():
+            return True
+        ok, msg = self._auto_rebase(self.pack.repo, collapse_net_zero=True)
+        first = msg.splitlines()[0] if msg else ""
+        if ok:
+            self.ledger(f"BASE-REFRESH ({why}): {first}")
+        else:
+            self.ledger(f"BASE-REFRESH ({why}) übersprungen: {first}")
+        return ok and not self.base_stale_blocks_gate()
+
     # ── Frontend-Deps ──
     def _plan_prompt_reads_has_web(self) -> bool:
         """Liest der Plan-Prompt dieses Packs {{HAS_WEB}} überhaupt aus?
@@ -2373,7 +2409,7 @@ class LoopRunner:
 
     def _run_pipeline(self) -> None:
         deadline = self._deadline()
-        fails = verified = 0
+        fails = verified = stale_requeues = 0
         self._expire_stale_building()
         for rnd in range(1, self.stop_cfg("max_rounds") + 1):
             if self.stop_requested():
@@ -2384,6 +2420,13 @@ class LoopRunner:
                 break
             if not self.guard_clean():
                 break
+            # Vorbeugung: main läuft unter uns weiter (parallele Sessions,
+            # Kanban-Merges, andere Packs). Driftet die Basis über die
+            # branch-age-Schwelle, stellt der Preflight das Gate rot, OHNE dass
+            # ein Test läuft — und der Verifier verwirft dann einen guten Commit.
+            # Zwischen den Runden ist kein Commit in Arbeit, hier ist Nachziehen
+            # gefahrlos.
+            self._refresh_base_if_stale(f"Runde {rnd}, Basis stale")
             plan = self.pick_plan()
             if plan is None:
                 self.say("Queue leer — fertig.")
@@ -2546,6 +2589,46 @@ class LoopRunner:
                 self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")
                 self.ledger_event(round=rnd, phase="verify", verdict="ok", plan=building.name,
                                    build_secs=self.phase_secs.get("build"), verify_secs=self.phase_secs.get("verify"))
+            elif self.base_stale_blocks_gate():
+                # Kein Urteil über den Kandidaten: der branch-age-Preflight hat
+                # das Gate rotgestellt, bevor ein Test lief (live 2026-08-04 an
+                # dashboard-polish — parallele main-Merges während des Laufs).
+                # Hier wird bewusst NICHT gebounct und NICHT auf fail_streak
+                # gezählt; der Plan geht unverbraucht zurück in die Queue und
+                # die nächste Runde baut ihn auf frischer Basis neu.
+                self.say(
+                    "VERIFY UNGÜLTIG — Basis ist stale, das Gate lief nicht. "
+                    "Kein Urteil über den Plan."
+                )
+                if not self.revert_range(prehead):
+                    self.notify(
+                        f"{self.pack.name}: Revert fehlgeschlagen bei {building.name} — gestoppt."
+                    )
+                    break
+                stale_requeues += 1
+                building.rename(self.queue / "00-planned" / building.name)
+                self.ledger(
+                    f"R{rnd} ⏭ {building.name}: Verify ungültig (Basis stale, Gate lief nicht) "
+                    f"— Plan neu eingereiht, kein Fail"
+                )
+                self.ledger_event(round=rnd, phase="verify", verdict="blocked",
+                                   plan=building.name, fail_kind="base_stale", reason=status,
+                                   build_secs=self.phase_secs.get("build"),
+                                   verify_secs=self.phase_secs.get("verify"))
+                if not self._refresh_base_if_stale("nach ungültigem Verify"):
+                    # Die Basis lässt sich nicht heilen (Konflikt, dirty). Ohne
+                    # diesen Deckel liefe der Pack alle max_rounds durch und
+                    # baute jede Runde denselben Plan neu, ohne ihn je bewerten
+                    # zu können — fail_streak greift hier ja bewusst nicht.
+                    if stale_requeues >= 2:
+                        self.say("Basis bleibt stale — Stop für Human-Review.")
+                        self.notify(
+                            f"{self.pack.name}: Basis bleibt stale (Rebase scheitert) — gestoppt."
+                        )
+                        self.ledger_event(round=rnd, phase="stop", verdict="stopped",
+                                           reason="base_stale_unhealable")
+                        break
+                continue
             else:
                 visual_fail = False
                 if verify.rc != 0 and not verify.timed_out:
