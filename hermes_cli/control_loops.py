@@ -988,6 +988,25 @@ def _repo_lock_path(repo: Path) -> Path:
     return _state_root() / f".repo-{repo_key}.lock"
 
 
+def _repo_lock_holder(repo: Path) -> str | None:
+    """Pack-Name des Prozesses, der den Repo-Lock GERADE hält — oder None.
+
+    Der Runner schreibt seinen Pack-Namen beim Nehmen in die Lock-Datei
+    (`LoopRunner.repo_locked`). Vorher leitete das Dashboard den Blockierer aus
+    "welches Pack läuft gerade" ab; seit Bauen parallel erlaubt ist, ist ein
+    laufendes Pack aber KEIN Beleg fürs Lock-Halten, und die Anzeige benannte
+    dann das falsche. Nur aufrufen, wenn `_is_repo_locked` True ist: die Datei
+    wird beim Nehmen truncatet, ein freigegebener Lock ist leer und der
+    Restinhalt wäre veraltet.
+    """
+    try:
+        first = _repo_lock_path(repo).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    name = first[0].strip() if first else ""
+    return name or None
+
+
 def _is_repo_locked(repo: Path) -> bool:
     """True, wenn GERADE ein Prozess den repo-weiten Lock hält (Landung läuft
     für irgendein Pack dieses Repos). Best effort, read-only — nimmt den Lock
@@ -1028,14 +1047,16 @@ def _annotate_repo_lock(summaries: list[dict[str, Any]]) -> None:
     for repo, group in by_repo.items():
         if len(group) < 2 or not _is_repo_locked(Path(repo)):
             continue
-        others_running = [s["name"] for s in group if s.get("running")]
+        # Der Halter steht in der Lock-Datei. "läuft gerade" taugt seit der
+        # Lock-Verengung NICHT mehr als Ersatz dafür: bauende Packs laufen,
+        # ohne den Lock zu halten — die Anzeige hätte sonst ein bauendes Pack
+        # als Blockierer der Landung benannt.
+        holder = _repo_lock_holder(Path(repo))
         for summary in group:
-            if summary.get("running"):
-                continue  # eigener Lauf — kein Fremd-Konflikt mit sich selbst
+            if summary.get("name") == holder:
+                continue  # der Halter selbst ist nicht blockiert
             summary["repo_locked"] = True
-            summary["repo_locked_by"] = (
-                others_running[0] if len(others_running) == 1 else None
-            )
+            summary["repo_locked_by"] = holder
 
 
 _GIT_PROBE_ERROR_PREFIX = "git-Probe fehlgeschlagen: "

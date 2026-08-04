@@ -784,7 +784,12 @@ def test_cmd_land_serializes_through_the_full_gates_window(tmp_path, fake_engine
     for r, name in ((runner_a, "a"), (runner_b, "b")):
         r.ensure_dirs()
         r.ensure_wt()
-        commit_in(r.wt, name)
+        # Getrennte Dateien: commit_in() haengt an dieselbe modul.py an, und
+        # seit B nicht mehr am Lock stirbt, kommt B bis zu seinem Rebase — der
+        # scheiterte dann an einem Fixture-Konflikt statt am Vertrag.
+        (r.wt / f"modul_{name}.py").write_text(f"# fix {name}\n", encoding="utf-8")
+        g(r.wt, "add", "-A")
+        g(r.wt, "commit", "-m", f"loop(test): {name}")
         r._push = lambda repo: (True, "ok")
 
     gates_started = threading.Event()
@@ -807,12 +812,50 @@ def test_cmd_land_serializes_through_the_full_gates_window(tmp_path, fake_engine
     thread.start()
     assert gates_started.wait(timeout=5), "Landung A muss die Gates erreicht haben"
 
-    with pytest.raises(RuntimeError, match="Repo-Lock"):
-        runner_b.cmd_land(push=True)
+    # B darf NICHT fail-fast sterben, sondern muss warten: eine fremde Landung
+    # haelt den Lock ueber ihre gesamten Gates (Minuten). Der frueher hier
+    # erwartete RuntimeError war der Nachtbetriebs-Defekt — er lief ungefangen
+    # bis main() durch (Exit 3, ohne Ledger, ohne Notify) und liess B's
+    # verifizierten Commit bis zur naechsten Nacht liegen.
+    b_thread = threading.Thread(target=lambda: result.setdefault("b", runner_b.cmd_land(push=True)))
+    b_thread.start()
+    b_thread.join(timeout=1.5)
+    assert b_thread.is_alive(), "B muss auf den Lock warten, nicht abbrechen"
+    assert "b" not in result
 
     release_gates.set()
     thread.join(timeout=5)
+    b_thread.join(timeout=10)
+    assert not b_thread.is_alive(), "B muss nach Freigabe durchlaufen"
     assert result["a"] is True
+    assert result["b"] is True, "B landet, sobald der Lock frei ist"
+
+
+def test_cmd_land_reports_a_lock_timeout_instead_of_dying_silently(tmp_path, fake_engine, monkeypatch):
+    """Laeuft das Wartefenster ab, muss der Operator es MORGENS sehen.
+
+    Vorher lief der RuntimeError bis main() durch: Exit 3, nur eine
+    stderr-Zeile im Unit-Log, kein Ledger-Eintrag, kein Notify.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "wartend", "sweep", repo)
+    write_pack(tmp_path / "packs", "haltend", "sweep", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "wartend"), state_root=tmp_path / "state")
+    holder = LoopRunner(load_pack(tmp_path / "packs", "haltend"), state_root=tmp_path / "state")
+    for r in (runner, holder):
+        r.ensure_dirs(); r.ensure_wt()
+    monkeypatch.setattr(runner_module, "LAND_LOCK_WAIT_S", 0.2)
+
+    notes: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notes.append(msg))
+
+    with holder.repo_locked():
+        assert runner.cmd_land(push=False) is False
+
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "LAND verschoben" in ledger
+    assert "nichts verändert" in ledger
+    assert notes and "Landung verschoben" in notes[0]
 
 
 def test_missing_pack_lists_available():
@@ -5247,3 +5290,146 @@ def test_verify_fail_on_fresh_base_still_bounces(tmp_path, fake_engine):
     ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
     assert "verify-fail" in ledger, "ein echter Mangel muss weiterhin als Fail zaehlen"
     assert "Basis stale" not in ledger
+
+
+def test_round_start_refreshes_a_stale_base(tmp_path, fake_engine, monkeypatch):
+    """Vorbeugung: die Basis wird VOR jeder Runde nachgezogen, nicht nur nachts.
+
+    Ohne das driftet ein langer Lauf unter parallelen main-Merges weg und der
+    Preflight stellt mitten im Lauf das Gate rot.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "frisch-vor-runde", "pipeline", repo,
+               stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 2})
+    runner = LoopRunner(load_pack(tmp_path / "packs", "frisch-vor-runde"),
+                        state_root=tmp_path / "state")
+    runner.ensure_dirs(); runner.ensure_wt()
+    _stale_branch_age(runner, blocked=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    refreshes: list[str] = []
+    monkeypatch.setattr(runner, "_refresh_base_if_stale",
+                        lambda why: refreshes.append(why) or True)
+    behaviors["build"] = ok("BUILT fl-20260702-beispiel")
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    runner._run_pipeline()
+
+    assert any("Runde 1" in w for w in refreshes), (
+        f"Rundenstart muss die Basis pruefen, sah: {refreshes}"
+    )
+
+
+def test_unhealable_stale_base_stops_instead_of_looping(tmp_path, fake_engine, monkeypatch):
+    """Deckel gegen die Endlosschleife.
+
+    Im stale-Zweig greift fail_streak bewusst NICHT. Laesst sich die Basis
+    nicht heilen (Rebase-Konflikt, dirty), baute der Pack sonst denselben Plan
+    bis max_rounds immer wieder neu.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "unheilbar", "pipeline", repo,
+               stop={"max_rounds": 8, "max_hours": 1, "fail_streak": 1, "dry_rounds": 2})
+    runner = LoopRunner(load_pack(tmp_path / "packs", "unheilbar"),
+                        state_root=tmp_path / "state")
+    runner.ensure_dirs(); runner.ensure_wt()
+    _stale_branch_age(runner, blocked=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+    # Basis laesst sich nie heilen — genau der Ast, den der Deckel abfaengt.
+    monkeypatch.setattr(runner, "_refresh_base_if_stale", lambda why: False)
+
+    rounds: list[int] = []
+
+    def build_phase(kv, cwd):
+        rounds.append(1)
+        commit_in(cwd, f"kandidat{len(rounds)}")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("FAIL Repo-Gate nicht gelaufen: Branch stale")
+    runner._run_pipeline()
+
+    assert len(rounds) == 2, f"Deckel muss nach 2 Anlaeufen stoppen, lief {len(rounds)}x"
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "Basis bleibt stale" in ledger or "base_stale_unhealable" in (
+        runner.state / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+def test_timeout_in_verify_is_not_excused_by_a_stale_base(tmp_path, fake_engine):
+    """Gegenprobe zum verengten Zweig: nur ein GELAUFENER Verifier zaehlt.
+
+    Ein TIMEOUT hat andere Ursachen — ihn als Basisproblem zu tarnen wuerde
+    echte Fehler verstecken.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "timeout-pack", "pipeline", repo,
+               stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 2})
+    runner = LoopRunner(load_pack(tmp_path / "packs", "timeout-pack"),
+                        state_root=tmp_path / "state")
+    runner.ensure_dirs(); runner.ensure_wt()
+    _stale_branch_age(runner, blocked=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "kandidat")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = lambda kv, cwd: engines.EngineResult(
+        rc=0, output="", usage_limit=False, timed_out=True
+    )
+    runner._run_pipeline()
+
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "verify-fail" in ledger, "ein TIMEOUT muss weiterhin als Fail zaehlen"
+    # Genau die Requeue-Zeile darf NICHT stehen. Nicht auf "Basis stale" pruefen:
+    # das steht auch in der harmlosen Vorbeuge-Zeile des Rundenstart-Refresh.
+    assert "Verify ungültig (Basis stale, Gate lief nicht)" not in ledger
+
+
+def test_worker_environment_caps_load_for_the_whole_turn(tmp_path, fake_engine, monkeypatch):
+    """Der Lastdeckel muss den GANZEN Agent-Turn erfassen, nicht nur loops/gate.sh.
+
+    Pack-Prompts rufen scripts/gate-frontend.sh und teils scripts/run_tests.sh
+    direkt; die erbten sonst weiter HERMES_TEST_WORKERS=8 aus dem
+    systemd-User-Environment und den vitest-Default. Seit mehrere Packs parallel
+    bauen, riss darunter ein jsdom-Test seinen 30-s-Timeout, waehrend dieselbe
+    Datei isoliert in 1,8 s durchlief.
+    """
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "deckel", "sweep", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "deckel"), state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    monkeypatch.setenv("HERMES_TEST_WORKERS", "8")          # so wie systemd es vererbt
+    monkeypatch.delenv("HERMES_LOOP_TEST_WORKERS", raising=False)
+    monkeypatch.delenv("HERMES_LOOP_FRONTEND_WORKERS", raising=False)
+
+    with runner._worker_environment("round"):
+        pytest_workers = os.environ["HERMES_TEST_WORKERS"]
+        vitest_workers = os.environ["GATE_FRONTEND_MAX_WORKERS"]
+    assert pytest_workers == "4", "geerbte 8 muessen ueberschrieben werden"
+    assert int(vitest_workers) <= int(pytest_workers), (
+        "vitest-Worker wiegen schwerer (je eine jsdom-Umgebung) und duerfen den "
+        "pytest-Deckel nicht ueberschreiten"
+    )
+    # Nach dem Turn exakt wiederhergestellt — sonst leckt der Deckel in den Driver.
+    assert os.environ["HERMES_TEST_WORKERS"] == "8"
+    assert "GATE_FRONTEND_MAX_WORKERS" not in os.environ
+
+
+def test_operator_can_raise_the_turn_load_cap(tmp_path, fake_engine, monkeypatch):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "hebel", "sweep", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "hebel"), state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    monkeypatch.setenv("HERMES_TEST_WORKERS", "8")
+    monkeypatch.setenv("HERMES_LOOP_TEST_WORKERS", "6")
+    monkeypatch.setenv("HERMES_LOOP_FRONTEND_WORKERS", "3")
+
+    with runner._worker_environment("round"):
+        assert os.environ["HERMES_TEST_WORKERS"] == "6"
+        assert os.environ["GATE_FRONTEND_MAX_WORKERS"] == "3"

@@ -544,7 +544,14 @@ def test_land_blocked_by_sibling_pack_names_the_holder(api):
 
     repo_lock_path = cl._repo_lock_path(repo)
     repo_lock = repo_lock_path.open("w", encoding="utf-8")
-    fcntl.flock(repo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # derselbe Lock wie LoopRunner.locked()
+    fcntl.flock(repo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # derselbe Lock wie LoopRunner.repo_locked()
+    # Halter-Notiz wie LoopRunner.repo_locked() sie beim Nehmen schreibt. Der
+    # Name wird daraus GELESEN, nicht mehr aus "welches Pack laeuft gerade"
+    # geraten: seit Bauen parallel erlaubt ist, laufen Packs, ohne den
+    # Land-Lock zu halten — die Anzeige benannte sonst ein bauendes Pack als
+    # Blockierer der Landung.
+    repo_lock.write("nacht\n4711\n")
+    repo_lock.flush()
     try:
         packs = {p["name"]: p for p in client.get("/api/loops").json()["packs"]}
     finally:
@@ -554,7 +561,7 @@ def test_land_blocked_by_sibling_pack_names_the_holder(api):
         nacht_lock.close()
 
     assert packs["nacht"]["running"] is True
-    assert "repo_locked" not in packs["nacht"]  # eigener Lauf ist kein Fremd-Konflikt
+    assert "repo_locked" not in packs["nacht"]  # der Halter selbst ist nicht blockiert
 
     assert packs["fliessband"]["running"] is False
     assert packs["fliessband"]["repo_locked"] is True
