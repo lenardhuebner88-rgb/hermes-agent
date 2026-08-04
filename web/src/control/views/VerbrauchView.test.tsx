@@ -98,6 +98,7 @@ function payload(overrides: Partial<UsageConsumptionResponse> = {}): UsageConsum
         {
           day: "2026-08-03",
           equivalent_usd: 500.0,
+          tokens: 700_000_000,
           token_coverage: { value: 0.99, numerator: 99, denominator: 100 },
         },
       ],
