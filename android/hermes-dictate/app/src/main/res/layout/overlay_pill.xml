@@ -1,58 +1,96 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Expanded state while dictating: [cancel] [live text / status] [confirm]. -->
-<LinearLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- Expanded dictation control. While the microphone is open the pill shows nothing but the
+     three things that matter: abort, the live voice, stop. No status word, no running transcript,
+     no branding — the recognized text belongs in the target field, not on a floating chip.
+
+     Only the result and error states swap the wave for a short line of text, because those are the
+     moments that actually have something to say. Every measurement comes from values/dimens.xml. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/pill_root"
     android:layout_width="wrap_content"
-    android:layout_height="56dp"
-    android:orientation="horizontal"
-    android:gravity="center_vertical"
+    android:layout_height="@dimen/pill_height"
     android:background="@drawable/bg_pill"
-    android:elevation="8dp"
-    android:paddingStart="6dp"
-    android:paddingEnd="6dp">
+    android:elevation="@dimen/overlay_elevation">
 
-    <ImageButton
-        android:id="@+id/pill_cancel"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_close"
-        android:padding="12dp"
-        android:contentDescription="@string/overlay_cancel_desc" />
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="@dimen/pill_padding_horizontal"
+        android:paddingEnd="@dimen/pill_padding_horizontal">
 
-    <TextView
-        android:id="@+id/pill_text"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_weight="1"
-        android:layout_marginStart="4dp"
-        android:layout_marginEnd="4dp"
-        android:maxWidth="220dp"
-        android:minWidth="80dp"
-        android:maxLines="1"
-        android:ellipsize="start"
-        android:textColor="@color/text_primary"
-        android:textSize="14sp"
-        android:text="@string/status_listening" />
+        <ImageButton
+            android:id="@+id/pill_cancel"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@drawable/bg_pill_action"
+            android:contentDescription="@string/overlay_cancel_desc"
+            android:padding="@dimen/overlay_icon_inset"
+            android:src="@drawable/ic_close"
+            android:tint="@color/text_primary" />
 
-    <Button
-        android:id="@+id/pill_hermes"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@drawable/bg_key"
-        android:contentDescription="@string/send_to_hermes"
-        android:text="H"
-        android:textColor="@color/accent"
-        android:textStyle="bold" />
+        <FrameLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="@dimen/pill_column_margin"
+            android:layout_marginEnd="@dimen/pill_column_margin"
+            android:layout_weight="1"
+            android:minWidth="@dimen/pill_column_min_width">
 
-    <ImageButton
-        android:id="@+id/pill_confirm"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:src="@drawable/ic_check"
-        android:backgroundTint="@color/accent"
-        android:padding="12dp"
-        android:contentDescription="@string/overlay_confirm_desc" />
-</LinearLayout>
+            <!-- The voice itself. Carries the status announcement so a screen reader still hears
+                 the state that the visual design no longer spells out. -->
+            <net.hermes.dictate.OverlayWaveView
+                android:id="@+id/pill_wave"
+                android:layout_width="match_parent"
+                android:layout_height="@dimen/pill_wave_height"
+                android:layout_gravity="center_vertical"
+                android:accessibilityLiveRegion="polite"
+                android:importantForAccessibility="yes" />
+
+            <!-- Result / error face. Hidden while the microphone is open. -->
+            <LinearLayout
+                android:id="@+id/pill_message"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/pill_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:importantForAccessibility="yes"
+                    android:maxLines="1"
+                    android:text="@string/status_done"
+                    android:textAllCaps="true"
+                    android:textColor="@color/state_ok"
+                    android:textSize="@dimen/overlay_text_status"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/pill_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="start"
+                    android:importantForAccessibility="yes"
+                    android:maxLines="2"
+                    android:text="@string/overlay_speak_now"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/overlay_text_body" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <ImageButton
+            android:id="@+id/pill_confirm"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@drawable/bg_pill_action_primary"
+            android:contentDescription="@string/overlay_confirm_unavailable_desc"
+            android:padding="@dimen/overlay_icon_inset"
+            android:src="@drawable/ic_check"
+            android:tint="@color/text_primary" />
+    </LinearLayout>
+</FrameLayout>

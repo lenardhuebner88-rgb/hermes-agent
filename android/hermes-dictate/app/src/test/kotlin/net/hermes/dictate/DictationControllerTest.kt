@@ -50,28 +50,28 @@ class DictationControllerTest {
         // First dictation: tap, final, stop tap, final.
         c.micTapped()
         assertEquals(listOf<Cmd>(Cmd.CommitSegment("erster teil"), Cmd.StartRecognizer), c.recognizerFinal("erster teil"))
-        assertEquals(listOf<Cmd>(Cmd.StopRecognizer), c.micTapped())
+        assertEquals(listOf<Cmd>(Cmd.StopRecognizer, Cmd.Status(UiStatus.Processing)), c.micTapped())
         val firstStop = c.recognizerFinal("erster teil.")
-        assertEquals(listOf<Cmd>(Cmd.CommitSegment("erster teil."), Cmd.Status(UiStatus.Idle)), firstStop)
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("erster teil."), Cmd.Status(UiStatus.Done)), firstStop)
         assertEquals(DictationController.Phase.IDLE, c.phase)
 
         // Second dictation in the same field: must start again from idle.
         assertEquals(listOf<Cmd>(Cmd.StartRecognizer, Cmd.Status(UiStatus.Listening)), c.micTapped())
         assertEquals(listOf<Cmd>(Cmd.Preview("zweiter teil")), c.recognizerPartial("zweiter teil"))
         assertEquals(listOf<Cmd>(Cmd.CommitSegment("zweiter teil"), Cmd.StartRecognizer), c.recognizerFinal("zweiter teil"))
-        assertEquals(listOf<Cmd>(Cmd.StopRecognizer), c.micTapped())
+        assertEquals(listOf<Cmd>(Cmd.StopRecognizer, Cmd.Status(UiStatus.Processing)), c.micTapped())
         val secondStop = c.recognizerFinal("zweiter teil.")
-        assertEquals(listOf<Cmd>(Cmd.CommitSegment("zweiter teil."), Cmd.Status(UiStatus.Idle)), secondStop)
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("zweiter teil."), Cmd.Status(UiStatus.Done)), secondStop)
     }
 
     @Test
     fun `second tap stops gracefully and the final result ends the session`() {
         val c = controller()
         c.micTapped()
-        assertEquals(listOf<Cmd>(Cmd.StopRecognizer), c.micTapped())
+        assertEquals(listOf<Cmd>(Cmd.StopRecognizer, Cmd.Status(UiStatus.Processing)), c.micTapped())
         assertEquals(DictationController.Phase.STOPPING, c.phase)
         val cmds = c.recognizerFinal("letzter teil")
-        assertEquals(listOf<Cmd>(Cmd.CommitSegment("letzter teil"), Cmd.Status(UiStatus.Idle)), cmds)
+        assertEquals(listOf<Cmd>(Cmd.CommitSegment("letzter teil"), Cmd.Status(UiStatus.Done)), cmds)
         assertEquals(DictationController.Phase.IDLE, c.phase)
     }
 

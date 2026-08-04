@@ -10,6 +10,7 @@ import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.Toast
 import android.widget.EditText
 import android.widget.RadioGroup
 import android.widget.SeekBar
@@ -98,6 +99,26 @@ class SettingsActivity : ComponentActivity() {
             setOnCheckedChangeListener { _, checked ->
                 prefs.localRecoveryEnabled = checked
                 if (!checked) prefs.lastRecoveryText = ""
+            }
+        }
+
+        // The overlay pill is pure dictation control now, so the explicit Hermes hand-off lives
+        // here — the only place that keeps the last dictation around on purpose.
+        findViewById<Button>(R.id.hermes_handoff_button).setOnClickListener {
+            val draft = prefs.lastRecoveryText.trim()
+            if (draft.isEmpty()) {
+                Toast.makeText(this, R.string.hermes_handoff_empty, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val intent = Intent().apply {
+                setClassName("net.hermes.voice", "net.hermes.voice.MainActivity")
+                action = Intent.ACTION_SEND
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, draft.take(4_000))
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            if (runCatching { startActivity(intent) }.isFailure) {
+                Toast.makeText(this, R.string.hermes_handoff_missing, Toast.LENGTH_SHORT).show()
             }
         }
 

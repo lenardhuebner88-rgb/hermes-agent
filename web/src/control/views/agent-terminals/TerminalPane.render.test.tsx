@@ -5,6 +5,9 @@ import { cleanup, render, waitFor } from "@testing-library/react";
 import { formatPtyResize } from "./terminalHelpers";
 
 const fitFitMock = vi.fn();
+const attachTouchScrollBridgeMock = vi.fn(
+  (_options: { host: HTMLElement; term: unknown; send: (data: string) => boolean }) => vi.fn(),
+);
 let websocketSends: string[] = [];
 
 vi.mock("@/lib/api", () => ({
@@ -15,6 +18,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class Terminal {} }));
 
 vi.mock("@/lib/xtermSurface", () => ({
   TERMINAL_THEME_STATIC: {},
+  attachTouchScrollBridge: attachTouchScrollBridgeMock,
   // Non-hex placeholder — design-token ratchet counts raw hex in web/src/control.
   TERMINAL_PANE_BACKGROUND: "transparent",
   createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => {
@@ -69,6 +73,7 @@ describe("TerminalPane resize wire format", () => {
   beforeEach(() => {
     websocketSends = [];
     fitFitMock.mockReset();
+    attachTouchScrollBridgeMock.mockClear();
     Object.defineProperty(HTMLElement.prototype, "clientWidth", {
       configurable: true,
       get() {
@@ -118,5 +123,35 @@ describe("TerminalPane resize wire format", () => {
     expect(expected).toContain("80;24");
     // Must not use the old OSC 777 format that never matched the backend parser.
     expect(websocketSends.some((s) => s.includes("777;RESIZE"))).toBe(false);
+  });
+
+  it("wires the touch-drag scroll bridge to its own host and socket", async () => {
+    const { TerminalPane } = await import("./TerminalPane");
+    const { unmount } = render(
+      <TerminalPane
+        target={{ session: "work", window: "codex" }}
+        paneOrder={1}
+        fontSize={12}
+        isolated
+      />,
+    );
+
+    // Without this the extra panes offer no way to reach tmux scrollback on a
+    // phone — the primary pane scrolls and these silently do not.
+    expect(attachTouchScrollBridgeMock).toHaveBeenCalledTimes(1);
+    const args = attachTouchScrollBridgeMock.mock.calls[0][0];
+    expect(args.host).toBeInstanceOf(HTMLElement);
+
+    await waitFor(() => {
+      expect(websocketSends.length).toBeGreaterThan(0);
+    });
+    const before = websocketSends.length;
+    expect(args.send("[<64;1;1M")).toBe(true);
+    expect(websocketSends.length).toBe(before + 1);
+    expect(websocketSends[websocketSends.length - 1]).toBe("[<64;1;1M");
+
+    const dispose = attachTouchScrollBridgeMock.mock.results[0].value;
+    unmount();
+    expect(dispose).toHaveBeenCalled();
   });
 });

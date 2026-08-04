@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Secondary circular action inside the pill: present, but never louder than the voice. -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/key_pressed">
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="@color/overlay_action_surface" />
+            <stroke android:width="@dimen/overlay_stroke" android:color="@color/overlay_border" />
+        </shape>
+    </item>
+</ripple>

@@ -63,12 +63,10 @@ import {
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import {
+  attachTouchScrollBridge,
   createHermesXtermSurface,
-  SGR_WHEEL_DOWN,
-  SGR_WHEEL_UP,
   TERMINAL_MAIN_BACKGROUND,
   TERMINAL_THEME_STATIC,
-  touchScrollSteps,
 } from "@/lib/xtermSurface";
 import { de } from "../i18n/de";
 import { Eyebrow } from "../components/primitives";
@@ -108,6 +106,7 @@ import {
   OVERVIEW_POLL_MS,
   PANE_TARGETS_STORAGE_KEY,
   QUICK_KEYS,
+  QUICK_REPLIES,
   RESIZE_SEND_DEBOUNCE_MS,
   TARGET_STORAGE_KEY,
   TERMINATE_ARM_TIMEOUT_MS,
@@ -178,6 +177,11 @@ export {
   toControlSequence,
 } from "./agent-terminals/terminalHelpers";
 export type { TerminalUiState } from "./agent-terminals/terminalHelpers";
+
+/** Scrollback depth of the history snapshot: first fetch, then "Mehr laden". */
+const HISTORY_INITIAL_LINES = 2000;
+/** The service clamps `capture(start=…)` at 5000 — asking for more is a lie. */
+const HISTORY_MAX_LINES = 5000;
 
 function isActiveExecutionCapsuleForWindow(
   capsule: unknown,
@@ -404,10 +408,13 @@ export function AgentTerminalsView() {
   const [pendingTerminate, setPendingTerminate] = useState<string | null>(null);
   const [terminateBusy, setTerminateBusy] = useState(false);
   const [copyState, setCopyState] = useState<TerminalCopyState>("idle");
-  /** Frozen buffer snapshot for the "Text auswählen" overlay; null = closed. */
+  /** Frozen buffer snapshot for the "Verlauf" overlay; null = closed. */
   const [selectSnapshot, setSelectSnapshot] = useState<string | null>(null);
   /** Invalidates in-flight capture fetches when the overlay closes/reopens. */
   const selectSnapshotSeqRef = useRef(0);
+  /** Scrollback depth the open snapshot was fetched at (see HISTORY_*_LINES). */
+  const [snapshotDepth, setSnapshotDepth] = useState(HISTORY_INITIAL_LINES);
+  const [snapshotLoadingMore, setSnapshotLoadingMore] = useState(false);
   const [view, setView] = useState<"terminal" | "flotte">("terminal");
   const [overview, setOverview] = useState<AgentTerminalOverviewWindow[]>([]);
   const [overviewNow, setOverviewNow] = useState<number>(() => Date.now() / 1000);
@@ -831,64 +838,26 @@ export function AgentTerminalsView() {
     window.visualViewport?.addEventListener("resize", scheduleResize);
     window.addEventListener("resize", scheduleResize);
 
-    // Touch-drag scroll bridge: xterm v6 has no touch→application path at all
-    // (touch-drag only scrolls the local viewport, a no-op on the alternate
-    // buffer tmux runs fullscreen in). Translate vertical drag into tmux's
-    // SGR wheel reports instead, one report per row-sized step. `sendRaw`
-    // isn't defined yet at this point in the component body — this mirrors
-    // its exact WS-send logic via `wsRef` directly rather than depending on
-    // declaration order.
-    let touchLastY: number | null = null;
-    let touchAccumPx = 0;
-    let touchStepPx = 0;
-    const onTouchStart = (event: TouchEvent) => {
-      if (term.buffer.active.type !== "alternate") return;
-      const touch = event.touches[0];
-      if (!touch) return;
-      touchLastY = touch.clientY;
-      touchAccumPx = 0;
-      touchStepPx = Math.max(8, Math.round(host.clientHeight / Math.max(1, term.rows)));
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      if (term.buffer.active.type !== "alternate") return;
-      if (touchLastY == null) return;
-      // Without mouse tracking there is nothing we could send (raw SGR would
-      // leak into the app) — bail BEFORE preventDefault so the gesture isn't
-      // consumed for nothing; the scroll buttons remain the fallback.
-      if (term.modes.mouseTrackingMode === "none") return;
-      const touch = event.touches[0];
-      if (!touch) return;
-      // Stop the native (no-op on the alt buffer) viewport scroll and
-      // pull-to-refresh from fighting the gesture.
-      event.preventDefault();
-      const deltaY = touch.clientY - touchLastY;
-      touchLastY = touch.clientY;
-      const { steps, remainder } = touchScrollSteps(touchAccumPx + deltaY, touchStepPx);
-      touchAccumPx = remainder;
-      if (steps === 0) return;
-      // Finger moves DOWN (steps > 0) -> wheel UP -> back in history.
-      const sequence = steps > 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
-      const ws = wsRef.current;
-      if (ws?.readyState !== WebSocket.OPEN) return;
-      for (let i = 0; i < Math.abs(steps); i += 1) ws.send(sequence);
-    };
-    const onTouchEnd = () => {
-      touchLastY = null;
-      touchAccumPx = 0;
-    };
-    host.addEventListener("touchstart", onTouchStart, { passive: false });
-    host.addEventListener("touchmove", onTouchMove, { passive: false });
-    host.addEventListener("touchend", onTouchEnd, { passive: false });
-    host.addEventListener("touchcancel", onTouchEnd, { passive: false });
+    // Touch-drag scroll bridge — shared with TerminalPane so both surfaces
+    // scroll identically. `sendRaw` isn't defined yet at this point in the
+    // component body, so this mirrors its WS-send logic via `wsRef` directly
+    // rather than depending on declaration order.
+    const disposeTouchScroll = attachTouchScrollBridge({
+      host,
+      term,
+      send: (data) => {
+        const ws = wsRef.current;
+        if (ws?.readyState !== WebSocket.OPEN) return false;
+        ws.send(data);
+        return true;
+      },
+    });
 
     return () => {
       observer.disconnect();
       window.visualViewport?.removeEventListener("resize", scheduleResize);
       window.removeEventListener("resize", scheduleResize);
-      host.removeEventListener("touchstart", onTouchStart);
-      host.removeEventListener("touchmove", onTouchMove);
-      host.removeEventListener("touchend", onTouchEnd);
-      host.removeEventListener("touchcancel", onTouchEnd);
+      disposeTouchScroll();
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);
       if (settleRaf2) cancelAnimationFrame(settleRaf2);
@@ -1264,16 +1233,18 @@ export function AgentTerminalsView() {
 
   const openSelectOverlay = useCallback(() => {
     // Capture once at open so polling / WS traffic cannot destroy a native selection.
-    // Alternate buffer (tmux attach / TUI) has no client scrollback — fetch ~2000
-    // lines from the server capture API (same path as TerminalHandoffPanel).
+    // Alternate buffer (tmux attach / TUI) has no client scrollback — fetch from
+    // the server capture API (same path as TerminalHandoffPanel).
     const clientText = readActiveBufferText();
     const bufferType = readActiveBufferType();
     const captureTarget = activeTarget;
     const requestSeq = ++selectSnapshotSeqRef.current;
+    setSnapshotDepth(HISTORY_INITIAL_LINES);
+    setSnapshotLoadingMore(false);
     if (bufferType === "alternate" && captureTarget) {
       setSelectSnapshot("Lade Verlauf …");
       void api
-        .captureAgentTerminalWindow(captureTarget.session, captureTarget.window, -2000)
+        .captureAgentTerminalWindow(captureTarget.session, captureTarget.window, -HISTORY_INITIAL_LINES)
         .then((resp) => {
           // A close (or newer open) during the fetch wins — a late resolve must
           // not reopen the overlay.
@@ -1290,9 +1261,30 @@ export function AgentTerminalsView() {
     setSelectSnapshot(clientText);
   }, [activeTarget, readActiveBufferText, readActiveBufferType]);
 
+  const loadMoreHistory = useCallback(() => {
+    const captureTarget = activeTarget;
+    if (!captureTarget || snapshotDepth >= HISTORY_MAX_LINES) return;
+    const requestSeq = selectSnapshotSeqRef.current;
+    setSnapshotLoadingMore(true);
+    void api
+      .captureAgentTerminalWindow(captureTarget.session, captureTarget.window, -HISTORY_MAX_LINES)
+      .then((resp) => {
+        if (requestSeq !== selectSnapshotSeqRef.current) return;
+        const content = typeof resp?.content === "string" ? resp.content : "";
+        if (content) setSelectSnapshot(content);
+        setSnapshotDepth(HISTORY_MAX_LINES);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (requestSeq !== selectSnapshotSeqRef.current) return;
+        setSnapshotLoadingMore(false);
+      });
+  }, [activeTarget, snapshotDepth]);
+
   const closeSelectOverlay = useCallback(() => {
     selectSnapshotSeqRef.current += 1;
     setSelectSnapshot(null);
+    setSnapshotLoadingMore(false);
   }, []);
 
   useEffect(() => {
@@ -1652,20 +1644,33 @@ export function AgentTerminalsView() {
     });
   }, []);
 
+  /** Leave tmux copy-mode, else the input lands in the scrollback instead of the app. */
+  const leaveCopyMode = useCallback(() => {
+    if (!tmuxCopyModeRef.current) return;
+    sendRaw("q");
+    tmuxCopyModeRef.current = false;
+    termRef.current?.scrollToBottom();
+  }, [sendRaw]);
+
   const sendComposer = useCallback(
     (submit: boolean) => {
       const payload = buildComposerPayload(composerText, submit);
       if (!payload) return;
-      // Aus dem tmux-Copy-Mode raus, sonst landet die Eingabe im Scrollback.
-      if (tmuxCopyModeRef.current) {
-        sendRaw("q");
-        tmuxCopyModeRef.current = false;
-        termRef.current?.scrollToBottom();
-      }
+      leaveCopyMode();
       sendRaw(payload);
       setComposerText("");
     },
-    [composerText, sendRaw],
+    [composerText, leaveCopyMode, sendRaw],
+  );
+
+  const sendQuickReply = useCallback(
+    (text: string) => {
+      const payload = buildComposerPayload(text, true);
+      if (!payload) return;
+      leaveCopyMode();
+      sendRaw(payload);
+    },
+    [leaveCopyMode, sendRaw],
   );
 
   // Phone → terminal upload: photo-picker button, paste, and drag&drop all
@@ -2219,6 +2224,34 @@ export function AgentTerminalsView() {
           {de.agentTerminals.uploadError} {uploadError}
         </div>
       )}
+      {/* One tap = one full answer. Sits above the composer in every layout —
+          the keys bar below is compact-only and toggled off by default. */}
+      <div
+        className="mb-1.5 flex gap-1 overflow-x-auto overscroll-x-contain pb-0.5"
+        role="group"
+        aria-label="Schnellantworten"
+      >
+        {QUICK_REPLIES.map((reply) => (
+          <button
+            key={reply.label}
+            type="button"
+            aria-label={`Antwort senden: ${reply.label}`}
+            disabled={!activeSocketReady}
+            // Keep terminal focus: a pointerdown-driven blur would drop the
+            // next keystroke into the button instead of the pane.
+            onPointerDown={(event) => event.preventDefault()}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => sendQuickReply(reply.text)}
+            className={cn(
+              "shrink-0 whitespace-nowrap rounded-card border border-line bg-surface-2 px-2.5 py-1.5 text-micro text-ink-2 transition",
+              "hover:border-live/40 hover:bg-live/10 hover:text-live active:bg-live/15",
+              !activeSocketReady && "cursor-not-allowed opacity-35",
+            )}
+          >
+            {reply.label}
+          </button>
+        ))}
+      </div>
       <div className="flex items-end gap-1.5">
         {compactLayout && (
           <button
@@ -3100,8 +3133,8 @@ export function AgentTerminalsView() {
                 </button>
                 <button
                   type="button"
-                  aria-label="Text auswählen"
-                  title="Text auswählen"
+                  aria-label="Verlauf"
+                  title="Verlauf lesen"
                   onClick={openSelectOverlay}
                   className="inline-flex min-h-[44px] min-w-[44px] items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 text-micro font-medium text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
                 >
@@ -3136,8 +3169,8 @@ export function AgentTerminalsView() {
                 </button>
                 <button
                   type="button"
-                  aria-label="Text auswählen"
-                  title="Text auswählen (Snapshot zum Markieren)"
+                  aria-label="Verlauf"
+                  title="Verlauf lesen, suchen, kopieren"
                   onClick={openSelectOverlay}
                   className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
                 >
@@ -3535,7 +3568,13 @@ export function AgentTerminalsView() {
       )}
 
       {selectSnapshot !== null && (
-        <TerminalSelectOverlay text={selectSnapshot} onClose={closeSelectOverlay} />
+        <TerminalSelectOverlay
+          text={selectSnapshot}
+          onClose={closeSelectOverlay}
+          onLoadMore={loadMoreHistory}
+          loadingMore={snapshotLoadingMore}
+          canLoadMore={activeTarget !== null && snapshotDepth < HISTORY_MAX_LINES}
+        />
       )}
 
       {answerSheetOpen && (

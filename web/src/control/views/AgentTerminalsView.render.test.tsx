@@ -93,6 +93,9 @@ vi.mock("@/lib/xtermSurface", async () => {
     // Keep real palette exports so host-ridge assertions match production constants.
     TERMINAL_MAIN_BACKGROUND: actual.TERMINAL_MAIN_BACKGROUND,
     TERMINAL_PANE_BACKGROUND: actual.TERMINAL_PANE_BACKGROUND,
+    // Real bridge: it only touches the terminal from inside touch handlers,
+    // which never fire here, and keeping it real proves the wiring compiles.
+    attachTouchScrollBridge: actual.attachTouchScrollBridge,
     createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => ({
       term: {
         clear: vi.fn(),
@@ -1548,9 +1551,9 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
     await screen.findByTestId("terminal-pane-host-0");
 
-    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verlauf" }));
 
-    const dialog = await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Verlauf" });
     expect(dialog).toBeTruthy();
     // Distinctive real-looking shell/agent line from the fake buffer (scoped to
     // the overlay — the fleet strip also shows overview tails with similar text).
@@ -1571,10 +1574,10 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
     await screen.findByTestId("terminal-pane-host-0");
 
-    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Verlauf" }));
 
     // Overlay opens immediately (loading state) then fills from capture.
-    const dialog = await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Verlauf" });
     await waitFor(() => {
       expect(apiMock.captureAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", -2000);
     });
@@ -1588,8 +1591,8 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
     await screen.findByTestId("terminal-pane-host-0");
 
-    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
-    await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+    fireEvent.click(await screen.findByRole("button", { name: "Verlauf" }));
+    await screen.findByRole("dialog", { name: "Terminal-Verlauf" });
 
     fireEvent.click(screen.getByRole("button", { name: "Alles kopieren" }));
 
@@ -1601,6 +1604,69 @@ describe("AgentTerminalsView desktop rendering", () => {
 
     await waitFor(() => expect(copyTextToClipboardMock).toHaveBeenCalledWith(expectedSnapshot));
     expect(websocketSends).not.toContain("\x03");
+  });
+
+  it("filters the history to matching lines and copies only the hits", async () => {
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Verlauf" }));
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Verlauf" });
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Im Verlauf suchen" }), {
+      target: { value: "analysiere" },
+    });
+
+    // Case-insensitive hit, prefixed with its line number in the full snapshot.
+    const shown = dialog.querySelector("pre")?.textContent ?? "";
+    expect(shown).toContain("Analysiere PlanSpec");
+    expect(shown).not.toContain("piet@homeserver:~$ hermes --tui");
+    expect(await screen.findByText("1 von 3 Zeilen")).toBeTruthy();
+
+    // A filtered copy takes the hits, not the haystack.
+    fireEvent.click(screen.getByRole("button", { name: "Treffer kopieren" }));
+    await waitFor(() =>
+      expect(copyTextToClipboardMock).toHaveBeenCalledWith("▌ Analysiere PlanSpec …"),
+    );
+  });
+
+  it("reloads the history at the deeper capture bound on Mehr laden", async () => {
+    terminalBufferType = "alternate";
+    apiMock.captureAgentTerminalWindow.mockResolvedValue({ content: "flache historie" });
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Verlauf" }));
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Verlauf" });
+    await waitFor(() =>
+      expect(apiMock.captureAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", -2000),
+    );
+
+    apiMock.captureAgentTerminalWindow.mockResolvedValue({ content: "tiefe historie" });
+    fireEvent.click(await screen.findByRole("button", { name: "Mehr laden" }));
+
+    // 5000 is the service-side clamp on capture(start=…) — asking for more lies.
+    await waitFor(() =>
+      expect(apiMock.captureAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", -5000),
+    );
+    await waitFor(() => expect(dialog.querySelector("pre")?.textContent).toContain("tiefe historie"));
+    // Once the deepest bound is loaded there is nothing left to load.
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Mehr laden" })).toBeNull());
+  });
+
+  it("sends a quick reply as one submitted line without touching the composer", async () => {
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+    const composer = screen.getByLabelText("Text an Terminal senden") as HTMLTextAreaElement;
+    await waitFor(() => expect(composer.disabled).toBe(false));
+    fireEvent.change(composer, { target: { value: "halb getippt" } });
+    websocketSends.length = 0;
+
+    fireEvent.click(await screen.findByRole("button", { name: "Antwort senden: weiter" }));
+
+    await waitFor(() => expect(websocketSends).toContain("weiter\r"));
+    // The half-typed draft must survive — a quick reply is not a composer send.
+    expect(composer.value).toBe("halb getippt");
   });
 
   // Plain Ctrl+C stays the agent interrupt — hijacking it whenever a stale
@@ -2033,7 +2099,7 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     expect(chip.className).toContain("font-data");
     expect(chip.className).toContain("text-micro");
     expect(screen.getByRole("button", { name: "Auswahl kopieren" }).className).toContain("min-w-[44px]");
-    expect(screen.getByRole("button", { name: "Text auswählen" }).className).toContain("min-h-[44px]");
+    expect(screen.getByRole("button", { name: "Verlauf" }).className).toContain("min-h-[44px]");
   });
 
   it("renames the active window from the session sheet and refreshes the window list", async () => {

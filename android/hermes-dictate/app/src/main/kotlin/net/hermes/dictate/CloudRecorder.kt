@@ -5,6 +5,8 @@ import android.media.MediaRecorder
 import android.os.Build
 import java.io.File
 
+data class RecordedAudio(val bytes: ByteArray, val mimeType: String)
+
 /**
  * Buffers one cloud-opt-in dictation as AAC/MP4 (16 kHz mono, ~48 kbit/s — ~1.1 MiB for the
  * 3-minute cap) in the app cache dir.
@@ -23,6 +25,7 @@ class CloudRecorder(
 
     private var recorder: MediaRecorder? = null
     private var file: File? = null
+    private var injectedAudio: RecordedAudio? = null
 
     /**
      * Set when the recorder hit max duration and stopped ITSELF: our later stop() call then
@@ -34,6 +37,17 @@ class CloudRecorder(
     fun start(): Boolean {
         cleanupStaleFiles()
         autoStopped = false
+        injectedAudio = null
+        // The debug source set can consume one adb-fed WAV fixture. The release source set is a
+        // hard no-op, and the BuildConfig guard lets the compiler erase even the probe there.
+        if (BuildConfig.DEBUG && DebugAudioInput.hasFixture(context)) {
+            return try {
+                injectedAudio = DebugAudioInput.take(context)
+                injectedAudio != null
+            } catch (_: Exception) {
+                false
+            }
+        }
         val target: File
         val r: MediaRecorder
         try {
@@ -72,7 +86,11 @@ class CloudRecorder(
     }
 
     /** Stops and returns the recorded bytes; null when nothing usable was captured. */
-    fun stopAndRead(): ByteArray? {
+    fun stopAndRead(): RecordedAudio? {
+        injectedAudio?.let {
+            injectedAudio = null
+            return it
+        }
         val r = recorder ?: return null
         recorder = null
         val f = file
@@ -82,7 +100,11 @@ class CloudRecorder(
         val stopped = runCatching { r.stop() }.isSuccess || autoStopped
         runCatching { r.release() }
         return try {
-            if (stopped) f?.takeIf { it.length() > 0 }?.readBytes() else null
+            if (stopped) {
+                f?.takeIf { it.length() > 0 }?.readBytes()?.let { RecordedAudio(it, "audio/mp4") }
+            } else {
+                null
+            }
         } catch (e: Exception) {
             null
         } finally {
@@ -96,6 +118,7 @@ class CloudRecorder(
             runCatching { r.release() }
         }
         recorder = null
+        injectedAudio = null
         file?.delete()
         file = null
     }

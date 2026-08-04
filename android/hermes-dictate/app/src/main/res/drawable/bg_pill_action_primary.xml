@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Primary circular action: the one button the user reaches for to finish a dictation. -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/key_pressed">
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="@color/accent" />
+        </shape>
+    </item>
+</ripple>

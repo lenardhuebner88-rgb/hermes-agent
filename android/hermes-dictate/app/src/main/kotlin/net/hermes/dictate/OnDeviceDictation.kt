@@ -128,6 +128,7 @@ class OnDeviceDictation(
         fun onPartial(text: String)
         fun onFinal(text: String)
         fun onError(failure: RecognizerFailure)
+        fun onLevel(rmsDb: Float) {}
     }
 
     private var recognizer: SpeechRecognizer? = null
@@ -192,7 +193,9 @@ class OnDeviceDictation(
 
         override fun onReadyForSpeech(params: Bundle?) {}
         override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onRmsChanged(rmsdB: Float) {
+            if (!isStale) callbacks.onLevel(rmsdB)
+        }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
 

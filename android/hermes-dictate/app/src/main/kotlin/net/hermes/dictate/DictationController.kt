@@ -43,6 +43,8 @@ enum class Mode { ON_DEVICE, CLOUD }
 sealed class UiStatus {
     object Idle : UiStatus()
     object Listening : UiStatus()
+    object Processing : UiStatus()
+    object Done : UiStatus()
     object Recording : UiStatus()
     object Uploading : UiStatus()
     data class CloudDone(val provider: String?) : UiStatus()
@@ -65,6 +67,9 @@ enum class ErrorKind {
 
     /** Overlay only: the recognized text could not be inserted into the focused field. */
     INSERT_FAILED,
+
+    /** Overlay only: the visible undo could not take the committed text back out again. */
+    UNDO_FAILED,
 }
 
 /** Semantic view of SpeechRecognizer error codes; the service does the int mapping. */
@@ -96,6 +101,7 @@ sealed class CloudOutcome {
  * ON_DEVICE, and failures surface visibly instead of silently retrying cloud.
  */
 class DictationController(
+    private val previewTransform: ((String) -> DictationTransform)? = null,
     private val transform: (String) -> DictationTransform = {
         DictationTransform.Text(PunctuationMapper.map(it))
     },
@@ -127,7 +133,7 @@ class DictationController(
         }
         Phase.LISTENING -> {
             phase = Phase.STOPPING
-            listOf(Cmd.StopRecognizer)
+            listOf(Cmd.StopRecognizer, Cmd.Status(UiStatus.Processing))
         }
         Phase.RECORDING -> {
             phase = Phase.WAITING_FILE
@@ -148,7 +154,7 @@ class DictationController(
 
     fun recognizerPartial(text: String): List<Cmd> {
         if (phase != Phase.LISTENING && phase != Phase.STOPPING) return emptyList()
-        val result = transform(text)
+        val result = (previewTransform ?: transform)(text)
         return if (result is DictationTransform.Text && result.value.isNotEmpty()) {
             listOf(Cmd.Preview(result.value))
         } else {
@@ -172,7 +178,7 @@ class DictationController(
             if (result is DictationTransform.Text && result.value.isEmpty()) {
                 listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
             } else {
-                commandsFor(result) + Cmd.Status(UiStatus.Idle)
+                commandsFor(result) + Cmd.Status(UiStatus.Done)
             }
         }
         else -> emptyList()
