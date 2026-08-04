@@ -4930,6 +4930,15 @@ CONFLICT_FIXER_DISPATCHED_EVENT = "conflict_fixer_dispatched"
 # the parked chain deadlocks (the fixer can never run to clear the block).
 CONFLICT_FIXER_IDEM_PREFIX = "conflict-fixer:"
 CONFLICT_FIXER_MAX_ATTEMPTS = 2
+# Every finished fixer card stamps exactly one of these on ITSELF and on the
+# park it owns: either it resolved the park (``resolved``) or it did not, with
+# a machine-readable ``reason_code``.  Before this event a refused resume was a
+# silent ``return False``: the board showed a *done* fixer next to a *blocked*
+# parent with nothing linking the two, which reads as "fixer worked, chain just
+# stalled".  Measured on the live board 2026-08-04: 20 of 33 completed fixer
+# cards never resumed their parent, and the refusal reason was recoverable only
+# by replaying the guard chain by hand against the event log.
+CONFLICT_FIXER_OUTCOME_EVENT = "conflict_fixer_outcome"
 CONFLICT_FIXER_BACKOFF_SECONDS = 300
 CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
 # Fixer runtime extensions are deliberately confined to conflict/lane-scope
@@ -26781,11 +26790,136 @@ def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return row is not None
 
 
+def _conflict_fixer_dispatch_event_id(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+) -> Optional[int]:
+    """Row id of the ``conflict_fixer_dispatched`` event that spawned *child_id*."""
+    row = conn.execute(
+        "SELECT id FROM task_events WHERE task_id = ? AND kind = ? "
+        "AND json_extract(payload, '$.child_id') = ? ORDER BY id DESC LIMIT 1",
+        (parent_id, CONFLICT_FIXER_DISPATCHED_EVENT, child_id),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
+
+
+def _conflict_fixer_attempt_is_counted(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    child_id: str,
+    conflict_fingerprint: str,
+) -> bool:
+    """Whether *child_id* is one of the cards ``_matching_conflict_fixer_attempts``
+    counts for this episode — i.e. its own dispatch already spent one attempt."""
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ? "
+        "AND json_extract(payload, '$.root_id') = ? "
+        "AND json_extract(payload, '$.child_id') = ?",
+        (CONFLICT_FIXER_DISPATCHED_EVENT, root_id, child_id),
+    ):
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if _conflict_event_fingerprint(payload) == conflict_fingerprint:
+            return True
+    return False
+
+
+def _escalation_blocks_fixer_resume(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    *,
+    dispatch_event_id: Optional[int],
+) -> bool:
+    """Whether an operator escalation must veto this fixer's parent resume.
+
+    :func:`_operator_escalation_is_active` alone is too coarse here.  The
+    no-silent-stall sweep escalates a park it *also* routed to a fixer
+    (``evidence.stall_class == 'integration_parked'``): that escalation is a
+    notification ABOUT the very conflict the fixer was dispatched to repair,
+    not an independent operator hold.  Because it lands after the dispatch, it
+    permanently disarmed the fixer's resume — the fixer committed its fix,
+    completed green, and the chain stayed parked (live evidence 2026-08-04:
+    t_635aded0/t_5b3f6ee7/t_57aaa085/t_237fb16b, escalation row ids 87604,
+    88076, … each 2-5 rows after their own ``conflict_fixer_dispatched``).
+
+    So only a same-episode integration-park sweep escalation is ignored, and
+    only when it was raised after this fixer's dispatch.  Anything else — an
+    operator hold, a budget/stall escalation of another class, or an escalation
+    that already existed when the fixer was dispatched — still vetoes: the park
+    the resume would clear is then not the one this fixer owns, and the
+    fingerprint/park guards below stay in force either way.
+    """
+    row = conn.execute(
+        "SELECT id, kind, payload FROM task_events "
+        "WHERE task_id = ? AND ("
+        "  (kind = ? AND COALESCE(json_extract(payload, "
+        "   '$.evidence.trigger_outcome'), '') != 'nonspawnable_assignee')"
+        "  OR kind IN ('unblocked', 'promoted_manual')) "
+        "ORDER BY id DESC LIMIT 1",
+        (parent_id, OPERATOR_ESCALATION_EVENT),
+    ).fetchone()
+    if row is None or row["kind"] != OPERATOR_ESCALATION_EVENT:
+        return False
+    if dispatch_event_id is None or int(row["id"]) <= dispatch_event_id:
+        return True
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return True
+    evidence = payload.get("evidence") if isinstance(payload, dict) else None
+    stall_class = (
+        str(evidence.get("stall_class") or "") if isinstance(evidence, dict) else ""
+    )
+    return stall_class != "integration_parked"
+
+
+def _record_conflict_fixer_outcome(
+    conn: sqlite3.Connection,
+    *,
+    child_id: str,
+    parent_id: str,
+    outcome: str,
+    reason_code: str,
+    conflict_fingerprint: str,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Stamp the honest fixer outcome on the fixer card and on its park.
+
+    Caller must already hold the write txn.  ``parent_id`` may be empty when
+    the marker itself is incomplete; the child always gets the record.
+    """
+    payload: dict[str, Any] = {
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "child_id": child_id,
+        "parent_id": parent_id or None,
+        "conflict_fingerprint": conflict_fingerprint or None,
+    }
+    if extra:
+        payload.update(extra)
+    _append_event(conn, child_id, CONFLICT_FIXER_OUTCOME_EVENT, payload)
+    if parent_id:
+        _append_event(conn, parent_id, CONFLICT_FIXER_OUTCOME_EVENT, payload)
+
+
 def _resume_parent_for_completed_conflict_fixer(
     conn: sqlite3.Connection,
     child_id: str,
 ) -> bool:
-    """CAS-resume the integration park this successful fixer still owns."""
+    """CAS-resume the integration park this successful fixer still owns.
+
+    Every exit stamps a :data:`CONFLICT_FIXER_OUTCOME_EVENT` (``resolved`` vs
+    ``not_resumed`` + ``reason_code``) so a completed fixer that did NOT unpark
+    its chain is visible on the board instead of being a silent ``False``.
+    Only cards that actually carry a ``conflict_fixer_for`` marker are stamped
+    — this helper runs on every completion.
+    """
     with write_txn(conn):
         marker = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? "
@@ -26797,19 +26931,41 @@ def _resume_parent_for_completed_conflict_fixer(
         try:
             payload = json.loads(marker["payload"] or "{}")
         except (TypeError, ValueError):
-            return False
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
         parent_id = str(payload.get("parent_id") or "").strip()
         root_id = str(payload.get("root_id") or parent_id).strip()
         expected_fingerprint = str(
             payload.get("conflict_fingerprint") or ""
         ).strip()
-        if not parent_id or not root_id or not expected_fingerprint:
+
+        def _refuse(reason_code: str, **extra: Any) -> bool:
+            _record_conflict_fixer_outcome(
+                conn,
+                child_id=child_id,
+                parent_id=parent_id,
+                outcome="not_resumed",
+                reason_code=reason_code,
+                conflict_fingerprint=expected_fingerprint,
+                extra=extra or None,
+            )
             return False
+
+        if not parent_id or not root_id or not expected_fingerprint:
+            # Legacy/incomplete marker (pre-fingerprint fixer cards): the guard
+            # chain below cannot even be evaluated. Say so instead of vanishing.
+            return _refuse("incomplete_fixer_marker")
 
         parent = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
             (parent_id,),
         ).fetchone()
+        if parent is None:
+            return _refuse("parent_missing")
+        if parent["status"] != "blocked":
+            return _refuse("parent_not_blocked", parent_status=parent["status"])
+
         blocked = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
             "ORDER BY id DESC LIMIT 1",
@@ -26818,24 +26974,48 @@ def _resume_parent_for_completed_conflict_fixer(
         current_reason = _decision_event_reason(
             blocked["payload"] if blocked else None
         ) or ""
-        if (
-            parent is None
-            or parent["status"] != "blocked"
-            or not is_integration_park(
-                reason=current_reason,
-                block_kind=blocked_event_kind(
-                    blocked["payload"] if blocked else None,
-                ),
-            )
-            or _operator_escalation_is_active(conn, parent_id)
-            or _matching_conflict_fixer_attempts(
-                conn,
-                root_id=root_id,
-                conflict_fingerprint=expected_fingerprint,
-            ) >= CONFLICT_FIXER_MAX_ATTEMPTS
-            or _conflict_fingerprint(current_reason) != expected_fingerprint
+        if not is_integration_park(
+            reason=current_reason,
+            block_kind=blocked_event_kind(blocked["payload"] if blocked else None),
         ):
-            return False
+            return _refuse("park_is_not_an_integration_park")
+        if _conflict_fingerprint(current_reason) != expected_fingerprint:
+            return _refuse(
+                "park_fingerprint_mismatch",
+                current_fingerprint=_conflict_fingerprint(current_reason),
+            )
+        if _escalation_blocks_fixer_resume(
+            conn,
+            parent_id,
+            dispatch_event_id=_conflict_fixer_dispatch_event_id(
+                conn, parent_id, child_id
+            ),
+        ):
+            return _refuse("operator_escalation_active")
+
+        attempts = _matching_conflict_fixer_attempts(
+            conn,
+            root_id=root_id,
+            conflict_fingerprint=expected_fingerprint,
+        )
+        # The completing fixer's OWN dispatch is part of that count whenever it
+        # was routed the normal way. Counting it against the budget made the
+        # LAST permitted attempt unable to resume even when it had actually
+        # fixed the conflict — "attempts exhausted" must mean *other* attempts
+        # filled the budget, not this one. A fixer that is not itself in the
+        # count (legacy/hand-made card) keeps the strict comparison.
+        own_attempt = 1 if _conflict_fixer_attempt_is_counted(
+            conn,
+            root_id=root_id,
+            child_id=child_id,
+            conflict_fingerprint=expected_fingerprint,
+        ) else 0
+        if attempts - own_attempt >= CONFLICT_FIXER_MAX_ATTEMPTS:
+            return _refuse(
+                "attempts_exhausted",
+                attempts=attempts,
+                limit=CONFLICT_FIXER_MAX_ATTEMPTS,
+            )
 
         undone_parent = conn.execute(
             "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
@@ -26850,7 +27030,7 @@ def _resume_parent_for_completed_conflict_fixer(
             (new_status, parent_id),
         )
         if cur.rowcount != 1:
-            return False
+            return _refuse("resume_cas_lost")
         _append_event(
             conn,
             parent_id,
@@ -26866,6 +27046,15 @@ def _resume_parent_for_completed_conflict_fixer(
             parent_id,
             "unblocked",
             {"status": new_status, "source": "conflict_fixer_completion"},
+        )
+        _record_conflict_fixer_outcome(
+            conn,
+            child_id=child_id,
+            parent_id=parent_id,
+            outcome="resolved",
+            reason_code="parent_resumed",
+            conflict_fingerprint=expected_fingerprint,
+            extra={"status": new_status},
         )
         return True
 
