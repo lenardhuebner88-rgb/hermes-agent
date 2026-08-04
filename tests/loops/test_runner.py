@@ -4237,6 +4237,21 @@ def test_read_ledger_stats_tolerates_malformed_lines(tmp_path):
     assert stats["fails_by_kind"] == {"build_fail": 1}
 
 
+def test_read_ledger_stats_logs_malformed_lines_before_skipping(tmp_path, caplog):
+    """A torn append must not masquerade as a clean, smaller ledger."""
+    state_dir = tmp_path / "torn-ledger"
+    state_dir.mkdir()
+    (state_dir / "ledger.jsonl").write_text(
+        '{"round": 7, "verdict": "fail"\n', encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=runner_module.__name__):
+        stats = read_ledger_stats(state_dir)
+
+    assert stats["rounds"] == 0
+    assert any("malformed ledger event" in record.message for record in caplog.records)
+
+
 def test_read_ledger_stats_missing_file_returns_zeroed(tmp_path):
     stats = read_ledger_stats(tmp_path / "nicht-vorhanden")
     assert stats == {

@@ -943,7 +943,8 @@ def read_ledger_stats(pack_state_dir: Path) -> dict:
             continue
         try:
             event = json.loads(line)
-        except ValueError:
+        except ValueError as exc:
+            logger.warning("malformed ledger event skipped: %s", exc)
             continue
         if not isinstance(event, dict):
             continue
