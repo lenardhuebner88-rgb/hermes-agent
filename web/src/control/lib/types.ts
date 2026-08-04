@@ -1492,6 +1492,13 @@ export interface LoopPackSummary {
    * Zahl ist unzuverlässig, deshalb KEIN Manifest-Fehler-Pack.
    */
   error?: string;
+  /** true = die Landung dieses Packs würde GERADE am repo-weiten Lock
+   *  scheitern (ein anderes Pack desselben Repos landet). Bauen ist davon
+   *  nicht betroffen — nur die Landung ist repo-weit exklusiv. */
+  repo_locked?: boolean;
+  /** Name des blockierenden Packs, wenn eindeutig bestimmbar; null = Lock
+   *  hängt, aber der Halter ist nicht sicher zuzuordnen (nie geraten). */
+  repo_locked_by?: string | null;
 }
 
 export type LoopPack = LoopPackSummary | LoopPackError;

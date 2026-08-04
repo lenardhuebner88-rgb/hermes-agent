@@ -53,3 +53,12 @@ export function sortPacksByAttention(packs: readonly LoopPackSummary[]): LoopPac
     return delta !== 0 ? delta : a.name.localeCompare(b.name);
   });
 }
+
+/** Wie viele Packs einer Repo-Gruppe laufen GERADE gleichzeitig — mehrere
+ *  Packs desselben Repos duerfen parallel bauen (nur die Landung ist
+ *  repo-weit exklusiv). Bis vor Kurzem lief hoechstens EIN Loop pro Repo, die
+ *  Karten allein liessen "laeuft mehrfach" also nicht ohne Raten erkennen —
+ *  eigene Funktion, damit die Ableitung ohne den ganzen Tab testbar ist. */
+export function runningCountInGroup(packs: readonly LoopPackSummary[]): number {
+  return packs.reduce((count, pack) => count + (pack.running ? 1 : 0), 0);
+}
