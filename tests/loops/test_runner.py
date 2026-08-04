@@ -5130,3 +5130,120 @@ def test_sweep_round_without_status_counts_as_blocked(tmp_path, fake_engine):
     ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
     assert "kein Status (Kontrakt verletzt)" in ledger
     assert "status=?" not in ledger
+
+
+# ── Stale Basis ist kein Verify-Urteil (live 2026-08-04) ────────────────────
+#
+# dashboard-polish verwarf einen guten Commit mit
+# "FAIL Repo-Gate nicht gelaufen: Branch stale". Ursache war NICHT der Kandidat:
+# waehrend des Laufs lief main weiter (parallele Sessions bauen gleichzeitig),
+# der branch-age-Preflight stellte das Gate rot, und run-affected.sh fuehrte
+# KEINEN Test aus. Der Verifier machte daraus ein FAIL, der Runner revertierte.
+
+def _stale_branch_age(runner, blocked: bool) -> None:
+    """Echtes check-branch-age.sh im Pack-Worktree durch eine Attrappe ersetzen.
+
+    Bewusst ueber das Skript und nicht ueber einen Monkeypatch der Methode:
+    der Runner soll die Schwelle beim ECHTEN Skript erfragen, damit sie nicht
+    in zwei Quellen driftet — das prueft dieser Aufbau mit.
+    """
+    script = runner.wt / "scripts" / "check-branch-age.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(f"#!/usr/bin/env bash\nexit {1 if blocked else 0}\n", encoding="utf-8")
+    script.chmod(0o755)
+    # Versioniert ablegen wie das echte Skript: guard_clean() raeumt zu jedem
+    # Rundenbeginn den Worktree und wuerde eine untracked Attrappe entfernen —
+    # der Test liefe dann gegen einen Worktree ohne Preflight und bewiese nichts.
+    g(runner.wt, "add", "-A")
+    g(runner.wt, "commit", "-m", f"branch-age stub blocked={blocked}")
+
+
+def test_stale_base_probe_asks_the_real_script(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "probe", "pipeline", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "probe"), state_root=tmp_path / "state")
+    runner.ensure_wt()
+
+    _stale_branch_age(runner, blocked=True)
+    assert runner.base_stale_blocks_gate() is True
+    _stale_branch_age(runner, blocked=False)
+    assert runner.base_stale_blocks_gate() is False
+
+
+def test_missing_branch_age_script_does_not_invalidate_a_round(tmp_path, fake_engine):
+    """Eine unbeantwortbare Probe darf keine Runde entwerten."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "ohne", "pipeline", repo)
+    runner = LoopRunner(load_pack(tmp_path / "packs", "ohne"), state_root=tmp_path / "state")
+    runner.ensure_wt()
+
+    assert not (runner.wt / "scripts" / "check-branch-age.sh").exists()
+    assert runner.base_stale_blocks_gate() is False
+
+
+def test_verify_fail_on_stale_base_requeues_instead_of_bouncing(tmp_path, fake_engine):
+    """Der Kern: FAIL bei stale Basis ist kein Urteil.
+
+    Erwartet: kein Bounce, kein Fail-Streak, Plan zurueck in 00-planned —
+    die naechste Runde baut ihn auf frischer Basis neu.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "stale", "pipeline", repo,
+               stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 2})
+    pack = load_pack(tmp_path / "packs", "stale")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    _stale_branch_age(runner, blocked=True)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "kandidat")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("FAIL Repo-Gate nicht gelaufen: Branch stale")
+    runner._run_pipeline()
+
+    planned = sorted(p.name for p in (runner.queue / "00-planned").glob("*.md"))
+    assert planned == ["P1-beispiel.md"], "Plan muss unverbraucht zurueck in die Queue"
+    assert not list((runner.queue / "90-bounced").glob("*.md")), "kein Bounce bei stale Basis"
+    assert not list((runner.queue / "10-building").glob("*.md")), "kein Karteileichen-Rest"
+
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "Verify ungültig (Basis stale, Gate lief nicht)" in ledger
+    assert "verify-fail" not in ledger, "darf nicht als Verify-Fail protokolliert werden"
+
+    plan_text = (runner.queue / "00-planned" / "P1-beispiel.md").read_text(encoding="utf-8")
+    assert parse_retry(plan_text) == 0, "retry darf nicht hochgezaehlt werden"
+
+
+def test_verify_fail_on_fresh_base_still_bounces(tmp_path, fake_engine):
+    """Gegenprobe: bei frischer Basis bleibt ein FAIL ein echtes Urteil.
+
+    Ohne diese Kontrolle koennte der neue Zweig jeden Verify-Fail verschlucken.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "frisch", "pipeline", repo,
+               stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 2})
+    runner = LoopRunner(load_pack(tmp_path / "packs", "frisch"), state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    _stale_branch_age(runner, blocked=False)
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "kandidat")
+        (Path(kv["STATE"]) / "last-status").write_text("BUILT fl-20260702-beispiel\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("FAIL echter Mangel am Kandidaten")
+    runner._run_pipeline()
+
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "verify-fail" in ledger, "ein echter Mangel muss weiterhin als Fail zaehlen"
+    assert "Basis stale" not in ledger
