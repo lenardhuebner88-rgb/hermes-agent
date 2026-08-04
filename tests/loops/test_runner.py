@@ -4876,3 +4876,100 @@ def test_dry_streak_also_counts_retry_dry_exit(tmp_path, fake_engine, monkeypatc
     assert calls.count("plan") == 2
     assert runner._read_dry_streak() == 1
     assert "build" not in calls
+
+
+# ── (g) Frontend-Deps-Provisionierung (HAS_WEB) ──────────────────────────────
+#
+# Regression 2026-08-04: HAS_WEB war eine nackte is_dir()-Probe auf
+# web/node_modules. Seit der Worktree-Deps-Isolation legt aber erst
+# scripts/gate-frontend.sh diesen Symlink an — ein Loop-Worktree hat ihn nie.
+# Packs mit hartem Frontend-Kontrakt (dashboard-polish) brachen darum im
+# Planner ab und kamen nie an ein Gate, das die Deps angelegt haette:
+# 7 Naechte in Folge "DRY web fehlt", 0 Plaene.
+
+def _web_runner(tmp_path, name="webpack", *, plan_reads_has_web=True):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", name, "pipeline", repo)
+    pack_dir = tmp_path / "packs" / name
+    if not plan_reads_has_web:
+        plan_prompt = pack_dir / "plan.md"
+        plan_prompt.write_text(
+            plan_prompt.read_text(encoding="utf-8").replace("HAS_WEB={{HAS_WEB}}\n", ""),
+            encoding="utf-8",
+        )
+    pack = load_pack(tmp_path / "packs", name)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.wt.mkdir(parents=True, exist_ok=True)
+    (runner.wt / "web").mkdir(exist_ok=True)
+    return runner
+
+
+def _install_fake_gate(runner: LoopRunner, body: str) -> Path:
+    gate = runner.wt / "scripts" / "gate-frontend.sh"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(body, encoding="utf-8")
+    gate.chmod(0o755)
+    return gate
+
+
+def test_ensure_frontend_deps_provisions_when_node_modules_missing(tmp_path, fake_engine):
+    """Der Kern der Regression: fehlende Deps werden EINMAL angelegt, nicht gemeldet."""
+    runner = _web_runner(tmp_path)
+    _install_fake_gate(runner, '#!/bin/bash\nmkdir -p "$(dirname "$0")/../web/node_modules"\n')
+
+    assert runner.ensure_frontend_deps() == "1"
+    assert (runner.wt / "web" / "node_modules").is_dir()
+    assert "FRONTEND-DEPS provisioniert" in (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+
+
+def test_ensure_frontend_deps_passes_preflight_and_stale_env(tmp_path, fake_engine):
+    """Preflight-only + Stale-Override: sonst blockt check-branch-age.sh vor jedem Test."""
+    runner = _web_runner(tmp_path)
+    seen = runner.wt / "env.txt"
+    _install_fake_gate(
+        runner,
+        '#!/bin/bash\n'
+        f'printf "%s|%s\\n" "$GATE_FRONTEND_PREFLIGHT_ONLY" "$HERMES_GATE_STALE_OK" > "{seen}"\n'
+        'mkdir -p "$(dirname "$0")/../web/node_modules"\n',
+    )
+
+    assert runner.ensure_frontend_deps() == "1"
+    assert seen.read_text(encoding="utf-8").strip() == "1|1"
+
+
+def test_ensure_frontend_deps_skips_pack_that_never_reads_has_web(tmp_path, fake_engine):
+    """Packs ohne Frontend-Interesse duerfen kein npm ci und keine 1,5 GB zahlen."""
+    runner = _web_runner(tmp_path, plan_reads_has_web=False)
+    marker = runner.wt / "ran.txt"
+    _install_fake_gate(runner, f'#!/bin/bash\ntouch "{marker}"\n')
+
+    assert runner.ensure_frontend_deps() == "0"
+    assert not marker.exists()
+
+
+def test_ensure_frontend_deps_degrades_and_names_the_reason(tmp_path, fake_engine):
+    """Ein Fehlschlag kostet nie die Nacht — aber er steht benannt im Ledger."""
+    runner = _web_runner(tmp_path)
+    _install_fake_gate(runner, '#!/bin/bash\necho "npm ci explodiert" >&2\nexit 1\n')
+
+    assert runner.ensure_frontend_deps() == "0"
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "FRONTEND-DEPS Provisionierung fehlgeschlagen (rc=1)" in ledger
+    assert "npm ci explodiert" in ledger
+
+
+def test_ensure_frontend_deps_short_circuits_when_already_provisioned(tmp_path, fake_engine):
+    runner = _web_runner(tmp_path)
+    (runner.wt / "web" / "node_modules").mkdir()
+    marker = runner.wt / "ran.txt"
+    _install_fake_gate(runner, f'#!/bin/bash\ntouch "{marker}"\n')
+
+    assert runner.ensure_frontend_deps() == "1"
+    assert not marker.exists()
+
+
+def test_ensure_frontend_deps_zero_without_web_workspace(tmp_path, fake_engine):
+    runner = _web_runner(tmp_path)
+    (runner.wt / "web").rmdir()
+
+    assert runner.ensure_frontend_deps() == "0"

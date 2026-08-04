@@ -1928,6 +1928,78 @@ class LoopRunner:
             + ", ".join(net.splitlines()[:5])
         )
 
+    # ── Frontend-Deps ──
+    def _plan_prompt_reads_has_web(self) -> bool:
+        """Liest der Plan-Prompt dieses Packs {{HAS_WEB}} überhaupt aus?
+
+        Bewusst aus dem Prompt abgeleitet statt als neuer ``pack.yaml``-Key:
+        die autoland-Sicherheitsprojektion (``_manifest_hash``) hasht Manifest
+        UND Prompts, ein neuer Manifest-Key würde die kuratierten Hashes
+        brechen und autoland-Packs fail-closed stellen.
+        """
+        cfg = self.pack.phases.get("plan")
+        prompt = getattr(cfg, "prompt", None)
+        if not prompt:
+            return False
+        try:
+            text = (self.pack.pack_dir / prompt).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return "{{HAS_WEB}}" in text
+
+    def ensure_frontend_deps(self) -> str:
+        """HAS_WEB ehrlich beantworten, statt blind auf ``node_modules`` zu proben.
+
+        Seit der Worktree-Deps-Isolation legt erst ``scripts/gate-frontend.sh``
+        den ``node_modules``-Symlink in den exklusiven Deps-Baum unter
+        ``HERMES_WORKTREE_DEPS_ROOT`` — ein frischer Loop-Worktree hat ihn nie.
+        Die frühere nackte ``is_dir()``-Probe meldete darum dauerhaft
+        ``HAS_WEB=0``; Packs mit hartem Frontend-Kontrakt brachen im Planner ab
+        und kamen so nie an ein Gate, das die Deps angelegt hätte
+        (dashboard-polish: 7 Nächte DRY, 2026-07-29 bis 2026-08-04).
+
+        Nur Packs, deren Plan-Prompt ``HAS_WEB`` überhaupt liest, zahlen die
+        Provisionierung; ein Fehlschlag kostet nie die Nacht, er fällt auf
+        ``"0"`` zurück und wird im Ledger benannt.
+        """
+        web = self.wt / "web"
+        if (web / "node_modules").is_dir():
+            return "1"
+        if not web.is_dir() or not self._plan_prompt_reads_has_web():
+            return "0"
+        gate = self.wt / "scripts" / "gate-frontend.sh"
+        if not gate.is_file():
+            return "0"
+        self.say("Frontend-Deps fehlen im Worktree — Preflight provisioniert sie einmalig …")
+        env = {
+            **os.environ,
+            "GATE_FRONTEND_PREFLIGHT_ONLY": "1",
+            # Der Preflight installiert nur Deps und behauptet nichts über
+            # Grün — der branch-age-Wächter davor würde ihn auf einem noch
+            # nicht rebaseten Baum blocken, ohne dass je ein Test liefe.
+            "HERMES_GATE_STALE_OK": "1",
+        }
+        try:
+            res = subprocess.run(
+                [str(gate)], cwd=str(self.wt), env=env, capture_output=True,
+                encoding="utf-8", errors="replace", timeout=1800, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.ledger(f"FRONTEND-DEPS Provisionierung fehlgeschlagen: {exc}")
+            return "0"
+        if res.returncode != 0 or not (web / "node_modules").is_dir():
+            tail = [
+                line for line in ((res.stderr or "") + "\n" + (res.stdout or "")).splitlines()
+                if line.strip()
+            ]
+            reason = tail[-1].strip() if tail else "kein Output"
+            self.ledger(
+                f"FRONTEND-DEPS Provisionierung fehlgeschlagen (rc={res.returncode}): {reason}"
+            )
+            return "0"
+        self.ledger("FRONTEND-DEPS provisioniert (gate-frontend Preflight)")
+        return "1"
+
     # ── Kommandos ──
     def cmd_plan(self, fresh: bool = False) -> bool:
         self._validate_autoland_runtime()
@@ -1936,7 +2008,7 @@ class LoopRunner:
         self.ensure_wt(fresh=fresh)
         if not self.guard_clean():
             return False
-        has_web = "1" if (self.wt / "web" / "node_modules").is_dir() else "0"
+        has_web = self.ensure_frontend_deps()
         result = self.run_phase("plan", HAS_WEB=has_web)
         if result.usage_limit:
             self.say("Usage-Limit im Planner — Stop.")
