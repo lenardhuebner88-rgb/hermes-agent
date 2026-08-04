@@ -2881,6 +2881,94 @@ def test_cli_probe_accepts_future_minor_updates_with_matching_help(
         assert actions[action] is available
 
 
+def test_cli_probe_budget_covers_slow_starting_binary(tmp_path: Path) -> None:
+    """A big self-contained CLI (kimi needs 1.1-3.1 s) must not fail the probe."""
+    from hermes_cli import agent_terminals as at
+
+    at.clear_cli_probe_cache()
+    binary = tmp_path / "kimi"
+    binary.write_text(
+        "#!/bin/sh\n"
+        "sleep 2\n"
+        'if [ "$1" = "--version" ]; then echo "0.31.0"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    assert at.probe_agent_cli_actions("kimi", binary)["fresh"] is True
+
+
+def test_cli_probe_skips_help_when_policy_reads_none(tmp_path: Path) -> None:
+    """kimi has no help patterns — a broken --help must not disable Fresh."""
+    from hermes_cli import agent_terminals as at
+
+    at.clear_cli_probe_cache()
+    binary = tmp_path / "kimi"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "0.31.0"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then echo "boom" >&2; exit 1; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    actions = at.probe_agent_cli_actions("kimi", binary)
+    assert actions["fresh"] is True
+    assert actions["resume"] is False
+    assert actions["fork"] is False
+
+
+def test_cli_probe_failure_is_retried_after_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient probe failure must not disable an agent for the process life."""
+    from hermes_cli import agent_terminals as at
+
+    at.clear_cli_probe_cache()
+    flag = tmp_path / "healthy"
+    binary = tmp_path / "kimi"
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'if [ ! -f "{flag}" ]; then exit 1; fi\n'
+        'if [ "$1" = "--version" ]; then echo "0.31.0"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(at, "_CLI_PROBE_NEGATIVE_TTL_SECONDS", 0.0)
+    assert at.probe_agent_cli_actions("kimi", binary)["fresh"] is False
+
+    # The binary itself is untouched (same mtime/size), so a permanently cached
+    # fail-closed verdict would keep reporting False here.
+    flag.write_text("ok", encoding="utf-8")
+    assert at.probe_agent_cli_actions("kimi", binary)["fresh"] is True
+
+
+def test_cli_probe_caches_proven_result_without_expiry(tmp_path: Path) -> None:
+    """Proven results stay cached until the binary changes — no re-probe churn."""
+    from hermes_cli import agent_terminals as at
+
+    at.clear_cli_probe_cache()
+    calls = tmp_path / "calls"
+    binary = tmp_path / "kimi"
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'echo x >> "{calls}"\n'
+        'if [ "$1" = "--version" ]; then echo "0.31.0"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    assert at.probe_agent_cli_actions("kimi", binary)["fresh"] is True
+    first = calls.read_text(encoding="utf-8").count("x")
+    assert at.probe_agent_cli_actions("kimi", binary)["fresh"] is True
+    assert calls.read_text(encoding="utf-8").count("x") == first
+
+
 def test_resolve_workdir_rejects_non_manifest_terminal_path(tmp_path: Path) -> None:
     service = TmuxAgentSessionService(hermes_home=tmp_path / "hh")
     repo = tmp_path / "repo"

@@ -137,7 +137,14 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
 # still matches. Older versions, major upgrades, probe failures, or changed
 # help signatures fail closed. Lean/Compact are intentionally absent — never
 # inferred from help.
-_CLI_PROBE_TIMEOUT_SECONDS = 1.5
+# Measured on this host: the kimi CLI (a ~150 MB self-contained binary) needs
+# 1.1-3.1 s just to print --version, so a 1.5 s budget disabled it at random.
+# The budget must cover the slowest legitimate CLI cold start, not the fastest.
+_CLI_PROBE_TIMEOUT_SECONDS = 10.0
+# A probe that fails is a fail-closed *guess*, not a proven fact — cache it only
+# briefly so a single slow/loaded start does not disable an agent until the next
+# dashboard restart. Proven results stay cached until the binary changes.
+_CLI_PROBE_NEGATIVE_TTL_SECONDS = 60.0
 _CLI_CAPABILITY_POLICIES: dict[str, dict[str, object]] = {
     "claude": {
         "version_re": re.compile(
@@ -209,13 +216,28 @@ _CLI_CAPABILITY_POLICIES: dict[str, dict[str, object]] = {
     },
 }
 
-# (agent kind, resolved binary path) -> (mtime_ns, size, actions dict)
-_CLI_PROBE_CACHE: dict[tuple[str, str], tuple[int, int, dict[str, bool]]] = {}
+# (agent kind, resolved binary path) -> (mtime_ns, size, actions dict, expiry)
+# expiry is None for proven results and a monotonic deadline for fail-closed ones.
+_CLI_PROBE_CACHE: dict[
+    tuple[str, str], tuple[int, int, dict[str, bool], float | None]
+] = {}
 
 
 def clear_cli_probe_cache() -> None:
     """Test helper: drop cached version/help probes."""
     _CLI_PROBE_CACHE.clear()
+
+
+def _store_cli_probe(
+    cache_key: tuple[str, str],
+    mtime_ns: int,
+    size: int,
+    actions: Mapping[str, bool],
+    *,
+    proven: bool,
+) -> None:
+    expiry = None if proven else time.monotonic() + _CLI_PROBE_NEGATIVE_TTL_SECONDS
+    _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(actions), expiry)
 
 
 def seed_cli_probe_cache(
@@ -230,9 +252,10 @@ def seed_cli_probe_cache(
             int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
             int(st.st_size),
             dict(actions),
+            None,
         )
     except OSError:
-        _CLI_PROBE_CACHE[(kind, str(path))] = (0, 0, dict(actions))
+        _CLI_PROBE_CACHE[(kind, str(path))] = (0, 0, dict(actions), None)
 
 
 def _run_cli_probe(binary: Path, flag: str) -> tuple[bool, str]:
@@ -311,10 +334,24 @@ def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
     cache_key = (kind, str(resolved))
     cached = _CLI_PROBE_CACHE.get(cache_key)
     if cached is not None and cached[0] == mtime_ns and cached[1] == size:
-        return dict(cached[2])
+        if cached[3] is None or cached[3] > time.monotonic():
+            return dict(cached[2])
+        # A fail-closed guess whose grace period ran out: probe again instead of
+        # carrying one slow start forward for the whole process lifetime.
+        _CLI_PROBE_CACHE.pop(cache_key, None)
 
+    help_patterns = (
+        policy.get("help_patterns")
+        if isinstance(policy.get("help_patterns"), dict)
+        else {}
+    )
+    assert isinstance(help_patterns, dict)
     version_ok, version_out = _run_cli_probe(resolved, "--version")
-    help_ok, help_out = _run_cli_probe(resolved, "--help")
+    # Only pay for (and only fail on) --help when the policy actually reads it.
+    if help_patterns:
+        help_ok, help_out = _run_cli_probe(resolved, "--help")
+    else:
+        help_ok, help_out = True, ""
     version_re = policy.get("version_re")
     if (
         not version_ok
@@ -322,22 +359,16 @@ def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
         or not isinstance(version_re, re.Pattern)
         or not version_out.strip()
     ):
-        _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+        _store_cli_probe(cache_key, mtime_ns, size, base, proven=False)
         return base
     first_line = next((ln.strip() for ln in version_out.splitlines() if ln.strip()), "")
     version_match = version_re.fullmatch(first_line)
     if version_match is None or not _cli_version_is_compatible(
         version_match.group("version"), policy
     ):
-        _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+        _store_cli_probe(cache_key, mtime_ns, size, base, proven=False)
         return base
     base["fresh"] = bool(static.get("fresh", True))
-    help_patterns = (
-        policy.get("help_patterns")
-        if isinstance(policy.get("help_patterns"), dict)
-        else {}
-    )
-    assert isinstance(help_patterns, dict)
     for action_name in ("resume", "fork", "session_id"):
         if action_name != "session_id" and not static.get(action_name):
             continue
@@ -346,7 +377,7 @@ def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
             continue
         if pattern.search(help_out):
             base[action_name] = True
-    _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+    _store_cli_probe(cache_key, mtime_ns, size, base, proven=True)
     return base
 
 # Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
