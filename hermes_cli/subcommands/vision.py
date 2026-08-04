@@ -52,15 +52,25 @@ def build_vision_parser(subparsers) -> None:
     )
     strat.add_argument(
         "--mode",
-        choices=["propose", "reflect", "outcomes-backfill", "harvest", "digest", "harvest-watch"],
+        choices=[
+            "propose", "reflect", "outcomes-backfill", "harvest", "digest",
+            "harvest-watch", "unsuppress", "reopen-archived", "allow-qualitative",
+        ],
         required=True,
-        help="propose, reflect, outcomes-backfill, harvest, digest oder harvest-watch",
+        help="propose, reflect, outcomes-backfill, harvest, digest, harvest-watch "
+        "oder Operator-Gegenwege: unsuppress, reopen-archived, allow-qualitative",
     )
     strat.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
     strat.add_argument("--json", action="store_true", help="Emit JSON output")
     strat.add_argument("--apply", action="store_true", help="Apply outcomes-backfill writes; default is dry-run")
     strat.add_argument("--limit", type=int, help="Maximum existing outcome rows to backfill")
     strat.add_argument("--lever-key", action="append", help="Restrict outcomes-backfill to a lever key; repeatable")
+    strat.add_argument(
+        "--reason",
+        default=None,
+        help="(Operator-Gegenwege) Begruendung fuer die Audit-Zeile; Pflicht bei "
+        "unsuppress, reopen-archived und allow-qualitative",
+    )
     strat.add_argument("--root-task-id", action="append", help="Restrict outcomes-backfill to a root task id; repeatable")
     strat.add_argument(
         "--status",
@@ -381,6 +391,12 @@ def vision_command(args: argparse.Namespace) -> int:
                 result = strategist.run_harvest_watch(args)
             elif args.mode == "outcomes-backfill":
                 result = strategist.run_outcomes_backfill(args)
+            elif args.mode == "unsuppress":
+                result = strategist.run_unsuppress(args)
+            elif args.mode == "reopen-archived":
+                result = strategist.run_reopen_archived(args)
+            elif args.mode == "allow-qualitative":
+                result = strategist.run_allow_qualitative(args)
             else:
                 result = strategist.run_reflect(args)
         except (FileNotFoundError, ValueError) as exc:
@@ -407,6 +423,8 @@ def vision_command(args: argparse.Namespace) -> int:
                 )
                 for item in result["ingested"]:
                     print(f"  - {item['key']}: {item['title']} → root {item.get('root_task_id')}")
+        elif result["mode"] in ("unsuppress", "reopen-archived", "allow-qualitative"):
+            print(f"strategist {result['mode']}: {result['key']} — {result['reason']}")
         elif result["mode"] == "harvest":
             print(
                 f"strategist harvest: {result['receipts']} receipt(s), "

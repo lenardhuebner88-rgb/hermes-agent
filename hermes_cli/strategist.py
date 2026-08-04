@@ -104,6 +104,12 @@ RECURRING_FLAKE_MIN_NIGHTS = vision_metrics.RECURRING_FLAKE_MIN_NIGHTS
 # Self-gate budgets (cheap, deterministic). A lever passes iff it has a paired
 # counter-metric, a positive ROI score, and a guardrail risk within budget.
 CAP_MAX = 5
+
+# Operator-override state files in the strategist state dir (S1–S3 waste gates).
+VETOED_LEVERS_FILE = "vetoed_levers.json"
+REOPENED_LEVERS_FILE = "reopened_levers.json"
+QUALITATIVE_LEVERS_FILE = "qualitative_levers.json"
+OVERRIDE_AUDIT_FILE = "override_audit.jsonl"
 COUNTER_BUDGET = 0.5
 LEDGER_MIN_COUNT = 1  # a Heiler class needs >= this many escalations to drive a lever
 
@@ -980,22 +986,38 @@ def _write_last_reflect_run_ts(ts: int, path: Optional[Path] = None) -> None:
         logger.warning("write reflect_last_run stamp failed at %s", target, exc_info=True)
 
 
-def _read_suppressed(notes_dir: Optional[Path]) -> set[str]:
-    """Lever keys the operator vetoed (reflect-fed). Suppressed on propose."""
+def _read_key_list(notes_dir: Optional[Path], filename: str) -> set[str]:
+    """Read an operator-maintained JSON key list (array of strings) from the
+    strategist state dir; missing/corrupt degrades to an empty set."""
     if notes_dir is None:
         return set()
-    path = Path(notes_dir) / "vetoed_levers.json"
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return set()
-    try:
-        data = json.loads(raw)
-    except (ValueError, TypeError):
+        data = json.loads((Path(notes_dir) / filename).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
         return set()
     if isinstance(data, list):
         return {str(k) for k in data if k}
     return set()
+
+
+def _write_key_list(notes_dir: Path, filename: str, keys: Iterable[str]) -> list[str]:
+    """Persist a key list atomically enough for operator-override files."""
+    path = Path(notes_dir) / filename
+    merged = sorted({str(k) for k in keys if k})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+    return merged
+
+
+def _append_override_audit(notes_dir: Path, record: dict[str, Any]) -> None:
+    """One append-only audit line per operator override action — a gate whose
+    escape hatch is invisible is a silent gate."""
+    _append_jsonl(Path(notes_dir) / OVERRIDE_AUDIT_FILE, record)
+
+
+def _read_suppressed(notes_dir: Optional[Path]) -> set[str]:
+    """Lever keys the operator vetoed (reflect-fed). Suppressed on propose."""
+    return _read_key_list(notes_dir, VETOED_LEVERS_FILE)
 
 
 def gather_context(
@@ -1629,8 +1651,12 @@ def propose(
     # from ingest. The derive (baseline) path and the general ingest_planspec are
     # untouched. The existing vetoed_levers.json dedup runs alongside it.
     grounding_blocked: list[dict[str, Any]] = []
+    gated_out: list[dict[str, Any]] = []
+    qualitative_excepted: set[str] = set()
     if drafts is not None:
         suppressed = set(context.get("suppressed") or ())
+        qualitative_ok = _read_key_list(notes_dir, QUALITATIVE_LEVERS_FILE)
+        flat_metrics = _flatten_numeric(_metrics_payload(context.get("metrics")))
         candidates = []
         for lever in _levers_from_drafts(drafts):
             if lever.key in suppressed:
@@ -1641,11 +1667,25 @@ def propose(
                     {"key": lever.key, "title": lever.title, "reason": verdict.reason}
                 )
                 continue
+            # S3 (Measurability-Gate, Draft-Pfad — parallel zum grounding-gate,
+            # das ebenfalls nur hier wirkt): ein Hebel ohne aufloesbaren
+            # metric_key kann nur verdict=unmeasurable werden (6 von 12
+            # gemessenen Hebeln, Befund 2026-08-04) und gehoert nicht aufs
+            # Board. Operator-Ausnahme fuer bewusst qualitative Hebel ueber
+            # qualitative_levers.json — im Ingest-Eintrag sichtbar markiert.
+            measurability = _lever_measurability(_lever_metric_key(lever, flat_metrics))
+            if measurability != "ok":
+                if lever.key in qualitative_ok:
+                    qualitative_excepted.add(lever.key)
+                else:
+                    gated_out.append(
+                        {"key": lever.key, "title": lever.title, "reason": measurability}
+                    )
+                    continue
             candidates.append(lever)
     else:
         candidates = derive_levers(context)
 
-    gated_out: list[dict[str, Any]] = []
     survivors: list[Lever] = []
     for lever in candidates:
         verdict = self_gate(lever, counter_budget=counter_budget)
@@ -1662,20 +1702,61 @@ def propose(
     ingested: list[dict[str, Any]] = []
     ingest_errors: list[dict[str, Any]] = []
     if do_ingest:
-        for lever in capped:
-            spec_path = _write_spec(out_dir, lever)
-            try:
-                result = planspecs.ingest_planspec(
-                    spec_path, board=board, author=STRATEGIST_AUTHOR, plans_root=Path(out_dir)
-                )
-            except planspecs.PlanSpecBlocked as exc:
-                # A generic baseline body can be refused by the Sonnet judge in
-                # prod — record it and continue; one bad draft must not kill the
-                # run (the Opus --drafts-file path supplies judge-passing bodies).
-                ingest_errors.append({"key": lever.key, "findings": exc.findings})
-                continue
-            ingested.append(
-                {
+        reopened = _read_key_list(notes_dir, REOPENED_LEVERS_FILE)
+        guard_conn = kanban_db.connect(board=board)
+        try:
+            for lever in capped:
+                spec_path = _write_spec(out_dir, lever)
+                # S2: derselbe Archiv-Cooldown wie im Gate-Triage-Pfad
+                # (strategist_specs.task_ref_for_recent_idempotency_key) — die
+                # globale Dedup ignoriert archivierte Wurzeln absichtlich,
+                # also koennte jede archivierte Kette unveraendert
+                # wiederkommen (42 Wurzeln, Befund 2026-08-04). Operator-
+                # Reparaturweg: reopened_levers.json laesst den Key einmalig
+                # passieren (verbraucht beim erfolgreichen Ingest, auditiert).
+                bypass = lever.key in reopened
+                if not bypass:
+                    parsed_spec = planspecs.parse_binding_planspec(
+                        spec_path, plans_root=Path(out_dir)
+                    )
+                    idem = planspecs.ingest_idempotency_key(parsed_spec)
+                    ref = strategist_specs.task_ref_for_recent_idempotency_key(
+                        guard_conn, idem
+                    )
+                    if ref is not None and ref["status"] == "archived":
+                        gated_out.append(
+                            {
+                                "key": lever.key,
+                                "title": lever.title,
+                                "reason": "archived_cooldown",
+                                "archived_root_task_id": ref["task_id"],
+                                "idempotency_key": idem,
+                            }
+                        )
+                        continue
+                try:
+                    result = planspecs.ingest_planspec(
+                        spec_path, board=board, author=STRATEGIST_AUTHOR, plans_root=Path(out_dir)
+                    )
+                except planspecs.PlanSpecBlocked as exc:
+                    # A generic baseline body can be refused by the Sonnet judge in
+                    # prod — record it and continue; one bad draft must not kill the
+                    # run (the Opus --drafts-file path supplies judge-passing bodies).
+                    ingest_errors.append({"key": lever.key, "findings": exc.findings})
+                    continue
+                if bypass:
+                    reopened.discard(lever.key)
+                    _write_key_list(notes_dir, REOPENED_LEVERS_FILE, reopened)
+                    _append_override_audit(
+                        notes_dir,
+                        {
+                            "ts": int(time.time()),
+                            "action": "reopen_consumed",
+                            "key": lever.key,
+                            "root_task_id": result.get("root_task_id"),
+                        },
+                    )
+                entry = {
                     "key": lever.key,
                     "title": lever.title,
                     "root_task_id": result.get("root_task_id"),
@@ -1685,7 +1766,13 @@ def propose(
                     "counter_metric": lever.counter_metric,
                     "already_ingested": result.get("already_ingested", False),
                 }
-            )
+                if bypass:
+                    entry["reopen_bypass"] = True
+                if lever.key in qualitative_excepted:
+                    entry["qualitative_exception"] = True
+                ingested.append(entry)
+        finally:
+            guard_conn.close()
     else:
         ingested = [
             {
@@ -2093,6 +2180,47 @@ def _update_vetoed_set(path: Path, new_keys: Iterable[str]) -> list[str]:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
     return merged
+
+
+def _remove_from_vetoed_set(path: Path, key: str) -> list[str]:
+    """Remove *key* from the veto suppression set (operator ``unsuppress``).
+
+    The set stays the same when the key was never suppressed. The audit trail
+    for the removal lives in ``override_audit.jsonl``, written by the caller.
+    """
+    path = Path(path)
+    remaining = sorted(_read_key_list(path.parent, path.name) - {str(key)})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
+    return remaining
+
+
+def _outcome_root_vetoed_keys(conn: Any, outcomes_path: Path) -> set[str]:
+    """Lever keys whose outcome-anchored root carries a ``freigabe_vetoed``
+    event — ALL-TIME, independent of the reflect window.
+
+    The windowed scan in :func:`reflect` only covers ``[last_run, now)``:
+    a veto that falls into a gap (reflect down, stamp moved) is never seen
+    again (live 2026-08-04: 2 of 26 vetoed roots never reached
+    ``vetoed_levers.json``). The lever-outcomes anchor file is the
+    authoritative root→key map, so this scan needs neither the
+    ``created_by`` filter nor title parsing. Only ``freigabe_vetoed``
+    suppresses — ``freigabe_completed`` ("done elsewhere") and plain
+    archival are NOT vetoes and must never lock a key.
+    """
+    keys: set[str] = set()
+    for rec in _read_lever_outcomes(outcomes_path):
+        root = rec.get("root_task_id")
+        key = rec.get("lever_key")
+        if not root or not key:
+            continue
+        row = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_vetoed' LIMIT 1",
+            (str(root),),
+        ).fetchone()
+        if row is not None:
+            keys.add(str(key))
+    return keys
 
 
 # --------------------------------------------------------------------------- #
@@ -3102,7 +3230,16 @@ def reflect(
     if notes_path is not None:
         notes_path = Path(notes_path)
         _append_jsonl(notes_path, note)
-        suppressed_now = _update_vetoed_set(notes_path.parent / "vetoed_levers.json", vetoed_keys)
+        suppress_keys = vetoed_keys
+        if outcomes_path is not None:
+            # S1: Allzeit-Nachlese ueber die outcome-verankerten Wurzeln — ein
+            # freigabe_vetoed ausserhalb des Reflect-Fensters sperrt den Key
+            # trotzdem (live 2026-08-04: 2 von 26 Vetos nie gesperrt). Die
+            # Fenster-Statistik in `note` bleibt unveraendert fensterbezogen.
+            suppress_keys = sorted(
+                set(vetoed_keys) | _outcome_root_vetoed_keys(conn, Path(outcomes_path))
+            )
+        suppressed_now = _update_vetoed_set(notes_path.parent / VETOED_LEVERS_FILE, suppress_keys)
 
     # Rolling-window stamp: after a successful reflect, advance the lower bound
     # so the next default run covers [last_run, now) including late-evening
@@ -3730,6 +3867,84 @@ def run_reflect(args) -> dict[str, Any]:
         )
     finally:
         conn.close()
+
+
+def _override_args(args) -> tuple[str, str]:
+    """Shared validation for the operator override commands: exactly one
+    --lever-key and a non-empty --reason (auditable, never silent)."""
+    keys = [str(k) for k in (getattr(args, "lever_key", None) or []) if str(k).strip()]
+    reason = str(getattr(args, "reason", None) or "").strip()
+    if len(keys) != 1:
+        raise ValueError("genau ein --lever-key ist erforderlich")
+    if not reason:
+        raise ValueError("--reason ist erforderlich (Audit-Pflicht)")
+    return keys[0], reason
+
+
+def run_unsuppress(args) -> dict[str, Any]:
+    """Operator-Gegenweg zu S1: lever_key aus der Veto-Sperre loesen.
+
+    Dauerhafte Sperre, aber auditierbar reversibel — ohne diesen Weg waere
+    jedes Veto eine Zensur ohne Rueckkehr. Die Aufhebung selbst landet als
+    Zeile in override_audit.jsonl.
+    """
+    state_dir = default_state_dir()
+    key, reason = _override_args(args)
+    remaining = _remove_from_vetoed_set(state_dir / VETOED_LEVERS_FILE, key)
+    _append_override_audit(
+        state_dir,
+        {"ts": int(time.time()), "action": "unsuppress", "key": key, "reason": reason},
+    )
+    return {
+        "mode": "unsuppress",
+        "key": key,
+        "reason": reason,
+        "suppressed": remaining,
+    }
+
+
+def run_reopen_archived(args) -> dict[str, Any]:
+    """Operator-Gegenweg zu S2: lever_key darf den Archiv-Cooldown einmalig
+    passieren (bewusste Reparatur nach Fehl-Archivierung).
+
+    Der Eintrag wird beim naechsten erfolgreichen Ingest verbraucht und die
+    Nutzung auditiert — ein Dauer-Freisschein waere die offene Tür, die S2
+    gerade schliesst.
+    """
+    state_dir = default_state_dir()
+    key, reason = _override_args(args)
+    keys = _read_key_list(state_dir, REOPENED_LEVERS_FILE) | {key}
+    written = _write_key_list(state_dir, REOPENED_LEVERS_FILE, keys)
+    _append_override_audit(
+        state_dir,
+        {"ts": int(time.time()), "action": "reopen_archived", "key": key, "reason": reason},
+    )
+    return {
+        "mode": "reopen-archived",
+        "key": key,
+        "reason": reason,
+        "reopened": written,
+    }
+
+
+def run_allow_qualitative(args) -> dict[str, Any]:
+    """Operator-Gegenweg zu S3: lever_key ist ein bewusst qualitativer Hebel
+    und darf das Measurability-Gate passieren (sichtbar markiert im Ingest-
+    Eintrag, auditiert hier)."""
+    state_dir = default_state_dir()
+    key, reason = _override_args(args)
+    keys = _read_key_list(state_dir, QUALITATIVE_LEVERS_FILE) | {key}
+    written = _write_key_list(state_dir, QUALITATIVE_LEVERS_FILE, keys)
+    _append_override_audit(
+        state_dir,
+        {"ts": int(time.time()), "action": "allow_qualitative", "key": key, "reason": reason},
+    )
+    return {
+        "mode": "allow-qualitative",
+        "key": key,
+        "reason": reason,
+        "qualitative": written,
+    }
 
 
 def run_outcomes_backfill(args) -> dict[str, Any]:

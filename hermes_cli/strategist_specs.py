@@ -126,23 +126,24 @@ def has_terminal_decision_for_lever(plans_root: Path, lever_key: str) -> bool:
     return False
 
 
-def task_status_for_recent_idempotency_key(
+def task_ref_for_recent_idempotency_key(
     conn: Any,
     idempotency_key: str,
     *,
     now: int | None = None,
     archived_cooldown_seconds: int = ARCHIVED_INGEST_COOLDOWN_SECONDS,
-) -> str | None:
-    """Return an active or recently archived task status for an ingest key.
+) -> dict[str, str] | None:
+    """Return ``{"task_id", "status"}`` for an active or recently archived
+    task with this ingest key, ``None`` otherwise.
 
-    Global PlanSpec ingest dedupe intentionally excludes archived tasks.  This
-    strategist-only guard prevents a held triage proposal from being minted
-    again immediately after archival while allowing it after the cooldown.
+    Same guard semantics as :func:`task_status_for_recent_idempotency_key`,
+    but carries the task id so callers can reference the previous root in
+    their blocked/gated output.
     """
     cutoff = int(time.time() if now is None else now) - int(archived_cooldown_seconds)
     row = conn.execute(
         """
-        SELECT t.status
+        SELECT t.id, t.status
         FROM tasks AS t
         WHERE t.idempotency_key = ?
           AND (
@@ -161,7 +162,31 @@ def task_status_for_recent_idempotency_key(
         """,
         (idempotency_key, cutoff),
     ).fetchone()
-    return str(row["status"]) if row is not None else None
+    if row is None:
+        return None
+    return {"task_id": str(row["id"]), "status": str(row["status"])}
+
+
+def task_status_for_recent_idempotency_key(
+    conn: Any,
+    idempotency_key: str,
+    *,
+    now: int | None = None,
+    archived_cooldown_seconds: int = ARCHIVED_INGEST_COOLDOWN_SECONDS,
+) -> str | None:
+    """Return an active or recently archived task status for an ingest key.
+
+    Global PlanSpec ingest dedupe intentionally excludes archived tasks.  This
+    strategist-only guard prevents a held triage proposal from being minted
+    again immediately after archival while allowing it after the cooldown.
+    """
+    ref = task_ref_for_recent_idempotency_key(
+        conn,
+        idempotency_key,
+        now=now,
+        archived_cooldown_seconds=archived_cooldown_seconds,
+    )
+    return ref["status"] if ref is not None else None
 
 
 def _board_status_for_source(conn: Any, path: Path) -> str | None:
