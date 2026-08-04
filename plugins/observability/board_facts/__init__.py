@@ -16,6 +16,7 @@ from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
 from agent.usage_pricing import resolve_billing_route
 from hermes_cli.usage_facts_db import (
     increment_tool_call,
+    max_call_index,
     purge_expired_traces,
     record_llm_call,
     record_tool_result,
@@ -366,12 +367,30 @@ def _is_aux_call(kwargs: Mapping[str, Any]) -> bool:
     ) == "aux"
 
 
+def _persisted_max_aux_call_index(run_id: str) -> Optional[int]:
+    """Highest aux call_index already stored for this run; fail-soft None.
+
+    Aux events carry no shared correlation key (each wrapper event brings a
+    fresh ``api_request_id``), so every aux call resolves a brand-new
+    _RunContext.  Without this seed the in-memory counter restarts at
+    _AUX_CALL_INDEX_START and later aux calls of the same run silently
+    upsert over the first one's row — measured live on run 8816: 8
+    distinct aux api_request_ids, exactly 1 surviving call row.
+    """
+    try:
+        return max_call_index(run_id, min_call_index=_AUX_CALL_INDEX_START)
+    except Exception:
+        logger.debug("board_facts aux index seed failed", exc_info=True)
+        return None
+
+
 def _next_aux_call_index(ctx: _RunContext) -> int:
-    next_index = (
-        _AUX_CALL_INDEX_START
-        if ctx.last_aux_call_index is None
-        else ctx.last_aux_call_index + 1
-    )
+    if ctx.last_aux_call_index is None:
+        persisted = _persisted_max_aux_call_index(ctx.run_id)
+        ctx.last_aux_call_index = (
+            persisted if persisted is not None else _AUX_CALL_INDEX_START - 1
+        )
+    next_index = ctx.last_aux_call_index + 1
     ctx.last_aux_call_index = next_index
     return next_index
 
