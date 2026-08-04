@@ -1,6 +1,9 @@
 """Tests for the hermes_cli models module."""
 
 from unittest.mock import patch, MagicMock
+from urllib.request import Request
+
+import pytest
 
 from hermes_cli.nous_account import NousPortalAccountInfo
 from hermes_cli.models import (
@@ -10,6 +13,7 @@ from hermes_cli.models import (
     union_with_portal_free_recommendations,
     union_with_portal_paid_recommendations,
 )
+import hermes_cli.model_catalog as _model_catalog_mod
 import hermes_cli.models as _models_mod
 
 LIVE_OPENROUTER_MODELS = [
@@ -17,6 +21,38 @@ LIVE_OPENROUTER_MODELS = [
     ("qwen/qwen3.7-max", ""),
     ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
 ]
+
+PINNED_OPENROUTER_CATALOG = [
+    ("anthropic/claude-opus-4.8", ""),
+    ("anthropic/claude-sonnet-4.6", ""),
+    ("qwen/qwen3.7-max", ""),
+    ("nvidia/nemotron-3-super-120b-a12b:free", "free"),
+]
+
+
+def _reject_live_model_catalog_request(*_args, **_kwargs):
+    raise AssertionError("required-gate model tests must mock live catalog requests")
+
+
+@pytest.fixture(autouse=True)
+def _guard_live_model_catalog_requests(monkeypatch):
+    """Keep this required-gate unit suite independent of external catalogs."""
+    monkeypatch.setattr(
+        _model_catalog_mod,
+        "_fetch_manifest_with_fallback",
+        _reject_live_model_catalog_request,
+    )
+    monkeypatch.setattr(
+        _models_mod,
+        "_urlopen_model_catalog_request",
+        _reject_live_model_catalog_request,
+    )
+
+
+@pytest.fixture
+def pinned_openrouter_catalog():
+    """Return the stable manifest slice exercised by OpenRouter parser tests."""
+    return list(PINNED_OPENROUTER_CATALOG)
 
 
 
@@ -58,7 +94,9 @@ class TestOpenRouterModels:
 
 
 class TestFetchOpenRouterModels:
-    def test_live_fetch_recomputes_free_tags(self, monkeypatch):
+    def test_pinned_catalog_fetch_recomputes_free_tags(
+        self, monkeypatch, pinned_openrouter_catalog
+    ):
         class _Resp:
             def __enter__(self):
                 return self
@@ -70,9 +108,16 @@ class TestFetchOpenRouterModels:
                 return b'{"data":[{"id":"anthropic/claude-opus-4.8","pricing":{"prompt":"0.000015","completion":"0.000075"}},{"id":"qwen/qwen3.7-max","pricing":{"prompt":"0.000000325","completion":"0.00000195"}},{"id":"nvidia/nemotron-3-super-120b-a12b:free","pricing":{"prompt":"0","completion":"0"}}]}'
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=pinned_openrouter_catalog,
+            ) as catalog_mock,
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
+        catalog_mock.assert_called_once_with()
         assert models == [
             ("anthropic/claude-opus-4.8", "recommended"),
             ("qwen/qwen3.7-max", ""),
@@ -142,7 +187,9 @@ class TestFetchOpenRouterModels:
         # Image-only model advertised supported_parameters WITHOUT tools → must be dropped.
         assert "google/gemini-3-pro-image-preview" not in ids
 
-    def test_permissive_when_supported_parameters_missing(self, monkeypatch):
+    def test_permissive_when_supported_parameters_missing(
+        self, monkeypatch, pinned_openrouter_catalog
+    ):
         """Models missing the supported_parameters field keep appearing in the picker.
 
         Some OpenRouter-compatible gateways (Nous Portal, private mirrors, older
@@ -167,12 +214,29 @@ class TestFetchOpenRouterModels:
                 )
 
         monkeypatch.setattr(_models_mod, "_openrouter_catalog_cache", None)
-        with patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()):
+        with (
+            patch(
+                "hermes_cli.model_catalog.get_curated_openrouter_models",
+                return_value=pinned_openrouter_catalog,
+            ) as catalog_mock,
+            patch("hermes_cli.models._urlopen_model_catalog_request", return_value=_Resp()),
+        ):
             models = fetch_openrouter_models(force_refresh=True)
 
+        catalog_mock.assert_called_once_with()
         ids = [mid for mid, _ in models]
         assert "anthropic/claude-opus-4.8" in ids
         assert "qwen/qwen3.7-max" in ids
+
+    def test_required_gate_guard_blocks_unmocked_catalog_requests(self):
+        with pytest.raises(AssertionError, match="must mock live catalog requests"):
+            _model_catalog_mod._fetch_manifest_with_fallback(
+                "https://catalog.invalid/models.json", 1.0
+            )
+        with pytest.raises(AssertionError, match="must mock live catalog requests"):
+            _models_mod._urlopen_model_catalog_request(
+                Request("https://catalog.invalid/models.json"), timeout=1.0
+            )
 
 
 class TestOpenRouterToolSupportHelper:
