@@ -1651,7 +1651,8 @@ class LoopRunner:
             if not isinstance(n, int) or isinstance(n, bool) or n < 0:
                 return 0
             return n
-        except Exception:  # noqa: BLE001 — unreadable state never aborts a run
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+            logger.warning("dry-streak read failed; treating counter as zero: %s", exc)
             return 0
 
     def _write_dry_streak(self, streak: int) -> None:

@@ -4884,6 +4884,22 @@ def test_dry_streak_escalates_from_third_night(tmp_path, fake_engine, monkeypatc
     assert "build" not in calls
 
 
+def test_dry_streak_malformed_state_is_logged_before_zeroing(
+    tmp_path, fake_engine, monkeypatch, caplog
+):
+    """A truncated persistent counter must not masquerade as a first DRY night."""
+    _behaviors, _calls, runner, _notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-streak-malformed"
+    )
+    runner.state.mkdir(parents=True, exist_ok=True)
+    runner.dry_streak_path.write_text('{"streak":', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert runner._read_dry_streak() == 0
+
+    assert any("dry-streak read failed" in record.message for record in caplog.records)
+
+
 def test_dry_streak_resets_on_non_dry_end(tmp_path, fake_engine, monkeypatch):
     """Nicht-DRY-Ende (Pläne) dazwischen setzt den Zähler auf 0."""
     behaviors, calls, runner, notifies = _dry_streak_runner(
