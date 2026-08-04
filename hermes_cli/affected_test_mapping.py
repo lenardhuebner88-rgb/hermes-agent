@@ -228,24 +228,35 @@ FEATURE_PREFIX_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
     # tests/plugins/kanban/dashboard/ directory and ran none of the route
     # suite.  This entry pulls the importlib-blind dashboard tests into the
     # selection for any change under the package; the route-ownership
-    # contract joins them because it is equally blind to route submodules.
-    # The mirrored tests/plugins/kanban/dashboard/ directory must stay listed:
-    # the explicit match suppresses the package_fallback that selected it.
+    # contract joins them because it is equally blind to route submodules,
+    # and test_kanban_usage_facts_route.py joins because it statically
+    # imports plugin_api but asserts route-contract ownership of the
+    # dynamically loaded route modules.  The mirrored
+    # tests/plugins/kanban/dashboard/ directory must stay listed: the
+    # explicit match suppresses the package_fallback that selected it.
+    # Keep this list complete: several loaders build the plugin path with
+    # one path component per source line, so line-based greps undercount
+    # them (measured 2026-08-04: 22 importlib loaders of plugin_api.py).
     "plugins/kanban/dashboard/": (
         "tests/plugins/kanban/dashboard/test_*.py",
         "tests/test_planspec_approve.py",
         "tests/plugins/test_digest_routes.py",
         "tests/plugins/test_kanban_attachments.py",
         "tests/plugins/test_kanban_b1_b4_backend.py",
+        "tests/plugins/test_kanban_chain_summary_contract.py",
+        "tests/plugins/test_kanban_chain_summary_query_budget.py",
         "tests/plugins/test_kanban_dashboard_chain_identity.py",
         "tests/plugins/test_kanban_dashboard_chain_release_guard.py",
         "tests/plugins/test_kanban_dashboard_plugin.py",
         "tests/plugins/test_kanban_dashboard_route_contract.py",
+        "tests/plugins/test_kanban_dispatch_cap_passthrough.py",
         "tests/plugins/test_kanban_disposition_endpoints.py",
         "tests/plugins/test_kanban_lanes_persist.py",
         "tests/plugins/test_kanban_model_override.py",
         "tests/plugins/test_kanban_observability_route.py",
         "tests/plugins/test_kanban_strategist_endpoint.py",
+        "tests/plugins/test_kanban_task_detail_chain_context.py",
+        "tests/plugins/test_kanban_usage_facts_route.py",
         "tests/plugins/test_kanban_worker_runs.py",
         "tests/plugins/test_plan_compile_preview.py",
         "tests/plugins/test_release_mode.py",

@@ -688,15 +688,22 @@ def test_lifecycle_document_change_selects_the_anchor_gate() -> None:
 def test_dashboard_route_module_change_selects_the_route_suite(changed: str) -> None:
     """The dashboard route tests must run on route-module changes.
 
-    Seventeen test files load plugins/kanban/dashboard/plugin_api.py
-    via importlib.util.spec_from_file_location, so the import index never sees
-    the edge; plugin_api.py itself is covered by function-level static
-    imports, but the route modules it includes are not. Measured 2026-08-04
-    against the real tree: before the FEATURE_PREFIX_TEST_PATTERNS entry, a
-    route-module change selected only the mirrored
-    tests/plugins/kanban/dashboard/ directory, so the real route suite
-    (tests/plugins/test_kanban_dashboard_plugin.py, /planspecs coverage)
-    never ran on route changes.
+    Twenty-two test files load plugins/kanban/dashboard/plugin_api.py via
+    importlib.util.spec_from_file_location (twenty-one listed explicitly,
+    one via the mirrored tests/plugins/kanban/dashboard/ glob), so the
+    import index never sees the edge; plugin_api.py itself is covered by
+    function-level static imports, but the route modules it includes via
+    load_api_extension are not. Measured 2026-08-04 against the real tree:
+    before the FEATURE_PREFIX_TEST_PATTERNS entry, a route-module change
+    selected only the mirrored tests/plugins/kanban/dashboard/ directory,
+    so the real route suite (tests/plugins/test_kanban_dashboard_plugin.py,
+    /planspecs coverage) never ran on route changes. The four
+    multi-line-join loaders below were caught by a second survey pass:
+    they build the plugin path with one path component per source line,
+    which a line-based grep misses. test_kanban_usage_facts_route.py
+    imports plugin_api statically but asserts route-contract ownership of
+    those dynamically loaded route modules, an edge the index equally
+    cannot see.
     """
     assert (REPO_ROOT / changed).is_file(), f"fixture path vanished: {changed}"
 
@@ -704,6 +711,14 @@ def test_dashboard_route_module_change_selects_the_route_suite(changed: str) -> 
 
     assert record.state == "selected"
     assert "tests/plugins/test_kanban_dashboard_plugin.py" in record.tests
+    multi_line_join_loaders = {
+        "tests/plugins/test_kanban_chain_summary_contract.py",
+        "tests/plugins/test_kanban_chain_summary_query_budget.py",
+        "tests/plugins/test_kanban_dispatch_cap_passthrough.py",
+        "tests/plugins/test_kanban_task_detail_chain_context.py",
+    }
+    assert multi_line_join_loaders <= set(record.tests)
+    assert "tests/plugins/test_kanban_usage_facts_route.py" in record.tests
 
 
 def test_real_gateway_config_commit_does_not_warn(
