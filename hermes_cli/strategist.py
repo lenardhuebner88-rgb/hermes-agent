@@ -107,6 +107,7 @@ CAP_MAX = 5
 
 # Operator-override state files in the strategist state dir (S1–S3 waste gates).
 VETOED_LEVERS_FILE = "vetoed_levers.json"
+UNSUPPRESSED_LEVERS_FILE = "unsuppressed_levers.json"
 REOPENED_LEVERS_FILE = "reopened_levers.json"
 QUALITATIVE_LEVERS_FILE = "qualitative_levers.json"
 OVERRIDE_AUDIT_FILE = "override_audit.jsonl"
@@ -1655,8 +1656,6 @@ def propose(
     qualitative_excepted: set[str] = set()
     if drafts is not None:
         suppressed = set(context.get("suppressed") or ())
-        qualitative_ok = _read_key_list(notes_dir, QUALITATIVE_LEVERS_FILE)
-        flat_metrics = _flatten_numeric(_metrics_payload(context.get("metrics")))
         candidates = []
         for lever in _levers_from_drafts(drafts):
             if lever.key in suppressed:
@@ -1667,27 +1666,36 @@ def propose(
                     {"key": lever.key, "title": lever.title, "reason": verdict.reason}
                 )
                 continue
-            # S3 (Measurability-Gate, Draft-Pfad — parallel zum grounding-gate,
-            # das ebenfalls nur hier wirkt): ein Hebel ohne aufloesbaren
-            # metric_key kann nur verdict=unmeasurable werden (6 von 12
-            # gemessenen Hebeln, Befund 2026-08-04) und gehoert nicht aufs
-            # Board. Operator-Ausnahme fuer bewusst qualitative Hebel ueber
-            # qualitative_levers.json — im Ingest-Eintrag sichtbar markiert.
-            measurability = _lever_measurability(_lever_metric_key(lever, flat_metrics))
-            if measurability != "ok":
-                if lever.key in qualitative_ok:
-                    qualitative_excepted.add(lever.key)
-                else:
-                    gated_out.append(
-                        {"key": lever.key, "title": lever.title, "reason": measurability}
-                    )
-                    continue
             candidates.append(lever)
     else:
         candidates = derive_levers(context)
 
-    survivors: list[Lever] = []
+    # S3 (Measurability-Gate) gilt fuer BEIDE Ingest-Pfade — ein Hebel ohne
+    # aufloesbaren metric_key kann nur verdict=unmeasurable werden (6 von 12
+    # gemessenen Hebeln, Befund 2026-08-04) und gehoert nicht aufs Board.
+    # Zuerst nur im Draft-Pfad gebaut, hatte der headless derive-Pfad
+    # (run_propose ohne --drafts-file, do_ingest=True) eine zweite unbewachte
+    # Ingest-Tuer offengelassen (Codex-Blocker 2026-08-04). Der derive-Pfad
+    # faellt damit sichtbar aus (gated_out mit Grund), nicht stumm.
+    # Operator-Ausnahme fuer bewusst qualitative Hebel ueber
+    # qualitative_levers.json — im Ingest-Eintrag sichtbar markiert.
+    qualitative_ok = _read_key_list(notes_dir, QUALITATIVE_LEVERS_FILE)
+    flat_metrics = _flatten_numeric(_metrics_payload(context.get("metrics")))
+    measurable: list[Lever] = []
     for lever in candidates:
+        measurability = _lever_measurability(_lever_metric_key(lever, flat_metrics))
+        if measurability != "ok":
+            if lever.key in qualitative_ok:
+                qualitative_excepted.add(lever.key)
+            else:
+                gated_out.append(
+                    {"key": lever.key, "title": lever.title, "reason": measurability}
+                )
+                continue
+        measurable.append(lever)
+
+    survivors: list[Lever] = []
+    for lever in measurable:
         verdict = self_gate(lever, counter_budget=counter_budget)
         if verdict.passed:
             survivors.append(lever)
@@ -3236,9 +3244,14 @@ def reflect(
             # freigabe_vetoed ausserhalb des Reflect-Fensters sperrt den Key
             # trotzdem (live 2026-08-04: 2 von 26 Vetos nie gesperrt). Die
             # Fenster-Statistik in `note` bleibt unveraendert fensterbezogen.
-            suppress_keys = sorted(
-                set(vetoed_keys) | _outcome_root_vetoed_keys(conn, Path(outcomes_path))
-            )
+            # Ein bewusst aufgehobenes Veto (unsuppress) ist persistent und
+            # wird hier respektiert — sonst sperrte der Allzeit-Scan die
+            # Entscheidung beim naechsten Lauf still wieder (Codex-Blocker
+            # 2026-08-04). Nur die Allzeit-Nachlese wird gefiltert: ein NEUES
+            # Veto im Fenster sperrt auch einen frueher freigegebenen Key.
+            alltime = _outcome_root_vetoed_keys(conn, Path(outcomes_path))
+            alltime -= _read_key_list(notes_path.parent, UNSUPPRESSED_LEVERS_FILE)
+            suppress_keys = sorted(set(vetoed_keys) | alltime)
         suppressed_now = _update_vetoed_set(notes_path.parent / VETOED_LEVERS_FILE, suppress_keys)
 
     # Rolling-window stamp: after a successful reflect, advance the lower bound
@@ -3884,13 +3897,23 @@ def _override_args(args) -> tuple[str, str]:
 def run_unsuppress(args) -> dict[str, Any]:
     """Operator-Gegenweg zu S1: lever_key aus der Veto-Sperre loesen.
 
-    Dauerhafte Sperre, aber auditierbar reversibel — ohne diesen Weg waere
-    jedes Veto eine Zensur ohne Rueckkehr. Die Aufhebung selbst landet als
-    Zeile in override_audit.jsonl.
+    Dauerhaft in beide Richtungen: die Aufhebung wird in
+    ``unsuppressed_levers.json`` festgehalten, damit die Allzeit-Nachlese in
+    :func:`reflect` die bewusste Entscheidung nicht beim naechsten Lauf still
+    zurueckdreht (Codex-Blocker 2026-08-04: nach unsuppress war der Key im
+    naechsten Reflect wieder gesperrt). Ein NEUES freigabe_vetoed sperrt den
+    Key trotzdem erneut — die Aufhebung gilt fuer die Vergangenheit, nicht
+    als Immunitaet. Jede Aufhebung hinterlaesst eine Zeile in
+    override_audit.jsonl.
     """
     state_dir = default_state_dir()
     key, reason = _override_args(args)
     remaining = _remove_from_vetoed_set(state_dir / VETOED_LEVERS_FILE, key)
+    lifted = _write_key_list(
+        state_dir,
+        UNSUPPRESSED_LEVERS_FILE,
+        _read_key_list(state_dir, UNSUPPRESSED_LEVERS_FILE) | {key},
+    )
     _append_override_audit(
         state_dir,
         {"ts": int(time.time()), "action": "unsuppress", "key": key, "reason": reason},
@@ -3900,6 +3923,7 @@ def run_unsuppress(args) -> dict[str, Any]:
         "key": key,
         "reason": reason,
         "suppressed": remaining,
+        "unsuppressed": lifted,
     }
 
 

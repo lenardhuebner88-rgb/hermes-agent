@@ -105,9 +105,14 @@ def test_empty_landscape_is_idle(board_home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 3. Hits → <=5 held, annotated, correct provenance
+# 3. Hits → derive path is visibly gated (S3, 2026-08-04)
 # --------------------------------------------------------------------------- #
-def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
+def test_derive_path_levers_are_gated_out_visibly(board_home, monkeypatch):
+    """Seit dem Measurability-Gate (Codex-Blocker A2, 2026-08-04) erreicht KEIN
+    derive-Hebel mehr das Board: ihre Prosa-target_metrics loesen zu
+    no_metric auf. Der Pfad faellt sichtbar aus (gated_out mit Grund), nicht
+    stumm — das war frueher 'hits produce capped held proposals' und ist jetzt
+    die geschlossene zweite Ingest-Tuer."""
     _patch_budget(monkeypatch, 30.0)
     with kb.connect() as conn:
         _seed_ledger(conn, "dirty-overlap git lock contention")  # transient
@@ -122,27 +127,18 @@ def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
     result = strategist.propose(board=None, out_dir=out_dir, metrics=metrics)
 
     assert result["skipped"] is False
-    assert result["idle"] is False
-    # CAP enforced
-    assert len(result["ingested"]) <= strategist.CAP_MAX
-    assert len(result["ingested"]) >= 1
-    # the blunt autonomy lever was self-gated out, never ingested
-    ingested_keys = {item["key"] for item in result["ingested"]}
-    assert "AUTON-UPLIFT" not in ingested_keys
+    # Kandidaten entstehen weiterhin (der Pfad ist nicht tot, nur bewacht) ...
+    assert result["candidates"] >= 1
+    # ... aber keiner landet mehr auf dem Board.
+    assert result["ingested"] == []
+    assert len(result["gated_out"]) >= 1
+    assert all(g["reason"] in ("no_metric", "unmapped_metric") or g["key"] == "AUTON-UPLIFT"
+               for g in result["gated_out"])
+    # the blunt autonomy lever is still self-gated for its counter-metric
     assert any(g["key"] == "AUTON-UPLIFT" for g in result["gated_out"])
 
     with kb.connect() as conn:
-        proposals = strategist_surface.held_operator_proposals(conn)
-    assert len(proposals) == len(result["ingested"])
-    assert len(proposals) <= strategist.CAP_MAX
-    for prop in proposals:
-        assert prop["created_by"] == strategist.STRATEGIST_AUTHOR
-        # annotation round-tripped through build_root_body → parse_annotation
-        assert prop["target_metric"]
-        assert prop["roi"]
-        assert prop["counter_metric"]
-        # Unscoped generated proposals get read-only scout + build + review.
-        assert prop["subtask_count"] == 3
+        assert strategist_surface.held_operator_proposals(conn) == []
 
 
 def test_cap_limits_to_five(board_home, monkeypatch):
@@ -359,10 +355,11 @@ def test_cost_lever_is_suppressed_when_vetoed():
     assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
 
 
-def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
-    """End-to-end: an injected cost view drives a held, annotated proposal on the
-    G1 surface — the strategist now ships cost-reduction work, not just
-    escalation/autonomy levers."""
+def test_cost_lever_is_gated_out_without_metric_key(board_home, monkeypatch):
+    """Der Kosten-Hebel entsteht weiterhin aus der injected cost view — erreicht
+    aber seit dem Measurability-Gate (2026-08-04) das Board nicht mehr: sein
+    Prosa-target_metric loest zu no_metric auf. Sichtbar in gated_out, nicht
+    stumm (vorher: 'cost lever round-trips as held proposal')."""
     _patch_budget(monkeypatch, 30.0)
     cost = {"profiles": [
         {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
@@ -373,8 +370,9 @@ def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
                                          "cost_per_task": {"coverage": {"coverage_pct": 100.0}}},
                                 cost=cost)
     assert result["skipped"] is False
-    keys = {item["key"] for item in result["ingested"]}
-    assert "COST-EFFICIENCY-CODER-CLAUDE" in keys
+    assert result["ingested"] == []
+    gated = {g["key"]: g["reason"] for g in result["gated_out"]}
+    assert gated.get("COST-EFFICIENCY-CODER-CLAUDE") == "no_metric"
 
 
 # --------------------------------------------------------------------------- #
@@ -1585,3 +1583,67 @@ def test_qualitative_exception_ingests_and_is_visible(board_home, monkeypatch):
 
     assert len(result["ingested"]) == 1
     assert result["ingested"][0]["qualitative_exception"] is True
+
+
+def test_unsuppress_survives_next_reflect_run(board_home, tmp_path, monkeypatch):
+    """A1 (Codex-Blocker 2026-08-04): unsuppress muss einen vollen Reflect-Lauf
+    ueberleben. Ohne persistente Aufhebung las die Allzeit-Nachlese das
+    historische freigabe_vetoed erneut und sperrte den bewusst freigegebenen
+    Key beim naechsten Cron still wieder:
+    after_unsuppress=[] -> Nachlese ['K'] -> after_next_reflect=['K']."""
+    now_ts = int(time.time())
+    old_ts = now_ts - 30 * 86400
+    outcomes_path = tmp_path / "lever-outcomes.json"
+    notes_path = tmp_path / "reflections.jsonl"
+
+    with kb.connect() as conn:
+        root = _make_held_proposal(conn, "LIFT-ME", "vetoed long ago")
+        assert kb.dismiss_freigabe_hold(conn, root, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root),
+        )
+        conn.commit()
+    outcomes_path.write_text(
+        json.dumps([{
+            "schema_version": 1,
+            "lever_key": "LIFT-ME",
+            "root_task_id": root,
+            "proposed_at": old_ts,
+            "status": "archived",
+        }]),
+        encoding="utf-8",
+    )
+
+    # 1. Reflect sperrt den Key (Allzeit-Nachlese, Event ausserhalb des Fensters).
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts))
+    vetoed_path = notes_path.parent / "vetoed_levers.json"
+    assert "LIFT-ME" in json.loads(vetoed_path.read_text(encoding="utf-8"))
+
+    # 2. Operator hebt bewusst auf — run_unsuppress schreibt in denselben
+    # notes/state dir, in dem auch die Sperrliste liegt.
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("vetoed_levers.json", "lever-outcomes.json", "reflections.jsonl"):
+        (state_dir / name).write_bytes((tmp_path / name).read_bytes())
+    args = SimpleNamespace(lever_key=["LIFT-ME"], reason="bewusst aufgehoben (Test)")
+    strategist.run_unsuppress(args)
+    assert "LIFT-ME" not in json.loads(
+        (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
+    )
+    assert "LIFT-ME" in json.loads(
+        (state_dir / "unsuppressed_levers.json").read_text(encoding="utf-8")
+    )
+
+    # 3. Ein voller zweiter Reflect-Lauf darf den Key NICHT wieder sperren.
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600,
+                           notes_path=state_dir / "reflections.jsonl",
+                           outcomes_path=state_dir / "lever-outcomes.json",
+                           now=float(now_ts + 60))
+    assert "LIFT-ME" not in json.loads(
+        (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
+    )
