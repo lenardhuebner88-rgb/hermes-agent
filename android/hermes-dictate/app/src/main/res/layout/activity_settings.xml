@@ -208,6 +208,7 @@
         <SeekBar android:id="@+id/bubble_opacity_seek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" />
         <Switch android:id="@+id/bubble_shrink_switch" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/bubble_shrink" android:textColor="@color/text_primary" />
         <Switch android:id="@+id/local_recovery_switch" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/local_recovery" android:textColor="@color/text_primary" />
+        <Button android:id="@+id/hermes_handoff_button" android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="48dp" android:text="@string/hermes_handoff_last" android:textColor="@color/text_primary" />
 
         <Switch
             android:id="@+id/local_refine_switch"
