@@ -2209,6 +2209,14 @@ class TmuxAgentSessionService:
         try:
             self._run("new-session", "-d", "-t", source_session, "-s", group)
             self._run("select-window", "-t", self._cmd_target(group, source_target))
+            # tmux session options are per-session and are NOT inherited from the
+            # group: a fresh grouped session starts from the *global* defaults, so
+            # the `mouse on` we set on the source session does not reach the client
+            # that actually attaches here. Without it tmux never turns on mouse
+            # tracking, the browser sees `mouseTrackingMode === "none"`, and both
+            # the wheel and the touch-drag bridge have nothing to send — scrolling
+            # is dead in every dashboard pane (every attach is isolated=1).
+            self.ensure_session_options(group)
             self.ensure_isolated_attach_options(group)
             for option, value in (
                 (_EPHEMERAL_ATTACH_MARKER, "1"),

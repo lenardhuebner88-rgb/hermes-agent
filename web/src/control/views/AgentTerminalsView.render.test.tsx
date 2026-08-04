@@ -93,6 +93,9 @@ vi.mock("@/lib/xtermSurface", async () => {
     // Keep real palette exports so host-ridge assertions match production constants.
     TERMINAL_MAIN_BACKGROUND: actual.TERMINAL_MAIN_BACKGROUND,
     TERMINAL_PANE_BACKGROUND: actual.TERMINAL_PANE_BACKGROUND,
+    // Real bridge: it only touches the terminal from inside touch handlers,
+    // which never fire here, and keeping it real proves the wiring compiles.
+    attachTouchScrollBridge: actual.attachTouchScrollBridge,
     createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => ({
       term: {
         clear: vi.fn(),
