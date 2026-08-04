@@ -136,6 +136,12 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
   const criteriaCount = detail
     ? detail.acceptance_criteria_total ?? detail.acceptance_criteria.length + sliceCriteria.length
     : 0;
+  // Prosa-Fallback (Server, 2026-08-04): Kriterien aus einem Done-when-Abschnitt
+  // im Fließtext tragen source: "prose". Für die Abnahme muss sichtbar bleiben,
+  // dass sie NICHT als strukturiertes Feld hinterlegt sind.
+  const proseCriteriaCount = (detail?.acceptance_criteria ?? [])
+    .filter((ac) => (ac as { source?: unknown }).source === "prose")
+    .length;
   // Prüfbefunde ohne das Abschluss-Echo („closed status: …") — das ist die
   // Disposition, kein Befund, und steht schon im Zustandslabel.
   const visibleFindings = [
@@ -272,6 +278,13 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
             </section>
             <section className="fleet-detail-instrument">
               <Eyebrow>Acceptance Criteria</Eyebrow>
+              {proseCriteriaCount > 0 ? (
+                <p className="fleet-plan-hint">
+                  {proseCriteriaCount === 1
+                    ? "1 Kriterium aus dem Fließtext gelesen (Done-when-Abschnitt) — nicht als strukturiertes Feld hinterlegt."
+                    : `${proseCriteriaCount} Kriterien aus dem Fließtext gelesen (Done-when-Abschnitt) — nicht als strukturiertes Feld hinterlegt.`}
+                </p>
+              ) : null}
               <ol className="fleet-plan-criteria">
                 {detail.acceptance_criteria.map((ac, idx) => (
                   <li key={`plan:${ac.id ?? idx}`} className="text-sec text-ink-2">
@@ -290,7 +303,7 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
                   </li>
                 ))}
                 {criteriaCount === 0 ? (
-                  <li className="text-sec text-ink-2">Keine Kriterien im Plan.</li>
+                  <li className="text-sec text-ink-2">Keine Kriterien hinterlegt — weder als Feld noch als Done-when-Abschnitt.</li>
                 ) : null}
               </ol>
             </section>

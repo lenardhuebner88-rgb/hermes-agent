@@ -519,3 +519,132 @@ taskgraph_hints:
     assert detail["acceptance_criteria"] == []
     assert detail["subtasks"][0]["acceptance_criteria"] == []
     assert detail["acceptance_criteria_total"] == 0
+
+
+# --- Prosa-Kriterien-Fallback (2026-08-04) -----------------------------------
+#
+# Gemessen am echten Vault-Bestand: 193 von 399 Plänen meldeten "Keine
+# Kriterien im Plan", aber 45 davon tragen ihre Kriterien als nummerierte oder
+# Bullet-Liste unter einem Done-when-/Akzeptanz-/Acceptance-/Abnahme-Abschnitt
+# im Body. Der Prosa-Pfad ist reiner Anzeige-Fallback: strukturierte Kriterien
+# (plan-weit oder pro Schritt) behalten immer Vorrang.
+
+
+def test_detail_reads_prose_criteria_when_no_structured_ones_exist(tmp_path: Path):
+    """Rot-Gegenprobe Prosa-Pfad: ohne diesen Fallback bliebe die Liste leer."""
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "prose-ac.md",
+        """---
+topic: Prosa-Kriterien
+freigabe: operator
+live_test_depth: smoke
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: Schritt
+      lane: coder
+      deps: []
+---
+
+# Prosa-Kriterien
+
+## 1. Befund
+
+- Ein Beleg, kein Kriterium.
+
+## 2. Ziel / Done-when
+
+Eine frische Session liefert:
+1. Ein **Cockpit** mit genau zwei Balken
+   — deutsche Labels, Reset-Countdown.
+2. Eine Engpass-Zeile oben.
+- [ ] Alle Gates gruen.
+
+## 3. Design
+
+1. Kein Kriterium mehr, schon der naechste Abschnitt.
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert detail["acceptance_criteria_total"] == 3
+    assert detail["acceptance_criteria"] == [
+        {
+            "statement": "Ein **Cockpit** mit genau zwei Balken — deutsche Labels, Reset-Countdown.",
+            "source": "prose",
+        },
+        {"statement": "Eine Engpass-Zeile oben.", "source": "prose"},
+        {"statement": "Alle Gates gruen.", "source": "prose"},
+    ]
+
+
+def test_detail_structured_criteria_win_over_prose_section(tmp_path: Path):
+    """Rot-Gegenprobe Vorrang: ein Plan mit strukturierten Kriterien UND einem
+    Done-when-Abschnitt darf die Prosa-Punkte nicht uebernehmen."""
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "structured-wins.md",
+        """---
+topic: Strukturiert schlaegt Prosa
+freigabe: operator
+live_test_depth: smoke
+acceptance_criteria:
+  - id: AC-1
+    statement: Strukturiertes Kriterium.
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: Schritt
+      lane: coder
+      deps: []
+---
+
+# Strukturiert schlaegt Prosa
+
+## Done-when
+
+1. Prosa-Punkt, der NICHT auftauchen darf.
+2. Zweiter Prosa-Punkt, der NICHT auftauchen darf.
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert detail["acceptance_criteria"] == [
+        {"id": "AC-1", "statement": "Strukturiertes Kriterium."}
+    ]
+    assert detail["acceptance_criteria_total"] == 1
+
+
+def test_detail_reads_prose_criteria_from_invalid_plan(tmp_path: Path):
+    """Kaputtes Frontmatter (source_state invalid) darf die Prosa-Kriterien
+    im Body trotzdem anzeigen -- der Zustand bleibt invalid."""
+    root = tmp_path / "agents"
+    path = _write_spec(
+        root,
+        "invalid-prose.md",
+        """---
+topic: Kaputt: dieser Doppelpunkt bricht das YAML
+---
+
+# Kaputte Spec
+
+## Done-when
+
+1. Kriterium trotz kaputtem Frontmatter.
+""",
+    )
+
+    detail = build_readable_plan_detail(path, planspecs=_detail_planspecs_ns(root))
+
+    assert detail["source_state"] == "invalid"
+    assert detail["acceptance_criteria"] == [
+        {"statement": "Kriterium trotz kaputtem Frontmatter.", "source": "prose"}
+    ]
+    assert detail["acceptance_criteria_total"] == 1

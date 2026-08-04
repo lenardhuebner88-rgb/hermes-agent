@@ -8,6 +8,7 @@ an optimistic concurrency token before delegating to the established ingest.
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -202,6 +203,56 @@ def _criteria_field(value: Any) -> list[str]:
     return out
 
 
+_PROSE_HEADING_RE = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
+_PROSE_LIST_ITEM_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+(.+?)\s*$")
+_PROSE_CHECKBOX_RE = re.compile(r"^\[[ xX]\]\s+")
+_PROSE_CRITERIA_HEADING_MARKS = ("done-when", "akzeptanz", "acceptance", "abnahme")
+
+
+def _body_without_frontmatter_fence(text: str) -> str:
+    """Return the text after a leading ``---`` frontmatter fence, if present."""
+
+    lines = text.splitlines()
+    if lines and lines[0].strip() == "---":
+        for index in range(1, len(lines)):
+            if lines[index].strip() in ("---", "..."):
+                return "\n".join(lines[index + 1 :])
+    return text
+
+
+def _prose_acceptance_criteria(body: str) -> list[str]:
+    """Extract criteria from a prose Done-when section (display fallback).
+
+    Many authored plans carry their acceptance criteria as a numbered or bullet
+    list under a heading like ``## 2. Ziel / Done-when`` instead of the YAML
+    ``acceptance_criteria`` field -- measured 2026-08-04: 45 of 193 plans that
+    reported "Keine Kriterien im Plan" do have criteria, only in prose.
+    Structured criteria (plan-level field, per-subtask field) always win; this
+    reader fills the gap only when the structured total is 0.
+    """
+
+    items: list[str] = []
+    in_section = False
+    for line in body.splitlines():
+        heading = _PROSE_HEADING_RE.match(line)
+        if heading:
+            if in_section and items:
+                break  # the criteria section ends at the next heading
+            title = heading.group(1).lower()
+            in_section = any(mark in title for mark in _PROSE_CRITERIA_HEADING_MARKS)
+            continue
+        if not in_section:
+            continue
+        item = _PROSE_LIST_ITEM_RE.match(line)
+        if item:
+            text = _PROSE_CHECKBOX_RE.sub("", item.group(1)).strip()
+            items.append(text)
+        elif items and line[:1].isspace() and line.strip():
+            # indented wrapped continuation of the previous list item
+            items[-1] = f"{items[-1]} {line.strip()}"
+    return [item for item in items if item]
+
+
 def build_binding_detail(spec: Any) -> dict[str, Any]:
     """Project the authored contract and executable step details."""
 
@@ -262,10 +313,18 @@ def build_readable_plan_detail(path: str | Path, *, planspecs: Any) -> dict[str,
         frontmatter, body = planspecs._extract_frontmatter(text)
     except Exception as exc:
         findings = list(getattr(exc, "findings", None) or [str(exc)])
+        # An unreadable (invalid) plan can still carry its criteria as a prose
+        # Done-when section. Display them, marked as prose -- the entry stays
+        # source_state "invalid"; the register filter is NOT touched.
+        prose_criteria = _prose_acceptance_criteria(
+            _body_without_frontmatter_fence(text)
+        )
         return {
             "goal": resolved.stem,
-            "acceptance_criteria": [],
-            "acceptance_criteria_total": 0,
+            "acceptance_criteria": [
+                {"statement": item, "source": "prose"} for item in prose_criteria
+            ],
+            "acceptance_criteria_total": len(prose_criteria),
             "anti_scope": [],
             "evidence_required": [],
             "freigabe": "",
@@ -347,15 +406,29 @@ def build_readable_plan_detail(path: str | Path, *, planspecs: Any) -> dict[str,
     source_state = "closed" if closed_reason else (
         "binding" if binding and not findings else "draft"
     )
+    ac_total = len(acceptance_criteria) + sum(
+        len(item["acceptance_criteria"]) for item in subtasks
+    )
+    if ac_total == 0:
+        # Last-resort display fallback: criteria authored as a prose Done-when
+        # section in the body. Structured criteria ALWAYS win -- this branch is
+        # unreachable whenever any field carried criteria, so the 206 plans
+        # already showing criteria are byte-identical (measured 2026-08-04).
+        prose_criteria = _prose_acceptance_criteria(body)
+        if prose_criteria:
+            acceptance_criteria = [
+                {"statement": item, "source": "prose"} for item in prose_criteria
+            ]
+            ac_total = len(prose_criteria)
     return {
         "goal": str(frontmatter.get("goal") or topic),
         "acceptance_criteria": acceptance_criteria,
         # Plan-level AC is the FALLBACK, not the norm: Canon puts criteria per
         # subtask. Reporting only the plan-level count made the two live open
         # plans -- 23 authored criteria (12+11) and 5 -- render as
-        # "Keine Kriterien im Plan" (measured 2026-07-30).
-        "acceptance_criteria_total": len(acceptance_criteria)
-        + sum(len(item["acceptance_criteria"]) for item in subtasks),
+        # "Keine Kriterien im Plan" (measured 2026-07-30). The prose branch
+        # above is the fallback below BOTH structured sources.
+        "acceptance_criteria_total": ac_total,
         "anti_scope": _list_field(frontmatter.get("anti_scope")),
         "evidence_required": _list_field(frontmatter.get("evidence_required")),
         "freigabe": freigabe,

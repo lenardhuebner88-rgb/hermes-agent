@@ -231,7 +231,7 @@ describe("PlanSpecDetailDrawer", () => {
       />,
     );
 
-    expect(screen.queryByText("Keine Kriterien im Plan.")).toBeNull();
+    expect(screen.queryByText(/Keine Kriterien hinterlegt/)).toBeNull();
     expect(
       screen.getByText("Die Entscheidungslogik liegt vollständig in hermes_cli/landing_loop.py."),
     ).toBeTruthy();
@@ -256,7 +256,52 @@ describe("PlanSpecDetailDrawer", () => {
       />,
     );
 
-    expect(screen.getByText("Keine Kriterien im Plan.")).toBeTruthy();
+    expect(
+      screen.getByText("Keine Kriterien hinterlegt — weder als Feld noch als Done-when-Abschnitt."),
+    ).toBeTruthy();
+  });
+
+  // --- Prosa-Kriterien (Server-Fallback 2026-08-04) --------------------------
+  // Kriterien, die der Server aus einem Done-when-Abschnitt im Fließtext las,
+  // tragen source: "prose" — der Drawer muss das sichtbar kennzeichnen, weil
+  // der Unterschied für die Abnahme zählt.
+  it("kennzeichnet aus Prosa gelesene Kriterien sichtbar", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={{
+          ...baseDetail,
+          acceptance_criteria: [
+            { statement: "Ein Cockpit mit zwei Balken.", source: "prose" },
+            { statement: "Eine Engpass-Zeile oben.", source: "prose" },
+          ],
+          acceptance_criteria_total: 2,
+        }}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    expect(screen.getByText("Ein Cockpit mit zwei Balken.")).toBeTruthy();
+    expect(
+      screen.getByText(/2 Kriterien aus dem Fließtext gelesen \(Done-when-Abschnitt\)/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Keine Kriterien hinterlegt/)).toBeNull();
+  });
+
+  it("Kontrollprobe: strukturierte Kriterien bekommen keine Prosa-Kennzeichnung", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+
+    expect(screen.queryByText(/aus dem Fließtext gelesen/)).toBeNull();
   });
 
   it("Ablauf: Arbeitsvertrag zeigt Kriterien und Scope-Pfade des Schritts", () => {
