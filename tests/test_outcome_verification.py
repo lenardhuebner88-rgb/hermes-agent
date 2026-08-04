@@ -281,6 +281,34 @@ def test_common_vision_contract_preserves_five_percent_neutral_band() -> None:
     assert outcomes.compare_observations(contract, baseline, improved) == "improved"
 
 
+def test_additive_schema_step_v3_baseline_vs_v4_current_stays_measurable() -> None:
+    """METRICS-WINDOW-S4: the v3->v4 vision schema step is purely additive, so
+    a baseline recorded on v3 must still yield a REAL verdict against a v4
+    observation — not `confounded`, which would have invalidated every running
+    baseline on the first v4 snapshot. Versions outside the declared additive
+    family (or one-sided versions) must keep confounding."""
+    contract = outcomes.build_vision_metric_contract("autonomy_pct", direction=1)
+    baseline = {
+        "ok": True,
+        "environment_fingerprint": "same",
+        "source_schema_version": "3",
+        "observed_value": {"ok": True, "value": 100.0},
+        "counter_observations": [],
+    }
+    current_v4 = {
+        **baseline,
+        "source_schema_version": "4",
+        "observed_value": {"ok": True, "value": 110.0},
+    }
+    assert outcomes.compare_observations(contract, baseline, current_v4) == "improved"
+
+    # Guard against over-relaxation:
+    unknown_future = {**current_v4, "source_schema_version": "5"}
+    assert outcomes.compare_observations(contract, baseline, unknown_future) == "confounded"
+    one_sided = {**current_v4, "source_schema_version": None}
+    assert outcomes.compare_observations(contract, baseline, one_sided) == "confounded"
+
+
 def _claim_once(db_path: str, task_id: str, queue: multiprocessing.Queue) -> None:
     import sqlite3
 

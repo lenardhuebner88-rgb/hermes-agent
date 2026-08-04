@@ -1327,6 +1327,29 @@ def validate_baseline(contract: Mapping[str, Any], baseline: Mapping[str, Any]) 
         raise ContractError("baseline evidence seal does not match its contents")
 
 
+def _source_schema_versions_compatible(
+    baseline_version: Optional[str], current_version: Optional[str]
+) -> bool:
+    """Whether two observation schema versions may be compared.
+
+    Equal versions (including both-absent) compare as before. Across versions,
+    only pairs where BOTH sides belong to the vision snapshot's declared
+    additive family (vision_metrics.ADDITIVE_SCHEMA_VERSIONS — schemas that
+    differ solely by added keys) are compatible; every other mismatch stays
+    confounded. A one-sided version is never compatible. Non-vision probes
+    carry probe-id strings that never enter the additive family, so their
+    strict-equality behaviour is unchanged.
+    """
+    if baseline_version == current_version:
+        return True
+    if baseline_version is None or current_version is None:
+        return False
+    from hermes_cli import vision_metrics
+
+    additive = {str(version) for version in vision_metrics.ADDITIVE_SCHEMA_VERSIONS}
+    return str(baseline_version) in additive and str(current_version) in additive
+
+
 def compare_observations(
     contract: Mapping[str, Any], baseline: Mapping[str, Any], current: Mapping[str, Any]
 ) -> str:
@@ -1334,7 +1357,9 @@ def compare_observations(
         return "unmeasurable"
     if baseline.get("environment_fingerprint") != current.get("environment_fingerprint"):
         return "confounded"
-    if baseline.get("source_schema_version") != current.get("source_schema_version"):
+    if not _source_schema_versions_compatible(
+        baseline.get("source_schema_version"), current.get("source_schema_version")
+    ):
         return "confounded"
     if current.get("confounded_reasons"):
         return "confounded"

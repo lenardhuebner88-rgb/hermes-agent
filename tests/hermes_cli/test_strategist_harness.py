@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -104,9 +105,14 @@ def test_empty_landscape_is_idle(board_home, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 3. Hits → <=5 held, annotated, correct provenance
+# 3. Hits → derive path is visibly gated (S3, 2026-08-04)
 # --------------------------------------------------------------------------- #
-def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
+def test_derive_path_levers_are_gated_out_visibly(board_home, monkeypatch):
+    """Seit dem Measurability-Gate (Codex-Blocker A2, 2026-08-04) erreicht KEIN
+    derive-Hebel mehr das Board: ihre Prosa-target_metrics loesen zu
+    no_metric auf. Der Pfad faellt sichtbar aus (gated_out mit Grund), nicht
+    stumm — das war frueher 'hits produce capped held proposals' und ist jetzt
+    die geschlossene zweite Ingest-Tuer."""
     _patch_budget(monkeypatch, 30.0)
     with kb.connect() as conn:
         _seed_ledger(conn, "dirty-overlap git lock contention")  # transient
@@ -121,27 +127,18 @@ def test_hits_produce_capped_annotated_held_proposals(board_home, monkeypatch):
     result = strategist.propose(board=None, out_dir=out_dir, metrics=metrics)
 
     assert result["skipped"] is False
-    assert result["idle"] is False
-    # CAP enforced
-    assert len(result["ingested"]) <= strategist.CAP_MAX
-    assert len(result["ingested"]) >= 1
-    # the blunt autonomy lever was self-gated out, never ingested
-    ingested_keys = {item["key"] for item in result["ingested"]}
-    assert "AUTON-UPLIFT" not in ingested_keys
+    # Kandidaten entstehen weiterhin (der Pfad ist nicht tot, nur bewacht) ...
+    assert result["candidates"] >= 1
+    # ... aber keiner landet mehr auf dem Board.
+    assert result["ingested"] == []
+    assert len(result["gated_out"]) >= 1
+    assert all(g["reason"] in ("no_metric", "unmapped_metric") or g["key"] == "AUTON-UPLIFT"
+               for g in result["gated_out"])
+    # the blunt autonomy lever is still self-gated for its counter-metric
     assert any(g["key"] == "AUTON-UPLIFT" for g in result["gated_out"])
 
     with kb.connect() as conn:
-        proposals = strategist_surface.held_operator_proposals(conn)
-    assert len(proposals) == len(result["ingested"])
-    assert len(proposals) <= strategist.CAP_MAX
-    for prop in proposals:
-        assert prop["created_by"] == strategist.STRATEGIST_AUTHOR
-        # annotation round-tripped through build_root_body → parse_annotation
-        assert prop["target_metric"]
-        assert prop["roi"]
-        assert prop["counter_metric"]
-        # Unscoped generated proposals get read-only scout + build + review.
-        assert prop["subtask_count"] == 3
+        assert strategist_surface.held_operator_proposals(conn) == []
 
 
 def test_cap_limits_to_five(board_home, monkeypatch):
@@ -157,6 +154,7 @@ def test_cap_limits_to_five(board_home, monkeypatch):
             "roi": "positive",
             "counter_metric": f"guardrail {i} held",
             "grounding": f"git log und grep in hermes_cli/strategist.py belegen Luecke {i}",
+            "metric_key": "autonomy_pct",  # S3: resolvable, sonst gated das Measurability-Gate
             "counter_risk": 0.2,
             "gain_weight": 1.0,
             "cost": 0.3,
@@ -187,6 +185,7 @@ def test_cap_keeps_higher_rank_score_not_higher_roi_score(board_home, monkeypatc
             "roi": "positive",
             "counter_metric": "guardrail A held",
             "grounding": "git log und grep in hermes_cli/strategist.py belegen Luecke A",
+            "metric_key": "autonomy_pct",  # S3: resolvable, sonst gated das Measurability-Gate
             "counter_risk": 0.1,
             "gain_weight": 1.0,
             "cost": 2.0,
@@ -200,6 +199,7 @@ def test_cap_keeps_higher_rank_score_not_higher_roi_score(board_home, monkeypatc
             "roi": "positive",
             "counter_metric": "guardrail B held",
             "grounding": "git log und grep in hermes_cli/strategist.py belegen Luecke B",
+            "metric_key": "autonomy_pct",  # S3: resolvable, sonst gated das Measurability-Gate
             "counter_risk": 0.1,
             "gain_weight": 1.0,
             "cost": 0.3,
@@ -355,10 +355,11 @@ def test_cost_lever_is_suppressed_when_vetoed():
     assert [lv for lv in strategist.derive_levers(ctx) if lv.source == "cost"] == []
 
 
-def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
-    """End-to-end: an injected cost view drives a held, annotated proposal on the
-    G1 surface — the strategist now ships cost-reduction work, not just
-    escalation/autonomy levers."""
+def test_cost_lever_is_gated_out_without_metric_key(board_home, monkeypatch):
+    """Der Kosten-Hebel entsteht weiterhin aus der injected cost view — erreicht
+    aber seit dem Measurability-Gate (2026-08-04) das Board nicht mehr: sein
+    Prosa-target_metric loest zu no_metric auf. Sichtbar in gated_out, nicht
+    stumm (vorher: 'cost lever round-trips as held proposal')."""
     _patch_budget(monkeypatch, 30.0)
     cost = {"profiles": [
         {"profile": "coder-claude", "cost_usd": 0.0, "cost_usd_equivalent": 364.0},
@@ -369,8 +370,9 @@ def test_cost_lever_round_trips_as_held_proposal(board_home, monkeypatch):
                                          "cost_per_task": {"coverage": {"coverage_pct": 100.0}}},
                                 cost=cost)
     assert result["skipped"] is False
-    keys = {item["key"] for item in result["ingested"]}
-    assert "COST-EFFICIENCY-CODER-CLAUDE" in keys
+    assert result["ingested"] == []
+    gated = {g["key"]: g["reason"] for g in result["gated_out"]}
+    assert gated.get("COST-EFFICIENCY-CODER-CLAUDE") == "no_metric"
 
 
 # --------------------------------------------------------------------------- #
@@ -623,6 +625,7 @@ def _grounded_draft(key="GROUNDED-1", grounding="git log zeigt kein vorhandenes 
         "counter_metric": "Guardrail Y gehalten",
         "rationale": "Begruendung fuer den Hebel.",
         "grounding": grounding,
+        "metric_key": "autonomy_pct",  # S3: resolvable key, damit das Measurability-Gate passiert
         "counter_risk": 0.2,
         "gain_weight": 1.0,
         "cost": 0.3,
@@ -1396,3 +1399,326 @@ def test_non_test_red_still_files_the_normal_triage_card(board_home):
     assert result["red_files_source"] == "non-test-red"
     assert "extraction_anomaly" not in result
     assert "EXTRACTION-ANOMALY" not in result["key"]
+
+
+# --------------------------------------------------------------------------- #
+# STRATEGIST-WASTE-GATES (S1–S3, 2026-08-04) — Veto sperrt, Archiv-Cooldown am
+# Propose-Pfad, Measurability-Gate; je mit auditiertem Operator-Gegenweg.
+# Befundlage: 60 Wurzeln → 22 released, 19 gelandet, 1× improved.
+# --------------------------------------------------------------------------- #
+def test_reflect_suppresses_outcome_root_veto_outside_window(board_home, tmp_path):
+    """S1: ein freigabe_vetoed AUSSERHALB des Reflect-Fensters sperrt den
+    lever_key trotzdem — Allzeit-Nachlese ueber die outcome-verankerte Wurzel
+    (live 2026-08-04: 2 von 26 Vetos erreichten vetoed_levers.json nie, weil
+    das Fenster [last_run, now) sie nicht mehr sah)."""
+    now_ts = int(time.time())
+    old_ts = now_ts - 30 * 86400
+    outcomes_path = tmp_path / "lever-outcomes.json"
+    notes_path = tmp_path / "reflections.jsonl"
+
+    with kb.connect() as conn:
+        root = _make_held_proposal(conn, "OLD-VETO-KEY", "vetoed long ago")
+        assert kb.dismiss_freigabe_hold(conn, root, author="operator") is True
+        # Das Veto liegt 30 Tage zurueck — ausserhalb jedes aktuellen Fensters.
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root),
+        )
+        conn.commit()
+
+    outcomes_path.write_text(
+        json.dumps([{
+            "schema_version": 1,
+            "lever_key": "OLD-VETO-KEY",
+            "root_task_id": root,
+            "proposed_at": old_ts,
+            "status": "archived",
+        }]),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        result = strategist.reflect(
+            conn, since=now_ts - 3600, notes_path=notes_path,
+            outcomes_path=outcomes_path, now=float(now_ts),
+        )
+
+    # Fenster-Statistik bleibt fensterbezogen (Veto ausserhalb → nicht gezaehlt),
+    # aber die Sperre greift allzeit.
+    assert "OLD-VETO-KEY" not in result["note"]["vetoed_levers"]
+    vetoed_set = json.loads(
+        (notes_path.parent / "vetoed_levers.json").read_text(encoding="utf-8")
+    )
+    assert "OLD-VETO-KEY" in vetoed_set
+
+
+def test_unsuppress_removes_key_and_writes_audit(board_home, monkeypatch):
+    """S1-Gegenweg: unsuppress loest die Sperre und hinterlaesst eine
+    Audit-Zeile — dauerhafte Sperre, aber auditierbar reversibel."""
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "vetoed_levers.json").write_text(
+        json.dumps(["KEEP-KEY", "UNDO-KEY"]), encoding="utf-8"
+    )
+    args = SimpleNamespace(
+        lever_key=["UNDO-KEY"], reason="Veto bezog sich auf ueberholte Spec-Fassung"
+    )
+    result = strategist.run_unsuppress(args)
+
+    assert result["mode"] == "unsuppress"
+    remaining = json.loads((state_dir / "vetoed_levers.json").read_text(encoding="utf-8"))
+    assert remaining == ["KEEP-KEY"]
+    audit = (state_dir / "override_audit.jsonl").read_text(encoding="utf-8").splitlines()
+    record = json.loads(audit[-1])
+    assert record["action"] == "unsuppress"
+    assert record["key"] == "UNDO-KEY"
+    assert "ueberholte" in record["reason"]
+
+
+def _ingest_draft_then_complete(board_home, monkeypatch, key="COOLDOWN-KEY"):
+    """Gemeinsamer Aufbau fuer S2: derselbe Draft wird zweimal vorgeschlagen;
+    nach dem ersten Ingest wird die Wurzel via complete_freigabe_hold
+    archiviert ('anderweitig erledigt' — archiviert, aber KEIN Veto, damit die
+    S1-Sperre den S2-Guard nicht verdeckt)."""
+    _patch_budget(monkeypatch, 20.0)
+    draft = _grounded_draft(key=key)
+    out_dir = board_home / "specs"
+    first = strategist.propose(board=None, out_dir=out_dir, drafts=[draft])
+    assert len(first["ingested"]) == 1
+    root = first["ingested"][0]["root_task_id"]
+    with kb.connect() as conn:
+        assert kb.complete_freigabe_hold(
+            conn, root, author="operator", note="anderweitig erledigt (Test)"
+        ) is True
+    return draft, out_dir, root
+
+
+def test_propose_gated_out_when_same_spec_recently_archived(board_home, monkeypatch):
+    """S2: der Archiv-Cooldown aus dem Gate-Triage-Pfad gilt jetzt auch im
+    produktiven Propose-Pfad — eine archivierte Kette kann nicht am naechsten
+    Morgen unveraendert wiederkommen (42 offene Faelle, Befund 2026-08-04)."""
+    draft, out_dir, root = _ingest_draft_then_complete(board_home, monkeypatch)
+
+    second = strategist.propose(board=None, out_dir=out_dir, drafts=[draft])
+
+    assert second["ingested"] == []
+    cooldown = [g for g in second["gated_out"] if g["reason"] == "archived_cooldown"]
+    assert len(cooldown) == 1
+    assert cooldown[0]["archived_root_task_id"] == root
+    assert cooldown[0]["idempotency_key"]
+    with kb.connect() as conn:
+        same_key = conn.execute(
+            "SELECT COUNT(*) c FROM tasks WHERE idempotency_key = ?",
+            (cooldown[0]["idempotency_key"],),
+        ).fetchone()["c"]
+    assert same_key == 1, "Re-Ingest trotz Cooldown — zweite Wurzel entstanden"
+
+
+def test_reopen_archived_bypasses_cooldown_once(board_home, monkeypatch):
+    """S2-Gegenweg: der Operator darf einen Key bewusst wieder oeffnen — der
+    Guard laesst ihn einmalig passieren, verbraucht den Eintrag und auditiert
+    die Nutzung (Fehl-Archivierungen wie am 2026-08-04 bleiben reparierbar)."""
+    draft, out_dir, root = _ingest_draft_then_complete(board_home, monkeypatch)
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "reopened_levers.json").write_text(
+        json.dumps(["COOLDOWN-KEY"]), encoding="utf-8"
+    )
+
+    second = strategist.propose(
+        board=None, out_dir=out_dir, drafts=[draft], notes_dir=state_dir
+    )
+
+    assert len(second["ingested"]) == 1
+    entry = second["ingested"][0]
+    assert entry["reopen_bypass"] is True
+    assert entry["root_task_id"] != root
+    # one-shot: der Eintrag ist verbraucht, die Nutzung auditiert
+    remaining = json.loads((state_dir / "reopened_levers.json").read_text(encoding="utf-8"))
+    assert "COOLDOWN-KEY" not in remaining
+    audit = (state_dir / "override_audit.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(audit[-1])["action"] == "reopen_consumed"
+
+
+def test_draft_without_resolvable_metric_key_gated_out(board_home, monkeypatch):
+    """S3: ein Draft ohne aufloesbaren metric_key kann nur verdict=unmeasurable
+    werden (6 von 12 gemessenen Hebeln) und erreicht das Board nicht —
+    no_metric und unmapped_metric werden VOR dem Ingest ausgegattert."""
+    _patch_budget(monkeypatch, 20.0)
+    no_metric = _grounded_draft(key="NO-METRIC")
+    no_metric.pop("metric_key")
+    unmapped = _grounded_draft(key="UNMAPPED-METRIC")
+    unmapped["metric_key"] = "gibt.es.nicht"
+
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None, out_dir=out_dir, drafts=[no_metric, unmapped]
+    )
+
+    assert result["ingested"] == []
+    reasons = {g["key"]: g["reason"] for g in result["gated_out"]}
+    assert reasons["NO-METRIC"] == "no_metric"
+    assert reasons["UNMAPPED-METRIC"] == "unmapped_metric"
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_qualitative_exception_ingests_and_is_visible(board_home, monkeypatch):
+    """S3-Gegenweg: ein bewusst qualitativer Hebel darf das Measurability-Gate
+    passieren — aber sichtbar markiert im Ingest-Eintrag, nicht stillschweigend."""
+    _patch_budget(monkeypatch, 20.0)
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "qualitative_levers.json").write_text(
+        json.dumps(["QUALITATIVE-KEY"]), encoding="utf-8"
+    )
+    draft = _grounded_draft(key="QUALITATIVE-KEY")
+    draft.pop("metric_key")  # kein messbares Ziel — mit Operator-Ausnahme
+
+    out_dir = board_home / "specs"
+    result = strategist.propose(
+        board=None, out_dir=out_dir, drafts=[draft], notes_dir=state_dir
+    )
+
+    assert len(result["ingested"]) == 1
+    assert result["ingested"][0]["qualitative_exception"] is True
+
+
+def test_unsuppress_survives_next_reflect_run(board_home, tmp_path, monkeypatch):
+    """A1 (Codex-Blocker 2026-08-04): unsuppress muss einen vollen Reflect-Lauf
+    ueberleben. Ohne persistente Aufhebung las die Allzeit-Nachlese das
+    historische freigabe_vetoed erneut und sperrte den bewusst freigegebenen
+    Key beim naechsten Cron still wieder:
+    after_unsuppress=[] -> Nachlese ['K'] -> after_next_reflect=['K']."""
+    now_ts = int(time.time())
+    old_ts = now_ts - 30 * 86400
+    outcomes_path = tmp_path / "lever-outcomes.json"
+    notes_path = tmp_path / "reflections.jsonl"
+
+    with kb.connect() as conn:
+        root = _make_held_proposal(conn, "LIFT-ME", "vetoed long ago")
+        assert kb.dismiss_freigabe_hold(conn, root, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root),
+        )
+        conn.commit()
+    outcomes_path.write_text(
+        json.dumps([{
+            "schema_version": 1,
+            "lever_key": "LIFT-ME",
+            "root_task_id": root,
+            "proposed_at": old_ts,
+            "status": "archived",
+        }]),
+        encoding="utf-8",
+    )
+
+    # 1. Reflect sperrt den Key (Allzeit-Nachlese, Event ausserhalb des Fensters).
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts))
+    vetoed_path = notes_path.parent / "vetoed_levers.json"
+    assert "LIFT-ME" in json.loads(vetoed_path.read_text(encoding="utf-8"))
+
+    # 2. Operator hebt bewusst auf — run_unsuppress schreibt in denselben
+    # notes/state dir, in dem auch die Sperrliste liegt.
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("vetoed_levers.json", "lever-outcomes.json", "reflections.jsonl"):
+        (state_dir / name).write_bytes((tmp_path / name).read_bytes())
+    args = SimpleNamespace(lever_key=["LIFT-ME"], reason="bewusst aufgehoben (Test)")
+    strategist.run_unsuppress(args)
+    assert "LIFT-ME" not in json.loads(
+        (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
+    )
+    lifted = json.loads((state_dir / "unsuppressed_levers.json").read_text(encoding="utf-8"))
+    assert [r["key"] for r in lifted] == ["LIFT-ME"]
+
+    # 3. Ein voller zweiter Reflect-Lauf darf den Key NICHT wieder sperren.
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600,
+                           notes_path=state_dir / "reflections.jsonl",
+                           outcomes_path=state_dir / "lever-outcomes.json",
+                           now=float(now_ts + 60))
+    assert "LIFT-ME" not in json.loads(
+        (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
+    )
+
+
+def test_new_veto_after_unsuppress_suppresses_again_outside_window(
+    board_home, tmp_path, monkeypatch
+):
+    """Codex-Blocker, 3. Runde (2026-08-04): der Override darf nur Vetoes BIS
+    zur Aufhebung neutralisieren. Kette: veto(alt) -> reflect -> unsuppress
+    -> NEUES Veto AUSSERHALB des Reflect-Fensters -> der Key ist wieder
+    gesperrt. Ohne Watermark (nackter Key-Override) blieb er frei:
+    after_new_veto_outside_window=[]."""
+    now_ts = int(time.time())
+    old_ts = now_ts - 30 * 86400
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    outcomes_path = state_dir / "lever-outcomes.json"
+    notes_path = state_dir / "reflections.jsonl"
+
+    # 1. Altes Veto auf Wurzel 1 (ausserhalb des Fensters).
+    with kb.connect() as conn:
+        root1 = _make_held_proposal(conn, "WATERMARK-KEY", "first veto")
+        assert kb.dismiss_freigabe_hold(conn, root1, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root1),
+        )
+        conn.commit()
+    outcomes_path.write_text(
+        json.dumps([{
+            "schema_version": 1,
+            "lever_key": "WATERMARK-KEY",
+            "root_task_id": root1,
+            "proposed_at": old_ts,
+            "status": "archived",
+        }]),
+        encoding="utf-8",
+    )
+
+    # 2. Reflect sperrt; 3. Operator hebt auf (Watermark = Veto-1-Event-ID).
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts))
+    vetoed_path = state_dir / "vetoed_levers.json"
+    assert "WATERMARK-KEY" in json.loads(vetoed_path.read_text(encoding="utf-8"))
+    args = SimpleNamespace(lever_key=["WATERMARK-KEY"], reason="bewusst aufgehoben",
+                           board=None)
+    strategist.run_unsuppress(args)
+    assert "WATERMARK-KEY" not in json.loads(vetoed_path.read_text(encoding="utf-8"))
+
+    # 4. NEUES Veto auf einer neuen Wurzel desselben Hebels — hoehere
+    # Event-ID, aber zurueckdatiert, also AUSSERHALB des Reflect-Fensters.
+    with kb.connect() as conn:
+        root2 = _make_held_proposal(conn, "WATERMARK-KEY", "second veto")
+        assert kb.dismiss_freigabe_hold(conn, root2, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root2),
+        )
+        conn.commit()
+    records = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    records.append({
+        "schema_version": 1,
+        "lever_key": "WATERMARK-KEY",
+        "root_task_id": root2,
+        "proposed_at": old_ts + 100,
+        "status": "archived",
+    })
+    outcomes_path.write_text(json.dumps(records), encoding="utf-8")
+
+    # 5. Der naechste Reflect sperrt den Key wieder — das neue Veto liegt
+    # UEBER dem Watermark, obwohl es das Fenster verpasst hat.
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts + 60))
+    assert "WATERMARK-KEY" in json.loads(vetoed_path.read_text(encoding="utf-8"))

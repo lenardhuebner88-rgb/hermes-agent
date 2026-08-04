@@ -68,6 +68,27 @@ _BASE_METRICS = {
 }
 
 
+def _measurable_draft(key="BASELINE-DRAFT"):
+    """Grounded Opus draft with a resolvable metric_key — since the
+    measurability gate (2026-08-04) the only way onto the board; the derive
+    path's prose target_metrics are gated_out (no_metric) before ingest."""
+    return {
+        "key": key,
+        "title": f"Hebel {key}",
+        "lane": "coder-claude",
+        "target_metric": "autonomy_pct anheben",
+        "roi": "positiv",
+        "counter_metric": "Guardrail gehalten",
+        "rationale": "Begruendung fuer den Hebel.",
+        "grounding": "git log und grep in hermes_cli/strategist.py belegen die Luecke",
+        "metric_key": "autonomy_pct",
+        "counter_risk": 0.2,
+        "gain_weight": 1.0,
+        "cost": 0.3,
+        "signal_strength": 1.0,
+    }
+
+
 def _make_held_and_released_done(conn, key, *, now_ts: int):
     """Create a strategist root, release it, and mark it done."""
     root = kb.create_task(
@@ -169,10 +190,18 @@ def test_ingest_writes_baseline_record(board_home, monkeypatch, tmp_path):
 
     out_dir = board_home / "specs"
     outcomes_path = tmp_path / "lever-outcomes.json"
+    # Frischer Snapshot mit Schema: capture_vision_snapshot_baseline lehnt
+    # generated_at > 24 h als stale ab (_BASE_METRICS ist 2023 → legacy-Pfad).
+    fresh_metrics = {
+        **_BASE_METRICS,
+        "generated_at": int(time.time()),
+        "schema_version": 3,
+    }
     result = strategist.propose(
         board=None,
         out_dir=out_dir,
-        metrics=_BASE_METRICS,
+        metrics=fresh_metrics,
+        drafts=[_measurable_draft()],
         outcomes_path=outcomes_path,
     )
 
@@ -201,7 +230,13 @@ def test_ingest_writes_baseline_record(board_home, monkeypatch, tmp_path):
     if rec["metric_key"] is not None:
         assert rec["probe_contract"]["probe_id"] == "vision_metric_snapshot.v1"
         assert rec["contract_hash"] == rec["probe_contract"]["contract_hash"]
-        assert rec["evidence_grade"] == "contract_verified"
+        # evidence_grade bleibt bei der Baseline-Anlage legacy_observational
+        # (strategist.py, _outcomes_write_baselines) — contract_verified wird
+        # erst von der Contract-Observation gestempelt. Dieser Block lief vor
+        # S3 nie: Prosa-target_metrics loesten den Key zu None auf.
+        assert rec["evidence_grade"] == "legacy_observational"
+        assert rec["measurement_status"] == "pending"
+        assert rec["contract_registered"] is True
     assert baseline["autonomy_pct"] == pytest.approx(75.0)
     assert baseline["green_gate_streak.streak"] == pytest.approx(3.0)
     # non-numeric / nested dict values must NOT appear as raw values
@@ -642,11 +677,13 @@ def test_ingest_skips_duplicate_for_already_ingested_lever(board_home, monkeypat
     outcomes_path = tmp_path / "lever-outcomes.json"
 
     # first run — ingest
-    strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS, outcomes_path=outcomes_path)
+    strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS,
+                       drafts=[_measurable_draft()], outcomes_path=outcomes_path)
     first_records = json.loads(outcomes_path.read_text(encoding="utf-8"))
 
     # second run — already_ingested=True for the same lever
-    strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS, outcomes_path=outcomes_path)
+    strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS,
+                       drafts=[_measurable_draft()], outcomes_path=outcomes_path)
     second_records = json.loads(outcomes_path.read_text(encoding="utf-8"))
 
     # must not duplicate
@@ -659,7 +696,8 @@ def test_ingest_noop_when_no_outcomes_path(board_home, monkeypatch):
     with kb.connect() as conn:
         _seed_ledger(conn, "dirty-overlap git lock contention")
     out_dir = board_home / "specs"
-    result = strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS)
+    result = strategist.propose(board=None, out_dir=out_dir, metrics=_BASE_METRICS,
+                                drafts=[_measurable_draft()])
     assert len(result["ingested"]) >= 1  # still ingests normally
 
 
@@ -1014,7 +1052,8 @@ def test_atomic_write_uses_os_replace(board_home, monkeypatch, tmp_path):
     outcomes_path = tmp_path / "lever-outcomes.json"
     strategist.propose(
         board=None, out_dir=board_home / "specs",
-        metrics=_BASE_METRICS, outcomes_path=outcomes_path,
+        metrics=_BASE_METRICS, drafts=[_measurable_draft()],
+        outcomes_path=outcomes_path,
     )
 
     # at least one os.replace call whose destination is the outcomes file
@@ -1412,6 +1451,15 @@ def test_conflict_fixer_success_rate_direction_is_higher_is_better():
     ) == 1
 
 
+def test_conflict_fixer_window_success_rate_direction_is_higher_is_better():
+    """METRICS-WINDOW-S4: the windowed sibling of the trust metric must be a
+    usable lever target just like its all-time origin — a lever aiming at the
+    window rate may not be stamped 'unmeasurable'."""
+    assert strategist._resolve_verdict_direction(
+        "conflict_fixer.window_success_rate_pct"
+    ) == 1
+
+
 def test_direction_map_required_keys_mapped_minus_one():
     """The two keys the slice calls out explicitly are mapped -1 (lower is better)."""
     assert strategist._resolve_verdict_direction("classification_coverage.unclassified_share") == -1
@@ -1500,7 +1548,8 @@ def test_ingest_baseline_stamps_measurability_and_warns(board_home, monkeypatch,
     outcomes_path = tmp_path / "lever-outcomes.json"
     with caplog.at_level("WARNING", logger="hermes_cli.strategist"):
         strategist.propose(
-            board=None, out_dir=out_dir, metrics=_BASE_METRICS, outcomes_path=outcomes_path,
+            board=None, out_dir=out_dir, metrics=_BASE_METRICS,
+            drafts=[_measurable_draft()], outcomes_path=outcomes_path,
         )
 
     records = json.loads(outcomes_path.read_text(encoding="utf-8"))

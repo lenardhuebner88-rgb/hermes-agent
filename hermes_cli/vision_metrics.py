@@ -45,7 +45,18 @@ DAY_SECONDS = 86_400
 # and `autonomy` now grades a conflict-class done task by whether the conflict
 # fixer actually CLOSED the park (see ``_conflict_fixer_episodes``) instead of
 # counting every unescalated conflict as a missed escalation.
-SCHEMA_VERSION = 3
+# v4 (METRICS-WINDOW-S4): purely additive — `conflict_fixer` keeps every v3
+# field (all-time) and gains `window_*` siblings computed over the snapshot's
+# `window_days`. No key is removed or reinterpreted; `autonomy` gets no window
+# fields because the rest of its cohort (done tasks, escalations, failed runs)
+# is all-time, so a windowed headline would mix two populations.
+SCHEMA_VERSION = 4
+# Schema versions that differ only by ADDED keys (no removal, no
+# reinterpretation), so a baseline recorded on one remains a valid comparison
+# basis for an observation on another — see
+# outcome_verification.compare_observations. A future schema that removes or
+# reinterprets keys must NOT join this set.
+ADDITIVE_SCHEMA_VERSIONS = frozenset({3, 4})
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 LANDING_GATE_LEDGER_FILENAME = "landing-gate-ledger.jsonl"
@@ -1571,27 +1582,36 @@ _FIXER_CHILD_TERMINAL_STATUSES = frozenset(
 )
 
 
-def _tasks_with_fixer_exhausted_escalation(conn: sqlite3.Connection) -> set[str]:
-    """Tasks whose operator escalation carries the fixer's own budget-spent
-    evidence (``_maybe_route_conflict_park_fixer`` → ``_escalate({..
-    "fixer_exhausted": True})``).
+def _fixer_exhausted_escalation_event_ids(conn: sqlite3.Connection) -> dict[str, int]:
+    """Latest budget-spent evidence event id per escalated parent task.
 
-    Needed alongside the structural attempt count because the budget is
-    ROOT-keyed: a cascade can spend the budget across several parents, so a
-    single parent may show one dispatch and still be the one that escalated.
+    The operator escalation carries the fixer's own budget-spent evidence
+    (``_maybe_route_conflict_park_fixer`` → ``_escalate({..
+    "fixer_exhausted": True})``). Needed alongside the structural attempt
+    count because the budget is ROOT-keyed: a cascade can spend the budget
+    across several parents, so a single parent may show one dispatch and
+    still be the one that escalated.
+
+    Returns the newest evidence EVENT ID per task, not just membership: the
+    window view only accepts evidence that postdates the graded episode's
+    latest dispatch, and ``created_at`` stamps whole seconds only, so the
+    event id is the reliable order.
     """
-    out: set[str] = set()
+    latest: dict[str, int] = {}
     for r in conn.execute(
-        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        "SELECT id, task_id, payload FROM task_events WHERE kind = ?",
         (kb.OPERATOR_ESCALATION_EVENT,),
     ).fetchall():
         evidence = _event_payload(r["payload"]).get("evidence")
         if isinstance(evidence, dict) and evidence.get("fixer_exhausted"):
-            out.add(r["task_id"])
-    return out
+            task_id = str(r["task_id"])
+            latest[task_id] = max(latest.get(task_id, 0), int(r["id"]))
+    return latest
 
 
-def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
+def _conflict_fixer_episodes(
+    conn: sqlite3.Connection, *, since: Optional[int] = None
+) -> list[dict]:
     """Grade every dispatched conflict-fixer budget by its real outcome.
 
     Returns one dict per episode, in dispatch order, with ``outcome``:
@@ -1607,9 +1627,23 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
     * ``unresolved_by_fixer`` — every fixer card is finished, the budget was
       never formally spent, and the parent was never resumed: the automation
       stopped without closing the park (a human or another lane did).
+
+    ``since`` (epoch seconds) selects episodes by DISPATCH activity: an
+    episode is kept when its latest dispatch happened at or after ``since``.
+    Episodes straddling the window edge stay whole (all attempts counted).
+
+    Resume proofs are read across all time, but in the window view a proof
+    only counts when its EVENT ID is greater than the episode's latest
+    dispatch event id: a resume in between two dispatches closed the OLDER
+    attempt, and crediting it to a newer still-open attempt would report
+    success while work is pending. The event id decides the order because
+    ``created_at`` stamps whole seconds only (kanban_db stamps
+    ``int(time.time())``), so same-second events are otherwise unordered.
+    All-time grading keeps the plain membership rule unchanged.
     """
     dispatched = conn.execute(
-        "SELECT id, task_id, payload FROM task_events WHERE kind = ? ORDER BY id",
+        "SELECT id, task_id, payload, created_at "
+        "FROM task_events WHERE kind = ? ORDER BY id",
         (kb.CONFLICT_FIXER_DISPATCHED_EVENT,),
     ).fetchall()
     if not dispatched:
@@ -1630,6 +1664,7 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
                 "children": set(),
                 "limit": kb.CONFLICT_FIXER_MAX_ATTEMPTS,
                 "last_dispatch_id": 0,
+                "last_dispatch_at": 0,
             }
         ep["parents"].add(parent_id)
         child_id = str(payload.get("child_id") or "").strip()
@@ -1640,21 +1675,39 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
         except (TypeError, ValueError):
             pass
         ep["last_dispatch_id"] = int(row["id"])
+        ep["last_dispatch_at"] = max(ep["last_dispatch_at"], int(row["created_at"]))
 
-    # Resume proof, per (parent, fingerprint).
+    if since is not None:
+        cutoff = int(since)
+        episodes = {
+            key: ep for key, ep in episodes.items()
+            if ep["last_dispatch_at"] >= cutoff
+        }
+        if not episodes:
+            return []
+
+    # Resume proof, per (parent, fingerprint). The window view additionally
+    # needs each proof's event id (see the docstring's dispatch-order rule).
     resumed: set[tuple[str, str]] = set()
+    resumed_id: dict[tuple[str, str], int] = {}
     for r in conn.execute(
-        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        "SELECT id, task_id, payload FROM task_events WHERE kind = ?",
         (CONFLICT_FIXER_RESUMED_EVENT,),
     ).fetchall():
         payload = _event_payload(r["payload"])
-        resumed.add(
-            (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
-        )
+        key = (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
+        resumed.add(key)
+        resumed_id[key] = max(resumed_id.get(key, 0), int(r["id"]))
     for (_root, fingerprint), ep in episodes.items():
-        ep["resolved"] = any(
-            (parent, fingerprint) in resumed for parent in ep["parents"]
-        )
+        if since is None:
+            ep["resolved"] = any(
+                (parent, fingerprint) in resumed for parent in ep["parents"]
+            )
+        else:
+            ep["resolved"] = any(
+                resumed_id.get((parent, fingerprint), -1) > ep["last_dispatch_id"]
+                for parent in ep["parents"]
+            )
 
     # The ``fixer_exhausted`` escalation carries no fingerprint, so attribute it
     # to that task's LATEST still-unresolved episode — bounded and never able to
@@ -1666,12 +1719,18 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
         for parent in ep["parents"]:
             unresolved_by_parent.setdefault(parent, []).append(key)
     exhausted_keys: set[tuple[str, str]] = set()
-    for parent in _tasks_with_fixer_exhausted_escalation(conn):
+    for parent, evidence_id in _fixer_exhausted_escalation_event_ids(conn).items():
         keys = unresolved_by_parent.get(parent)
-        if keys:
-            exhausted_keys.add(
-                max(keys, key=lambda k: episodes[k]["last_dispatch_id"])
-            )
+        if not keys:
+            continue
+        latest_key = max(keys, key=lambda k: episodes[k]["last_dispatch_id"])
+        # All-time keeps the historical attribution; the window view only
+        # accepts evidence newer than the episode's latest dispatch — older
+        # evidence belongs to an earlier conflict on the same parent, and a
+        # stale exhaustion must not grade a still-running fixer (event ids
+        # order reliably; created_at stamps whole seconds only).
+        if since is None or evidence_id > episodes[latest_key]["last_dispatch_id"]:
+            exhausted_keys.add(latest_key)
 
     all_children = sorted(
         {child for ep in episodes.values() for child in ep["children"]}
@@ -1706,6 +1765,7 @@ def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
             "root_id": ep["root_id"],
             "fingerprint": ep["fingerprint"],
             "parents": sorted(ep["parents"]),
+            "children": sorted(ep["children"]),
             "attempts": attempts,
             "limit": int(ep["limit"]),
             "outcome": outcome,
@@ -1738,6 +1798,48 @@ def _conflict_fixer_failed_count(conn: sqlite3.Connection) -> int:
         except (TypeError, ValueError):
             continue
         if child_id and fingerprint and attempt >= 1:
+            failures.add((child_id, attempt, fingerprint))
+    return len(failures)
+
+
+def _conflict_fixer_failed_count_for_episodes(
+    conn: sqlite3.Connection, episodes: list[dict]
+) -> int:
+    """Count distinct failure keys belonging to the given episodes' fixer cards.
+
+    The window sibling of the all-time failed count must use the SAME cohort
+    as the episode buckets it sits next to: a failure is attributed when its
+    child card was dispatched as part of one of *episodes* (matching
+    fingerprint). Time-windowing the failure events instead would mix two
+    differently-selected populations into one rate.
+    """
+    child_fingerprints: dict[str, str] = {}
+    for ep in episodes:
+        for child in ep["children"]:
+            child_fingerprints[child] = ep["fingerprint"]
+    if not child_fingerprints:
+        return 0
+    failures: set[tuple[str, int, str]] = set()
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE kind = ?",
+        (CONFLICT_FIXER_FAILED_EVENT,),
+    ).fetchall():
+        payload = _event_payload(row["payload"])
+        child_id = str(payload.get("child_id") or "").strip()
+        fingerprint = str(payload.get("conflict_fingerprint") or "").strip()
+        raw_attempt = payload.get("attempt")
+        if raw_attempt is None:
+            continue
+        try:
+            attempt = int(raw_attempt)
+        except (TypeError, ValueError):
+            continue
+        if (
+            child_id
+            and fingerprint
+            and attempt >= 1
+            and child_fingerprints.get(child_id) == fingerprint
+        ):
             failures.add((child_id, attempt, fingerprint))
     return len(failures)
 
@@ -1811,6 +1913,39 @@ def _conflict_fixer_metric(episodes: list[dict], *, failed: int = 0) -> dict:
             ),
         },
     }
+
+
+# METRICS-WINDOW-S4: the all-time fields that get a `window_*` sibling.
+# `counter` deliberately stays all-time only — its windowed value is already
+# readable as `window_unresolved_by_fixer`, and a second nested counter would
+# be a new metric, not a window view of an existing one.
+_WINDOWED_CONFLICT_FIELDS = (
+    "success_rate_pct",
+    "episodes",
+    "resolved",
+    "failed",
+    "exhausted",
+    "unresolved_by_fixer",
+    "in_flight",
+)
+
+
+def _merge_windowed_conflict_fields(
+    base: dict,
+    windowed: dict,
+    *,
+    window_days: int,
+    since_epoch: int,
+) -> dict:
+    """Attach the window view as additive ``window_*`` siblings (schema v4).
+
+    ``base`` is the untouched all-time metric; every v3 key keeps its meaning.
+    """
+    for key in _WINDOWED_CONFLICT_FIELDS:
+        base[f"window_{key}"] = windowed[key]
+    base["window_days"] = int(window_days)
+    base["window_since_epoch"] = int(since_epoch)
+    return base
 
 
 def _autonomy_metric(
@@ -2448,8 +2583,13 @@ def compute_metrics_snapshot(
         gate_records = read_gate_records()
     generated = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
     # Graded once: the autonomy counter and the conflict_fixer headline are two
-    # readings of the SAME episodes, so they can never disagree.
+    # readings of the SAME episodes, so they can never disagree.  The autonomy
+    # cohort is all-time by design (see _autonomy_metric), so it keeps the
+    # all-time episodes; the windowed grading feeds ONLY the conflict_fixer
+    # `window_*` siblings (schema v4) — never the autonomy headline.
     conflict_episodes = _conflict_fixer_episodes(conn)
+    since_epoch = ts - int(window_days) * DAY_SECONDS
+    conflict_episodes_window = _conflict_fixer_episodes(conn, since=since_epoch)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated.isoformat(),
@@ -2459,9 +2599,19 @@ def compute_metrics_snapshot(
             "autonomy": _autonomy_metric(
                 conn, conflict_episodes=conflict_episodes
             ),
-            "conflict_fixer": _conflict_fixer_metric(
-                conflict_episodes,
-                failed=_conflict_fixer_failed_count(conn),
+            "conflict_fixer": _merge_windowed_conflict_fields(
+                _conflict_fixer_metric(
+                    conflict_episodes,
+                    failed=_conflict_fixer_failed_count(conn),
+                ),
+                _conflict_fixer_metric(
+                    conflict_episodes_window,
+                    failed=_conflict_fixer_failed_count_for_episodes(
+                        conn, conflict_episodes_window
+                    ),
+                ),
+                window_days=window_days,
+                since_epoch=since_epoch,
             ),
             "cost_per_task": _cost_per_task_metric(
                 conn, now=ts, window_days=window_days
@@ -2572,4 +2722,15 @@ def render_snapshot_summary(snapshot: dict) -> str:
             f"{o.get('counter', {}).get('value')}"
         ),
     ]
+    # METRICS-WINDOW-S4: the window view exists only from schema v4 on; a v3
+    # snapshot simply gets no window line (never a crash or phantom zero).
+    if cf.get("window_episodes") is not None:
+        lines.insert(3, (
+            f"  fixer window:    {cf.get('window_success_rate_pct')}%  "
+            f"(last {cf.get('window_days')}d: "
+            f"resolved={cf.get('window_resolved')}, "
+            f"failed={cf.get('window_failed')}, "
+            f"exhausted={cf.get('window_exhausted')}, "
+            f"in-flight={cf.get('window_in_flight')})"
+        ))
     return "\n".join(lines)
