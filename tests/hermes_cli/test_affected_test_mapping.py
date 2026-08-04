@@ -678,6 +678,34 @@ def test_lifecycle_document_change_selects_the_anchor_gate() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "plugins/kanban/dashboard/planspec_flow_routes.py",
+        "plugins/kanban/dashboard/control_routes.py",
+    ],
+)
+def test_dashboard_route_module_change_selects_the_route_suite(changed: str) -> None:
+    """The dashboard route tests must run on route-module changes.
+
+    Seventeen test files load plugins/kanban/dashboard/plugin_api.py
+    via importlib.util.spec_from_file_location, so the import index never sees
+    the edge; plugin_api.py itself is covered by function-level static
+    imports, but the route modules it includes are not. Measured 2026-08-04
+    against the real tree: before the FEATURE_PREFIX_TEST_PATTERNS entry, a
+    route-module change selected only the mirrored
+    tests/plugins/kanban/dashboard/ directory, so the real route suite
+    (tests/plugins/test_kanban_dashboard_plugin.py, /planspecs coverage)
+    never ran on route changes.
+    """
+    assert (REPO_ROOT / changed).is_file(), f"fixture path vanished: {changed}"
+
+    record = classify_changed_paths(REPO_ROOT, [changed], mode="worker").records[0]
+
+    assert record.state == "selected"
+    assert "tests/plugins/test_kanban_dashboard_plugin.py" in record.tests
+
+
 def test_real_gateway_config_commit_does_not_warn(
     real_test_index,
 ) -> None:
