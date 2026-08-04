@@ -2203,7 +2203,56 @@ def _remove_from_vetoed_set(path: Path, key: str) -> list[str]:
     return remaining
 
 
-def _outcome_root_vetoed_keys(conn: Any, outcomes_path: Path) -> set[str]:
+def _read_unsuppress_records(notes_dir: Optional[Path]) -> list[dict[str, Any]]:
+    """Raw override records from ``unsuppressed_levers.json`` (list of dicts)."""
+    if notes_dir is None:
+        return []
+    try:
+        data = json.loads(
+            (Path(notes_dir) / UNSUPPRESSED_LEVERS_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("key")]
+
+
+def _read_unsuppress_watermarks(notes_dir: Optional[Path]) -> dict[str, int]:
+    """Read the persistent unsuppress overrides as ``key -> watermark event id``.
+
+    The watermark is the highest ``task_events.id`` of a ``freigabe_vetoed``
+    that existed when the operator lifted the block: the all-time scan
+    neutralizes vetoes **up to** that point and none after it. A key-only
+    override (first S1 build, 2026-08-04) swallowed later vetoes that missed
+    the reflect window — the exact gap the all-time scan was built for
+    (Codex-Blocker, 3. Runde). Event-ID statt created_at: Ereignisse werden
+    mit ``int(time.time())`` gestempelt (kanban_db), zwei Ereignisse in
+    derselben Sekunde sind nur ueber die ID ordenbar.
+    """
+    out: dict[str, int] = {}
+    if notes_dir is None:
+        return out
+    try:
+        data = json.loads(
+            (Path(notes_dir) / UNSUPPRESSED_LEVERS_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, TypeError):
+        return out
+    if not isinstance(data, list):
+        return out
+    for item in data:
+        if isinstance(item, dict) and item.get("key"):
+            try:
+                out[str(item["key"])] = int(item.get("watermark_event_id") or 0)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def _outcome_root_vetoed_keys(
+    conn: Any, outcomes_path: Path, *, unsuppressed: Optional[dict[str, int]] = None
+) -> set[str]:
     """Lever keys whose outcome-anchored root carries a ``freigabe_vetoed``
     event — ALL-TIME, independent of the reflect window.
 
@@ -2215,7 +2264,12 @@ def _outcome_root_vetoed_keys(conn: Any, outcomes_path: Path) -> set[str]:
     ``created_by`` filter nor title parsing. Only ``freigabe_vetoed``
     suppresses — ``freigabe_completed`` ("done elsewhere") and plain
     archival are NOT vetoes and must never lock a key.
+
+    ``unsuppressed`` maps lever keys to their watermark event id: vetoes up
+    to and including that id are neutralized by the operator's decision,
+    anything newer suppresses again.
     """
+    lifted = unsuppressed or {}
     keys: set[str] = set()
     for rec in _read_lever_outcomes(outcomes_path):
         root = rec.get("root_task_id")
@@ -2223,11 +2277,17 @@ def _outcome_root_vetoed_keys(conn: Any, outcomes_path: Path) -> set[str]:
         if not root or not key:
             continue
         row = conn.execute(
-            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_vetoed' LIMIT 1",
+            "SELECT id FROM task_events WHERE task_id = ? AND kind = 'freigabe_vetoed' "
+            "ORDER BY id DESC LIMIT 1",
             (str(root),),
         ).fetchone()
-        if row is not None:
-            keys.add(str(key))
+        if row is None:
+            continue
+        key_str = str(key)
+        watermark = lifted.get(key_str)
+        if watermark is not None and int(row["id"]) <= watermark:
+            continue  # bewusst aufgehobenes Veto — neutralisiert bis hierher
+        keys.add(key_str)
     return keys
 
 
@@ -3245,12 +3305,16 @@ def reflect(
             # trotzdem (live 2026-08-04: 2 von 26 Vetos nie gesperrt). Die
             # Fenster-Statistik in `note` bleibt unveraendert fensterbezogen.
             # Ein bewusst aufgehobenes Veto (unsuppress) ist persistent und
-            # wird hier respektiert — sonst sperrte der Allzeit-Scan die
-            # Entscheidung beim naechsten Lauf still wieder (Codex-Blocker
-            # 2026-08-04). Nur die Allzeit-Nachlese wird gefiltert: ein NEUES
-            # Veto im Fenster sperrt auch einen frueher freigegebenen Key.
-            alltime = _outcome_root_vetoed_keys(conn, Path(outcomes_path))
-            alltime -= _read_key_list(notes_path.parent, UNSUPPRESSED_LEVERS_FILE)
+            # wird hier respektiert — mit Watermark auf die Event-ID: nur
+            # Vetoes BIS zur Aufhebung sind neutralisiert, ein spaeteres
+            # Veto sperrt wieder, auch ausserhalb des Fensters (Codex-
+            # Blocker, 3. Runde 2026-08-04). Die Fenster-Statistik in `note`
+            # bleibt unveraendert fensterbezogen.
+            alltime = _outcome_root_vetoed_keys(
+                conn,
+                Path(outcomes_path),
+                unsuppressed=_read_unsuppress_watermarks(notes_path.parent),
+            )
             suppress_keys = sorted(set(vetoed_keys) | alltime)
         suppressed_now = _update_vetoed_set(notes_path.parent / VETOED_LEVERS_FILE, suppress_keys)
 
@@ -3897,33 +3961,68 @@ def _override_args(args) -> tuple[str, str]:
 def run_unsuppress(args) -> dict[str, Any]:
     """Operator-Gegenweg zu S1: lever_key aus der Veto-Sperre loesen.
 
-    Dauerhaft in beide Richtungen: die Aufhebung wird in
-    ``unsuppressed_levers.json`` festgehalten, damit die Allzeit-Nachlese in
-    :func:`reflect` die bewusste Entscheidung nicht beim naechsten Lauf still
-    zurueckdreht (Codex-Blocker 2026-08-04: nach unsuppress war der Key im
-    naechsten Reflect wieder gesperrt). Ein NEUES freigabe_vetoed sperrt den
-    Key trotzdem erneut — die Aufhebung gilt fuer die Vergangenheit, nicht
-    als Immunitaet. Jede Aufhebung hinterlaesst eine Zeile in
+    Dauerhaft in beide Richtungen: die Aufhebung wird mit einem **Watermark**
+    in ``unsuppressed_levers.json`` festgehalten — der hoechsten Event-ID
+    eines ``freigabe_vetoed``, das zum Zeitpunkt der Aufhebung existierte.
+    Die Allzeit-Nachlese in :func:`reflect` neutralisiert damit genau die
+    Vetoes **bis** zu dieser Entscheidung; ein spaeteres Veto sperrt den
+    Key wieder, auch wenn es das Reflect-Fenster verpasst (Codex-Blocker,
+    3. Runde 2026-08-04 — ein nackter Key-Override hatte künftige Vetos
+    verschluckt). Jede Aufhebung hinterlaesst eine Zeile in
     override_audit.jsonl.
     """
     state_dir = default_state_dir()
     key, reason = _override_args(args)
+    watermark = 0
+    roots = [
+        str(rec["root_task_id"])
+        for rec in _read_lever_outcomes(state_dir / "lever-outcomes.json")
+        if rec.get("lever_key") == key and rec.get("root_task_id")
+    ]
+    if roots:
+        conn = kanban_db.connect(board=getattr(args, "board", None))
+        try:
+            qmarks = ", ".join("?" for _ in roots)
+            row = conn.execute(
+                f"SELECT MAX(id) AS m FROM task_events "
+                f"WHERE kind = 'freigabe_vetoed' AND task_id IN ({qmarks})",
+                roots,
+            ).fetchone()
+            watermark = int(row["m"] or 0) if row is not None else 0
+        finally:
+            conn.close()
     remaining = _remove_from_vetoed_set(state_dir / VETOED_LEVERS_FILE, key)
-    lifted = _write_key_list(
-        state_dir,
-        UNSUPPRESSED_LEVERS_FILE,
-        _read_key_list(state_dir, UNSUPPRESSED_LEVERS_FILE) | {key},
+    records = [
+        item
+        for item in _read_unsuppress_records(state_dir)
+        if item.get("key") != key
+    ]
+    records.append(
+        {
+            "key": key,
+            "lifted_at": int(time.time()),
+            "watermark_event_id": watermark,
+            "reason": reason,
+        }
     )
+    path = Path(state_dir) / UNSUPPRESSED_LEVERS_FILE
+    path.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
     _append_override_audit(
         state_dir,
-        {"ts": int(time.time()), "action": "unsuppress", "key": key, "reason": reason},
+        {
+            "ts": int(time.time()),
+            "action": "unsuppress",
+            "key": key,
+            "reason": reason,
+            "watermark_event_id": watermark,
+        },
     )
     return {
         "mode": "unsuppress",
         "key": key,
         "reason": reason,
         "suppressed": remaining,
-        "unsuppressed": lifted,
+        "watermark_event_id": watermark,
     }
 
 

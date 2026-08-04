@@ -1634,9 +1634,8 @@ def test_unsuppress_survives_next_reflect_run(board_home, tmp_path, monkeypatch)
     assert "LIFT-ME" not in json.loads(
         (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
     )
-    assert "LIFT-ME" in json.loads(
-        (state_dir / "unsuppressed_levers.json").read_text(encoding="utf-8")
-    )
+    lifted = json.loads((state_dir / "unsuppressed_levers.json").read_text(encoding="utf-8"))
+    assert [r["key"] for r in lifted] == ["LIFT-ME"]
 
     # 3. Ein voller zweiter Reflect-Lauf darf den Key NICHT wieder sperren.
     with kb.connect() as conn:
@@ -1647,3 +1646,79 @@ def test_unsuppress_survives_next_reflect_run(board_home, tmp_path, monkeypatch)
     assert "LIFT-ME" not in json.loads(
         (state_dir / "vetoed_levers.json").read_text(encoding="utf-8")
     )
+
+
+def test_new_veto_after_unsuppress_suppresses_again_outside_window(
+    board_home, tmp_path, monkeypatch
+):
+    """Codex-Blocker, 3. Runde (2026-08-04): der Override darf nur Vetoes BIS
+    zur Aufhebung neutralisieren. Kette: veto(alt) -> reflect -> unsuppress
+    -> NEUES Veto AUSSERHALB des Reflect-Fensters -> der Key ist wieder
+    gesperrt. Ohne Watermark (nackter Key-Override) blieb er frei:
+    after_new_veto_outside_window=[]."""
+    now_ts = int(time.time())
+    old_ts = now_ts - 30 * 86400
+    state_dir = strategist.default_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    outcomes_path = state_dir / "lever-outcomes.json"
+    notes_path = state_dir / "reflections.jsonl"
+
+    # 1. Altes Veto auf Wurzel 1 (ausserhalb des Fensters).
+    with kb.connect() as conn:
+        root1 = _make_held_proposal(conn, "WATERMARK-KEY", "first veto")
+        assert kb.dismiss_freigabe_hold(conn, root1, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root1),
+        )
+        conn.commit()
+    outcomes_path.write_text(
+        json.dumps([{
+            "schema_version": 1,
+            "lever_key": "WATERMARK-KEY",
+            "root_task_id": root1,
+            "proposed_at": old_ts,
+            "status": "archived",
+        }]),
+        encoding="utf-8",
+    )
+
+    # 2. Reflect sperrt; 3. Operator hebt auf (Watermark = Veto-1-Event-ID).
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts))
+    vetoed_path = state_dir / "vetoed_levers.json"
+    assert "WATERMARK-KEY" in json.loads(vetoed_path.read_text(encoding="utf-8"))
+    args = SimpleNamespace(lever_key=["WATERMARK-KEY"], reason="bewusst aufgehoben",
+                           board=None)
+    strategist.run_unsuppress(args)
+    assert "WATERMARK-KEY" not in json.loads(vetoed_path.read_text(encoding="utf-8"))
+
+    # 4. NEUES Veto auf einer neuen Wurzel desselben Hebels — hoehere
+    # Event-ID, aber zurueckdatiert, also AUSSERHALB des Reflect-Fensters.
+    with kb.connect() as conn:
+        root2 = _make_held_proposal(conn, "WATERMARK-KEY", "second veto")
+        assert kb.dismiss_freigabe_hold(conn, root2, author="operator") is True
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (old_ts, root2),
+        )
+        conn.commit()
+    records = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    records.append({
+        "schema_version": 1,
+        "lever_key": "WATERMARK-KEY",
+        "root_task_id": root2,
+        "proposed_at": old_ts + 100,
+        "status": "archived",
+    })
+    outcomes_path.write_text(json.dumps(records), encoding="utf-8")
+
+    # 5. Der naechste Reflect sperrt den Key wieder — das neue Veto liegt
+    # UEBER dem Watermark, obwohl es das Fenster verpasst hat.
+    with kb.connect() as conn:
+        strategist.reflect(conn, since=now_ts - 3600, notes_path=notes_path,
+                           outcomes_path=outcomes_path, now=float(now_ts + 60))
+    assert "WATERMARK-KEY" in json.loads(vetoed_path.read_text(encoding="utf-8"))
