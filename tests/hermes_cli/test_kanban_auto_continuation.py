@@ -76,7 +76,11 @@ def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
         assert run.metadata["worker_runtime"] == "hermes"
         ignored = SPAWN_IDENTITY_METADATA_FIELDS | {"cost"}
         md = {k: v for k, v in run.metadata.items() if k not in ignored}
-        assert md == {"phase": "routing"}
+        assert md == {
+            "phase": "routing",
+            "worker_exit_kind": "iteration_budget_exhausted",
+            "worker_failure_fingerprint": kb._error_fingerprint(run.summary),
+        }
 
         events = kb.list_events(conn, tid)
         assert [event.kind for event in events][-2:] == [

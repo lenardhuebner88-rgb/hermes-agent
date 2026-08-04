@@ -10977,6 +10977,7 @@ def record_iteration_budget_exhausted(
             task_id,
             outcome="iteration_budget_exhausted",
             status="iteration_budget_exhausted",
+            error=(summary or reason)[:500],
             summary=summary,
             metadata=metadata,
         )
