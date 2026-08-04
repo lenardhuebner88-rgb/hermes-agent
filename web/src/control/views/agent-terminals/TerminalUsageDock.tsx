@@ -65,22 +65,22 @@ export function TerminalUsageDock({ open, onClose }: { open: boolean; onClose: (
     >
       <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
         <div>
-          <Eyebrow>Usage</Eyebrow>
+          <Eyebrow>Verbrauch</Eyebrow>
           <h2 className="text-sm font-semibold text-ink">Abo-Limits</h2>
         </div>
         <div className="flex items-center gap-1">
-          <span className="rounded-card p-2 text-ink-3" aria-label={usage.loading ? "Usage wird aktualisiert" : "Usage wird jede Minute aktualisiert"}>
+          <span className="rounded-card p-2 text-ink-3" aria-label={usage.loading ? "Abo-Limits werden aktualisiert" : "Abo-Limits werden jede Minute aktualisiert"}>
             <RefreshCw className={`size-3.5 ${usage.loading ? "animate-spin" : ""}`} />
           </span>
-          <button type="button" onClick={onClose} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-3 hover:border-live/40 hover:bg-surface-3 hover:text-ink" aria-label="Usage schließen">
+          <button type="button" onClick={onClose} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-3 hover:border-live/40 hover:bg-surface-3 hover:text-ink" aria-label="Abo-Limits schließen">
             <X className="size-3.5" />
           </button>
         </div>
       </div>
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        {usage.error ? <p className="rounded-card border border-status-alert/20 bg-status-alert/10 p-3 text-xs text-status-alert">Usage konnte nicht geladen werden.</p> : null}
+        {usage.error ? <p className="rounded-card border border-status-alert/20 bg-status-alert/10 p-3 text-xs text-status-alert">Abo-Limits konnten nicht geladen werden.</p> : null}
         {usage.loading && providers.length === 0 ? (
-          <div className="space-y-3" aria-label="Usage wird geladen">
+          <div className="space-y-3" aria-label="Abo-Limits werden geladen">
             {[0, 1, 2, 3].map((index) => <div key={index} className="hc-skeleton h-28 rounded-card" />)}
           </div>
         ) : null}

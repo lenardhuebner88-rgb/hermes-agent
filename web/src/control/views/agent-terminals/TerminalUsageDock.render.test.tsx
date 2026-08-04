@@ -116,14 +116,31 @@ describe("TerminalUsageDock", () => {
     expect(screen.queryByText("5-Std-Fenster")).toBeNull();
   });
 
-  it("renders the Usage eyebrow via the shared Eyebrow primitive, not the mono hc-eyebrow compat class", () => {
+  it("renders the german eyebrow via the shared Eyebrow primitive above the unchanged Abo-Limits heading, not the mono hc-eyebrow compat class", () => {
     useAccountUsageMock.mockReturnValue(loadState({ cache_ttl_seconds: 60, providers: [] }));
 
     const { container } = render(<TerminalUsageDock open onClose={() => {}} />);
 
-    const eyebrow = screen.getByText("Usage");
+    const eyebrow = screen.getByText("Verbrauch");
     expect(eyebrow.className).toContain("font-display");
+    expect(screen.getByRole("heading", { name: "Abo-Limits" })).toBeTruthy();
     expect(container.innerHTML).not.toContain("hc-eyebrow");
+  });
+
+  it("speaks german throughout the dock header — no visible or screenreader 'Usage' left", () => {
+    useAccountUsageMock.mockReturnValue(loadState({ cache_ttl_seconds: 60, providers: [] }));
+
+    const { container, rerender } = render(<TerminalUsageDock open onClose={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /schließen/i })).toBeTruthy();
+    expect(screen.getByLabelText("Abo-Limits werden jede Minute aktualisiert")).toBeTruthy();
+    expect(container.innerHTML).not.toMatch(/Usage/);
+
+    useAccountUsageMock.mockReturnValue(loadState({ cache_ttl_seconds: 60, providers: [] }, { loading: true }));
+    rerender(<TerminalUsageDock open onClose={() => {}} />);
+
+    expect(screen.getByLabelText("Abo-Limits werden aktualisiert")).toBeTruthy();
+    expect(container.innerHTML).not.toMatch(/Usage/);
   });
 
   it("renders loading skeletons while usage is still loading and no providers are cached yet, without legacy classes", () => {
@@ -131,7 +148,7 @@ describe("TerminalUsageDock", () => {
 
     const { container } = render(<TerminalUsageDock open onClose={() => {}} />);
 
-    expect(screen.getByLabelText("Usage wird geladen")).toBeTruthy();
+    expect(screen.getByLabelText("Abo-Limits werden geladen")).toBeTruthy();
     expect(container.querySelectorAll(".hc-skeleton")).toHaveLength(4);
 
     const html = container.innerHTML;
@@ -145,7 +162,7 @@ describe("TerminalUsageDock", () => {
 
     const { container } = render(<TerminalUsageDock open onClose={() => {}} />);
 
-    expect(screen.getByText("Usage konnte nicht geladen werden.")).toBeTruthy();
+    expect(screen.getByText("Abo-Limits konnten nicht geladen werden.")).toBeTruthy();
 
     const html = container.innerHTML;
     for (const legacy of ["cyan-300", "cyan-200", "emerald-300", "amber-300", "red-400", "ink-dim", "hc-eyebrow", "rounded-[16px]"]) {

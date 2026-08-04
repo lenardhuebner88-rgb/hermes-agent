@@ -1,5 +1,7 @@
+// @vitest-environment jsdom
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
 import { ScorecardResponseSchema, type ScorecardResponse } from "../lib/schemas";
 
 const mockState = vi.hoisted(() => ({
@@ -79,6 +81,17 @@ describe("ScorecardView", () => {
     mockState.reload.mockClear();
   });
 
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("trägt denselben Seitentitel wie der Navigationseintrag: 'Scorecard'", () => {
+    render(<ScorecardView />);
+
+    expect(screen.getByRole("heading", { name: "Scorecard" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Worker Scorecard" })).toBeNull();
+  });
+
   it("unterscheidet die drei Zustände: Skeleton beim Erst-Load, ErrorNote mit Retry bei Fehler", () => {
     mockState.data = null;
     mockState.loading = true;
@@ -114,7 +127,8 @@ describe("ScorecardView", () => {
 
   it("zeigt Qualitätsentscheidungen mit sichtbaren Nennern", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
-    expect(markup).toContain("Worker Scorecard");
+    expect(markup).toContain(">Scorecard<");
+    expect(markup).not.toContain("Worker Scorecard");
     expect(markup).toContain("68,1 %");
     expect(markup).toContain("192 / 282 entschiedene Reviews");
     expect(markup).toContain("282 Verdicts / 987 Runs");

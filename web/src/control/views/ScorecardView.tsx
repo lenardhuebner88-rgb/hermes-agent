@@ -105,7 +105,7 @@ export function ScorecardView() {
     <main data-scorecard className="mx-auto flex w-full max-w-[2100px] flex-col gap-4 p-4 md:p-6">
       <ViewHeader
         eyebrow={`QUALITÄT · ENTSCHEIDUNGEN · ${quality.window_days > 0 ? `${quality.window_days} TAGE` : "GESAMTZEITRAUM"}`}
-        title="Worker Scorecard"
+        title="Scorecard"
         description="Eine Entscheidung, dann ihre Begründung."
         actions={(
           <div className={cn(
