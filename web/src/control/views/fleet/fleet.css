@@ -3237,7 +3237,9 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-plan-criteria > li {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+  /* minmax statt fixer 28px: lange AC-IDs (z. B. AC-ER-KONTROLLPROBE)
+     überlagerten auf 390px den Kriteriumstext, weil sie aus der Spur brachen. */
+  grid-template-columns: minmax(28px, max-content) minmax(0, 1fr);
   gap: 8px;
   padding: 8px 0;
   border-bottom: 1px solid var(--fleet-linie);
@@ -3246,6 +3248,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-plan-criteria > li > span {
   color: var(--fleet-t3);
   font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
+  overflow-wrap: anywhere;
 }
 
 .fleet-plan-disclosure {

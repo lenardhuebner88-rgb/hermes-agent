@@ -13,6 +13,7 @@ import { de } from "../../i18n/de";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
+import { planSpecVisibleFindingCount } from "./planSpecKanban";
 import type { PlanSpecRecord } from "./shared";
 
 const PLAN_COMPOSER_EXPANDED_KEY = "fleet-plan-composer-expanded";
@@ -38,6 +39,9 @@ interface PlanTabProps {
   readOnly?: boolean;
   loading?: boolean;
   error?: string | null;
+  /** true = letzte Aktualisierung fehlgeschlagen, gezeigt wird der Stand des
+      letzten erfolgreichen Polls (stale-while-error). */
+  stale?: boolean;
   onRetry?: () => void | Promise<void>;
 }
 
@@ -152,6 +156,7 @@ export function PlanTab({
   readOnly = false,
   loading = false,
   error = null,
+  stale = false,
   onRetry,
 }: PlanTabProps) {
   const [localSegment, setLocalSegment] = useState<PlanSegment>("all");
@@ -310,6 +315,12 @@ export function PlanTab({
         </select>
       </div>
 
+      {stale ? (
+        <p className="fleet-plan-hint" role="status">
+          Aktualisierung fehlgeschlagen · es wird der letzte erfolgreiche Stand gezeigt.
+        </p>
+      ) : null}
+
       {loading && allPlanspecs.length === 0 ? (
         <PlanSkeleton />
       ) : error && allPlanspecs.length === 0 ? (
@@ -321,12 +332,22 @@ export function PlanTab({
       ) : visible.length === 0 ? (
         <div className="hc-fleet-empty">
           <span className="hc-fleet-empty-title">
-            {allPlanspecs.length === 0 ? "Noch keine PlanSpecs" : "Keine Treffer"}
+            {allPlanspecs.length === 0
+              ? "Noch keine PlanSpecs"
+              : query.trim()
+                ? "Keine Treffer"
+                : segment === "all"
+                  ? "Nichts offen"
+                  : `Nichts in „${segments.find(([id]) => id === segment)?.[1] ?? segment}“`}
           </span>
           <span className="hc-fleet-empty-desc">
             {allPlanspecs.length === 0
               ? "Neue Pläne entstehen im Composer oder als bindende Vault-PlanSpec."
-              : "Register oder Suche anpassen."}
+              : query.trim()
+                ? "Suche oder Register anpassen."
+                : segment === "all"
+                  ? "Abgeschlossene Pläne liegen im Register „Erledigt“."
+                  : "Ein anderes Register wählen oder die Suche anpassen."}
           </span>
         </div>
       ) : (
@@ -335,6 +356,7 @@ export function PlanTab({
             const state = planState(item);
             const meta = STATE_META[state];
             const taskCount = item.kanban_child_total || item.subtask_count;
+            const findingCount = planSpecVisibleFindingCount(item);
             return (
               <li key={item.path}>
                 <button
@@ -349,7 +371,7 @@ export function PlanTab({
                       <span>{item.agent || "dashboard"}</span>
                       <span>{taskCount} Schritte</span>
                       {(item.dependency_count ?? 0) > 0 ? <span>{item.dependency_count} Abhängigkeiten</span> : null}
-                      {(item.finding_count ?? 0) > 0 ? <span>{item.finding_count} Befunde</span> : null}
+                      {findingCount > 0 ? <span>{findingCount} Befunde</span> : null}
                       {item.target_board ? <span>→ {item.target_board}</span> : null}
                     </span>
                     {item.action_reason ? <span className="fleet-plan-row-reason">{item.action_reason}</span> : null}

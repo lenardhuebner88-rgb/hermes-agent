@@ -38,6 +38,24 @@ function normalizedClosedReason(item: PlanSpecRecord): string {
   return (item.closed_reason ?? item.status ?? "").toLowerCase();
 }
 
+/**
+ * Status-Echo der Abschluss-Projektion ("closed status: done") — kein echter
+ * Prüfbefund. Live-Befund 2026-08-04: praktisch jede abgeschlossene PlanSpec
+ * trägt genau diesen Eintrag in ingest_findings/source_findings und zeigte
+ * dadurch „1 Befunde", sodass echte Befunde im Rauschen untergingen.
+ */
+export function planSpecFindingIsStatusEcho(finding: string): boolean {
+  return /^closed status:/i.test(finding.trim());
+}
+
+/** Sichtbare Befund-Anzahl: API-Zähler minus erkennbare Status-Echos. */
+export function planSpecVisibleFindingCount(item: PlanSpecRecord): number {
+  const total = item.finding_count ?? 0;
+  if (total <= 0) return 0;
+  const echoes = [...item.errors, ...item.ingest_findings].filter(planSpecFindingIsStatusEcho).length;
+  return Math.max(0, total - echoes);
+}
+
 export function planSpecIsClosed(item: PlanSpecRecord): boolean {
   return !item.open || Boolean(item.closed_reason) || item.kanban_state === "completed" || item.kanban_state === "done" || item.kanban_state === "archived";
 }
@@ -50,5 +68,13 @@ export function planSpecClosedDispositionLabel(item: PlanSpecRecord): string {
   if (reason.includes("shipped")) return "shipped";
   if (item.kanban_state === "archived" || rootStatus === "archived" || reason.includes("archived")) return "kanban-archived";
   if (item.kanban_state === "completed" || item.kanban_state === "done" || rootStatus === "completed" || rootStatus === "done") return "kanban-completed";
+  // Abschluss-Echo der Hub-Projektion: „closed status: done|completed|archived"
+  // ohne Board-Endzustand (kanban_state „not_ingested"). Fiel sonst auf den
+  // generischen „geschlossen"-Fallback — direkt neben dem „Fertig" der Liste.
+  const statusEcho = reason.match(/^closed status:\s*([a-z_-]+)/);
+  if (statusEcho) {
+    if (statusEcho[1] === "done" || statusEcho[1] === "completed") return "kanban-completed";
+    if (statusEcho[1] === "archived") return "kanban-archived";
+  }
   return item.closed_reason ?? item.status ?? "closed";
 }

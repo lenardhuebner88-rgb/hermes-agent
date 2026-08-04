@@ -4,7 +4,7 @@ import type { PlanSpecDetailResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "../../lib/types";
 import { Eyebrow, SkeletonCard } from "../../components/primitives";
 import { DrawerShell, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
-import { planSpecKanbanTone, planSpecKanbanLabel } from "./planSpecKanban";
+import { planSpecKanbanTone, planSpecKanbanLabel, planSpecFindingIsStatusEcho, planSpecIsClosed } from "./planSpecKanban";
 
 function middleEllipsis(value: string, edge = 32): string {
   if (value.length <= edge * 2 + 3) return value;
@@ -126,6 +126,18 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
   const criteriaCount = detail
     ? detail.acceptance_criteria_total ?? detail.acceptance_criteria.length + sliceCriteria.length
     : 0;
+  // Prüfbefunde ohne das Abschluss-Echo („closed status: …") — das ist die
+  // Disposition, kein Befund, und steht schon im Zustandslabel.
+  const visibleFindings = [
+    ...(detail?.source_findings ?? []), ...item.errors, ...item.ingest_findings,
+  ]
+    .filter((finding, index, all) => all.indexOf(finding) === index)
+    .filter((finding) => !planSpecFindingIsStatusEcho(finding));
+  // Geschlossene Pläne haben keinen nächsten Schritt im Dashboard — die
+  // Zeile „Abschluss prüfen" führte in eine Sackgasse (keine Aktion dahinter).
+  const closed = planSpecIsClosed(item);
+  const showNextAction = !closed
+    || Boolean(item.next_action && !["none", "open_result"].includes(item.next_action));
   const tabs = [
     ["target", "Überblick"],
     ["steps", `Ablauf ${detail?.subtasks.length ?? 0}`],
@@ -185,10 +197,12 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
           <span>Warum</span>
           <strong>{item.action_reason || "Keine zusätzliche Einordnung vorhanden."}</strong>
         </div>
-        <div>
-          <span>Nächster Schritt</span>
-          <strong>{NEXT_ACTION_LABELS[item.next_action ?? "none"] ?? item.next_action ?? "Keine Aktion"}</strong>
-        </div>
+        {showNextAction ? (
+          <div>
+            <span>Nächster Schritt</span>
+            <strong>{NEXT_ACTION_LABELS[item.next_action ?? "none"] ?? item.next_action ?? "Keine Aktion"}</strong>
+          </div>
+        ) : null}
       </section>
       {planIsOnBoard(item) && onOpenChain ? (
         <button
@@ -225,13 +239,11 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
           </div>
 
           {tab === "target" ? <div id="fleet-plan-panel-target" role="tabpanel" aria-labelledby="fleet-plan-tab-target" className="mt-4 grid gap-4">
-            {(detail.source_findings?.length || item.errors.length || item.ingest_findings.length) ? (
+            {visibleFindings.length ? (
               <section className="fleet-plan-findings-panel">
                 <Eyebrow>Prüfbefunde</Eyebrow>
                 <ul>
-                  {[...(detail.source_findings ?? []), ...item.errors, ...item.ingest_findings]
-                    .filter((finding, index, all) => all.indexOf(finding) === index)
-                    .map((finding) => <li key={finding}>{finding}</li>)}
+                  {visibleFindings.map((finding) => <li key={finding}>{finding}</li>)}
                 </ul>
               </section>
             ) : null}
@@ -326,11 +338,15 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
           </section> : null}
 
           {tab === "check" ? <div id="fleet-plan-panel-check" role="tabpanel" aria-labelledby="fleet-plan-tab-check" className="mt-4 grid gap-4">
-            <dl className="fleet-plan-decision">
-              <div><dt>Auswirkung</dt><dd>{detail.subtasks.length} Schritte auf {detail.target_board || item.target_board || "dem aktiven Board"}</dd></div>
-              <div><dt>Schutz</dt><dd>{detail.freigabe === "operator" ? "Start erfordert Operator-Freigabe" : "Freigabe laut PlanSpec"}</dd></div>
-              <div><dt>Prüfung</dt><dd>{item.finding_count ?? detail.finding_count ?? 0} Befunde · Live-Test {detail.live_test_depth || "smoke"}</dd></div>
-            </dl>
+            {/* Für geschlossene Pläne ist die Übergabe-Matrix irreführend —
+                nichts davon landet noch auf einem Board. */}
+            {closed ? null : (
+              <dl className="fleet-plan-decision">
+                <div><dt>Auswirkung</dt><dd>{detail.subtasks.length} Schritte auf {detail.target_board || item.target_board || "dem aktiven Board"}</dd></div>
+                <div><dt>Schutz</dt><dd>{detail.freigabe === "operator" ? "Start erfordert Operator-Freigabe" : "Freigabe laut PlanSpec"}</dd></div>
+                <div><dt>Prüfung</dt><dd>{item.finding_count ?? detail.finding_count ?? 0} Befunde · Live-Test {detail.live_test_depth || "smoke"}</dd></div>
+              </dl>
+            )}
             {actions}
           </div> : null}
         </div>

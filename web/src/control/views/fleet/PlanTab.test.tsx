@@ -60,10 +60,12 @@ function renderPlanTab({
   plans = [plan()],
   onShowDetail = vi.fn(),
   readOnly = false,
+  stale = false,
 }: {
   plans?: PlanSpecRecord[];
   onShowDetail?: (item: PlanSpecRecord) => void;
   readOnly?: boolean;
+  stale?: boolean;
 } = {}) {
   return render(
     <PlanTab
@@ -72,6 +74,7 @@ function renderPlanTab({
       onApproveSuccess={vi.fn()}
       onShowDetail={onShowDetail}
       readOnly={readOnly}
+      stale={stale}
     />,
   );
 }
@@ -247,5 +250,94 @@ describe("PlanTab register", () => {
     expect(screen.queryByRole("button", { name: "Neuer Plan" })).toBeNull();
     expect(screen.queryByLabelText("Auto-Release-Status")).toBeNull();
     expect(screen.getByRole("listitem")).toBeTruthy();
+  });
+});
+
+describe("PlanTab — Befund-Echo, Stale-Hinweis, Leerzustände", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      autonomous: true,
+      max_tier_autonomous: "review",
+      recent: [],
+      anchors: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
+  });
+
+  afterEach(() => {
+    cleanup();
+    window.localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it("zeigt kein Befund-Meta in der Zeile, wenn der Zähler nur das Abschluss-Echo trägt (Live-Form 2026-08-04)", () => {
+    renderPlanTab({
+      plans: [
+        plan({
+          topic: "Nur Echo",
+          open: false,
+          status: "done",
+          closed_reason: "closed status: done",
+          action_state: "completed",
+          finding_count: 1,
+          ingest_findings: ["closed status: done"],
+        }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/real-finding.md",
+          filename: "real-finding.md",
+          topic: "Echter Befund",
+          open: false,
+          status: "done",
+          closed_reason: "closed status: done",
+          action_state: "completed",
+          finding_count: 2,
+          ingest_findings: ["closed status: done", "scope-less code subtask: ER-S2"],
+        }),
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Erledigt24" }));
+    const echoRow = screen.getByRole("button", { name: /Nur Echo/ });
+    expect(echoRow.textContent).not.toContain("Befunde");
+    const realRow = screen.getByRole("button", { name: /Echter Befund/ });
+    expect(realRow.textContent).toContain("1 Befunde");
+  });
+
+  it("meldet einen fehlgeschlagenen Poll als letzten erfolgreichen Stand statt still zu bleiben", () => {
+    renderPlanTab({ stale: true });
+    expect(screen.getByText("Aktualisierung fehlgeschlagen · es wird der letzte erfolgreiche Stand gezeigt.")).toBeTruthy();
+
+    cleanup();
+    renderPlanTab({ stale: false });
+    expect(screen.queryByText("Aktualisierung fehlgeschlagen · es wird der letzte erfolgreiche Stand gezeigt.")).toBeNull();
+  });
+
+  it("unterscheidet leere Segmente von Suchfehlschlägen", () => {
+    // Live-Lage 2026-08-04: 399 abgeschlossene Pläne, nichts offen.
+    renderPlanTab({
+      plans: [
+        plan({
+          topic: "Abgeschlossener Plan",
+          open: false,
+          status: "done",
+          closed_reason: "closed status: done",
+          action_state: "completed",
+        }),
+      ],
+    });
+
+    // Default „Offen": kein Filter aktiv — das darf nicht wie ein
+    // Suchfehlschlag („Keine Treffer") aussehen.
+    expect(screen.getByText("Nichts offen")).toBeTruthy();
+    expect(screen.getByText("Abgeschlossene Pläne liegen im Register „Erledigt“.")).toBeTruthy();
+
+    // Anderes leeres Register nennt seinen Namen.
+    fireEvent.click(screen.getByRole("tab", { name: "Bereit5" }));
+    expect(screen.getByText("Nichts in „Bereit“")).toBeTruthy();
+
+    // Erst eine Suche ohne Treffer ist „Keine Treffer".
+    fireEvent.change(screen.getByLabelText("PlanSpecs durchsuchen"), { target: { value: "gibtsnicht" } });
+    expect(screen.getByText("Keine Treffer")).toBeTruthy();
+    expect(screen.getByText("Suche oder Register anpassen.")).toBeTruthy();
   });
 });

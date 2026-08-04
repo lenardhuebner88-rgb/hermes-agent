@@ -691,6 +691,7 @@ export function FleetView() {
                   summary={selectedBoard ? selectedPlanspecs.data?.summary : planspecs.data?.summary}
                   loading={selectedBoard ? selectedPlanspecs.loading : planspecs.loading}
                   error={selectedBoard ? selectedPlanspecs.error : planspecs.error}
+                  stale={Boolean(selectedBoard ? selectedPlanspecs.isStale : planspecs.isStale)}
                   onRetry={selectedBoard ? selectedPlanspecs.reload : planspecs.reload}
                   readOnly={selectedBoard != null}
                   selectedPath={planspecDrawerItem?.path}

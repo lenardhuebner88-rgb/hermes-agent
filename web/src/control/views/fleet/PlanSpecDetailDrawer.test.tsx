@@ -317,3 +317,95 @@ describe("PlanSpecDetailDrawer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PlanSpecDetailDrawer — geschlossene Pläne und Befund-Echo", () => {
+  afterEach(cleanup);
+
+  // Live-Form 2026-08-04: abgeschlossene PlanSpec, nie ingestiert, der Hub
+  // projiziert „closed status: done" als finding.
+  const closedItem: PlanSpecRecord = {
+    ...baseItem,
+    open: false,
+    status: "done",
+    closed_reason: "closed status: done",
+    action_state: "completed",
+    next_action: "open_result",
+    finding_count: 1,
+    ingest_findings: ["closed status: done"],
+  };
+  const closedDetail: PlanSpecDetailResponse = {
+    ...baseDetail,
+    source_findings: ["closed status: done"],
+  };
+
+  it("zeigt das Abschluss-Echo nicht als Prüfbefund — echte Befunde bleiben", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={closedItem}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.queryByText("Prüfbefunde")).toBeNull();
+    expect(screen.queryByText("closed status: done")).toBeNull();
+
+    cleanup();
+    render(
+      <PlanSpecDetailDrawer
+        item={{ ...closedItem, ingest_findings: ["closed status: done", "scope-less code subtask: ER-S2"] }}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.getByText("Prüfbefunde")).toBeTruthy();
+    expect(screen.getByText("scope-less code subtask: ER-S2")).toBeTruthy();
+    expect(screen.queryByText("closed status: done")).toBeNull();
+  });
+
+  it("endet bei geschlossenen Plänen ohne Sackgassen-Next-Step", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={closedItem}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.queryByText("Nächster Schritt")).toBeNull();
+    expect(screen.queryByText("Abschluss prüfen")).toBeNull();
+
+    // Offener Plan behält seinen nächsten Schritt.
+    cleanup();
+    render(
+      <PlanSpecDetailDrawer
+        item={{ ...baseItem, next_action: "preview_ingest" }}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.getByText("Nächster Schritt")).toBeTruthy();
+    expect(screen.getByText("Übergabe vorprüfen")).toBeTruthy();
+  });
+
+  it("versteckt die Übergabe-Matrix bei geschlossenen Plänen", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={closedItem}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Übergabe" }));
+    expect(screen.queryByText("Auswirkung")).toBeNull();
+    expect(screen.queryByText("Schutz")).toBeNull();
+  });
+});

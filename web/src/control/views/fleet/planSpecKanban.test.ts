@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanSpecRecord } from "../../lib/types";
-import { planSpecClosedDispositionLabel, planSpecIsClosed, planSpecKanbanLabel } from "./planSpecKanban";
+import { planSpecClosedDispositionLabel, planSpecFindingIsStatusEcho, planSpecIsClosed, planSpecKanbanLabel, planSpecVisibleFindingCount } from "./planSpecKanban";
 
 function record(overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
   return {
@@ -95,10 +95,66 @@ describe("planSpecKanban closed provenance", () => {
       action_state: "archived",
     });
     expect(planSpecKanbanLabel(unknownClosed)).toBe("geschlossen");
+
+    // Live-Record 2026-08-04 (Abo-Limits-Cockpit): Hub projiziert
+    // closed_reason „closed status: done" bei kanban_state „not_ingested".
+    // Liste („Fertig" aus action_state) und Detail müssen denselben
+    // Endzustand zeigen.
+    const statusEchoDone = record({
+      open: false,
+      status: "done",
+      closed_reason: "closed status: done",
+      kanban_state: "not_ingested",
+      action_state: "completed",
+    });
+    expect(planSpecKanbanLabel(statusEchoDone)).toBe("erledigt");
+
+    const statusEchoArchived = record({
+      open: false,
+      status: "archived",
+      closed_reason: "closed status: archived",
+      kanban_state: "not_ingested",
+      action_state: "archived",
+    });
+    expect(planSpecKanbanLabel(statusEchoArchived)).toBe("archiviert");
   });
 
   it("keeps the open fallbacks for genuinely open records", () => {
     expect(planSpecKanbanLabel(record({ open: true, valid: true }))).toBe("offen");
     expect(planSpecKanbanLabel(record({ open: true, valid: false }))).toBe("blocked");
+  });
+});
+
+describe("planSpec findings — Status-Echo ist kein Befund", () => {
+  it("erkennt das Abschluss-Echo in allen Groß-/Kleinschreibungen", () => {
+    expect(planSpecFindingIsStatusEcho("closed status: done")).toBe(true);
+    expect(planSpecFindingIsStatusEcho("  Closed Status: archived")).toBe(true);
+    expect(planSpecFindingIsStatusEcho("scope-less code subtask: ER-S2")).toBe(false);
+    expect(planSpecFindingIsStatusEcho("lane coder nicht auflösbar")).toBe(false);
+  });
+
+  it("zählt das Echo nicht als sichtbaren Befund — Live-Form finding_count=1", () => {
+    // Live-Befund 2026-08-04: 399 abgeschlossene PlanSpecs trugen
+    // finding_count=1 mit genau diesem Echo in ingest_findings.
+    const item = record({
+      open: false,
+      closed_reason: "closed status: done",
+      action_state: "completed",
+      ingest_findings: ["closed status: done"],
+      finding_count: 1,
+    });
+    expect(planSpecVisibleFindingCount(item)).toBe(0);
+
+    const mitEchtemBefund = record({
+      open: false,
+      closed_reason: "closed status: done",
+      action_state: "completed",
+      ingest_findings: ["closed status: done", "scope-less code subtask: ER-S2"],
+      finding_count: 2,
+    });
+    expect(planSpecVisibleFindingCount(mitEchtemBefund)).toBe(1);
+
+    expect(planSpecVisibleFindingCount(record({ finding_count: 0 }))).toBe(0);
+    expect(planSpecVisibleFindingCount(record({ finding_count: undefined }))).toBe(0);
   });
 });
