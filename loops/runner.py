@@ -1947,6 +1947,49 @@ class LoopRunner:
             return False
         return "{{HAS_WEB}}" in text
 
+    # Die beiden node_modules, die gate-frontend.sh worktree-lokal verlangt.
+    _DEDICATED_NM_LINKS = ("node_modules", "web/node_modules")
+
+    def dedicated_deps_tree(self) -> Path:
+        """Spiegelt die Deps-Identität aus ``scripts/gate-frontend.sh``.
+
+        Das Gate bildet sie als ``basename(<physischer repo_root>)-sha256[:16]``
+        unter ``HERMES_WORKTREE_DEPS_ROOT``. Die Formel darf nicht driften —
+        ``test_dedicated_deps_tree_matches_gate_frontend_formula`` rechnet sie
+        gegen das echte Shell-Skript nach.
+        """
+        root = os.environ.get("HERMES_WORKTREE_DEPS_ROOT") or "/mnt/data/hermes-worktree-deps"
+        canonical = self.wt.resolve(strict=False)
+        digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
+        return Path(os.path.abspath(root)) / f"{canonical.name}-{digest}"
+
+    def _plant_dedicated_deps_links(self) -> str | None:
+        """Symlinks in den exklusiven Deps-Baum pflanzen; Fehlergrund oder None.
+
+        ``gate-frontend.sh`` bereitet den dedizierten Baum nur vor, wenn schon
+        ein solcher Symlink existiert (``_gate_has_dedicated_nm_link``) — in
+        einem frischen Worktree also nie. Ohne diesen Anstoß installiert
+        ``npm ci`` ~1,5 GB als echte Verzeichnisse dorthin, wo der Worktree
+        liegt: bei den Loop-Packs auf die Systemplatte statt auf die SSD.
+        """
+        tree = self.dedicated_deps_tree()
+        for rel in self._DEDICATED_NM_LINKS:
+            link = self.wt / rel
+            target = tree / rel
+            if link.is_symlink():
+                if Path(os.path.abspath(link.readlink())) != target:
+                    return f"{rel} zeigt auf einen fremden Baum ({link.readlink()})"
+                continue
+            if link.exists():
+                return f"{rel} ist ein echtes Verzeichnis — erst entfernen"
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+            except OSError as exc:
+                return f"{rel}: {exc}"
+        return None
+
     def ensure_frontend_deps(self) -> str:
         """HAS_WEB ehrlich beantworten, statt blind auf ``node_modules`` zu proben.
 
@@ -1971,6 +2014,10 @@ class LoopRunner:
         if not gate.is_file():
             return "0"
         self.say("Frontend-Deps fehlen im Worktree — Preflight provisioniert sie einmalig …")
+        planted = self._plant_dedicated_deps_links()
+        if planted is not None:
+            self.ledger(f"FRONTEND-DEPS Isolation nicht herstellbar: {planted}")
+            return "0"
         env = {
             **os.environ,
             "GATE_FRONTEND_PREFLIGHT_ONLY": "1",
