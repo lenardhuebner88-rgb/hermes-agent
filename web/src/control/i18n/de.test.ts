@@ -11,6 +11,7 @@ import { de } from "./de";
 const planTransitionSrc = readFileSync(fileURLToPath(new URL("../views/fleet/PlanSpecTransitionPanel.tsx", import.meta.url)), "utf8");
 const fleetPipelineSrc = readFileSync(fileURLToPath(new URL("../components/fleet/FleetPipeline.tsx", import.meta.url)), "utf8");
 const fleetSrc = readFileSync(fileURLToPath(new URL("../lib/fleet.ts", import.meta.url)), "utf8");
+const foDetailDrawerSrc = readFileSync(fileURLToPath(new URL("../views/backlog/FoDetailDrawer.tsx", import.meta.url)), "utf8");
 
 describe("German gated Flow copy", () => {
   it("explains that the gated release frees held subtasks without a force-run promise", () => {
@@ -43,6 +44,17 @@ describe("German gated Flow copy", () => {
 
     expect(fleetPipelineSrc).not.toMatch(/Rework|Verify:/);
     expect(fleetSrc).not.toMatch(/ship: \{ key: "ship", label: "Ship"|rework: \{ key: "rework", label: "Rework"|Review abnehmen/);
+  });
+});
+
+describe("German FO-Backlog drawer copy", () => {
+  it("pins the FoDetailDrawer section labels to de.backlog.* keys", () => {
+    expect(de.backlog.nextAction).toBe("Nächster Schritt");
+    expect(de.backlog.acceptanceCriteria).toBe("Akzeptanzkriterien");
+    expect(de.backlog.blockers).toBe("Blocker");
+    expect(foDetailDrawerSrc).toContain("de.backlog.nextAction");
+    expect(foDetailDrawerSrc).toContain("de.backlog.acceptanceCriteria");
+    expect(foDetailDrawerSrc).not.toMatch(/<Eyebrow>Next Action<\/Eyebrow>|title="Acceptance Criteria"/);
   });
 });
 

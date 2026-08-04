@@ -49,7 +49,7 @@ describe("Family Organizer queue-first view pieces", () => {
       <FoDetailDrawer item={backlogItem} loading={false} onClose={() => undefined} />,
     );
 
-    expect(content).toContain("Next Action");
+    expect(content).toContain("Nächster Schritt");
     expect(content).not.toContain('role="dialog"');
     expect(drawer).toContain('role="dialog"');
     expect(drawer).toContain('aria-label="Backlog-Detail: Detail task"');
