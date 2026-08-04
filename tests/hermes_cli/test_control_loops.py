@@ -513,6 +513,79 @@ def test_summary_flags_a_pack_whose_repo_is_gone(api, tmp_path):
     assert packs["nacht"]["repo_exists"] is True
 
 
+def test_list_loops_no_repo_lock_flag_by_default(api):
+    """Grundzustand: kein anderer Prozess haelt den Repo-Lock — beide Packs
+    ("nacht"/"fliessband") teilen sich `kein-git-repo`, keins traegt das Flag.
+    Kontrollprobe, sonst koennte ein zu breiter Default alles markieren."""
+    client, _calls, _tmp = api
+    packs = client.get("/api/loops").json()["packs"]
+    for pack in packs:
+        assert "repo_locked" not in pack
+        assert "repo_locked_by" not in pack
+
+
+def test_land_blocked_by_sibling_pack_names_the_holder(api):
+    """Baut darf parallel laufen; Landen bleibt repo-weit exklusiv. "nacht"
+    haelt den Repo-Lock (wie `LoopRunner.locked()` es fuer eine Landung
+    taete) UND laeuft selbst — "fliessband" (dasselbe Repo, nicht laufend)
+    muss VOR dem Klick sehen, dass "nacht" blockiert; "nacht" selbst bekommt
+    kein Fremd-Flag fuer den eigenen Lauf."""
+    client, _calls, tmp = api
+    from hermes_cli import control_loops as cl
+
+    state_root = tmp / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    repo = (tmp / "kein-git-repo").resolve()
+
+    nacht_state = state_root / "nacht"
+    nacht_state.mkdir(parents=True, exist_ok=True)
+    nacht_lock = (nacht_state / ".lock").open("w", encoding="utf-8")
+    fcntl.flock(nacht_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # simuliert laufenden Runner
+
+    repo_lock_path = cl._repo_lock_path(repo)
+    repo_lock = repo_lock_path.open("w", encoding="utf-8")
+    fcntl.flock(repo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # derselbe Lock wie LoopRunner.locked()
+    try:
+        packs = {p["name"]: p for p in client.get("/api/loops").json()["packs"]}
+    finally:
+        fcntl.flock(repo_lock, fcntl.LOCK_UN)
+        repo_lock.close()
+        fcntl.flock(nacht_lock, fcntl.LOCK_UN)
+        nacht_lock.close()
+
+    assert packs["nacht"]["running"] is True
+    assert "repo_locked" not in packs["nacht"]  # eigener Lauf ist kein Fremd-Konflikt
+
+    assert packs["fliessband"]["running"] is False
+    assert packs["fliessband"]["repo_locked"] is True
+    assert packs["fliessband"]["repo_locked_by"] == "nacht"
+
+
+def test_land_blocked_without_a_visible_holder_stays_generic(api):
+    """Repo-Lock haengt, aber KEIN Pack der Gruppe laeuft sichtbar (z.B. ein
+    Prozess ausserhalb der Pack-Liste) — der Name darf NICHT geraten werden,
+    nur die generische Meldung."""
+    client, _calls, tmp = api
+    from hermes_cli import control_loops as cl
+
+    state_root = tmp / "state"
+    state_root.mkdir(parents=True, exist_ok=True)
+    repo = (tmp / "kein-git-repo").resolve()
+
+    repo_lock = cl._repo_lock_path(repo).open("w", encoding="utf-8")
+    fcntl.flock(repo_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        packs = {p["name"]: p for p in client.get("/api/loops").json()["packs"]}
+    finally:
+        fcntl.flock(repo_lock, fcntl.LOCK_UN)
+        repo_lock.close()
+
+    assert packs["nacht"]["repo_locked"] is True
+    assert packs["nacht"]["repo_locked_by"] is None
+    assert packs["fliessband"]["repo_locked"] is True
+    assert packs["fliessband"]["repo_locked_by"] is None
+
+
 def test_start_refuses_a_pack_whose_repo_is_gone(api, tmp_path):
     """Statt einen Loop zu starten, der in der Unit stirbt und als kryptischer
     502 zurueckkommt, sagt der Endpoint vorher WAS fehlt."""

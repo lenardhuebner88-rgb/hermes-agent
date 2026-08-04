@@ -691,9 +691,49 @@ def test_existing_pipeline_pack_still_runs_the_unchanged_path(tmp_path, monkeypa
     ]
 
 
-def test_blocking_repo_lock_waits_for_holder_instead_of_aborting(
+def test_locked_default_does_not_take_repo_lock_two_packs_run_concurrently(
     tmp_path, fake_engine
 ):
+    """Zwei VERSCHIEDENE Packs desselben Repos dürfen ihre Nicht-Landungs-
+    Phasen gleichzeitig fahren — der frühere globale Repo-Lock in ``locked()``
+    ließ das nicht zu (fail-fast am Repo-Lock, obwohl Plan/Build/Verify nur im
+    pack-eigenen Worktree arbeiten)."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "pack-a", "sweep", repo)
+    write_pack(tmp_path / "packs", "pack-b", "sweep", repo)
+    first = LoopRunner(
+        load_pack(tmp_path / "packs", "pack-a"), state_root=tmp_path / "state"
+    )
+    second = LoopRunner(
+        load_pack(tmp_path / "packs", "pack-b"), state_root=tmp_path / "state"
+    )
+    entered = threading.Event()
+    errors = []
+
+    def other():
+        try:
+            with second.locked():
+                entered.set()
+        except Exception as exc:  # pragma: no cover - asserted through errors
+            errors.append(exc)
+
+    with first.locked():
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join(timeout=2)
+
+    assert not errors, f"zweiter Pack-Lauf darf am Repo-Lock nicht fail-fasten: {errors}"
+    assert entered.is_set(), "zweiter Pack-Lauf ist nie in seinen Lock-Block gekommen"
+
+
+def test_blocking_deterministic_pack_waits_for_active_land_instead_of_aborting(
+    tmp_path, fake_engine
+):
+    """Der Repo-Lock lebt jetzt eng um ``cmd_land`` (``repo_locked``) statt um
+    den gesamten Lauf — das begrenzte Wartefenster für deterministische
+    Sammelläufe (``blocking=True``) muss trotzdem weiter funktionieren: es
+    wartet jetzt auf eine gerade LAUFENDE Landung statt auf den ganzen Lauf
+    eines fremden Packs."""
     repo = init_repo(tmp_path / "repo")
     write_pack(tmp_path / "packs", "lock-owner", "sweep", repo)
     write_pack(tmp_path / "packs", "lock-wait", "deterministic", repo)
@@ -715,15 +755,64 @@ def test_blocking_repo_lock_waits_for_holder_instead_of_aborting(
         except Exception as exc:  # pragma: no cover - asserted through errors
             errors.append(exc)
 
-    with first.locked():
+    with first.repo_locked():  # simuliert eine laufende Landung von "first"
         thread = threading.Thread(target=waiter)
         thread.start()
         time.sleep(0.15)
         assert not entered.is_set()
     thread.join(timeout=2)
-
+    assert not errors, errors
     assert entered.is_set()
-    assert errors == []
+
+
+def test_cmd_land_serializes_through_the_full_gates_window(tmp_path, fake_engine):
+    """TOCTOU-Regression: eine zweite Landung darf nicht zwischen
+    Sauberkeits-Check/Merge UND den Landungs-Gates hineinmergen —
+    ``_land_gates`` läuft mit ``cwd=repo`` (Collection-Sweep + affected Tests,
+    Minuten) und würde sonst Dateien lesen, die die zweite Landung gerade
+    wegschreibt. Mit einer Barriere MITTEN in den Gates deterministisch
+    synchronisiert (kein sleep-Timing)."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "landing-a", "sweep", repo)
+    write_pack(tmp_path / "packs", "landing-b", "sweep", repo)
+    runner_a = LoopRunner(
+        load_pack(tmp_path / "packs", "landing-a"), state_root=tmp_path / "state"
+    )
+    runner_b = LoopRunner(
+        load_pack(tmp_path / "packs", "landing-b"), state_root=tmp_path / "state"
+    )
+    for r, name in ((runner_a, "a"), (runner_b, "b")):
+        r.ensure_dirs()
+        r.ensure_wt()
+        commit_in(r.wt, name)
+        r._push = lambda repo: (True, "ok")
+
+    gates_started = threading.Event()
+    release_gates = threading.Event()
+
+    def slow_gates(repo, base):
+        gates_started.set()
+        assert release_gates.wait(timeout=5), "Barriere nie freigegeben"
+        return True, "seamed grün"
+
+    runner_a._land_gates = slow_gates
+    runner_b._land_gates = lambda repo, base: (True, "seamed grün")
+
+    result: dict[str, bool] = {}
+
+    def run_a():
+        result["a"] = runner_a.cmd_land(push=True)
+
+    thread = threading.Thread(target=run_a)
+    thread.start()
+    assert gates_started.wait(timeout=5), "Landung A muss die Gates erreicht haben"
+
+    with pytest.raises(RuntimeError, match="Repo-Lock"):
+        runner_b.cmd_land(push=True)
+
+    release_gates.set()
+    thread.join(timeout=5)
+    assert result["a"] is True
 
 
 def test_missing_pack_lists_available():

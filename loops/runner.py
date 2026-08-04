@@ -998,6 +998,7 @@ class LoopRunner:
         self.phase_secs: dict[str, int] = {}
         self._overrides_consumed = False
         self._repo_validated = False
+        self._repo_lock_depth = 0
         self.autoland_runtime = self._read_runtime_autoland()
 
     def _read_runtime_autoland(self) -> bool:
@@ -1114,44 +1115,95 @@ class LoopRunner:
             (self.queue / stage).mkdir(parents=True, exist_ok=True)
         (self.state / "logs").mkdir(parents=True, exist_ok=True)
 
+    def _acquire_flock(self, fh, what: str, *, blocking: bool, timeout: float) -> None:
+        if blocking:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"{what}-Lock nach {timeout:g}s weiter belegt"
+                        ) from None
+                    time.sleep(0.05)
+        # Einmal-Retry: die Dashboard-Running-Probe hält das Lock für µs —
+        # ein Start exakt in dem Fenster soll nicht die Nacht kosten.
+        for attempt in (1, 2):
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if attempt == 2:
+                    raise RuntimeError(f"{what}-Lock belegt — läuft schon ein Loop?") from None
+                time.sleep(1.0)
+
     @contextmanager
     def locked(self, *, blocking: bool = False, timeout: float = 0.0):
-        """Pack-Lock + globaler Repo-Lock: nie zwei Loops aufs selbe Repo.
+        """Pack-Lock: nie zwei Läufe DESSELBEN Packs gleichzeitig.
 
-        Normale Packs behalten den bisherigen fail-fast-Vertrag. Deterministische
-        Sammelläufe können denselben ``flock`` mit einem begrenzten Wartefenster
-        nehmen, damit sie einem noch laufenden Nacht-Pack nicht dazwischenfahren.
+        Der frühere globale Repo-Lock ist hier weg — er umschloss den GANZEN
+        Lauf (Plan/Build/Verify arbeiten im pack-eigenen Worktree und brauchen
+        den geteilten Live-Checkout gar nicht) und verhinderte dadurch, dass
+        zwei Packs desselben Repos je gleichzeitig liefen. Der Repo-Lock lebt
+        jetzt eng um ``cmd_land`` (siehe ``repo_locked``), wo der geteilte
+        Live-Checkout tatsächlich exklusiv gebraucht wird.
+
+        Deterministische Sammelläufe (``blocking=True``) warten weiterhin
+        zusätzlich auf den Repo-Lock — mit demselben begrenzten Wartefenster
+        wie zuvor —, damit sie einer gerade laufenden Landung nicht
+        dazwischenfahren; das Fenster ist jetzt nur die Land-Dauer statt der
+        gesamten Nacht.
         """
+        self.state.mkdir(parents=True, exist_ok=True)
+        with self.state.joinpath(".lock").open("w", encoding="utf-8") as pack_fh:
+            self._acquire_flock(pack_fh, "Pack", blocking=blocking, timeout=timeout)
+            if blocking:
+                with self.repo_locked(blocking=True, timeout=timeout):
+                    yield
+            else:
+                yield
+
+    @contextmanager
+    def repo_locked(self, *, blocking: bool = False, timeout: float = 0.0):
+        """Repo-Lock: exklusiver Zugriff auf den GETEILTEN Live-Checkout
+        (``self.pack.repo``) — umschließt ausschließlich ``cmd_land``
+        (Sauberkeits-Check, ff-Merge, Landungs-Gates, Push, Rollback).
+        ``_land_gates`` startet Collection-Sweep + affected Tests mit
+        ``cwd=repo`` und läuft Minuten — das Exklusivfenster muss also bis
+        zum Ende der Gates reichen, nicht nur bis zum ``merge --ff-only``:
+        sonst kann eine zweite, ebenfalls saubere Landung dazwischenmergen und
+        die laufenden Gates lesen Dateien, die unter ihnen weggeschrieben
+        werden (nicht-deterministisches Gate-Ergebnis, siehe cmd_land).
+
+        BASE-REFRESH in ``cmd_night`` läuft bewusst NICHT hierunter: der
+        eigentliche Rebase passiert im pack-eigenen Worktree, gegen ``repo``
+        gehen dort nur rev-list/diff/tag-Lesevorgänge, und die
+        Rebase-Anker-Tags tragen den Pack-Namen als Präfix — keine Kollision
+        zwischen Packs.
+
+        Re-entrant innerhalb desselben ``LoopRunner``: ein deterministischer
+        Pack, der über ``locked(blocking=True)`` den Repo-Lock schon hält,
+        blockiert sich in seinem eigenen ``cmd_land`` nicht selbst.
+        """
+        if self._repo_lock_depth > 0:
+            self._repo_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._repo_lock_depth -= 1
+            return
         self.state.mkdir(parents=True, exist_ok=True)
         repo_key = hashlib.md5(str(self.pack.repo.resolve()).encode("utf-8")).hexdigest()[:8]
         repo_lock_path = self.state.parent / f".repo-{repo_key}.lock"
-        with self.state.joinpath(".lock").open("w", encoding="utf-8") as pack_fh, \
-                repo_lock_path.open("w", encoding="utf-8") as repo_fh:
-            for fh, what in ((pack_fh, "Pack"), (repo_fh, "Repo")):
-                if blocking:
-                    deadline = time.monotonic() + timeout
-                    while True:
-                        try:
-                            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            if time.monotonic() >= deadline:
-                                raise RuntimeError(
-                                    f"{what}-Lock nach {timeout:g}s weiter belegt"
-                                ) from None
-                            time.sleep(0.05)
-                    continue
-                # Einmal-Retry: die Dashboard-Running-Probe hält das Lock für µs —
-                # ein Start exakt in dem Fenster soll nicht die Nacht kosten.
-                for attempt in (1, 2):
-                    try:
-                        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if attempt == 2:
-                            raise RuntimeError(f"{what}-Lock belegt — läuft schon ein Loop?") from None
-                        time.sleep(1.0)
-            yield
+        with repo_lock_path.open("w", encoding="utf-8") as repo_fh:
+            self._acquire_flock(repo_fh, "Repo", blocking=blocking, timeout=timeout)
+            self._repo_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._repo_lock_depth -= 1
 
     # ── Git ──
     def git(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -2921,6 +2973,13 @@ class LoopRunner:
         return True, f"auto-rebase auf main (Anker {anchor})"
 
     def cmd_land(self, push: bool = True, require_push: bool = False) -> bool:
+        """Landung — läuft komplett unter dem Repo-Lock (siehe ``repo_locked``):
+        der geteilte Live-Checkout ``self.pack.repo`` wird von der
+        Sauberkeits-Prüfung bis zu Gates/Push/Rollback exklusiv gebraucht."""
+        with self.repo_locked():
+            return self._cmd_land_locked(push=push, require_push=require_push)
+
+    def _cmd_land_locked(self, push: bool = True, require_push: bool = False) -> bool:
         repo = self.pack.repo
         ahead = self.git(
             "rev-list", "--count", f"{self.pack.base_branch}..{self.pack.branch}", cwd=repo

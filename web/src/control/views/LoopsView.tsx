@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   FolderGit2,
+  Lock,
   PauseCircle,
   Play,
   RefreshCw,
@@ -49,7 +50,7 @@ import {
   routeAfterEngineChange,
   type PhaseRoute,
 } from "./loops/routeOverrides";
-import { sortPacksByAttention } from "./loops/packOrder";
+import { runningCountInGroup, sortPacksByAttention } from "./loops/packOrder";
 import { LandingCardSection, LandingDetailSections } from "./loops/landingPack";
 
 const t = de.loops;
@@ -1675,7 +1676,12 @@ function LoopCard({
         ? t.statusInterrupted
         : t.statusIdle;
   const hasVerifiedPipelinePlan = pack.type !== "pipeline" || (pack.queue?.["20-verified"] ?? 0) > 0;
-  const canLand = !pack.running && pack.commits_ahead > 0 && hasVerifiedPipelinePlan;
+  // Bauen darf parallel laufen; Landen bleibt repo-weit exklusiv (geteilter
+  // Live-Checkout, git merge --ff-only). `repo_locked` kommt vom Backend NUR
+  // fuer Packs, die selbst gerade nicht laufen — der Operator sieht den
+  // Konflikt VOR dem Klick statt als kryptischen Fehler danach.
+  const landBlockedByForeignLock = Boolean(pack.repo_locked);
+  const canLand = !pack.running && pack.commits_ahead > 0 && hasVerifiedPipelinePlan && !landBlockedByForeignLock;
   const ringState: "running" | "idle" = pack.running ? "running" : "idle";
   const ringSegments = pack.type === "pipeline" && pack.running ? deriveRingSegments(pack, nowMs) : undefined;
   const ringTicks = pack.type === "sweep" && pack.running ? deriveRingTicks(pack) : undefined;
@@ -1785,6 +1791,12 @@ function LoopCard({
             onSaveTimerSchedule={onSaveTimerSchedule}
           />
         </Disclosure>
+        {landBlockedByForeignLock ? (
+          <div data-testid={`land-blocked-${pack.name}`} className="flex items-start gap-2 text-xs" style={{ color: "var(--ln-warn)" }}>
+            <Lock aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>{pack.repo_locked_by ? t.landBlockedByOther(pack.repo_locked_by) : t.landBlockedByUnknown}</span>
+          </div>
+        ) : null}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {!pack.running && canLand ? (
             pendingLand ? (
@@ -1796,8 +1808,11 @@ function LoopCard({
                 <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(null)}>{t.confirmNo}</LoopCardAction>
               </span>
             ) : (
-              <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(pack.name)} tone="bronze">
-                <Anchor className="h-3.5 w-3.5" />{t.actions.land}
+              // Lock-Icon markiert die Landung als repo-weit EXKLUSIV — im
+              // Gegensatz zu Start/Stop, die auch bei parallel bauenden
+              // Geschwister-Packs desselben Repos jederzeit erlaubt sind.
+              <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(pack.name)} tone="bronze" title={t.landExclusiveHint}>
+                <Anchor className="h-3.5 w-3.5" /><Lock aria-hidden className="h-3 w-3" />{t.actions.land}
               </LoopCardAction>
             )
           ) : null}
@@ -2284,7 +2299,9 @@ export function LoopsGrid({
           })}
         </div>
       ) : null}
-      {repoGroups.map((group) => (
+      {repoGroups.map((group) => {
+        const runningInGroup = runningCountInGroup(group.packs);
+        return (
         <section key={group.repo} className="space-y-2.5" aria-label={`${t.boundRepo}: ${repoName(group.repo)}`}>
           <header className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-1">
             <FolderGit2 aria-hidden className="h-4 w-4 shrink-0" style={{ color: "var(--ln-sodium)" }} />
@@ -2293,12 +2310,19 @@ export function LoopsGrid({
             <span className="font-data text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>
               {t.boundBranch(Array.from(new Set(group.packs.map((pack) => pack.base_branch))).join(", ") || "main")}
             </span>
+            {/* Mehrere Packs desselben Repos duerfen parallel bauen — ohne
+                diesen Chip liest sich die Gruppe wie hoechstens ein laufendes
+                Pack, weil die Karten selbst gescrollt werden muessen. */}
+            {runningInGroup > 1 ? (
+              <NightPill tone="sodium">{t.groupRunningCount(runningInGroup)}</NightPill>
+            ) : null}
           </header>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 sm:gap-4">
             {group.packs.map(renderPack)}
           </div>
         </section>
-      ))}
+        );
+      })}
       {broken.length > 0 ? <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{broken.map((pack) => <LoopErrorCard key={pack.name} pack={pack} />)}</div> : null}
     </div>
   );

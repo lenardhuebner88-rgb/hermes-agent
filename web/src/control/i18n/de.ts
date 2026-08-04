@@ -1309,6 +1309,9 @@ export const de = {
     repoFilterLabel: "Projekt filtern",
     boundRepo: "Gebundenes Projekt",
     boundBranch: (branch: string) => `Basis ${branch}`,
+    // Mehrere Packs desselben Repos duerfen parallel bauen (nur die Landung
+    // ist repo-weit exklusiv) — der Chip macht das ohne Karten-Scrollen sichtbar.
+    groupRunningCount: (n: number) => `${n} Packs laufen parallel`,
     landRemoteArrow: "→",
     // Bewusst neutral (kein Warn-/Alarmton) — land_push=false ist ein gewollter
     // Zustand (z.B. Dreifach-Lock), keine Fehlkonfiguration.
@@ -1453,6 +1456,12 @@ export const de = {
     confirmLand: "Landen? Schienen: ff-only, Gates, Rollback-Anker — Ergebnis erscheint im Logbuch.",
     landStarted: "Landung gestartet",
     landFailed: "Landung fehlgeschlagen",
+    // Landung bleibt exklusiv pro Repo, auch wenn mehrere Packs desselben
+    // Repos parallel bauen dürfen — der Operator muss den Konflikt VOR dem
+    // Klick sehen, nicht als kryptischen Fehler danach.
+    landExclusiveHint: "Landung ist repo-weit exklusiv — auch wenn mehrere Packs dieses Repos parallel bauen dürfen.",
+    landBlockedByOther: (pack: string) => `Landung gerade durch ${pack} belegt (repo-weiter Lock) — erst abwarten.`,
+    landBlockedByUnknown: "Landung ist gerade durch einen anderen Lauf im selben Repo belegt — erst abwarten.",
     // Werkstatt (Pack-Dateien lesen/schreiben, duplizieren).
     workshopTitle: "Werkstatt",
     workshopEmpty: "Keine Dateien gefunden.",

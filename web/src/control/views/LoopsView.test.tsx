@@ -844,6 +844,61 @@ describe("LoopsGrid — Land-Button-Sichtbarkeit", () => {
   });
 });
 
+// Kontext: bis vor Kurzem lief hoechstens EIN Loop pro Repo (globaler
+// Repo-Lock in loops/runner.py); das wird gerade so gelockert, dass mehrere
+// Packs desselben Repos parallel BAUEN duerfen — nur die Landung bleibt
+// repo-weit exklusiv (git merge --ff-only im geteilten Live-Checkout).
+// control_loops._annotate_repo_lock liefert `repo_locked`/`repo_locked_by`.
+describe("LoopsGrid — Repo-Lock (Landung exklusiv, Bauen parallel)", () => {
+  it("verbirgt Land und nennt das blockierende Pack, statt einen kryptischen Fehler abzuwarten", () => {
+    const blocked: LoopPack = {
+      ...idleSweepWithCommits,
+      name: "doc-sweep-blocked",
+      repo_locked: true,
+      repo_locked_by: "builder-reviewer",
+    };
+    const html = renderGrid([blocked]);
+    expect(html).not.toContain(t.actions.land);
+    expect(html).toContain(t.landBlockedByOther("builder-reviewer"));
+  });
+
+  it("bleibt generisch, wenn der Halter nicht eindeutig bestimmbar ist (rät keinen Namen)", () => {
+    const blocked: LoopPack = {
+      ...idleSweepWithCommits,
+      name: "doc-sweep-blocked-2",
+      repo_locked: true,
+      repo_locked_by: null,
+    };
+    const html = renderGrid([blocked]);
+    expect(html).not.toContain(t.actions.land);
+    expect(html).toContain(t.landBlockedByUnknown);
+    expect(html).not.toContain(t.landBlockedByOther("builder-reviewer"));
+  });
+
+  it("zeigt Land normal, wenn kein Fremd-Lock ansteht (Gegenprobe)", () => {
+    const html = renderGrid([idleSweepWithCommits]);
+    expect(html).toContain(t.actions.land);
+    expect(html).not.toContain(t.landBlockedByUnknown);
+  });
+
+  it("markiert die Landung als exklusiv per Tooltip, im Gegensatz zu Start/Stop", () => {
+    renderInteractiveGrid([idleSweepWithCommits]);
+    const landButton = screen.getByRole("button", { name: t.actions.land });
+    expect(landButton.getAttribute("title")).toBe(t.landExclusiveHint);
+  });
+
+  it("zeigt einen Parallel-Chip, wenn mehr als ein Pack desselben Repos gleichzeitig läuft", () => {
+    const sibling: LoopPack = { ...runningPipeline, name: "builder-reviewer-2" };
+    const html = renderGrid([runningPipeline, sibling]);
+    expect(html).toContain(t.groupRunningCount(2));
+  });
+
+  it("zeigt KEINEN Parallel-Chip bei nur einem laufenden Pack im Repo (Gegenprobe)", () => {
+    const html = renderGrid([runningPipeline, idleSweepWithCommits]);
+    expect(html).not.toContain(t.groupRunningCount(2));
+  });
+});
+
 describe("LoopsGrid — Werkstatt-Panel", () => {
   const repoFiles: LoopFilesResponse = {
     pack: "builder-reviewer",

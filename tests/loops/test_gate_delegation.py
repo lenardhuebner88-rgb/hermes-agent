@@ -162,3 +162,92 @@ def test_ruff_failure_short_circuits_before_run_affected(tmp_path):
     assert result.returncode == 11, result.stdout + result.stderr
     assert "GATE_FAIL: ruff" in result.stdout
     assert not log.exists(), "run-affected.sh haette nach ruff-Fail nicht laufen duerfen"
+
+
+# ── (f) Lastdeckel: Loop-Gates drosseln sich selbst, Kanban nicht ───────────
+#
+# Seit der Repo-Lock verengt ist, koennen mehrere Packs gleichzeitig bauen.
+# `scripts/run_tests.sh` setzt sonst 8 Worker; zwei parallele Loop-Gates plus
+# Kanban-Worker ueberzeichnen damit die 12 Kerne, und die Kanban-Runs, auf die
+# ein Mensch wartet, werden langsamer. Gedrosselt wird nur die Nachtarbeit.
+
+def _fake_run_affected_logging_workers(repo: Path, log_path: Path) -> None:
+    script_dir = repo / "scripts"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    script = script_dir / "run-affected.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "WORKERS=$HERMES_TEST_WORKERS" >> "{log_path}"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+
+def test_loop_gate_caps_test_workers_below_the_shared_default(tmp_path):
+    """Der Deckel muss ein GEERBTES HERMES_TEST_WORKERS ueberschreiben.
+
+    Das systemd-User-Environment traegt HERMES_TEST_WORKERS=8, und jede
+    hermes-loop@-Unit erbt es. Ein Fallback-Default (`${VAR:-4}`) haette in
+    Produktion nie gegriffen und in einer sauberen Testumgebung trotzdem gruen
+    ausgesehen — deshalb setzt dieser Test den geerbten Wert explizit.
+    """
+    repo, base_sha = _init_repo(tmp_path)
+    log = tmp_path / "workers.log"
+    _fake_run_affected_logging_workers(repo, log)
+
+    env = {
+        **os.environ,
+        "GATE_PY": sys.executable,
+        "GATE_RUFF": str(_write_fake_ruff(repo, 0)),
+        "HERMES_TEST_WORKERS": "8",   # so wie systemd es vererbt
+    }
+    env.pop("HERMES_LOOP_TEST_WORKERS", None)
+    result = subprocess.run(
+        [str(GATE_SH), base_sha], cwd=repo, env=env,
+        capture_output=True, encoding="utf-8", check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    workers = int(log.read_text(encoding="utf-8").strip().split("=")[1])
+    # DEFAULT_TEST_WORKERS ist der geteilte Default, den run_tests.sh setzt und
+    # den Kanban behaelt — der Loop-Pfad muss darunter liegen.
+    from hermes_cli.affected_test_budget import DEFAULT_TEST_WORKERS
+    assert 0 < workers < DEFAULT_TEST_WORKERS, (
+        f"Loop-Gate faehrt mit {workers} Workern, geteilter Default ist "
+        f"{DEFAULT_TEST_WORKERS} — der Deckel greift nicht"
+    )
+
+
+def test_loop_gate_worker_cap_stays_overridable(tmp_path):
+    """Ein Operator muss den Deckel fuer einen Lauf anheben koennen."""
+    repo, base_sha = _init_repo(tmp_path)
+    log = tmp_path / "workers.log"
+    _fake_run_affected_logging_workers(repo, log)
+
+    env = {
+        **os.environ,
+        "GATE_PY": sys.executable,
+        "GATE_RUFF": str(_write_fake_ruff(repo, 0)),
+        "HERMES_TEST_WORKERS": "8",          # geerbt — darf NICHT gewinnen
+        "HERMES_LOOP_TEST_WORKERS": "11",    # Operator-Hebel — gewinnt
+    }
+    result = subprocess.run(
+        [str(GATE_SH), base_sha], cwd=repo, env=env,
+        capture_output=True, encoding="utf-8", check=False, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WORKERS=11" in log.read_text(encoding="utf-8")
+
+
+def test_kanban_shared_runner_keeps_the_higher_default():
+    """Kontrollprobe: der Deckel darf NUR im Loop-Pfad stehen.
+
+    Steht er in scripts/run_tests.sh, traefe er auch die Kanban-Worker — genau
+    das soll er nicht.
+    """
+    shared = (REPO_ROOT / "scripts" / "run_tests.sh").read_text(encoding="utf-8")
+    assert "HERMES_TEST_WORKERS:-8" in shared, (
+        "run_tests.sh setzt nicht mehr 8 — der geteilte Kanban-Default wurde "
+        "mitgedrosselt"
+    )

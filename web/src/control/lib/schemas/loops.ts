@@ -140,6 +140,10 @@ export const LoopPackSummarySchema = z.object({
     metered_cost_eur: z.coerce.number().nullable().catch(null),
     billing: z.enum(["subscription", "mixed", "unknown"]).catch("unknown"),
   }).optional(),
+  // Repo-Lock-Probe (control_loops._annotate_repo_lock) — additiv-optional,
+  // fehlt bei einem älteren Backend oder wenn kein Fremd-Lock ansteht.
+  repo_locked: z.boolean().optional(),
+  repo_locked_by: z.string().nullable().optional(),
 });
 
 // Reihenfolge irrelevant für die Auflösung (Summary verlangt "type", Error hat

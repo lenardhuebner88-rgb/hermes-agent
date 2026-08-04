@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -979,6 +980,64 @@ def _is_running(state: Path) -> bool:
     return False
 
 
+def _repo_lock_path(repo: Path) -> Path:
+    """Selber Pfadaufbau wie `LoopRunner.locked()` (loops/runner.py) —
+    lesende Probe, verändert den Runner nicht. Mehrere Packs desselben Repos
+    dürfen parallel bauen; nur die Landung greift auf diesen einen Lock."""
+    repo_key = hashlib.md5(str(repo.resolve()).encode("utf-8")).hexdigest()[:8]
+    return _state_root() / f".repo-{repo_key}.lock"
+
+
+def _is_repo_locked(repo: Path) -> bool:
+    """True, wenn GERADE ein Prozess den repo-weiten Lock hält (Landung läuft
+    für irgendein Pack dieses Repos). Best effort, read-only — nimmt den Lock
+    testweise und gibt ihn sofort wieder frei (gleiche Konvention wie
+    `_is_running`)."""
+    path = _repo_lock_path(repo)
+    if not path.exists():
+        return False
+    try:
+        with path.open("r+", encoding="utf-8") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(fh, fcntl.LOCK_UN)
+    except OSError:
+        return False
+    return False
+
+
+def _annotate_repo_lock(summaries: list[dict[str, Any]]) -> None:
+    """Markiert Packs, deren Landung GERADE an einem fremden Repo-Lock
+    scheitern würde — bevor der Operator klickt, nicht erst als 502 danach.
+
+    Bauen darf parallel laufen (kein Repo-Lock mehr dafür); Landen bleibt
+    exklusiv pro Repo (git-Merge im geteilten Live-Checkout). Ein Pack, das
+    selbst gerade läuft, bekommt kein Fremd-Flag — sein eigener Lauf ist kein
+    Konflikt mit sich selbst. Der Name des Blockierers ist nur gesetzt, wenn
+    GENAU EIN anderes Pack der Gruppe läuft — sonst lieber "unbekannt" als
+    einen falschen Namen zu raten.
+    """
+    by_repo: dict[str, list[dict[str, Any]]] = {}
+    for summary in summaries:
+        repo = summary.get("repo")
+        if not repo or "type" not in summary:  # ManifestError-Pack ({name, error})
+            continue
+        by_repo.setdefault(repo, []).append(summary)
+    for repo, group in by_repo.items():
+        if len(group) < 2 or not _is_repo_locked(Path(repo)):
+            continue
+        others_running = [s["name"] for s in group if s.get("running")]
+        for summary in group:
+            if summary.get("running"):
+                continue  # eigener Lauf — kein Fremd-Konflikt mit sich selbst
+            summary["repo_locked"] = True
+            summary["repo_locked_by"] = (
+                others_running[0] if len(others_running) == 1 else None
+            )
+
+
 _GIT_PROBE_ERROR_PREFIX = "git-Probe fehlgeschlagen: "
 
 
@@ -1242,7 +1301,9 @@ def register_loops_routes(app: FastAPI) -> None:
     def list_loops() -> dict[str, Any]:
         packs = _all_pack_names()
         timers = _timer_snapshot([name for name, _source in packs])
-        return {"packs": [_pack_summary(name, source, timers) for name, source in packs]}
+        summaries = [_pack_summary(name, source, timers) for name, source in packs]
+        _annotate_repo_lock(summaries)
+        return {"packs": summaries}
 
     @app.get("/api/loops/models")
     def loop_models() -> dict[str, Any]:

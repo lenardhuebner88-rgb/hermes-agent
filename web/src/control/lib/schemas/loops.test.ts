@@ -93,6 +93,39 @@ describe("LoopPackSummarySchema — Landing (deterministic)", () => {
   });
 });
 
+describe("LoopPackSummarySchema — Repo-Lock (control_loops._annotate_repo_lock)", () => {
+  // E4 (ESCALATIONS.md): ein neues Backend-Feld ohne Schema-Eintrag wird von
+  // zod still gestrippt und erreicht die UI nie — deshalb hier explizit gegen
+  // den echten Payload-Shape geprüft, nicht nur "irgendein Feld parst".
+  it("bewahrt repo_locked + repo_locked_by, wenn ein anderes Pack blockiert", () => {
+    const parsed = LoopPackSummarySchema.parse({
+      name: "fliessband",
+      type: "pipeline",
+      repo_locked: true,
+      repo_locked_by: "nacht",
+    });
+    expect(parsed.repo_locked).toBe(true);
+    expect(parsed.repo_locked_by).toBe("nacht");
+  });
+
+  it("bewahrt repo_locked_by=null (Halter nicht eindeutig bestimmbar)", () => {
+    const parsed = LoopPackSummarySchema.parse({
+      name: "fliessband",
+      type: "pipeline",
+      repo_locked: true,
+      repo_locked_by: null,
+    });
+    expect(parsed.repo_locked).toBe(true);
+    expect(parsed.repo_locked_by).toBeNull();
+  });
+
+  it("funktioniert ohne die Felder (kein Fremd-Lock bzw. älteres Backend)", () => {
+    const parsed = LoopPackSummarySchema.parse({ name: "nacht", type: "sweep" });
+    expect(parsed.repo_locked).toBeUndefined();
+    expect(parsed.repo_locked_by).toBeUndefined();
+  });
+});
+
 describe("LoopDetailResponseSchema — Landing-Drawer-Payload", () => {
   const detailPayload = {
     ...landingSummaryPayload,

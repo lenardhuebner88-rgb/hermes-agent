@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ATTENTION_RANK, attentionRank, sortPacksByAttention } from "./packOrder";
+import { ATTENTION_RANK, attentionRank, runningCountInGroup, sortPacksByAttention } from "./packOrder";
 import type { LoopPackSummary } from "../../lib/types";
 
 /** Minimal-Pack in der echten Summary-Form; jeder Test variiert nur das Feld,
@@ -112,5 +112,20 @@ describe("sortPacksByAttention", () => {
     const input = [pack("zulu"), pack("alpha")];
     sortPacksByAttention(input);
     expect(input.map((p) => p.name)).toEqual(["zulu", "alpha"]);
+  });
+});
+
+describe("runningCountInGroup", () => {
+  it("zaehlt 0 fuer eine leere Gruppe (Kontrollprobe)", () => {
+    expect(runningCountInGroup([])).toBe(0);
+  });
+
+  it("zaehlt 0, wenn kein Pack der Gruppe laeuft", () => {
+    expect(runningCountInGroup([pack("a"), pack("b")])).toBe(0);
+  });
+
+  it("zaehlt nur die laufenden Packs, nicht die ganze Gruppe", () => {
+    const group = [pack("a", { running: true }), pack("b"), pack("c", { running: true })];
+    expect(runningCountInGroup(group)).toBe(2);
   });
 });
