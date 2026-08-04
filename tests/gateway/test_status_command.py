@@ -217,6 +217,36 @@ async def test_status_command_includes_live_agent_model_and_context():
 
 
 @pytest.mark.asyncio
+async def test_status_command_marks_malformed_live_context_usage_unavailable():
+    """A provider-side malformed usage value must not become a plausible 0%."""
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner = _make_runner(session_entry)
+    running_agent = SimpleNamespace(
+        model="openai/gpt-test",
+        provider="openai",
+        context_compressor=SimpleNamespace(
+            last_prompt_tokens="unknown",
+            context_length=100_000,
+        ),
+        interrupt=MagicMock(),
+    )
+    runner._running_agents[build_session_key(_make_source())] = running_agent
+
+    result = await runner._handle_message(_make_event("/status"))
+
+    assert "**Context:** unavailable" in result
+    assert "**Context:** 0 / 100,000 (0%)" not in result
+
+
+@pytest.mark.asyncio
 async def test_status_command_includes_persisted_model_and_context_when_agent_not_running(monkeypatch):
     session_entry = SessionEntry(
         session_key=build_session_key(_make_source()),
