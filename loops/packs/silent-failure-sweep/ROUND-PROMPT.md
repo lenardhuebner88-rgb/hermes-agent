@@ -35,7 +35,10 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
 1. **Dedup (Pflicht, VOR der Suche).** {{STATE_DIR}}/LEDGER.md und
    {{STATE_DIR}}/ESCALATIONS.md lesen — behandelte Stellen nicht wiederholen.
    Ein früher als „legitim" verworfener Kandidat wird nur mit NEUER Evidenz erneut
-   geprüft.
+   geprüft. Dafür führst du {{STATE_DIR}}/VERWORFEN.md: eine Zeile je verworfener
+   Stelle, `<datei>:<zeile> — <welcher der vier Punkte fehlt>`. Ohne diese Liste
+   triagiert jede Nacht dieselben zwanzig legitimen Stellen neu und verbrennt die
+   Runde, bevor sie beim ersten echten Fund ankommt.
 
 2. **Revier wählen — maschinenlesbar, nicht nach Gefühl.**
    Jede Ledger-Zeile dieses Packs beginnt mit `REVIER=<n>`. Lies die letzten
@@ -67,6 +70,11 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    Repo). Für `web/src/control`: `.catch(`, `?? 0`, `|| []`, und besonders
    zod-Schemas — ein im Schema fehlendes Feld wird still weggestrippt und erreicht
    die UI nie (Eskalation E4).
+
+   **Deckel: höchstens 25 Kandidaten in die Triage.** Die AST-Sammlung liefert im
+   Zweifel Hunderte; wer sie alle prüft, hat die Runde verbraucht, bevor ein Fix
+   entsteht. Sortiere nach Nähe zu einer Route, einem Gate oder einer Anzeige —
+   dort trifft Punkt 4 (Folgenreich) am ehesten zu — und schneide bei 25 ab.
 
 4. **Triage gegen die vier Punkte.** Prüfe die Kandidaten der Reihe nach und nimm
    den folgenreichsten, der alle vier erfüllt. Notiere für die anderen in EINEM
@@ -100,7 +108,13 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    nicht `FIXED`. Ein grüner Test um einen ungefixten Bug herum ist Reward-Hacking
    und fliegt in der Morgen-Review raus.
 
-7. **Grün messen + Gate.** `git add -A && ./loops/gate.sh`
+7. **Grün messen + Gate — das Gate muss zu deinem Revier passen.**
+   `./loops/gate.sh` deckt ruff und die betroffenen **Python**-Tests ab. Hast du
+   in `web/src/control` gefixt, beweist es über deinen Fix GAR NICHTS: dann läuft
+   ZUSÄTZLICH `scripts/gate-frontend.sh --skip-build`. Ein TS-Fix, der nur durch
+   das Python-Gate gegangen ist, landet ungetestet — und meldet sich als grün.
+
+   `git add -A && ./loops/gate.sh`
    (`git add -A` VOR dem Gate — neue Dateien sind für `git diff HEAD` sonst
    unsichtbar.) Das Gate allein aufrufen, den Exit-Code direkt lesen: ein Gate in
    einer Pipe meldet ohne `pipefail` Exit 0, obwohl es rot ist — das ist selbst
@@ -113,9 +127,16 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    rote Testausgabe von Schritt 5, und die Ein-Satz-Notiz zu den verworfenen
    Kandidaten.
 
-9. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
+9. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile) — der Runner
+   liest sie per Präfix, nicht sinnerfassend. Erlaubt ist ausschließlich:
    `FIXED <datei:zeile>` · `DRY` (ehrlich kein Kandidat mit allen vier Punkten) ·
    `BLOCKED <grund>`.
+
+   Schreib sie als LETZTE Handlung der Runde, und schreib sie immer —
+   auch beim Abbruch. Ein Freitext („Fertig!") fällt in keinen der drei Präfixe und wird
+   als erfolgreiche Runde gezählt — die Runde sieht dann grün aus, ohne dass ein
+   Fix existiert. Das ist dieselbe Fehlerklasse, die du in diesem Pack jagst;
+   sie hier selbst zu produzieren wäre das schlechteste mögliche Ergebnis.
 
 ## Eskalation (Pflicht bei jedem echten Fund, den du nicht fixt)
 
@@ -129,7 +150,12 @@ ein 40×-Auth-500-Bug ohne Adressaten liegen. Häng ihn ZUSÄTZLICH an
     - Fix-Skizze: <1–3 Zeilen>
     - Kanal-Vorschlag: <Kanban-Task | Operator | Pack <name>>
 
-Diese Datei steht im Loops-Tab des Dashboards — dein Fund bekommt dort einen Besitzer.
+Diese Datei steht im Loops-Tab des Dashboards — dein Fund bekommt dort einen
+Besitzer. Genau deshalb darf sie nicht zulaufen: prüfe VOR dem Anhängen, ob
+dieselbe Fundstelle schon einen Eintrag hat. Wenn ja, ergänze dort eine
+Evidenz-Zeile mit dem heutigen Datum, statt einen zweiten Block zu schreiben.
+Der Tab zeigt die letzten 200 Zeilen — ein dreifach eingetragener Fund verdrängt
+zwei andere aus dem Sichtfeld.
 
 ## Verbote
 

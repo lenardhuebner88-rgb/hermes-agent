@@ -208,3 +208,39 @@ def test_a_test_only_diff_is_not_a_fix(prompt):
     assert "nur eine Testdatei anfasst, ist kein Fix" in prompt
     assert "Reward-Hacking" in prompt
     assert "`BLOCKED`" in prompt
+
+
+# ── Iterationsstufen 3–8 ────────────────────────────────────────────────────
+
+def test_rejected_candidates_are_deduped_too(prompt):
+    """Stufe 3: ohne Verworfen-Liste triagiert jede Nacht dieselben Stellen neu."""
+    assert "VERWORFEN.md" in prompt
+    assert "welcher der vier Punkte fehlt" in prompt
+
+
+def test_candidate_triage_has_a_cap(prompt):
+    """Stufe 4: die AST-Sammlung liefert Hunderte; ohne Deckel frisst sie die Runde."""
+    assert "höchstens 25 Kandidaten" in prompt
+    assert "schneide bei 25 ab" in prompt
+
+
+def test_frontend_findings_require_the_frontend_gate(prompt):
+    """Stufe 5: loops/gate.sh deckt Python — ein TS-Fix ginge ungetestet durch.
+
+    Und meldete sich dabei als gruen, was exakt die Fehlerklasse dieses Packs ist.
+    """
+    assert "gate-frontend.sh --skip-build" in prompt
+    assert "GAR NICHTS" in prompt
+
+
+def test_escalations_file_is_deduped(prompt):
+    """Stufe 6: der Tab zeigt die letzten 200 Zeilen — Dubletten verdraengen Funde."""
+    assert "schon einen Eintrag hat" in prompt
+    assert "200 Zeilen" in prompt
+
+
+def test_last_status_contract_is_spelled_out(prompt):
+    """Stufe 8: der Runner liest per Praefix, nicht sinnerfassend."""
+    assert "per Präfix, nicht sinnerfassend" in prompt
+    assert "schreib sie immer —" in prompt
+    assert "auch beim Abbruch" in prompt

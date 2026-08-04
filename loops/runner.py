@@ -2541,14 +2541,25 @@ class LoopRunner:
                 self.ledger_event(round=rnd, phase="sweep", verdict="blocked", fail_kind="usage_limit")
                 break
             status = "TIMEOUT" if result.timed_out else self.last_status()
-            self.ledger(f"R{rnd} sweep status={status or '?'} [{self._secs('round')}]")
+            # "?" las sich als "Status unbekannt, vermutlich ok". Der Grund ist
+            # bekannt: die Runde hat den Statuskontrakt nicht erfüllt.
+            self.ledger(
+                f"R{rnd} sweep status={status or 'kein Status (Kontrakt verletzt)'} "
+                f"[{self._secs('round')}]"
+            )
             if status.startswith("DRY"):
                 dry, blocked = dry + 1, 0
                 self.ledger_event(round=rnd, phase="sweep", verdict="ok", reason=status)
-            elif status.startswith("BLOCKED") or status == "TIMEOUT":
+            elif status.startswith("BLOCKED") or status == "TIMEOUT" or not status:
+                # Leerer Status = der Agent hat den Kontrakt nicht erfüllt (Turn
+                # abgebrochen, Datei nie geschrieben). Er fiel bisher in den
+                # else-Zweig und zählte damit als ERFOLGREICHE Runde: beide
+                # Zähler auf 0, fail_streak konnte nie greifen, ein toter Sweep
+                # lief alle max_rounds durch. Der Pipeline-Pfad kennt diesen
+                # Statuskontrakt bereits (run_phase "plan"), der Sweep nicht.
                 blocked, dry = blocked + 1, 0
                 self.ledger_event(round=rnd, phase="sweep", verdict="blocked",
-                                   fail_kind="blocked", reason=status)
+                                   fail_kind="blocked", reason=status or "kein Status")
             else:
                 dry = blocked = 0
                 self.ledger_event(round=rnd, phase="sweep", verdict="ok", reason=status)
