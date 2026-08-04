@@ -228,6 +228,7 @@ def _run_dict(
     r: kanban_db.Run,
     *,
     legacy_resolver: Optional[_LegacyModelRouteResolver] = None,
+    lineage_resolver: Optional[_ClaimedEventPayloadResolver] = None,
 ) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
     d = {
@@ -254,7 +255,14 @@ def _run_dict(
         "cost_usd": r.cost_usd,
     }
     d.update(_run_model_route_fields(conn, r, legacy_resolver=legacy_resolver))
-    d.update(_run_lineage_fields(conn, r.task_id, r.id))
+    d.update(
+        _run_lineage_fields(
+            conn,
+            r.task_id,
+            r.id,
+            lineage_resolver=lineage_resolver,
+        )
+    )
     return d
 
 
@@ -417,7 +425,73 @@ def _claimed_event_payload(conn: sqlite3.Connection, task_id: str, run_id: Any) 
     return payload if isinstance(payload, dict) else {}
 
 
-def _run_lineage_fields(conn: sqlite3.Connection, task_id: str, run_id: Any) -> dict[str, str]:
+class _ClaimedEventPayloadResolver:
+    """Request-scoped batch/cache for task-run claimed-event payloads."""
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        runs: Optional[list[Any]] = None,
+    ) -> None:
+        self.conn = conn
+        self._payload_by_run: dict[tuple[str, int], Optional[dict[str, Any]]] = {}
+        run_ids_by_task: dict[str, list[int]] = {}
+        for run in runs or []:
+            task_id = str(_run_value(run, "task_id") or "")
+            try:
+                run_id = int(_run_value(run, "id"))
+            except (TypeError, ValueError):
+                continue
+            key = (task_id, run_id)
+            if not task_id or key in self._payload_by_run:
+                continue
+            self._payload_by_run[key] = None
+            run_ids_by_task.setdefault(task_id, []).append(run_id)
+
+        for task_id, run_ids in run_ids_by_task.items():
+            try:
+                rows = conn.execute(
+                    "SELECT run_id, payload FROM task_events "
+                    "WHERE task_id = ? AND kind = 'claimed' "
+                    "AND run_id IN (SELECT value FROM json_each(?)) "
+                    "ORDER BY id DESC",
+                    (task_id, json.dumps(run_ids)),
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            resolved: set[tuple[str, int]] = set()
+            for row in rows:
+                key = (task_id, int(row["run_id"]))
+                if key in resolved or key not in self._payload_by_run:
+                    continue
+                try:
+                    payload = json.loads(row["payload"]) if row["payload"] else {}
+                except Exception:
+                    payload = {}
+                self._payload_by_run[key] = payload if isinstance(payload, dict) else {}
+                resolved.add(key)
+
+    def payload(self, task_id: str, run_id: Any) -> Optional[dict[str, Any]]:
+        try:
+            key = (str(task_id), int(run_id))
+        except (TypeError, ValueError):
+            return None
+        if key not in self._payload_by_run:
+            self._payload_by_run[key] = _claimed_event_payload(
+                self.conn,
+                key[0],
+                key[1],
+            )
+        return self._payload_by_run[key]
+
+
+def _run_lineage_fields(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Any,
+    *,
+    lineage_resolver: Optional[_ClaimedEventPayloadResolver] = None,
+) -> dict[str, str]:
     """Return explicit human-facing lineage labels for a task_runs row.
 
     The durable discriminator for review/verifier attempts is the claimed
@@ -425,7 +499,11 @@ def _run_lineage_fields(conn: sqlite3.Connection, task_id: str, run_id: Any) -> 
     Old/synthetic rows may lack any claimed event; surface them as legacy
     unknown instead of inferring coder from task.assignee/profile fallbacks.
     """
-    payload = _claimed_event_payload(conn, task_id, run_id)
+    payload = (
+        lineage_resolver.payload(task_id, run_id)
+        if lineage_resolver is not None
+        else _claimed_event_payload(conn, task_id, run_id)
+    )
     if payload is None:
         return {
             "run_role": "legacy_unknown",

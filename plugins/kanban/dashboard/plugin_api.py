@@ -1500,6 +1500,7 @@ def get_task(
         if detail_view == "drawer":
             runs = runs[-20:]
         legacy_resolver = _LegacyModelRouteResolver(conn, list(runs), board=board)
+        lineage_resolver = _ClaimedEventPayloadResolver(conn, list(runs))
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in comments],
@@ -1517,13 +1518,12 @@ def get_task(
             "links": links,
             "child_results": child_results,
             "runs": [
-                _run_dict(conn, r, legacy_resolver=legacy_resolver)
+                _run_dict(conn, r, legacy_resolver=legacy_resolver, lineage_resolver=lineage_resolver)
                 for r in runs
             ],
         }
     finally:
         conn.close()
-
 
 class CreateTaskBody(BaseModel):
     title: ShortText
