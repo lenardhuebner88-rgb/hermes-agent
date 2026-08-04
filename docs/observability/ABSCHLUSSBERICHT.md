@@ -104,21 +104,40 @@ und mit Tests belegt, keiner wurde abgewiesen.
 
 ## Gates (final, Exit-Codes)
 
-- `scripts/run-affected.sh $(git merge-base main HEAD)`: siehe unten
-- `ruff check .`: EXIT=0
-- `scripts/gate-frontend.sh`: EXIT=0 (inkl. tsc, vitest, build, Hex-Ratchet
-  58=Baseline, Kontrast AA)
-- `scripts/collect_check.sh -q tests/`: 57.520 Tests, 0 Fehler
-- `scripts/usage_reconcile.py --days 30`: EXIT=0 (0 unerklärte Deltas)
-- Frontend-Visual-Verify `/control/verbrauch`: EXIT=0
+- `scripts/run-affected.sh $(git merge-base main HEAD)` im Worktree: EXIT=0;
+  nach dem Merge im Live-Checkout `scripts/run-affected.sh HEAD~1`: EXIT=0
+- `ruff check .`: EXIT=0 (Worktree und Live-Checkout)
+- `scripts/gate-frontend.sh`: EXIT=0, im Worktree und im Live-Checkout
+  (inkl. tsc, vitest, build, Hex-Ratchet 58=Baseline, Kontrast AA)
+- `scripts/collect_check.sh -q tests/`: 57.523 Tests, 0 Fehler
+- `scripts/usage_reconcile.py --days 30`: EXIT=0 (0 unerklärte Deltas,
+  Weg-4-Match 0,04–0,31 %)
+- Frontend-Visual-Verify `/control/verbrauch`: EXIT=0 (Desktop/Tablet/Mobile)
 
-## Merge-Befehl für den Operator
+## Landung (Phase E, ausgeführt 2026-08-05 ~01:40 UTC)
+
+- Merge: `git merge --no-ff worktree-usage-observability` → `77ebb734bd` auf
+  `main` (Live-Checkout stand auf main, keine fremden staged Änderungen).
+- Push: `git push piet-fork main` (`3d540cd521..77ebb734bd`, fast-forward,
+  niemals origin).
+- Deploy: `CONFIRMED=1 scripts/deploy_dashboard.sh` → EXIT=0, Service
+  `hermes-dashboard` active/running, NRestarts=0, keine Tracebacks im Journal.
+- **Live-Prüfung (authentifiziert, Loopback + Session-Cookie + Token):**
+  `GET /api/plugins/kanban/stats/usage-consumption?days=30&breakdown=origin`
+  → 200, Contract `usage-consumption.v1`, **$19.838,63 Äquivalent über
+  112.941 Läufe**, Kostenabdeckung 92,6 % (104.538/112.941), Tokenabdeckung
+  94,8 %, hermes_agent sichtbar ($894,26 — der bindende Review-Fix live),
+  `grok_cli` als `not applicable` (nie 0), vier Hebel mit Gegenrechnung.
+  **Kennzahl-Abgleich gegen den lokalen Reconcile-Report:** claude_code+buzz
+  Äquivalent lokal $13.287,54 vs. live $13.389,26 — Delta 0,76 %
+  (Zeitversatz, wachsende Live-Daten). Deploy abgenommen.
+
+## Merge-Befehl für den Operator (bereits ausgeführt, dokumentiert)
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
-git rev-parse --abbrev-ref HEAD        # MUSS main sein
-git status --short                      # fremde staged Änderungen: nicht mergen
-git merge --no-ff worktree-usage-observability
-git push piet-fork main                 # NIEMALS nach origin (NousResearch-Upstream)
-CONFIRMED=1 scripts/deploy_dashboard.sh
+git rev-parse --abbrev-ref HEAD        # war main
+git merge --no-ff worktree-usage-observability   # → 77ebb734bd
+git push piet-fork main                            # → gepusht
+CONFIRMED=1 scripts/deploy_dashboard.sh            # → deployt, live geprüft
 ```
