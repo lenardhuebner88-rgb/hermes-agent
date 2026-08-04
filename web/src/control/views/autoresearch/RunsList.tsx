@@ -39,7 +39,7 @@ export function RunsList({ runs, proposals, loading = false }: { runs: Autoresea
           <Stagger className="grid gap-3 lg:grid-cols-2">
             {runCards.map(({ run, card }, i) => <StaggerItem key={`${run.at}-${run.request_id ?? i}`}><RunHistoryCard run={run} card={card} /></StaggerItem>)}
           </Stagger>
-          {runs.length > runCards.length ? <p className="text-xs text-ink-3">Weitere {runs.length - runCards.length} ältere Läufe stehen in der technischen Tabelle.</p> : null}
+          {runs.length > runCards.length ? <p className="text-xs text-ink-2">Weitere {runs.length - runCards.length} ältere Läufe stehen in der technischen Tabelle.</p> : null}
           <Disclosure className="rounded-panel border border-line bg-surface-2 p-3" summary={<span className="text-sm font-medium text-ink">Technische Tabelle anzeigen</span>}>
             <div className="overflow-x-auto">
               {/* min-w-Boden: 7 Spalten (Zeit, Lane mit min-w-40, 5 numerisch)
