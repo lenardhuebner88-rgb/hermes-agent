@@ -23,6 +23,7 @@ from hermes_cli.foreign_lane_harvest import (
     distill_foreign_events,
     extract_codex_rollout,
     extract_grok_inference_event,
+    load_grok_model_map,
     extract_kimi_wire,
     extract_qwen_row,
     find_run_ids_for_handle,
@@ -351,6 +352,57 @@ def test_grok_inference_done_tokens_and_missing_model():
 
     noise = {"msg": "billing: fetched credits config", "sid": "x", "ctx": {}}
     assert extract_grok_inference_event(noise) is None
+
+
+def test_grok_model_recovered_from_change_events_and_catalog_singleton(
+    tmp_path: Path,
+):
+    """B7: model identity lives in sibling events of the same unified log."""
+    lines = (FIXTURES / "grok" / "unified-sample.jsonl").read_text().splitlines()
+    obj = json.loads(lines[0])
+    sid = obj["sid"]
+
+    log = tmp_path / "unified.jsonl"
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps({"msg": "model changed", "sid": sid, "ctx": {"model": "grok-4.5"}}),
+                json.dumps({"msg": "model catalog: notifying clients", "ctx": {"model_count": 1, "current_model_id": "grok-4.5"}}),
+                *lines,
+            ]
+        )
+    )
+
+    changed, singleton = load_grok_model_map(log)
+    assert changed == {sid: "grok-4.5"}
+    assert singleton == "grok-4.5"
+
+    measured = extract_grok_inference_event(
+        obj, session_models=changed, catalog_singleton_model=singleton
+    )
+    assert measured.run_fields["model"] == "grok-4.5"
+    assert measured.run_fields["model_source"] == "unified_log"
+
+    derived = extract_grok_inference_event(
+        obj, session_models={}, catalog_singleton_model=singleton
+    )
+    assert derived.run_fields["model"] == "grok-4.5"
+    assert derived.run_fields["model_source"] == "derived_catalog_singleton"
+
+    unknown = extract_grok_inference_event(obj, session_models={}, catalog_singleton_model=None)
+    assert unknown.run_fields["model"] is None
+
+    # Two catalog models: no derivation, fail closed.
+    log.write_text(
+        "\n".join(
+            [
+                json.dumps({"msg": "model catalog: notifying clients", "ctx": {"current_model_id": "grok-4.5"}}),
+                json.dumps({"msg": "model catalog: notifying clients", "ctx": {"current_model_id": "grok-4"}}),
+            ]
+        )
+    )
+    _, singleton = load_grok_model_map(log)
+    assert singleton is None
 
 
 # ---------------------------------------------------------------------------

@@ -862,12 +862,16 @@ def extract_grok_inference_event(
     *,
     workspace: Optional[str] = None,
     buzz_workspaces_root: Path | str = DEFAULT_BUZZ_AGENT_WORKSPACES_ROOT,
+    session_models: Optional[Mapping[str, str]] = None,
+    catalog_singleton_model: Optional[str] = None,
 ) -> Optional[ExtractedRun]:
     """One shell.turn.inference_done log line → one run (sid+loop).
 
     Tokens live in ``ctx`` (prompt_tokens, cached_prompt_tokens,
     completion_tokens, reasoning_tokens). No model id and no rate-limit
-    snapshot are present on this event type — those fields stay unavailable.
+    snapshot are present on this event type — the model is recovered from
+    ``model changed`` events (measured) or a single-model catalog
+    (derived) when the caller passes ``load_grok_model_map`` results.
     """
     if obj.get("msg") != "shell.turn.inference_done":
         return None
@@ -881,6 +885,14 @@ def extract_grok_inference_event(
     reasoning = _int_or_none(ctx.get("reasoning_tokens"))
     if prompt is None and completion is None:
         return None
+
+    model: Optional[str] = None
+    model_source = "unified_log"
+    if session_models and sid in session_models:
+        model = session_models[sid]
+    elif catalog_singleton_model is not None:
+        model = catalog_singleton_model
+        model_source = "derived_catalog_singleton"
 
     loop_index = ctx.get("loop_index")
     try:
@@ -909,8 +921,8 @@ def extract_grok_inference_event(
     fields = {
         "origin": actual_origin,
         "provider": "xai",
-        "model": None,  # not present on inference_done
-        "model_source": "unified_log",
+        "model": model,
+        "model_source": model_source,
         "billing_mode": "subscription_included",
         "input_tokens": prompt,
         "output_tokens": completion,
@@ -935,7 +947,8 @@ def extract_grok_inference_event(
                 fields={
                     "origin": actual_origin,
                     "provider": "xai",
-                    "model_source": "unified_log",
+                    "model": model,
+                    "model_source": model_source,
                     "input_tokens": prompt,
                     "output_tokens": completion,
                     "cache_read_tokens": cached,
@@ -1000,6 +1013,49 @@ def iter_grok_inference_events(path: Path | str) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(obj, dict) and obj.get("msg") == "shell.turn.inference_done":
                 yield obj
+
+
+def load_grok_model_map(path: Path | str) -> tuple[dict[str, str], Optional[str]]:
+    """Recover per-session model identity from the unified Grok log.
+
+    ``shell.turn.inference_done`` carries no model id (B7 capture gap:
+    1.016/1.016 grok rows with model NULL).  Two honest sources exist in
+    the same file: ``model changed`` events name the session's model
+    directly (measured), and the model catalog broadcasts the only model
+    the CLI could run — when every catalog event agrees on exactly one
+    ``current_model_id``, that id is a *derived* model for sessions
+    without an explicit change event.  Anything else stays NULL.
+    """
+    changed: dict[str, str] = {}
+    catalog_ids: set[str] = set()
+    try:
+        fh = Path(path).open(encoding="utf-8", errors="replace")
+    except OSError:
+        return changed, None
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line or '"model' not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(obj, dict):
+                continue
+            ctx = obj.get("ctx") if isinstance(obj.get("ctx"), dict) else {}
+            msg = obj.get("msg")
+            if msg == "model changed":
+                sid = obj.get("sid")
+                model = ctx.get("model")
+                if isinstance(sid, str) and sid and isinstance(model, str) and model:
+                    changed[sid] = model
+            elif msg == "model catalog: notifying clients":
+                current = ctx.get("current_model_id")
+                if isinstance(current, str) and current:
+                    catalog_ids.add(current)
+    singleton = next(iter(catalog_ids)) if len(catalog_ids) == 1 else None
+    return changed, singleton
 
 
 # ---------------------------------------------------------------------------
@@ -1453,6 +1509,7 @@ def harvest_grok(
         if isinstance(obj.get("sid"), str) and obj.get("sid")
     }
     workspaces = load_grok_session_workspaces(sessions_root, session_ids)
+    session_models, catalog_singleton = load_grok_model_map(path)
     for obj in iter_grok_inference_events(path):
         stats.scanned += 1
         try:
@@ -1465,6 +1522,8 @@ def harvest_grok(
                     else None
                 ),
                 buzz_workspaces_root=buzz_workspaces_root,
+                session_models=session_models,
+                catalog_singleton_model=catalog_singleton,
             )
         except Exception:
             stats.errors += 1

@@ -220,9 +220,17 @@ def test_round2_entries_and_documented_absences() -> None:
     check = priceability("codex-auto-review", "openai")
     assert check["classification"] == "documented_absent"
 
-    # Capture gaps stay their own class.
+    # Capture gaps stay their own class.  A missing provider is a mapping
+    # problem, not a price gap: gpt-5.4-mini resolves unambiguously to
+    # openai (provider_inferred), where the sourcedly-absent write rate
+    # classifies it — only unresolvable models stay provider_missing.
     assert priceability(None, "xai")["classification"] == "model_missing"
-    assert priceability("gpt-5.4-mini", None)["classification"] == "provider_missing"
+    check = priceability("gpt-5.4-mini", None)
+    assert check["provider_inferred"] is True
+    assert check["resolved_provider"] == "openai"
+    assert check["classification"] == "documented_absent"
+    check = priceability("<synthetic>", None)
+    assert check["classification"] == "model_missing"
 
 
 def test_qwen38_models_have_no_payg_rate() -> None:

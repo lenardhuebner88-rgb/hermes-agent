@@ -45,6 +45,7 @@ __all__ = [
     "UsageFactsUsage",
     "estimate_usage_cost",
     "estimate_equivalent_cost",
+    "infer_provider_for_model",
     "priceability",
     "resolve_model_alias",
     # Re-exported upstream types so fork read paths do not import
@@ -173,6 +174,44 @@ def resolve_model_alias(model: str) -> str:
         return resolved
     basename = normalized.rsplit("/", 1)[-1]
     return _MODEL_ALIASES.get(basename.lower(), normalized)
+
+
+# Providers the fork prices at all.  Used for provider inference only —
+# never for route resolution.
+_PROVIDER_CANDIDATES = ("anthropic", "openai", "moonshot", "alibaba", "xai")
+
+
+def infer_provider_for_model(
+    model_name: Optional[str], origin: Optional[str] = None
+) -> Optional[str]:
+    """Derived provider when exactly one priced provider claims the model.
+
+    Rows whose provider was never captured (aux calls, foreign lanes) are
+    unpriceable only because the route is unknown — a *mapping* problem,
+    not a price gap (B7).  When the pricing catalogs (fork overrides +
+    upstream) contain exactly one provider with a sourced rate for the
+    model, that provider is the honest derivation; ambiguity or absence
+    fails closed to None.  The rate table still decides priceability —
+    e.g. qwen3.8-max-preview infers ``alibaba`` and stays
+    documented_absent.
+    """
+    normalized = str(model_name or "").strip()
+    if not normalized or normalized == "<synthetic>":
+        return None
+    resolved = resolve_model_alias(normalized)
+    hits: list[str] = []
+    for provider in _PROVIDER_CANDIDATES:
+        route = resolve_billing_route(resolved, provider=provider)
+        override = _fork_override(route, origin)
+        if override is not None:
+            # A fork override claims the model for this provider even when
+            # it fails closed (documented_absent) — the rate table decides
+            # priceability downstream, not the inference.
+            hits.append(provider)
+            continue
+        if get_pricing_entry(route.model, provider=route.provider) is not None:
+            hits.append(provider)
+    return hits[0] if len(hits) == 1 else None
 
 
 # Alibaba context-cache (alibabacloud.com model-studio context-cache docs,
@@ -540,9 +579,17 @@ def _estimate(
     origin: Optional[str] = None,
 ) -> CostResult:
     resolved_model = resolve_model_alias(model_name)
+    provider_effective = provider
+    if provider_effective is None or str(provider_effective).strip().lower() in {
+        "",
+        "unknown",
+    }:
+        # Mapping repair, not price invention (B7): the provider was never
+        # captured, but the model may belong to exactly one priced provider.
+        provider_effective = infer_provider_for_model(resolved_model, origin)
     route = resolve_billing_route(
         resolved_model,
-        provider=provider,
+        provider=provider_effective,
         base_url=base_url,
     )
     if result_status == "estimated" and route.billing_mode == "subscription_included":
@@ -670,6 +717,16 @@ _DOCUMENTED_ABSENT_COMPONENTS: dict[tuple[str, str, str], str] = {
         "cache-write line item does not exist "
         "(developers.openai.com/api/docs/pricing; Grok 2026-08-03)"
     ),
+    ("openai", "gpt-5.4", "cache_write_tokens"): (
+        "cache-write line item does not exist — automatic caching bills "
+        "cached reads at a discount only "
+        "(developers.openai.com/api/docs/pricing; CloudZero 2026-07-29)"
+    ),
+    ("openai", "gpt-5.4-mini", "cache_write_tokens"): (
+        "cache-write line item does not exist — automatic caching bills "
+        "cached reads at a discount only "
+        "(developers.openai.com/api/docs/pricing; CloudZero 2026-07-29)"
+    ),
     ("xai", "grok-4.5", "cache_write_tokens"): (
         "cache-write line item does not exist "
         "(docs.x.ai/developers/pricing; Grok 2026-08-03)"
@@ -728,7 +785,7 @@ def priceability(
         "alias_of": None,
         "origin": origin,
     }
-    if not model_name or not str(model_name).strip():
+    if not model_name or not str(model_name).strip() or str(model_name).strip() == "<synthetic>":
         return {
             **base,
             "priceable": False,
@@ -737,13 +794,17 @@ def priceability(
         }
     if not provider or not str(provider).strip():
         resolved_model = resolve_model_alias(str(model_name))
-        return {
-            **base,
-            "resolved_model": resolved_model,
-            "priceable": False,
-            "classification": "provider_missing",
-            "reason": "provider not captured (harvest gap)",
-        }
+        inferred = infer_provider_for_model(resolved_model, origin)
+        if inferred is None:
+            return {
+                **base,
+                "resolved_model": resolved_model,
+                "priceable": False,
+                "classification": "provider_missing",
+                "reason": "provider not captured and not unambiguously derivable (harvest gap)",
+            }
+        provider = inferred
+        base["provider_inferred"] = True
     resolved_model = resolve_model_alias(str(model_name))
     route = resolve_billing_route(resolved_model, provider=provider)
     base["resolved_provider"] = route.provider
