@@ -307,6 +307,38 @@ def test_billable_input_untouched_for_anthropic_convention() -> None:
     )
 
 
+def test_anthropic_row_with_small_cache_is_not_subtracted() -> None:
+    """Review-1-Blocker: 77 production rows carry cache_read <= input on the
+    Anthropic path — their input is real billed input, never cache-inclusive.
+    The subtraction must NOT fire for provider=anthropic even then."""
+    usage = UsageFactsUsage(input_tokens=24_798, cache_read_tokens=22_837)
+    result = estimate_equivalent_cost(
+        "claude-fable-5", usage, provider="anthropic", origin="claude_code"
+    )
+    assert result.amount_usd == (
+        Decimal("24798") * Decimal("10.00") / Decimal(_ONE_MILLION)
+        + Decimal("22837") * Decimal("1.00") / Decimal(_ONE_MILLION)
+    )
+
+
+def test_qwen_under_claude_code_is_anthropic_convention() -> None:
+    """The qwen token-plan traffic runs the Anthropic protocol through
+    claude_code (explicit cache, cf. _EXPLICIT_CACHE_ORIGINS): no
+    subtraction — while the same model on the OpenAI-compatible qwen_cli
+    path subtracts."""
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=400_000)
+    explicit = estimate_equivalent_cost(
+        "qwen3.7-max", usage, provider="alibaba-token-plan", origin="claude_code"
+    )
+    implicit = estimate_equivalent_cost(
+        "qwen3.7-max", usage, provider="qwen", origin="qwen_cli"
+    )
+    # explicit: full input 2.50 + read 400k*0.25 (10% of 2.50)
+    assert explicit.amount_usd == Decimal("2.50") + Decimal("0.10")
+    # implicit: billable input 600k*2.50 + read 400k*0.50 (20% of 2.50)
+    assert implicit.amount_usd == Decimal("1.50") + Decimal("0.20")
+
+
 def test_billable_input_fully_cached_row_prices_zero_uncached_input() -> None:
     usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=1_000_000)
     result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")

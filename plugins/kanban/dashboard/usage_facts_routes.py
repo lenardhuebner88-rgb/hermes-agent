@@ -89,6 +89,7 @@ def get_usage_consumption(
             detail=f"breakdown must be one of {sorted(_ALLOWED_CONSUMPTION_BREAKDOWNS)}",
         )
     board = _resolve_board(board)
+    _ensure_consumption_warmup()
     return _build_consumption_payload(
         _usage_facts_db_path(),
         days=days,
@@ -110,7 +111,26 @@ def _warm_consumption_in_background() -> None:
         pass
 
 
-threading.Thread(target=_warm_consumption_in_background, daemon=True).start()
+_WARMUP_LOCK = threading.Lock()
+_WARMUP_STARTED = False
+
+
+def _ensure_consumption_warmup() -> None:
+    """Start the warmup lazily on the first request — never at import.
+
+    An import-time thread would open the production databases during
+    pytest collection and every incidental package import (Review 1,
+    2026-08-04).  The daemon warms the default variant after the first
+    hit; the cold-build cost is documented in usage-facts.md.
+    """
+    global _WARMUP_STARTED
+    if _WARMUP_STARTED:
+        return
+    with _WARMUP_LOCK:
+        if _WARMUP_STARTED:
+            return
+        _WARMUP_STARTED = True
+    threading.Thread(target=_warm_consumption_in_background, daemon=True).start()
 
 
 __all__ = ()

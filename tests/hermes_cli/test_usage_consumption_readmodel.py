@@ -113,6 +113,29 @@ def _fact_db(tmp_path: Path) -> Path:
         },
         path=path,
     )
+    # hermes_agent call WITHOUT occurred_at (18k live rows carry none —
+    # Review 1): it must still land in the payload via the run's time.
+    record_llm_call(
+        "run-hermes-1",
+        1,
+        {
+            "origin": "hermes_agent",
+            "provider": "openai-codex",
+            "model": "gpt-5.6-sol",
+            "input_tokens": 50_000,
+            "output_tokens": 1_000,
+            "cache_read_tokens": 40_000,
+            # occurred_at deliberately absent
+        },
+        run_fields={
+            "origin": "hermes_agent",
+            "provider": "openai-codex",
+            "model": "gpt-5.6-sol",
+            "billing_mode": "subscription_included",
+            "captured_at": RECENT,
+        },
+        path=path,
+    )
     # out-of-window row: must not appear anywhere.
     record_llm_call(
         "run-old",
@@ -144,7 +167,7 @@ def test_totals_derive_billable_input_and_costs(tmp_path: Path) -> None:
     ) + Decimal("0.0225")
     # codex run: billable input 20k (200k-180k), out 2k, cr 180k at sol rates
     # (upstream openai gpt-5.6-sol entry)
-    assert totals["runs"] == 4  # incl. unpriceable qwen run
+    assert totals["runs"] == 5  # incl. unpriceable qwen run
     assert totals["equivalent_usd"] > float(sonnet)
     # subscription everywhere: metered 0, saving == equivalent
     assert totals["metered_usd"] == 0.0
@@ -152,7 +175,7 @@ def test_totals_derive_billable_input_and_costs(tmp_path: Path) -> None:
         totals["equivalent_usd"]
     )
     cov = totals["cost_coverage"]
-    assert cov["numerator"] == 3 and cov["denominator"] == 4
+    assert cov["numerator"] == 4 and cov["denominator"] == 5
 
 
 def test_unpriceable_is_not_applicable_never_zero(tmp_path: Path) -> None:
@@ -171,12 +194,12 @@ def test_cache_hit_rate_uses_self_detecting_prompt(tmp_path: Path) -> None:
         _fact_db(tmp_path), days=30, breakdown="origin", now=NOW
     )
     rate = payload["cache_hit_rate"]
-    # cache_read total = 100_000 + 180_000 + 50_000 + 400_000 = 730_000
+    # cache_read total = 100k + 180k + 50k + 400k + 40k (hermes) = 770_000
     # prompt = billable_input + cache_read
-    # billable = 1_000 + 20_000 + 100 + 100_000 = 121_100
-    assert rate["numerator"] == 730_000
-    assert rate["denominator"] == 730_000 + 121_100
-    assert rate["value"] == pytest.approx(730_000 / 851_100, rel=1e-4)
+    # billable = 1_000 + 20_000 + 100 + 100_000 + 10_000 = 131_100
+    assert rate["numerator"] == 770_000
+    assert rate["denominator"] == 770_000 + 131_100
+    assert rate["value"] == pytest.approx(770_000 / 901_100, rel=1e-4)
 
 
 def test_component_shares_carry_tokens_and_cost(tmp_path: Path) -> None:
@@ -198,7 +221,9 @@ def test_daily_and_trend_respect_window(tmp_path: Path) -> None:
         _fact_db(tmp_path), days=30, breakdown="origin", now=NOW
     )
     days = {entry["day"] for entry in payload["daily"]}
-    assert days == {"2026-08-03"}
+    # RECENT day + today: the aggregate refresh restamps captured_at to
+    # the real write time (documented semantics), and it is in-window.
+    assert days == {"2026-08-03", "2026-08-04"}
     assert payload["trend"]["equivalent_usd_per_day_full"] > 0
     # Same single data day in both windows: the 7d average is 30/7 of the
     # 30d average (denominator convention, documented).
@@ -212,7 +237,7 @@ def test_distributions_and_top_runs(tmp_path: Path) -> None:
         _fact_db(tmp_path), days=30, breakdown="origin", now=NOW
     )
     dist = payload["distributions"]["tokens_per_run"]
-    assert dist["count"] == 4
+    assert dist["count"] == 5
     assert dist["max"] >= dist["p90"] >= dist["p50"]
     top = payload["top_runs"]
     assert top

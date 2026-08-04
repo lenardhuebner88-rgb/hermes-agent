@@ -144,7 +144,7 @@ function VerbrauchBody({
         <KpiTile
           label="Abo erspart"
           value={fmtUsd0(totals.subscription_saving_usd)}
-          delta="metered $0,00 — das kostete der Wegfall des Abos"
+          delta={`metered ${fmtUsd(totals.metered_usd)} · bekannt abgerechnet ${fmtPct(totals.metered_coverage.value)} — das kostete der Wegfall des Abos`}
         />
         <KpiTile
           label="Cache-Hit-Rate"
@@ -292,17 +292,19 @@ function SmallMultiples({ data }: { data: UsageConsumptionResponse }) {
         {origins.map((origin, index) => {
           const entries = perOrigin[origin];
           const total = entries.reduce((acc, d) => acc + d.equivalent_usd, 0);
-          const coverageValues = entries
-            .map((d) => d.token_coverage.value)
-            .filter((v): v is number => typeof v === "number");
-          const meanCoverage = coverageValues.length
-            ? coverageValues.reduce((a, b) => a + b, 0) / coverageValues.length
-            : null;
+          // Token-gewichtete Abdeckung — ein Tag mit 10 Tokens zählt nicht
+          // so viel wie einer mit 10 Mrd (Review 2).
+          const covered = entries.reduce(
+            (acc, d) => acc + (typeof d.token_coverage.value === "number" ? d.token_coverage.value * d.tokens : 0),
+            0,
+          );
+          const tokenSum = entries.reduce((acc, d) => acc + d.tokens, 0);
+          const weightedCoverage = tokenSum > 0 ? covered / tokenSum : null;
           return (
             <div key={origin} className="rounded-panel border border-line bg-surface-2 p-4" data-testid={`verbrauch-multiple-${origin}`}>
               <div className="flex items-baseline justify-between gap-2">
                 <p className="truncate text-sm font-semibold text-ink">{origin}</p>
-                <p className="font-data text-sm tabular-nums text-ink">{fmtUsd0(total)}</p>
+                <p className="font-data text-sm tabular-nums text-ink">{total > 0 && total < 10 ? fmtUsd(total) : fmtUsd0(total)}</p>
               </div>
               <DayBarsCoverage
                 points={entries.map((d) => ({
@@ -314,7 +316,7 @@ function SmallMultiples({ data }: { data: UsageConsumptionResponse }) {
                 valueFmt={fmtUsd0}
               />
               <p className="mt-1 text-xs text-ink-3">
-                {meanCoverage != null ? `${(meanCoverage * 100).toFixed(0)} % gedeckt` : "Abdeckung unbekannt"} · matte Balken = dünner gedeckt
+                {weightedCoverage != null ? `${(weightedCoverage * 100).toFixed(0)} % gedeckt (token-gewichtet)` : "Abdeckung unbekannt"} · matte Balken = dünner gedeckt
               </p>
             </div>
           );

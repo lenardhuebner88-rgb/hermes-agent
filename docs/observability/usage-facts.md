@@ -47,7 +47,7 @@ nötig); ISO-Suffix-Mischung (`Z`/`+00:00`) ist tagesstabil, nicht sekundenstabi
 | Metrik | Formel | Zähler | Nenner |
 |---|---|---|---|
 | **Äquivalent-Kosten** | Σ Komponente × Satz / 1M über alle bepreisbaren Gruppen | Komponentensummen (s. u.) × `usage_facts_pricing`-Raten | — |
-| **billable_input** (Komponente) | zeilenweise: `input − cache_read`, wenn `0 < cache_read ≤ input`, sonst `input` (Canon §5f, OpenAI- vs. Anthropic-Konvention selbstdetektierend) | — | — |
+| **billable_input** (Komponente) | zeilenweise: `input − cache_read` nur auf OpenAI-Konvention (`0 < cache_read ≤ input` UND NICHT provider=`anthropic` UND NICHT origin=`claude_code`); Anthropic-Konvention zählt Input voll (Verfeinerung nach Review 1: 77 Produktionszeilen mit `cache_read ≤ input` auf dem Anthropic-Pfad) | — | — |
 | **Cache-Write-Komponenten** | liegt der TTL-Split vor (1h/5m nicht NULL), zählt nur der Split; sonst die Gesamtsumme (Register-Leseregel) | — | — |
 | **Abo-real (metered)** | `0` für `subscription_included`; Äquivalent für `payg/metered/api_key`; **unbekannt** bei NULL/`unknown` (nie 0) | — | — |
 | **Abo-Ersparnis** | Σ (Äquivalent − metered) über Gruppen mit bekannter Abrechnung | wie links | metered_coverage im Payload |
@@ -78,12 +78,30 @@ gerundet auf Cent; Autorität ist die Decimal-Rechnung.
    Läufe. Annahme: Ausreißer über p99 ist Fehlverhalten und begrenzbar.
    Plausibilität: Verhältnis Top:p99, Run-Identität zum Prüfen.
 3. **failed-outcome-runs:** Ist = Token-Anteil der task_runs mit Status
-   blocked/iteration_budget_exhausted/transient_retry × Fenster-Äquivalent;
-   Gegenrechnung = Halbierung. Annahme: frühere Abbrüche/Retry-Deckel
-   vermeiden die Hälfte. Plausibilität: failed_runs/all_runs, Token-Anteil
-   (Basis: task_runs in/out, Worker-Buchführung ohne Cache — benannt).
+   blocked/iteration_budget_exhausted/transient_retry × **Hermes-Runtime-
+   Äquivalent** (hermes_agent + hermes_aux — der nächstgelegene gemessene
+   Scope, NICHT das Gesamtfenster); Gegenrechnung = Halbierung. Annahme:
+   frühere Abbrüche/Retry-Deckel vermeiden die Hälfte; die Scope-
+   Extrapolation über die 16,5-%-Korrelationslücke ist Teil der Annahme und
+   im Payload benannt. Plausibilität: failed_runs/all_runs, Token-Anteil
+   (Basis: task_runs in/out, Worker-Buchführung ohne Cache).
+4. **foreign-lane-cache-hit:** Ist = billable_input der Fremd-Lanes
+   (OpenAI-Konvention, beide Granularitäten — Call-Ebene wo vorhanden,
+   Run-Ebene für den Fremd-Lane-Harvest) zum Input-Satz; Gegenrechnung =
+   der Anteil, der bei Claude-Hit-Rate (gemessen, Referenzwert im Payload)
+   stattdessen zum Cache-Read-Satz liefe. Annahme: stabilere Kontext-
+   Prefixe heben die Hit-Rate auf das gemessene Claude-Niveau.
+   Plausibilität: Hit-Raten je Lane im Payload.
 
 Ein Hebel ohne Gegenrechnung kommt nicht ins Ranking (Contract).
+
+## Latenz
+
+Warm antwortet der Endpoint aus dem TTL-Cache (300 s, Harvest-Takt 15 min)
+in < 1 ms — gemessen warm 0,000 s. Der Kaltbau (30 Tage, ~140 k Call-
+Zeilen) kostet ~4 s (vier Full-Scans + Preisfunktion); ein Lazy-Warmup
+beim ersten Request wärmt die Default-Variante im Hintergrund. Kein
+Import-Zeit-Thread (pytest-Collection berührt keine Produktions-DB).
 
 ## Blinde Flecken (beziffert, mit angewandter Entscheidungsregel)
 

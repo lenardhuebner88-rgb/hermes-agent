@@ -120,6 +120,7 @@ const ResponseSchema = z.object({
       z.object({
         day: z.string(),
         equivalent_usd: z.number(),
+        tokens: z.number(),
         token_coverage: RateSchema,
       }),
     ),

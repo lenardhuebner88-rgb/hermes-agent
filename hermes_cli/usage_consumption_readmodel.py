@@ -58,11 +58,17 @@ _UUID_LIKE_SQL = (
 )
 
 # Row-wise token components (Canon §5f billable input + TTL split rule).
-# Applied to one call row (alias c) or one run-level-only row (alias f).
+# billable input subtracts the cached share ONLY on OpenAI-convention rows
+# (input includes cache).  Anthropic-convention rows — provider anthropic
+# or the Anthropic-protocol path (origin claude_code, incl. its qwen
+# token-plan traffic) — never include cache in input; subtracting there
+# understated real input by up to 24.7 % on 77 measured production rows
+# (Review 1, 2026-08-04).  {a} = token source alias, {f} = facts alias.
 _COMPONENT_SQL = {
     "billable_input": (
         "SUM(CASE WHEN {a}.cache_read_tokens > 0 "
         "AND {a}.cache_read_tokens <= {a}.input_tokens "
+        "AND {a}.provider <> 'anthropic' AND {f}.origin <> 'claude_code' "
         "THEN {a}.input_tokens - {a}.cache_read_tokens "
         "ELSE COALESCE({a}.input_tokens, 0) END)"
     ),
@@ -142,21 +148,21 @@ def _aggregate_full(conn: sqlite3.Connection, cutoff_iso: str) -> list[GroupRow]
         " THEN NULL ELSE f.lane END"
     )
     component_cols = ", ".join(
-        f"{expr.format(a='c')} AS {name}" for name, expr in _COMPONENT_SQL.items()
+        f"{expr.format(a='c', f='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
     )
     call_sql = f"""
-        SELECT substr(c.occurred_at, 1, 10) AS day,
+        SELECT substr(COALESCE(c.occurred_at, f.last_call_at, f.captured_at), 1, 10) AS day,
                f.origin AS origin, c.provider AS provider, c.model AS model,
                f.billing_mode AS billing_mode, {lane_cat} AS lane,
                COUNT(DISTINCT c.run_id) AS runs,
                {component_cols}
         FROM run_llm_calls c
         JOIN run_usage_facts f ON f.run_id = c.run_id
-        WHERE c.occurred_at >= ?
+        WHERE COALESCE(c.occurred_at, f.last_call_at, f.captured_at) >= ?
         GROUP BY day, f.origin, c.provider, c.model, f.billing_mode, lane
     """
     run_component_cols = ", ".join(
-        f"{expr.format(a='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
+        f"{expr.format(a='f', f='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
     )
     run_sql = f"""
         SELECT substr(COALESCE(f.last_call_at, f.captured_at), 1, 10) AS day,
@@ -372,21 +378,21 @@ def _distribution(values: Sequence[float]) -> dict[str, Any]:
 def _per_run_rows(conn: sqlite3.Connection, cutoff_iso: str) -> list[sqlite3.Row]:
     """Per-run component sums for distributions and top-run listings."""
     component_cols = ", ".join(
-        f"{expr.format(a='c')} AS {name}" for name, expr in _COMPONENT_SQL.items()
+        f"{expr.format(a='c', f='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
     )
     sql = f"""
         SELECT c.run_id AS run_id, f.origin AS origin, c.provider AS provider,
                c.model AS model, f.task_id AS task_id, f.chain_id AS chain_id,
-               f.session_id AS session_id,
-               MIN(substr(c.occurred_at, 1, 10)) AS day,
+               f.session_id AS session_id, f.billing_mode AS billing_mode,
+               MIN(substr(COALESCE(c.occurred_at, f.last_call_at, f.captured_at), 1, 10)) AS day,
                {component_cols}
         FROM run_llm_calls c
         JOIN run_usage_facts f ON f.run_id = c.run_id
-        WHERE c.occurred_at >= ?
+        WHERE COALESCE(c.occurred_at, f.last_call_at, f.captured_at) >= ?
         GROUP BY c.run_id, f.origin, c.provider, c.model
     """
     run_component_cols = ", ".join(
-        f"{expr.format(a='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
+        f"{expr.format(a='f', f='f')} AS {name}" for name, expr in _COMPONENT_SQL.items()
     )
     sql_run = f"""
         SELECT f.run_id AS run_id, f.origin AS origin, f.provider AS provider,
@@ -415,7 +421,7 @@ def _breakdown_from_run_rows(
                 "provider": row["provider"],
                 "model": row["model"],
                 "origin": row["origin"],
-                "billing_mode": None,
+                "billing_mode": row["billing_mode"],
             },
             components={k: int(row[k] or 0) for k in _TOKEN_COMPONENT_KEYS},
             calls=int(row["calls"] or 0),
@@ -451,6 +457,7 @@ def _compute_levers(
     cutoff_iso: str,
     totals: Mapping[str, Any],
     kanban_path: Union[Path, str, None] = None,
+    hermes_scope_eq: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Hebel-Analyse (C2): every lever carries its counterfactual, the
     named assumption behind it, and a plausibility check on real data.
@@ -468,6 +475,8 @@ def _compute_levers(
         SELECT c.model, c.provider, c.origin,
                SUM(CASE WHEN c.cache_read_tokens > 0
                         AND c.cache_read_tokens <= c.input_tokens
+                        AND c.provider <> 'anthropic'
+                        AND c.origin <> 'claude_code'
                    THEN c.input_tokens - c.cache_read_tokens
                    ELSE COALESCE(c.input_tokens, 0) END) AS billable_input,
                SUM(COALESCE(c.output_tokens, 0)) AS output,
@@ -556,21 +565,44 @@ def _compute_levers(
             )
 
     # Lever 2 — cache-hit improvement on the OpenAI-convention lanes.
-    # Counterfactual: codex_cli/kimi_cli billable input moves to cache-read
-    # price at the hit rate claude_code already achieves (measured).
+    # Counterfactual: foreign-lane billable input moves to cache-read price
+    # at the hit rate claude_code already achieves (measured).  Foreign
+    # lanes are run-level-only (no call rows), so the lane side unions both
+    # granularities — reading only run_llm_calls would make this lever
+    # structurally dead (Review 2, 2026-08-04).
     lane_rows = conn.execute(
         """
-        SELECT c.origin, c.provider, c.model,
-               SUM(CASE WHEN c.cache_read_tokens > 0
-                        AND c.cache_read_tokens <= c.input_tokens
-                   THEN c.input_tokens - c.cache_read_tokens
-                   ELSE COALESCE(c.input_tokens, 0) END) AS billable_input,
-               SUM(COALESCE(c.cache_read_tokens, 0)) AS cache_read
-        FROM run_llm_calls c
-        WHERE c.occurred_at >= ?
-        GROUP BY c.origin, c.provider, c.model
+        SELECT origin, provider, model,
+               SUM(billable_input) AS billable_input,
+               SUM(cache_read) AS cache_read
+        FROM (
+          SELECT c.origin AS origin, c.provider AS provider, c.model AS model,
+                 CASE WHEN c.cache_read_tokens > 0
+                           AND c.cache_read_tokens <= c.input_tokens
+                           AND c.provider <> 'anthropic'
+                           AND c.origin <> 'claude_code'
+                      THEN c.input_tokens - c.cache_read_tokens
+                      ELSE COALESCE(c.input_tokens, 0) END AS billable_input,
+                 COALESCE(c.cache_read_tokens, 0) AS cache_read
+          FROM run_llm_calls c
+          JOIN run_usage_facts f ON f.run_id = c.run_id
+          WHERE COALESCE(c.occurred_at, f.last_call_at, f.captured_at) >= ?
+          UNION ALL
+          SELECT f.origin, f.provider, f.model,
+                 CASE WHEN f.cache_read_tokens > 0
+                           AND f.cache_read_tokens <= f.input_tokens
+                           AND f.provider <> 'anthropic'
+                           AND f.origin <> 'claude_code'
+                      THEN f.input_tokens - f.cache_read_tokens
+                      ELSE COALESCE(f.input_tokens, 0) END,
+                 COALESCE(f.cache_read_tokens, 0)
+          FROM run_usage_facts f
+          WHERE COALESCE(f.last_call_at, f.captured_at) >= ?
+            AND NOT EXISTS (SELECT 1 FROM run_llm_calls c WHERE c.run_id = f.run_id)
+        )
+        GROUP BY origin, provider, model
         """,
-        (cutoff_iso,),
+        (cutoff_iso, cutoff_iso),
     ).fetchall()
     lane_hit: dict[str, tuple[int, int]] = {}
     for row in lane_rows:
@@ -634,9 +666,11 @@ def _compute_levers(
 
     # Lever 3 — runs without outcome on the kanban scope (own DB,
     # read-only; coverage shown).  Empty ("not applicable") without a
-    # kanban path.
+    # kanban path.  Base is the hermes-runtime equivalent, not the whole
+    # window — extrapolating task_runs shares onto codex/buzz/claude
+    # totals would be circular, not conservative (Review 2, 2026-08-04).
     if kanban_path is not None:
-        levers.append(_kanban_outcome_lever(kanban_path, cutoff_iso, total_eq))
+        levers.append(_kanban_outcome_lever(kanban_path, cutoff_iso, hermes_scope_eq, total_eq))
 
     levers = [lever for lever in levers if lever]
     levers.sort(key=lambda lever: -(lever.get("savings_usd") or 0))
@@ -644,7 +678,10 @@ def _compute_levers(
 
 
 def _kanban_outcome_lever(
-    kanban_path: Union[Path, str], cutoff_iso: str, total_eq: float
+    kanban_path: Union[Path, str],
+    cutoff_iso: str,
+    hermes_scope_eq: float,
+    total_eq: float,
 ) -> dict[str, Any]:
     """Lever 3 with its own coverage accounting; empty when unjoinable."""
     try:
@@ -670,31 +707,38 @@ def _kanban_outcome_lever(
         return {}
     finally:
         kconn.close()
-    if not row or not row["all_io"]:
+    if not row or not row["all_io"] or not hermes_scope_eq:
         return {}
     # task_runs tokens are the worker's own accounting (in+out, no cache);
-    # the equivalent cost uses the measured $/token of the kanban scope.
+    # the $ basis is the hermes-runtime equivalent of the window — the
+    # closest measured scope to kanban worker consumption.  The
+    # extrapolation across the 16.5 % correlation coverage is named in the
+    # assumption, and share_of_total divides by the same basis.
     share = row["failed_io"] / row["all_io"]
-    kanban_eq = total_eq  # conservative: priced against the whole window
-    current = share * kanban_eq
+    current = share * hermes_scope_eq
     savings = current * 0.5
     return {
         "id": "failed-outcome-runs",
         "title": "Runs ohne Ergebnis (blocked/retry/budget) halbieren",
         "current_usd": round(current, 2),
-        "share_of_total": _rate(current, total_eq),
+        "share_of_total": _rate(current, hermes_scope_eq),
         "counterfactual_usd": round(current - savings, 2),
         "savings_usd": round(savings, 2),
         "assumption": (
             "die Hälfte des Verbrauchs fehlgeschlagener Runs ist durch "
             "frühere Abbrüche/Retry-Deckel vermeidbar, ohne Ergebnisse zu "
-            "verlieren"
+            "verlieren. Scope-Extrapolation: der task_runs-Token-Anteil "
+            "wird auf das Hermes-Runtime-Äquivalent "
+            f"(${hermes_scope_eq:,.0f}) hochgerechnet — Korrelations-"
+            "Abdeckung 16,5 %, daher Untergrenze, keine Gesamtrechnung"
         ),
         "plausibility": {
             "failed_runs": row["failed_runs"],
             "all_runs": row["runs"],
             "failed_token_share": round(share, 4),
             "basis": "task_runs in/out tokens (worker accounting, no cache)",
+            "scope_usd_basis": "hermes_agent + hermes_aux equivalent",
+            "window_equivalent_usd": round(total_eq, 2),
         },
     }
 
@@ -894,6 +938,7 @@ def _build_consumption_payload_uncached(
                 {
                     "day": day,
                     "equivalent_usd": round(s["equivalent_usd"], 4),
+                    "tokens": s["tokens"],
                     "token_coverage": _rate(
                         s["tokens"], s["tokens"] + s["unpriced_tokens"]
                     ),
@@ -1006,19 +1051,24 @@ def _build_consumption_payload_uncached(
         for cost, meta in runs_priced[:top_runs]
     ]
 
-    # Trend: last 7 days vs the full window (equivalent $/day).
-    def _window_sum(items: Iterable[PricedGroup], since_iso: Optional[str]) -> Decimal:
+    # Trend: last 7 days vs the full window (equivalent $/day).  The 7d
+    # side gets its own aggregate at the exact cutoff — filtering the
+    # day-bucketed groups by date string would include 8 calendar days
+    # and flip the sign of the ratio (Review 2, 2026-08-04).
+    def _window_sum(items: Iterable[PricedGroup]) -> Decimal:
         total = Decimal("0")
         for item in items:
-            day = item.group.dims["day"]
-            if since_iso is not None and (day is None or str(day) < since_iso[:10]):
-                continue
             if item.priceable and item.equivalent_usd is not None:
                 total += item.equivalent_usd
         return total
 
-    eq_30 = _window_sum(priced_rich, None)
-    eq_7 = _window_sum(priced_rich, trend_cutoff_iso)
+    conn = _connect_ro(path)
+    try:
+        rich_7d = _aggregate_full(conn, trend_cutoff_iso)
+    finally:
+        conn.close()
+    eq_30 = _window_sum(priced_rich)
+    eq_7 = _window_sum([_price_group(g) for g in rich_7d])
     days_in_window = min(days, max(1, (now - cutoff).days))
     trend = {
         "window_days": days,
@@ -1029,9 +1079,14 @@ def _build_consumption_payload_uncached(
 
     # Hebel-Analyse (C2): computed from the same raw facts, each lever
     # with counterfactual, named assumption and plausibility check.
+    hermes_scope_eq = sum(
+        float(item.equivalent_usd or 0)
+        for item in priced_rich
+        if item.priceable and item.group.dims["origin"] in ("hermes_agent", "hermes_aux")
+    )
     conn = _connect_ro(path)
     try:
-        levers = _compute_levers(conn, cutoff_iso, totals, kanban_path)
+        levers = _compute_levers(conn, cutoff_iso, totals, kanban_path, hermes_scope_eq)
     finally:
         conn.close()
 

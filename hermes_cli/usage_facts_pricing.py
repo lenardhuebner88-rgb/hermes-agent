@@ -528,23 +528,35 @@ def _rate_table_for_route(
     )
 
 
-def _billable_components(usage: UsageFactsUsage) -> dict[str, int]:
+def _billable_components(
+    usage: UsageFactsUsage,
+    *,
+    provider: Optional[str] = None,
+    origin: Optional[str] = None,
+) -> dict[str, int]:
     """Token amounts per component after the cache-write split rule.
 
-    Input counting follows the row-wise, self-detecting rule of Canon
-    register §5f: providers disagree on whether ``input_tokens`` already
-    contains cached reads (OpenAI convention: yes; Anthropic: no;
-    ``hermes_agent`` mixes both).  Without the correction the same cached
-    tokens are billed twice — measured 2026-07-31 as a 6.3x cost error on
-    the foreign lanes.  The cached share is subtracted only when it
-    provably fits inside the reported input; Anthropic rows (cache reads
-    far above uncached input) are untouched, as are cache-free runs.
+    Input counting follows the row-wise rule of Canon register §5f —
+    with one measured refinement (Review 1, 2026-08-04): the cached share
+    is subtracted only on OpenAI-convention rows, where ``input_tokens``
+    provably includes cached reads.  Anthropic-convention rows — provider
+    ``anthropic`` or the Anthropic-protocol path (``claude_code`` origin,
+    including its qwen token-plan traffic, cf. ``_EXPLICIT_CACHE_ORIGINS``)
+    — never include cache in input; 77 measured production rows with
+    ``cache_read <= input`` would otherwise lose up to 24.7 % of their
+    real billed input.  The §5f objection against origin-keyed rules
+    targeted the mixed ``hermes_agent`` origin; the provider column
+    discriminates cleanly there (no hermes_agent row is anthropic).
     """
     input_tokens = int(usage.input_tokens)
     cache_read = int(usage.cache_read_tokens)
+    input_includes_cache = (
+        str(provider or "").strip().lower() != "anthropic"
+        and origin not in _EXPLICIT_CACHE_ORIGINS
+    )
     billable_input = (
         input_tokens - cache_read
-        if 0 < cache_read <= input_tokens
+        if input_includes_cache and 0 < cache_read <= input_tokens
         else input_tokens
     )
     components = {
@@ -607,7 +619,7 @@ def _estimate(
         if isinstance(usage, UsageFactsUsage)
         else UsageFactsUsage.from_canonical(usage)
     )
-    components = _billable_components(normalized)
+    components = _billable_components(normalized, provider=route.provider, origin=origin)
 
     missing: list[str] = []
     amount = _ZERO
