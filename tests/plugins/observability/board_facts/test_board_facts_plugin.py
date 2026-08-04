@@ -382,6 +382,38 @@ def test_aux_calls_without_shared_correlation_keys_get_distinct_indices(
     assert indices == [start, start + 1, start + 2]
 
 
+def test_hermes_runtime_inside_buzz_workspace_is_attributed(
+    monkeypatch,
+    tmp_path,
+):
+    """B6: the buzz-agent@hermes unit must not blend into Kanban usage."""
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    monkeypatch.setattr(
+        board_facts.os,
+        "getcwd",
+        lambda: "/mnt/data/services/buzz-agent-workspaces/hermes/REPOS/hermes-agent",
+    )
+
+    plugin.on_post_llm_call(
+        api_request_id="request-buzz-hermes",
+        origin="hermes_agent",
+        call_kind="main_loop",
+        duration_ms=5,
+        usage={"input_tokens": 10, "output_tokens": 2},
+    )
+
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT origin, lane FROM run_usage_facts "
+            "WHERE run_id='request-buzz-hermes'"
+        ).fetchone()
+
+    assert tuple(row) == ("buzz_agent", "hermes")
+
+    assert tuple(row) == ("buzz_agent", "hermes")
+
+
 def test_request_trace_persists_each_growing_message_once(
     monkeypatch,
     tmp_path,

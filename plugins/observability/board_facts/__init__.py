@@ -14,6 +14,10 @@ from typing import Any, Mapping, Optional
 
 from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
 from agent.usage_pricing import resolve_billing_route
+from hermes_cli.usage_facts_buzz_attribution import (
+    BUZZ_AGENT_ORIGIN,
+    buzz_agent_unit_for_workspace,
+)
 from hermes_cli.usage_facts_db import (
     increment_tool_call,
     max_call_index,
@@ -136,6 +140,21 @@ def _worker_dimensions() -> dict[str, str]:
         return resolve_observability_context()
     except Exception:
         return {}
+
+
+def _buzz_unit_for_process() -> Optional[str]:
+    """Buzz agent unit when this process runs inside a managed workspace.
+
+    Same lexical contract as the harvesters (no symlink resolution, no
+    existence check): the buzz-agent@hermes unit's consumption is otherwise
+    indistinguishable from Kanban hermes_agent work — measured as a B6
+    attribution gap.  Fail-closed None on any error.
+    """
+    try:
+        return buzz_agent_unit_for_workspace(os.getcwd())
+    except Exception:
+        logger.debug("board_facts buzz workspace probe failed", exc_info=True)
+        return None
 
 
 def _usage_bucket(usage: Mapping[str, Any], name: str) -> Optional[int]:
@@ -279,9 +298,11 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
     )
     environment_profile = _text(os.environ.get("HERMES_PROFILE"))
     worker_dimensions = _worker_dimensions()
+    buzz_unit = _buzz_unit_for_process()
     lane = _first(
         _text(kwargs.get("lane")),
         _text(worker_dimensions.get("lane")),
+        buzz_unit,
         existing.lane if reuse_existing else None,
         environment_profile,
     )
@@ -291,6 +312,11 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
         environment_profile,
     )
     event_origin = _text(kwargs.get("origin")) or "hermes_agent"
+    if buzz_unit is not None and event_origin in ("hermes_agent", "hermes_aux"):
+        # B6: the buzz-agent@hermes unit runs the hermes runtime inside its
+        # managed workspace; attribute by process cwd (same contract as the
+        # harvesters) instead of letting it blend into Kanban consumption.
+        event_origin = BUZZ_AGENT_ORIGIN
     ctx = (
         existing
         if reuse_existing
