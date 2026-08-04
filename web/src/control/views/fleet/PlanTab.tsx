@@ -31,6 +31,8 @@ type PlanSort = "state" | "findings" | "agent" | "board";
 interface PlanTabProps {
   allPlanspecs: PlanSpecRecord[];
   summary?: PlanSpecsResponse["summary"] | null;
+  /** Anzahl serverseitig ausgeblendeter unlesbarer Quellen (0/undefined = keine Zeile). */
+  hiddenInvalidCount?: number | null;
   costs?: unknown;
   lanesCatalog?: unknown;
   accountUsage?: unknown;
@@ -141,6 +143,7 @@ function PlanSkeleton() {
 export function PlanTab({
   allPlanspecs,
   summary,
+  hiddenInvalidCount = 0,
   onApproveSuccess,
   onShowDetail,
   selectedPath = null,
@@ -392,6 +395,13 @@ export function PlanTab({
       {allPlanspecs.length < counts.total_matching ? (
         <p className="fleet-plan-hint" role="status">
           {allPlanspecs.length} von {counts.total_matching} Quellen geladen.
+        </p>
+      ) : null}
+      {(hiddenInvalidCount ?? 0) > 0 ? (
+        <p className="fleet-plan-hint" role="status">
+          {hiddenInvalidCount === 1
+            ? "1 Eintrag ohne gültiges Frontmatter ausgeblendet"
+            : `${hiddenInvalidCount} Einträge ohne gültiges Frontmatter ausgeblendet`}
         </p>
       ) : null}
     </div>

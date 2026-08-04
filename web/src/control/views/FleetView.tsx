@@ -689,6 +689,7 @@ export function FleetView() {
                 <PlanTab
                   allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : planRecords}
                   summary={selectedBoard ? selectedPlanspecs.data?.summary : planspecs.data?.summary}
+                  hiddenInvalidCount={selectedBoard ? selectedPlanspecs.data?.hidden_invalid_count : planspecs.data?.hidden_invalid_count}
                   loading={selectedBoard ? selectedPlanspecs.loading : planspecs.loading}
                   error={selectedBoard ? selectedPlanspecs.error : planspecs.error}
                   stale={Boolean(selectedBoard ? selectedPlanspecs.isStale : planspecs.isStale)}

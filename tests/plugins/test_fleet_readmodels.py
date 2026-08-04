@@ -146,6 +146,64 @@ def test_plan_list_limit_zero_returns_empty_but_full_summary(tmp_path: Path):
     assert response["summary"]["total_matching"] == 2
 
 
+def test_plan_list_hides_invalid_sources_but_counts_them(tmp_path: Path):
+    invalid = {
+        "path": str(tmp_path / "notizen.md"),
+        "binding": False,
+        "valid": False,
+        "closed_reason": "invalid PlanSpec",
+        "kanban_state": "not_ingested",
+        "kanban_root_task_id": None,
+        "ingest_findings": [],
+        "errors": ["missing YAML frontmatter delimited by ---"],
+    }
+    draft = {
+        "path": str(tmp_path / "echter-plan.md"),
+        "binding": False,
+        "valid": False,
+        "kanban_state": "not_ingested",
+        "kanban_root_task_id": None,
+        "ingest_findings": [],
+        "errors": [],
+    }
+    response = build_plan_list_response(
+        [invalid, draft],
+        planspecs=SimpleNamespace(),
+        limit=None,
+    )
+
+    assert [item["path"] for item in response["planspecs"]] == [draft["path"]]
+    assert response["count"] == 1
+    assert response["hidden_invalid_count"] == 1
+    # The hidden record leaves the segment counters too -- list and counters
+    # must not drift apart.
+    assert response["summary"]["total_matching"] == 1
+    assert response["summary"]["draft"] == 1
+
+
+def test_plan_list_without_invalid_sources_reports_zero_hidden(tmp_path: Path):
+    records = [
+        {
+            "path": str(tmp_path / f"{index}.md"),
+            "binding": False,
+            "valid": False,
+            "kanban_state": "not_ingested",
+            "kanban_root_task_id": None,
+            "ingest_findings": [],
+            "errors": [],
+        }
+        for index in range(2)
+    ]
+    response = build_plan_list_response(
+        records,
+        planspecs=SimpleNamespace(),
+        limit=None,
+    )
+
+    assert response["count"] == 2
+    assert response["hidden_invalid_count"] == 0
+
+
 def test_transition_preview_is_exact_and_write_free(tmp_path: Path):
     source = tmp_path / "binding.md"
     source.write_text("stable source", encoding="utf-8")

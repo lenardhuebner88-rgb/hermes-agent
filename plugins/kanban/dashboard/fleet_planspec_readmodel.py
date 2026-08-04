@@ -155,17 +155,36 @@ def summarize_plan_records(
     }
 
 
+def _is_invalid_source_record(record: dict[str, Any]) -> bool:
+    """True for records whose source file could not be parsed at all.
+
+    ``list_planspecs`` marks files whose read/frontmatter parse raised with
+    the literal closed_reason "invalid PlanSpec" -- the same condition under
+    which ``build_readable_plan_detail`` reports ``source_state == "invalid"``.
+    A binding record whose ingest precheck failed keeps a different
+    closed_reason and is NOT matched here.
+    """
+
+    return record.get("closed_reason") == "invalid PlanSpec"
+
+
 def build_plan_list_response(
     records: list[dict[str, Any]],
     *,
     planspecs: Any,
     limit: int | None,
 ) -> dict[str, Any]:
-    enriched = [enrich_plan_record(record, planspecs=planspecs) for record in records]
+    # Unparseable sources (no/broken YAML frontmatter) are not plans and never
+    # had an action_state -- they surfaced as a silent "Erledigt" bump. They
+    # leave list AND counters here (one place, so they cannot drift apart);
+    # the count stays visible as hidden_invalid_count instead of sinking mutely.
+    visible_records = [record for record in records if not _is_invalid_source_record(record)]
+    enriched = [enrich_plan_record(record, planspecs=planspecs) for record in visible_records]
     visible = enriched[:limit] if limit is not None else enriched
     return {
         "planspecs": visible,
         "count": len(visible),
+        "hidden_invalid_count": len(records) - len(visible_records),
         "summary": summarize_plan_records(enriched),
     }
 

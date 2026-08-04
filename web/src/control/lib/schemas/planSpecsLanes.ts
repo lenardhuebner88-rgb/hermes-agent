@@ -60,6 +60,9 @@ export const PlanSpecSummarySchema = z.object({
 export const PlanSpecsResponseSchema = z.object({
   planspecs: z.array(PlanSpecRecordSchema),
   count: z.coerce.number().catch(0),
+  // Server-side filter (Nachschlag 2): unparseable sources leave the register;
+  // their count stays visible here instead of sinking silently.
+  hidden_invalid_count: z.coerce.number().int().nonnegative().catch(0),
   summary: PlanSpecSummarySchema.catch({
     draft: 0,
     ready: 0,

@@ -61,16 +61,19 @@ function renderPlanTab({
   onShowDetail = vi.fn(),
   readOnly = false,
   stale = false,
+  hiddenInvalidCount = 0,
 }: {
   plans?: PlanSpecRecord[];
   onShowDetail?: (item: PlanSpecRecord) => void;
   readOnly?: boolean;
   stale?: boolean;
+  hiddenInvalidCount?: number;
 } = {}) {
   return render(
     <PlanTab
       allPlanspecs={plans}
       summary={summary}
+      hiddenInvalidCount={hiddenInvalidCount}
       onApproveSuccess={vi.fn()}
       onShowDetail={onShowDetail}
       readOnly={readOnly}
@@ -421,5 +424,21 @@ describe("PlanTab — Befund-Echo, Stale-Hinweis, Leerzustände", () => {
     expect(row.textContent).toContain("Kette: läuft");
     // … und der Chip bleibt der Plan-Zustand, keine Wortmischung.
     expect(row.textContent).toContain("Läuft");
+  });
+
+  it("zeigt die Zahl ausgeblendeter unlesbarer Quellen einmal dezent unter der Liste (Nachschlag 2)", () => {
+    renderPlanTab({ hiddenInvalidCount: 100 });
+    expect(
+      screen.getByText("100 Einträge ohne gültiges Frontmatter ausgeblendet"),
+    ).toBeTruthy();
+  });
+
+  it("zeigt bei 0 ausgeblendeten Quellen keine Zeile", () => {
+    renderPlanTab({ hiddenInvalidCount: 0 });
+    expect(screen.queryByText(/ausgeblendet/)).toBeNull();
+
+    cleanup();
+    renderPlanTab();
+    expect(screen.queryByText(/ausgeblendet/)).toBeNull();
   });
 });
