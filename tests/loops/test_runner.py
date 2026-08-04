@@ -1290,6 +1290,126 @@ def test_ensure_wt_guard_clean_and_revert(tmp_path, fake_engine):
     ).read_text(encoding="utf-8")
 
 
+def test_revert_range_failsafe_reset_discards_only_unverified(tmp_path, fake_engine):
+    """D1: schlägt der Revert fehl, obwohl prehead Vorfahre von HEAD ist,
+    räumt der fail-safe reset --hard die unverifizierte Runden-Arbeit weg —
+    und nur diese (live 2026-07-31/08-02: Commit blieb stehen, Autoland
+    danach dauerhaft blockiert)."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "gitp", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "gitp")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_wt()
+
+    # 'Verifizierter' Stand VOR der Runde — der darf nie verloren gehen.
+    commit_in(runner.wt, "verified")
+    prehead = runner.rev_parse()
+
+    # Unverifizierte Runden-Arbeit + Revert zum Scheitern bringen:
+    # lokale Änderung an derselben Datei → `git revert` verweigert.
+    commit_in(runner.wt, "t1")
+    with (runner.wt / "modul.py").open("a", encoding="utf-8") as fh:
+        fh.write("# lokal dirty\n")
+
+    assert runner.revert_range(prehead) is True
+    assert runner.rev_parse() == prehead
+    assert "# fix verified" in (runner.wt / "modul.py").read_text(encoding="utf-8")
+    assert "# fix t1" not in (runner.wt / "modul.py").read_text(encoding="utf-8")
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "fail-safe reset --hard" in ledger
+
+
+def test_revert_range_refuses_when_prehead_not_ancestor(tmp_path, fake_engine):
+    """D1, Live-Fehlerbild: ist prehead unauflösbar ("Invalid revision range",
+    live 2026-07-31/08-02) oder ein auflösbarer Nicht-Vorfahre (gedrifteter
+    Baum), darf weder revertiert noch resettet werden — ein Revert gegen einen
+    Nicht-Vorfahren würde still die GESAMTE Branch-Historie umkehren."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "gitp", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "gitp")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_wt()
+
+    # Fremder, unabhängiger Commit im selben Objektspeicher: auflösbar, aber
+    # niemals Vorfahre des Loop-Branches (Stellvertreter für den Live-Drift).
+    g(repo, "checkout", "--orphan", "fremd")
+    g(repo, "rm", "-rf", "--quiet", ".")
+    (repo / "fremd.txt").write_text("x\n", encoding="utf-8")
+    g(repo, "add", "-A")
+    g(repo, "commit", "-m", "fremd")
+    fremd = g(repo, "rev-parse", "fremd").stdout.strip()
+    g(repo, "checkout", "main")
+
+    commit_in(runner.wt, "t1")
+    head_before = runner.rev_parse()
+    log_before = g(runner.wt, "log", "--oneline").stdout
+
+    # Fall 1: auflösbarer Nicht-Vorfahre.
+    assert runner.revert_range(fremd) is False
+    assert runner.rev_parse() == head_before
+    assert g(runner.wt, "log", "--oneline").stdout == log_before
+
+    # Fall 2: unauflösbarer prehead (die Live-Form von 'Invalid revision range').
+    assert runner.revert_range("0" * 40) is False
+    assert runner.rev_parse() == head_before
+
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert ledger.count("REVERT VERWEIGERT") == 2
+    assert "fail-safe reset" not in ledger
+
+
+def test_guard_clean_heals_branch_drift(tmp_path, fake_engine):
+    """D2: driftet der Baum auf einen fremden Branch (live: 'master'), heilt
+    guard_clean zurück auf den Loop-Branch statt still weiterzubauen."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "gitp", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "gitp")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_wt()
+
+    g(repo, "branch", "master")  # nicht ausgecheckt → im Worktree erreichbar
+    res = g(runner.wt, "checkout", "master")
+    assert res.returncode == 0, res.stderr
+    assert g(runner.wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "master"
+    (runner.wt / "rest.tmp").write_text("rest\n", encoding="utf-8")  # Drift-Rest
+
+    assert runner.guard_clean() is True
+    assert g(runner.wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == pack.branch
+    assert g(runner.wt, "status", "--porcelain").stdout.strip() == ""
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "WORKTREE-DRIFT geheilt" in ledger
+
+
+def test_expire_stale_building_bounces_orphans(tmp_path, fake_engine):
+    """D3: 10-building verfällt beim Pipeline-Start — verwaiste Pläne aus einem
+    früheren Lauf landen in 90-bounced statt _autoland_queue_ready() dauerhaft
+    zu blockieren (live 2026-08-04: zwei Pläne seit 31.07./02.08.)."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "gitp", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "gitp")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+
+    stale = runner.queue / "10-building" / "P1-alt.md"
+    stale.write_text(PLAN_BODY, encoding="utf-8")
+
+    runner._expire_stale_building()
+
+    assert not stale.exists()
+    assert (runner.queue / "90-bounced" / "P1-alt.md").is_file()
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "building-expired" in ledger
+
+    # End-to-end: cmd_run mit nur einem verwaisten Plan räumt auf und endet
+    # mit leerer Queue, ohne eine Phase zu fahren.
+    stale2 = runner.queue / "10-building" / "P1-zweiter.md"
+    stale2.write_text(PLAN_BODY, encoding="utf-8")
+    assert runner.cmd_run() == 0
+    assert not stale2.exists()
+    assert (runner.queue / "90-bounced" / "P1-zweiter.md").is_file()
+    assert runner.qcount("10-building") == 0
+
+
 def test_ensure_wt_uses_base_branch(tmp_path, fake_engine):
     repo = init_repo(tmp_path / "repo")
     g(repo, "branch", "-m", "main", "trunk")

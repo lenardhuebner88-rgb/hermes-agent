@@ -1186,6 +1186,30 @@ class LoopRunner:
         if not self.wt.is_dir():
             self.say(f"ABBRUCH: Worktree fehlt: {self.wt}")
             return False
+        head = self.git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        if head != self.pack.branch:
+            # Drift (live 2026-07-31 + 08-03: Baum stand auf 'master',
+            # BASE-REFRESH fiel aus, Reverts schlugen mit "Invalid revision
+            # range" fehl). Erst säubern, dann zurück auf den Loop-Branch —
+            # niemals still auf dem fremden Branch weiterbauen.
+            self.say(
+                f"Worktree driftete auf {head!r} — heile auf {self.pack.branch!r}"
+            )
+            self.git("reset", "--quiet", "HEAD", "--", ".")
+            self.git("checkout", "--", ".")
+            self.git("clean", "-fd")
+            res = self.git("checkout", self.pack.branch)
+            if res.returncode != 0:
+                self.say(
+                    f"ABBRUCH: Rückkehr auf {self.pack.branch!r} fehlgeschlagen: "
+                    f"{res.stderr.strip()}"
+                )
+                self.ledger(
+                    f"⚠️ WORKTREE-DRIFT: Heilung auf {self.pack.branch} "
+                    f"fehlgeschlagen (war {head})"
+                )
+                return False
+            self.ledger(f"WORKTREE-DRIFT geheilt: {head} → {self.pack.branch}")
         if not self.git("status", "--porcelain").stdout.strip():
             return True
         self.say("Worktree dirty — räume Phase-Reste auf")
@@ -1202,12 +1226,46 @@ class LoopRunner:
         return True
 
     def revert_range(self, prehead: str) -> bool:
-        res = self.git("revert", "--no-edit", f"{prehead}..HEAD")
-        if res.returncode != 0:
-            self.say(f"Revert fehlgeschlagen: {res.stderr.strip()}")
-            self.ledger(f"⚠️ REVERT FEHLGESCHLAGEN ({prehead[:9]}..HEAD): {res.stderr.strip()[:200]}")
+        # Vorschalt-Guard: der Revert darf nur laufen, wenn prehead auflösbar
+        # und Vorfahre von HEAD ist. Im gedrifteten Baum (live 2026-07-31/
+        # 08-03) ist prehead unauflösbar ("Invalid revision range") — oder
+        # schlimmer: ein auflösbarer Nicht-Vorfahre ließe `git revert
+        # prehead..HEAD` still die GESAMTE Branch-Historie revertieren.
+        resolvable = (
+            self.git("rev-parse", "--verify", "--quiet", f"{prehead}^{{commit}}").returncode == 0
+        )
+        if not resolvable or self.git(
+            "merge-base", "--is-ancestor", prehead, "HEAD"
+        ).returncode != 0:
+            self.say(f"Revert verweigert: {prehead[:9]} ist unauflösbar oder kein Vorfahre von HEAD")
+            self.ledger(
+                f"⚠️ REVERT VERWEIGERT ({prehead[:9]}..HEAD): prehead unauflösbar "
+                "oder kein Vorfahre von HEAD — Baum gedriftet?"
+            )
             return False
-        return True
+        res = self.git("revert", "--no-edit", f"{prehead}..HEAD")
+        if res.returncode == 0:
+            return True
+        err = res.stderr.strip()
+        self.say(f"Revert fehlgeschlagen: {err}")
+        self.git("revert", "--abort")  # halben Konflikt-Zustand aufräumen (best effort)
+        # Fail-safe statt liegenlassen (live 2026-07-31/08-02: der unverifizierte
+        # Commit blieb stehen, danach blockte der Autoland-Wächter jede Nacht).
+        # prehead wurde zu Rundenbeginn gemessen und ist oben als Vorfahre
+        # bewiesen — alles in prehead..HEAD ist unverifizierte Arbeit genau
+        # dieser Runde; Verifiziertes liegt nie hinter prehead. Der harte
+        # Reset ist damit verlustfrei für verifizierte Arbeit.
+        if self.rev_parse() != prehead:
+            reset = self.git("reset", "--hard", prehead)
+            if reset.returncode == 0:
+                self.ledger(
+                    f"⚠️ REVERT FEHLGESCHLAGEN ({prehead[:9]}..HEAD) — "
+                    f"fail-safe reset --hard auf {prehead[:9]}: {err[:200]}"
+                )
+                return True
+            err = f"{err} | reset: {reset.stderr.strip()}"
+        self.ledger(f"⚠️ REVERT FEHLGESCHLAGEN ({prehead[:9]}..HEAD): {err[:200]}")
+        return False
 
     # ── Phasen ──
     def _int_override(self, key: str, fallback: int) -> int:
@@ -1778,6 +1836,30 @@ class LoopRunner:
             plan.rename(target)
             self.ledger(f"plan-invalid: {target.name} (Frontmatter/id unparsierbar — vor Build verworfen)")
 
+    def _expire_stale_building(self) -> None:
+        """10-building verfällt beim Pipeline-Start: was dort liegt, stammt aus
+        einem früheren Lauf (der Runner läuft ein-instanzig, ein aktiver Build
+        kann es nicht geben). Verwaist heißt bounced mit Protokollzeile — sonst
+        blockt der Eintrag _autoland_queue_ready() dauerhaft (live 2026-08-04:
+        zwei Pläne seit 31.07./02.08. → 'Queue nicht abgeschlossen')."""
+        stage = self.queue / "10-building"
+        if not stage.is_dir():
+            return
+        for plan in sorted(stage.glob("*.md")):
+            target = self.queue / "90-bounced" / plan.name
+            if target.exists():  # Namens-Wiederverwendung: alte Evidenz nicht überschreiben
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                target = target.with_name(f"{target.stem}.{stamp}.md")
+            plan.rename(target)
+            self.ledger(
+                f"building-expired: {target.name} "
+                "(verwaist aus früherem Lauf — bounced)"
+            )
+            self.ledger_event(
+                phase="expire", verdict="bounced", plan=target.name,
+                fail_kind="stale_building", reason="verwaist in 10-building",
+            )
+
     # ── Kommandos ──
     def cmd_plan(self, fresh: bool = False) -> bool:
         self._validate_autoland_runtime()
@@ -2053,6 +2135,7 @@ class LoopRunner:
     def _run_pipeline(self) -> None:
         deadline = self._deadline()
         fails = verified = 0
+        self._expire_stale_building()
         for rnd in range(1, self.stop_cfg("max_rounds") + 1):
             if self.stop_requested():
                 self.say("STOP-Datei — sauberes Ende.")
