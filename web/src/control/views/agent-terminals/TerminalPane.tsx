@@ -10,6 +10,7 @@ import { Terminal } from "@xterm/xterm";
 
 import { buildWsUrl } from "../../../lib/api";
 import {
+  attachTouchScrollBridge,
   createHermesXtermSurface,
   TERMINAL_PANE_BACKGROUND,
   TERMINAL_THEME_STATIC,
@@ -126,9 +127,22 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     });
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(fitAndResize);
     observer?.observe(host);
+    // Same touch-drag → tmux-history bridge the primary pane uses; without it
+    // these panes offer no way to reach the scrollback on a phone at all.
+    const disposeTouchScroll = attachTouchScrollBridge({
+      host,
+      term,
+      send: (data) => {
+        const ws = wsRef.current;
+        if (ws?.readyState !== WebSocket.OPEN) return false;
+        ws.send(data);
+        return true;
+      },
+    });
     window.setTimeout(fitAndResize, 0);
     return () => {
       observer?.disconnect();
+      disposeTouchScroll();
       dataSubscription.dispose();
       term.dispose();
       termRef.current = null;

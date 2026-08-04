@@ -208,3 +208,77 @@ export function touchScrollSteps(accumulatedPx: number, stepPx: number): { steps
   const remainder = accumulatedPx - steps * stepPx;
   return { steps, remainder };
 }
+
+/**
+ * Wire vertical touch-drag on `host` to tmux history scrolling for `term`.
+ *
+ * xterm v6 has no touch→application path at all: a touch-drag only scrolls the
+ * local viewport, which is a structural no-op on the alternate buffer that
+ * fullscreen TUIs (tmux, and the agent CLIs inside it) run in. Every pane that
+ * shows a live attach therefore needs this bridge — leaving it on one pane only
+ * makes scrolling work in one place and silently die in the next.
+ *
+ * `send` returns false when the transport is not ready; the gesture is then
+ * left alone rather than swallowed. Returns a disposer.
+ */
+export function attachTouchScrollBridge({
+  host,
+  term,
+  send,
+}: {
+  host: HTMLElement;
+  term: Terminal;
+  send: (data: string) => boolean;
+}): () => void {
+  let lastY: number | null = null;
+  let accumPx = 0;
+  let stepPx = 0;
+
+  const onTouchStart = (event: TouchEvent) => {
+    if (term.buffer.active.type !== "alternate") return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    lastY = touch.clientY;
+    accumPx = 0;
+    stepPx = Math.max(8, Math.round(host.clientHeight / Math.max(1, term.rows)));
+  };
+  const onTouchMove = (event: TouchEvent) => {
+    if (term.buffer.active.type !== "alternate") return;
+    if (lastY == null) return;
+    // Without mouse tracking there is nothing we could send (raw SGR would leak
+    // into the app) — bail BEFORE preventDefault so the gesture isn't consumed
+    // for nothing; the scroll buttons remain the fallback.
+    if (term.modes.mouseTrackingMode === "none") return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    // Stop the native (no-op on the alt buffer) viewport scroll and
+    // pull-to-refresh from fighting the gesture.
+    event.preventDefault();
+    const deltaY = touch.clientY - lastY;
+    lastY = touch.clientY;
+    const { steps, remainder } = touchScrollSteps(accumPx + deltaY, stepPx);
+    accumPx = remainder;
+    if (steps === 0) return;
+    // Finger moves DOWN (steps > 0) -> wheel UP -> back in history.
+    const sequence = steps > 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
+    for (let i = 0; i < Math.abs(steps); i += 1) {
+      if (!send(sequence)) return;
+    }
+  };
+  const onTouchEnd = () => {
+    lastY = null;
+    accumPx = 0;
+  };
+
+  host.addEventListener("touchstart", onTouchStart, { passive: false });
+  host.addEventListener("touchmove", onTouchMove, { passive: false });
+  host.addEventListener("touchend", onTouchEnd, { passive: false });
+  host.addEventListener("touchcancel", onTouchEnd, { passive: false });
+
+  return () => {
+    host.removeEventListener("touchstart", onTouchStart);
+    host.removeEventListener("touchmove", onTouchMove);
+    host.removeEventListener("touchend", onTouchEnd);
+    host.removeEventListener("touchcancel", onTouchEnd);
+  };
+}

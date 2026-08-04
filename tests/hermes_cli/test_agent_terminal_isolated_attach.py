@@ -67,6 +67,27 @@ def test_create_isolated_attach_groups_source_and_hides_internal_session(service
     assert options == ["1", "work", "two", "1000"]
 
 
+def test_create_isolated_attach_enables_mouse_on_the_attached_session(
+    service: TmuxAgentSessionService,
+) -> None:
+    """The dashboard only ever attaches isolated — without `mouse on` here the
+    browser sees no mouse tracking and neither wheel nor touch can scroll."""
+    service.ensure_session_options("work")
+
+    target = service.create_isolated_attach("work", "two", attach_id="pane-m", now=1000)
+
+    def option(session: str, name: str) -> str:
+        return subprocess.run(
+            ["tmux", "-S", str(service.socket_path), "show-options", "-t", session, "-v", name],
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()
+
+    # tmux session options are not inherited from the group, so setting them on
+    # the source session alone leaves the attach client without mouse tracking.
+    assert option(target.session, "mouse") == "on"
+    assert option(target.session, "history-limit") == "10000"
+
+
 def test_cleanup_isolated_attach_refuses_unmarked_prefix_session(service: TmuxAgentSessionService) -> None:
     subprocess.run(
         ["tmux", "-S", str(service.socket_path), "new-session", "-d", "-s", "__hermes_attach_user", "sh", "-c", "while :; do sleep 60; done"],

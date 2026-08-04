@@ -63,12 +63,10 @@ import {
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import {
+  attachTouchScrollBridge,
   createHermesXtermSurface,
-  SGR_WHEEL_DOWN,
-  SGR_WHEEL_UP,
   TERMINAL_MAIN_BACKGROUND,
   TERMINAL_THEME_STATIC,
-  touchScrollSteps,
 } from "@/lib/xtermSurface";
 import { de } from "../i18n/de";
 import { Eyebrow } from "../components/primitives";
@@ -831,64 +829,26 @@ export function AgentTerminalsView() {
     window.visualViewport?.addEventListener("resize", scheduleResize);
     window.addEventListener("resize", scheduleResize);
 
-    // Touch-drag scroll bridge: xterm v6 has no touch→application path at all
-    // (touch-drag only scrolls the local viewport, a no-op on the alternate
-    // buffer tmux runs fullscreen in). Translate vertical drag into tmux's
-    // SGR wheel reports instead, one report per row-sized step. `sendRaw`
-    // isn't defined yet at this point in the component body — this mirrors
-    // its exact WS-send logic via `wsRef` directly rather than depending on
-    // declaration order.
-    let touchLastY: number | null = null;
-    let touchAccumPx = 0;
-    let touchStepPx = 0;
-    const onTouchStart = (event: TouchEvent) => {
-      if (term.buffer.active.type !== "alternate") return;
-      const touch = event.touches[0];
-      if (!touch) return;
-      touchLastY = touch.clientY;
-      touchAccumPx = 0;
-      touchStepPx = Math.max(8, Math.round(host.clientHeight / Math.max(1, term.rows)));
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      if (term.buffer.active.type !== "alternate") return;
-      if (touchLastY == null) return;
-      // Without mouse tracking there is nothing we could send (raw SGR would
-      // leak into the app) — bail BEFORE preventDefault so the gesture isn't
-      // consumed for nothing; the scroll buttons remain the fallback.
-      if (term.modes.mouseTrackingMode === "none") return;
-      const touch = event.touches[0];
-      if (!touch) return;
-      // Stop the native (no-op on the alt buffer) viewport scroll and
-      // pull-to-refresh from fighting the gesture.
-      event.preventDefault();
-      const deltaY = touch.clientY - touchLastY;
-      touchLastY = touch.clientY;
-      const { steps, remainder } = touchScrollSteps(touchAccumPx + deltaY, touchStepPx);
-      touchAccumPx = remainder;
-      if (steps === 0) return;
-      // Finger moves DOWN (steps > 0) -> wheel UP -> back in history.
-      const sequence = steps > 0 ? SGR_WHEEL_UP : SGR_WHEEL_DOWN;
-      const ws = wsRef.current;
-      if (ws?.readyState !== WebSocket.OPEN) return;
-      for (let i = 0; i < Math.abs(steps); i += 1) ws.send(sequence);
-    };
-    const onTouchEnd = () => {
-      touchLastY = null;
-      touchAccumPx = 0;
-    };
-    host.addEventListener("touchstart", onTouchStart, { passive: false });
-    host.addEventListener("touchmove", onTouchMove, { passive: false });
-    host.addEventListener("touchend", onTouchEnd, { passive: false });
-    host.addEventListener("touchcancel", onTouchEnd, { passive: false });
+    // Touch-drag scroll bridge — shared with TerminalPane so both surfaces
+    // scroll identically. `sendRaw` isn't defined yet at this point in the
+    // component body, so this mirrors its WS-send logic via `wsRef` directly
+    // rather than depending on declaration order.
+    const disposeTouchScroll = attachTouchScrollBridge({
+      host,
+      term,
+      send: (data) => {
+        const ws = wsRef.current;
+        if (ws?.readyState !== WebSocket.OPEN) return false;
+        ws.send(data);
+        return true;
+      },
+    });
 
     return () => {
       observer.disconnect();
       window.visualViewport?.removeEventListener("resize", scheduleResize);
       window.removeEventListener("resize", scheduleResize);
-      host.removeEventListener("touchstart", onTouchStart);
-      host.removeEventListener("touchmove", onTouchMove);
-      host.removeEventListener("touchend", onTouchEnd);
-      host.removeEventListener("touchcancel", onTouchEnd);
+      disposeTouchScroll();
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       if (settleRaf1) cancelAnimationFrame(settleRaf1);
       if (settleRaf2) cancelAnimationFrame(settleRaf2);
