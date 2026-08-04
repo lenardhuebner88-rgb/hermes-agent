@@ -97,6 +97,52 @@ export const QUICK_KEYS: Array<{ label: string; sequence: string }> = [
   { label: "⏎", sequence: "\r" },
 ];
 
+/**
+ * Canned replies for the composer — the handful of answers an operator gives an
+ * agent all day. Sent WITH submit, so one tap is one full answer; anything
+ * longer belongs in the textarea.
+ */
+export const QUICK_REPLIES: Array<{ label: string; text: string }> = [
+  { label: "weiter", text: "weiter" },
+  { label: "ja", text: "ja" },
+  { label: "nein", text: "nein" },
+  { label: "Plan zeigen", text: "zeig mir erst den Plan, bevor du baust" },
+  { label: "kurz fassen", text: "fass dich kurz" },
+];
+
+export interface HistoryLine {
+  /** 1-based line number within the full snapshot, kept stable under filtering. */
+  number: number;
+  text: string;
+}
+
+export interface HistoryView {
+  lines: HistoryLine[];
+  /** Line count of the unfiltered snapshot. */
+  total: number;
+  /** True when a query was applied (so callers can tell "0 hits" from "empty"). */
+  filtered: boolean;
+}
+
+/**
+ * Number the snapshot's lines and optionally keep only those containing
+ * `query` (case-insensitive substring — not a regex, so a stray `(` from a
+ * stack trace cannot throw or silently match nothing).
+ *
+ * Line numbers survive filtering: a hit stays findable in the full view.
+ */
+export function buildHistoryView(text: string, query: string): HistoryView {
+  const source = text ? text.split("\n") : [];
+  const all: HistoryLine[] = source.map((line, index) => ({ number: index + 1, text: line }));
+  const needle = query.trim().toLowerCase();
+  if (!needle) return { lines: all, total: all.length, filtered: false };
+  return {
+    lines: all.filter((line) => line.text.toLowerCase().includes(needle)),
+    total: all.length,
+    filtered: true,
+  };
+}
+
 export const CONTROL_CAPABILITIES: Array<{ label: string; patterns: string[]; command: string }> = [
   { label: "Firecrawl", patterns: ["firecrawl"], command: "/firecrawl-search" },
   { label: "Gmail", patterns: ["gmail"], command: "/gmail" },

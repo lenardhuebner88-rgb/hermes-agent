@@ -21,6 +21,7 @@ import {
   toControlSequence,
 } from "./AgentTerminalsView";
 import { extractTerminalBufferText } from "./agent-terminals/TerminalSelectOverlay";
+import { QUICK_REPLIES, buildHistoryView } from "./agent-terminals/terminalHelpers";
 
 // Echtes Datenformat: 9-Fenster-Inventar aus dem Live-System (tmux list-windows -a
 // -F 'session:window active pane_id pane_pid pane_current_command pane_current_path
@@ -151,6 +152,48 @@ describe("AgentTerminalsView state helpers", () => {
     expect(buildComposerPayload("ls -la", false)).toBe("ls -la");
     expect(buildComposerPayload("ls -la", true)).toBe("ls -la\r");
     expect(buildComposerPayload("zeile 1\nzeile 2", true)).toBe("\x1b[200~zeile 1\nzeile 2\x1b[201~\r");
+  });
+
+  it("numbers history lines and keeps the numbers stable while filtering", () => {
+    const text = "erste zeile\nZWEITE Zeile\ndritte zeile\nvierte";
+    const all = buildHistoryView(text, "");
+    expect(all.total).toBe(4);
+    expect(all.filtered).toBe(false);
+    expect(all.lines.map((line) => line.number)).toEqual([1, 2, 3, 4]);
+
+    const hits = buildHistoryView(text, "zeile");
+    expect(hits.filtered).toBe(true);
+    expect(hits.total).toBe(4);
+    // Case-insensitive, and the numbers still point into the FULL snapshot.
+    expect(hits.lines.map((line) => line.number)).toEqual([1, 2, 3]);
+    expect(hits.lines[1].text).toBe("ZWEITE Zeile");
+  });
+
+  it("treats the history query as a literal, not a regex", () => {
+    // A stray bracket out of a stack trace must not throw or match nothing.
+    const view = buildHistoryView("Traceback (most recent call last)\nok", "(most");
+    expect(view.lines).toHaveLength(1);
+    expect(view.lines[0].number).toBe(1);
+  });
+
+  it("reports an empty snapshot and a whitespace-only query honestly", () => {
+    expect(buildHistoryView("", "").lines).toEqual([]);
+    expect(buildHistoryView("", "").total).toBe(0);
+    // Whitespace is not a search — it must not filter everything away.
+    expect(buildHistoryView("a\nb", "   ").filtered).toBe(false);
+    expect(buildHistoryView("a\nb", "zzz").lines).toEqual([]);
+    expect(buildHistoryView("a\nb", "zzz").filtered).toBe(true);
+  });
+
+  it("keeps every quick reply a one-tap full answer", () => {
+    expect(QUICK_REPLIES.length).toBeGreaterThan(0);
+    for (const reply of QUICK_REPLIES) {
+      expect(reply.label.trim()).not.toBe("");
+      expect(reply.text.trim()).not.toBe("");
+      // Multi-line would silently switch to bracketed paste — not a quick reply.
+      expect(reply.text).not.toContain("\n");
+      expect(buildComposerPayload(reply.text, true)).toBe(`${reply.text}\r`);
+    }
   });
 
   it("strips embedded bracketed-paste end sequences to prevent a paste-mode breakout", () => {
