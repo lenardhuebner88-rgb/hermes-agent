@@ -142,6 +142,49 @@ describe("OfflineStaleBanner refocus grace", () => {
   });
 });
 
+describe("OfflineStaleBanner live-region semantics", () => {
+  it("announces a fetch error as an assertive alert containing the error copy", () => {
+    clock.visibleSince = clock.now - 1;
+    render(
+      <OfflineStaleBanner
+        health={ageStaleHealth({ error: "network down", lastUpdated: 99 })}
+      />,
+    );
+    const banner = screen.getByRole("alert");
+    expect(banner.getAttribute("aria-live")).toBe("assertive");
+    expect(banner.textContent).toContain(de.staleBanner.fetchError);
+    // Alert must be distinct from the polite stale case.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("announces plain staleness as a polite status with stale copy and freshness suffix", () => {
+    clock.now = 1_700_000_100;
+    clock.visibleSince = clock.now - 1;
+    vi.setSystemTime(new Date(clock.now * 1000));
+    render(
+      <OfflineStaleBanner
+        health={ageStaleHealth({
+          isStale: true,
+          lastUpdated: clock.now - 2,
+          error: null,
+        })}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner.getAttribute("aria-live")).toBe("polite");
+    expect(banner.textContent).toContain(de.staleBanner.stale);
+    expect(banner.textContent).toContain("Zuletzt aktuell");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("renders no live region at all while not visible", () => {
+    clock.visibleSince = clock.now - 5; // inside refocus grace → hidden
+    render(<OfflineStaleBanner health={ageStaleHealth()} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("OfflineStaleBanner legal pending refresh", () => {
   it("suppresses age-stale while a legal in-flight health refresh is within the deadline", async () => {
     clock.now = 1_700_000_100;
