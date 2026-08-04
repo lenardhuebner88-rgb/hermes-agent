@@ -32,6 +32,12 @@ KANBAN_MODULE = "hermes_cli.kanban_db"
 KANBAN_PATH = "hermes_cli/kanban_db.py"
 WEB_MODULE = "hermes_cli.web_server"
 WEB_PATH = "hermes_cli/web_server.py"
+# Zahl der Testdateien, die hermes_cli.web_server importieren. Bewusst hart:
+# sie ist der Kanarienvogel dafuer, dass Narrowing die breite Fan-out-Menge
+# wirklich sieht. Kommt ein Test dazu, der web_server importiert, wird sie
+# hier nachgezogen (zuletzt 66 -> 67 durch tests/hermes_cli/test_fleet_agent_history.py,
+# gelandet in e6662bfe40).
+WEB_MODULE_IMPORTER_COUNT = 67
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -385,7 +391,7 @@ def test_real_additive_web_route_registration_selects_registered_module_test(
         imported_tests=test_index.imports[WEB_MODULE],
     )
 
-    assert len(test_index.imports[WEB_MODULE]) == 66
+    assert len(test_index.imports[WEB_MODULE]) == WEB_MODULE_IMPORTER_COUNT
     assert result == SymbolNarrowingResult(
         tests=("tests/hermes_cli/test_buzz_agent_cleanup.py",),
         applied=True,
@@ -443,7 +449,7 @@ def test_blank_lines_alone_do_not_narrow(real_indexes) -> None:
 
     assert result.applied is False
     assert result.reason == "no_changed_symbols"
-    assert len(result.tests) == 66
+    assert len(result.tests) == WEB_MODULE_IMPORTER_COUNT
 
 
 @pytest.mark.parametrize("change", ["delete", "modify"])
@@ -474,7 +480,7 @@ def test_real_module_level_route_removal_or_change_stays_broad(
 
     assert result.applied is False
     assert result.reason == "no_changed_symbols"
-    assert len(result.tests) == 66
+    assert len(result.tests) == WEB_MODULE_IMPORTER_COUNT
 
 
 def test_additive_registration_without_module_test_stays_broad(
@@ -501,7 +507,7 @@ def test_additive_registration_without_module_test_stays_broad(
 
     assert result.applied is False
     assert result.reason == "no_changed_symbols"
-    assert len(result.tests) == 66
+    assert len(result.tests) == WEB_MODULE_IMPORTER_COUNT
 
 
 def test_unparseable_after_ast_does_not_narrow(tmp_path: Path) -> None:
