@@ -1376,6 +1376,8 @@ export const de = {
     detailNoTokens: "Noch keine Token-Telemetrie",
     detailOverrides: "Aktive Overrides",
     detailNoLedger: "Noch kein Lauf protokolliert.",
+    detailEscalations: "Eskalationen (Out-of-Scope-Funde)",
+    detailNoEscalations: "Keine Eskalationen offen.",
     detailNoCommits: "Noch keine Commits.",
     detailNoOverrides: "Keine Overrides gesetzt.",
     detailError: "Detail konnte nicht geladen werden.",

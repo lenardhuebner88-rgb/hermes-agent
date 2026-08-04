@@ -5009,3 +5009,35 @@ def test_ensure_frontend_deps_zero_without_web_workspace(tmp_path, monkeypatch, 
     (runner.wt / "web").rmdir()
 
     assert runner.ensure_frontend_deps() == "0"
+
+
+def test_sweep_round_without_status_counts_as_blocked(tmp_path, fake_engine):
+    """Stufe 7 — ein leerer last-status galt als ERFOLGREICHE Runde.
+
+    Der Sweep-Zweig verzweigte nur auf die Praefixe DRY/BLOCKED; alles andere,
+    einschliesslich des leeren Strings, fiel in den Erfolgs-else und setzte
+    dry UND blocked auf 0. Ein Sweep, dessen Agent jede Runde ohne Statusdatei
+    abbricht, lief so alle max_rounds durch, statt nach fail_streak zu stoppen —
+    im Ledger als Serie von "status=?"-Zeilen, die wie Arbeit aussehen.
+    """
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "stumm", "sweep", repo,
+               stop={"max_rounds": 6, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2})
+    pack = load_pack(tmp_path / "packs", "stumm")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    rounds = []
+
+    def silent_round(kv, cwd):
+        rounds.append(1)
+        # Schreibt bewusst KEIN last-status — der abgebrochene Turn.
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["round"] = silent_round
+    runner.cmd_night()
+
+    assert len(rounds) == 2, f"fail_streak=2 muss nach 2 Runden stoppen, lief {len(rounds)}x"
+    ledger = (runner.state / "LEDGER.md").read_text(encoding="utf-8")
+    assert "kein Status (Kontrakt verletzt)" in ledger
+    assert "status=?" not in ledger
