@@ -1152,3 +1152,69 @@ def test_night_overrides_accept_effort_and_reject_an_invalid_one(api):
     )
     assert bad.status_code == 400
     assert "turbo" in bad.json()["detail"]
+
+
+# ── Eskalationen + Landungs-Liveness (Audit 2026-08-04) ─────────────────────
+
+def test_detail_surfaces_escalations(api):
+    """Jeder Pack-Prompt beauftragt ESCALATIONS.md — gelesen hat sie niemand.
+
+    hermes-hardening trug so 137 Zeilen echter Out-of-Scope-Funde, die nur per
+    Hand-grep im State-Verzeichnis auffindbar waren.
+    """
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True, exist_ok=True)
+    state.joinpath("ESCALATIONS.md").write_text(
+        "# ESCALATIONS\n\n## E4 — zod strippt das error-Feld\n- Schwere: mittel\n",
+        encoding="utf-8",
+    )
+    data = client.get("/api/loops/fliessband/detail").json()
+    assert any("E4 — zod strippt das error-Feld" in line for line in data["escalations_tail"])
+
+
+def test_detail_escalations_empty_without_file(api):
+    """Die meisten Packs haben keine ESCALATIONS.md — das darf nicht knallen."""
+    client, _calls, _tmp = api
+    assert client.get("/api/loops/fliessband/detail").json()["escalations_tail"] == []
+
+
+def test_land_reports_502_when_the_landing_dies_immediately(api, monkeypatch):
+    """Ein sofort sterbender Landungsprozess wurde als gruener Erfolg gemeldet.
+
+    Popen wirft nur, wenn der Interpreter fehlt; ein Prozess, der anlaeuft und
+    an ImportError/kaputtem PYTHONPATH stirbt, kam nie im Ledger an — die UI
+    zeigte trotzdem die Erfolgs-Notiz.
+    """
+    client, _calls, _tmp = api
+    from hermes_cli import control_loops as cl
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    def _spawn(pack, log):
+        log.write_text("ModuleNotFoundError: No module named 'loops'\n", encoding="utf-8")
+        return _Dead()
+
+    monkeypatch.setattr(cl, "_spawn_land", _spawn)
+    monkeypatch.setattr(cl, "_land_failed_fast", lambda proc, probe=0.0: proc.poll())
+    resp = client.post("/api/loops/nacht/land")
+    assert resp.status_code == 502, resp.text
+    assert "rc=1" in resp.json()["detail"]
+    assert "ModuleNotFoundError" in resp.json()["detail"]
+
+
+def test_land_still_succeeds_when_the_process_stays_alive(api, monkeypatch):
+    client, _calls, _tmp = api
+    from hermes_cli import control_loops as cl
+
+    class _Alive:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(cl, "_spawn_land", lambda pack, log: _Alive())
+    monkeypatch.setattr(cl, "_land_failed_fast", lambda proc, probe=0.0: proc.poll())
+    resp = client.post("/api/loops/nacht/land")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["land_started"] is True

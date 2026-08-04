@@ -163,6 +163,9 @@ export const LoopModelsResponseSchema = z.object({
 
 export const LoopDetailResponseSchema = LoopPackSummarySchema.extend({
   ledger_tail: z.array(z.string()).catch([]),
+  // Ohne Eintrag hier strippt zod das Feld still weg — genau der Weg, auf dem
+  // das `error`-Feld der Loops-API nie in der UI ankam (Eskalation E4).
+  escalations_tail: z.array(z.string()).catch([]),
   queue_entries: z.record(z.string(), z.array(z.string())).nullable().catch(null),
   commits: z.array(z.string()).catch([]),
   overrides: z.record(z.string(), z.string()).catch({}),

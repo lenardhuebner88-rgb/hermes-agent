@@ -1527,6 +1527,7 @@ export interface LoopNightOverridesResponse {
 
 export interface LoopDetailResponse extends LoopPackSummary {
   ledger_tail: string[];
+  escalations_tail: string[];
   queue_entries: Record<string, string[]> | null;
   commits: string[];
   overrides: Record<string, string>;

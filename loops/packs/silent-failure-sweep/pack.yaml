@@ -1,0 +1,42 @@
+# silent-failure-sweep — Sweep gegen die eine Fehlerklasse, die dieses Repo
+# wiederholt teuer bezahlt hat: ein echter Fehler wird still in ein plausibel
+# aussehendes Ergebnis verwandelt (0, [], "", None, "grün"), und der Aufrufer
+# kann das Ergebnis nicht vom echten unterscheiden.
+#
+# Belegte Vorfaelle dieser Klasse: `.catch(0)` verbarg fehlende chain-cost-Felder ·
+# zod strippte das neue `error`-Feld der Loops-API (Eskalation E4) · ein Gate in
+# einer Pipe meldete Exit 0 obwohl rot · `git cherry` nach Merge = 0 als Artefakt ·
+# HAS_WEB=0 statt "Deps fehlen, hole sie" (7 Naechte DRY).
+#
+# Warum ein eigener Pack und nicht hermes-hardening: dessen Linsen sind
+# ui-design und backend-robustheit (Event-Loop-Blocking, 4xx-Semantik, Touch-
+# Ziele). Die stille Luege ist quer dazu und wurde dort nie systematisch gejagt.
+#
+# Warum das nicht wie error-sweep an DRY stirbt: error-sweep zog seine Funde aus
+# Service-Logs und verhungerte an einem ruhigen System (18 DRY-Runden, retired).
+# Diese Quelle ist der Code selbst — allein in hermes_cli/gateway/loops sind
+# 2.528 still schluckende Handler AST-gemessen. Die Arbeit ist die Triage, nicht
+# das Finden.
+name: silent-failure-sweep
+type: sweep
+description: Pro Runde EINE stille Luege belegen (roter Repro-Test) und minimal fixen
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: codex
+    model: gpt-5.6-terra
+    effort: medium
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 10
+  max_hours: 7
+  fail_streak: 2
+  dry_rounds: 2
+params:
+  revier: "rotierend: (1) hermes_cli/ Route-Module  (2) gateway/  (3) loops/ + scripts/  (4) web/src/control/ (zod-Schemas, fetch-Loader, .catch/??/||-Defaults)"
+  fokus: "Fehler -> plausibles Ergebnis. Legitime Degradation mit Fehlerkanal ist KEIN Fund."
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

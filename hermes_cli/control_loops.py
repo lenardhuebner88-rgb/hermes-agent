@@ -1089,11 +1089,11 @@ def _lint_pack_dir(base: Path, name: str) -> str | None:
     return None
 
 
-def _spawn_land(pack: loop_runner.Pack, log_path: Path) -> None:
+def _spawn_land(pack: loop_runner.Pack, log_path: Path) -> subprocess.Popen | None:
     """Landung detached starten (dauert Minuten: Gates). Seam für Tests."""
     py = pack.repo / "venv" / "bin" / "python"
     with log_path.open("w", encoding="utf-8") as log_fh:
-        subprocess.Popen(  # noqa: S603 — Argumente stammen aus validiertem Pack
+        return subprocess.Popen(  # noqa: S603 — Argumente stammen aus validiertem Pack
             [str(py), "-m", "loops.runner", "--pack", pack.name, "--cmd", "land"],
             cwd=str(pack.repo),
             stdout=log_fh,
@@ -1101,6 +1101,23 @@ def _spawn_land(pack: loop_runner.Pack, log_path: Path) -> None:
             start_new_session=True,
             env={"PYTHONPATH": str(pack.repo), "PATH": "/usr/bin:/bin", "HOME": str(Path.home())},
         )
+
+
+def _land_failed_fast(proc: subprocess.Popen | None, probe: float = 0.6) -> int | None:
+    """Exit-Code, wenn die Landung schon in den ersten Millisekunden starb.
+
+    Gegenstueck zu ``_unit_failed_fast`` beim Start. ``Popen`` wirft nur, wenn
+    der Interpreter gar nicht existiert; ein Prozess, der anlaeuft und sofort
+    stirbt (ImportError, kaputtes PYTHONPATH, venv halb installiert), wurde
+    dem Operator vorher als gruene Erfolgsmeldung gezeigt, waehrend im Ledger
+    nie etwas ankam. Seam für Tests.
+    """
+    if proc is None:
+        return None
+    import time as _time
+
+    _time.sleep(probe)
+    return proc.poll()
 
 
 def _timer_enabled(name: str) -> bool:
@@ -1262,6 +1279,15 @@ def register_loops_routes(app: FastAPI) -> None:
             ledger_path.read_text(encoding="utf-8").splitlines()[-50:]
             if ledger_path.is_file() else []
         )
+        # Jeder Pack-Prompt beauftragt die Agenten, Out-of-Scope-Funde nach
+        # ESCALATIONS.md zu schreiben — gelesen hat die Datei bisher niemand:
+        # das Dashboard kannte sie nicht, und hermes-hardening trug so 137
+        # Zeilen echter Funde, die nur per Hand-grep auffindbar waren.
+        escalations_path = state / "ESCALATIONS.md"
+        escalations_tail = (
+            escalations_path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+            if escalations_path.is_file() else []
+        )
         queue_entries = {
             stage: sorted(
                 p.name for p in (state / "queue" / stage).glob("*.md")
@@ -1273,6 +1299,7 @@ def register_loops_routes(app: FastAPI) -> None:
         detail: dict[str, Any] = {
             **_pack_summary(loaded.name, source),
             "ledger_tail": ledger_tail,
+            "escalations_tail": escalations_tail,
             "queue_entries": queue_entries if loaded.type == "pipeline" else None,
             "commits": _commits_ahead(loaded),
             "overrides": loop_runner.parse_overrides(overrides_path),
@@ -1474,9 +1501,23 @@ def register_loops_routes(app: FastAPI) -> None:
         (state / "logs").mkdir(parents=True, exist_ok=True)
         log_path = state / "logs" / f"land-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
         try:
-            _spawn_land(loaded, log_path)
+            proc = _spawn_land(loaded, log_path)
         except OSError as exc:
             raise HTTPException(status_code=502, detail=f"Landung ließ sich nicht starten: {exc}") from exc
+        rc = _land_failed_fast(proc)
+        if rc is not None and rc != 0:
+            tail = ""
+            if log_path.is_file():
+                lines = [
+                    line for line in
+                    log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if line.strip()
+                ]
+                tail = lines[-1].strip() if lines else ""
+            raise HTTPException(
+                status_code=502,
+                detail=f"Landung starb sofort (rc={rc}){f': {tail}' if tail else ''}",
+            )
         return {"land_started": True, "pack": loaded.name, "log": log_path.name,
                 "note": "läuft detached mit allen Schienen; Ergebnis im Ledger (LAND ✅ / rollback / Abbruch)"}
 

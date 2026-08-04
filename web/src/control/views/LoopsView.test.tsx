@@ -954,6 +954,7 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
   // loopLedger.ts-Kommentar) — verifiziert der Parser hier im UI-Kontext.
   const detail: LoopDetailResponse = {
     ...(runningPipeline as LoopPackSummary),
+    escalations_tail: [],
     ledger_tail: [
       "- 2026-07-03 07:14 R1 ✅ P1-repo-housekeeper-dead-code-sweep.md verified (a1b2c3d4e) [build 812s · verify 340s]",
       "# LEDGER — ein fremdes/kaputtes Format, das nicht crashen darf",
@@ -1429,6 +1430,7 @@ const landingPack: LoopPackSummary = {
 const landingDetail: LoopDetailResponse = {
   ...landingPack,
   ledger_tail: [],
+  escalations_tail: [],
   queue_entries: null,
   commits: [],
   overrides: {},
@@ -1600,5 +1602,34 @@ describe("LoopsGrid — Landing-Drawer (LL2-S5, AC-4)", () => {
       preview: { running: true, started_at: "2026-07-31T00:05:00+00:00", output_tail: "" },
     });
     expect(html).toContain("Vorschau läuft …");
+  });
+});
+
+describe("LoopDetailPanel — Eskalationen", () => {
+  // Die Pack-Prompts beauftragen ESCALATIONS.md seit jeher; sichtbar war die
+  // Datei nie. hermes-hardening trug so 137 Zeilen echter Out-of-Scope-Funde.
+  const base = {
+    ...(runningPipeline as LoopPackSummary),
+    ledger_tail: [],
+    queue_entries: null,
+    commits: [],
+    overrides: {},
+    phase_usage: [],
+  };
+
+  it("renders escalation lines in the open detail panel", () => {
+    const detail: LoopDetailResponse = {
+      ...base,
+      escalations_tail: ["## E4 — zod strippt das error-Feld", "- Schwere: mittel"],
+    };
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).toContain("E4 — zod strippt das error-Feld");
+    expect(html).toContain("Eskalationen");
+  });
+
+  it("omits the section entirely when there is nothing escalated", () => {
+    const detail: LoopDetailResponse = { ...base, escalations_tail: [] };
+    const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
+    expect(html).not.toContain("data-loop-escalations");
   });
 });

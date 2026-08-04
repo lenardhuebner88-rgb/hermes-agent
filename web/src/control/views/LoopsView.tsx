@@ -599,6 +599,17 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
           <p className="mt-1" style={{ color: "var(--ln-ink-soft)" }}>{t.detailNoLedger}</p>
         )}
       </div>
+      {detail.escalations_tail.length > 0 ? (
+        <div data-loop-escalations>
+          <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailEscalations}</p>
+          <pre
+            className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap font-data text-[11px]"
+            style={{ color: "var(--ln-ink)" }}
+          >
+            {detail.escalations_tail.join("\n")}
+          </pre>
+        </div>
+      ) : null}
       {detail.queue_entries ? (
         <div>
           <p className="text-[11px] uppercase tracking-[0.14em]" style={caption}>{t.detailQueue}</p>
@@ -1510,7 +1521,7 @@ function NightModelControl({
         </p>
       ) : null}
       {error ? (
-        <p className="text-xs" style={{ color: "var(--ln-alert)" }} role="alert">{error}</p>
+        <p className="text-xs" style={{ color: "var(--ln-fail)" }} role="alert">{error}</p>
       ) : null}
       {success ? (
         <p className="text-xs" style={{ color: "var(--ln-ok)" }} role="status">{success}</p>
