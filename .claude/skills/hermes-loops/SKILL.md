@@ -61,6 +61,15 @@ New engine = module in `loops/engines/` with `@register("name")`.
 - Landing verdict about commit QUALITY stays human/main-agent: read LEDGER +
   `git log main..loop/<pack>` BEFORE `--cmd land`. Auto-land stays off (v2 ladder).
 - STOP file does not touch timers — disable the timer too if the pack should pause.
+- **The systemd *user manager* already exports `HERMES_TEST_WORKERS=8`** (`systemctl --user
+  show-environment`), and every `hermes-loop@` unit inherits it. A `${HERMES_TEST_WORKERS:-N}`
+  fallback therefore **never fires in production** — and still looks green in a clean test env.
+  Load caps for loops must be authoritative and use their own lever: the runner sets
+  `HERMES_TEST_WORKERS`/`GATE_FRONTEND_MAX_WORKERS` in `_worker_environment` (so the whole agent
+  turn is capped, including `gate-frontend.sh` a prompt calls directly), overridable via
+  `HERMES_LOOP_TEST_WORKERS` / `HERMES_LOOP_FRONTEND_WORKERS`. Kanban runs do not pass through
+  this path and keep their 8. Raising a test timeout instead is whack-a-mole — `web/vite.config.ts`
+  carries that warning verbatim.
 - Loop `.sh` files must stay git-mode **100755**; a 100644 shim → systemd `203/EXEC`
   silent-fail (ExecStart runs it via `/bin/bash` as a backstop).
   If Start "works" but nothing runs: `systemctl --user status hermes-loop@<pack>` —
