@@ -112,4 +112,18 @@ describe("PlanComposer", () => {
       freigabe: "sofort",
     });
   });
+
+  it("markiert die Zielhandlung „Plan übernehmen“ als primär, die Vorprüfung als sekundär (I3)", () => {
+    render(<PlanComposer onIngestSuccess={onIngestSuccess} />);
+
+    const previewButton = screen.getByRole("button", { name: de.fleet.planCompilePreview });
+    const ingestButton = screen.getByRole("button", { name: de.fleet.planIngest });
+
+    // Die Akzent-Fläche (live/10 + bronze) gehört der Zielhandlung,
+    // nicht dem Zwischenschritt — vorher umgekehrt.
+    expect(ingestButton.className).toContain("bg-live/10");
+    expect(ingestButton.className).toContain("text-bronze-hi");
+    expect(previewButton.className).not.toContain("bg-live/10");
+    expect(previewButton.className).toContain("bg-surface-2");
+  });
 });

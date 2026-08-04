@@ -12,14 +12,19 @@ import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
-import { SignalChip, type SignalTone } from "../../components/leitstand";
-import { planSpecVisibleFindingCount } from "./planSpecKanban";
+import { SignalChip } from "../../components/leitstand";
+import {
+  PLAN_ACTION_STATE_TONE,
+  planSpecActionReasonRestatesState,
+  planSpecActionState,
+  planSpecVisibleFindingCount,
+  type PlanActionState,
+} from "./planSpecKanban";
 import type { PlanSpecRecord } from "./shared";
 
 const PLAN_COMPOSER_EXPANDED_KEY = "fleet-plan-composer-expanded";
 
 export type PlanSegment = "all" | "draft" | "ready" | "attention" | "held" | "board" | "done";
-type PlanActionState = NonNullable<PlanSpecRecord["action_state"]>;
 type PlanSort = "state" | "findings" | "agent" | "board";
 
 interface PlanTabProps {
@@ -45,32 +50,17 @@ interface PlanTabProps {
   onRetry?: () => void | Promise<void>;
 }
 
-function planState(item: PlanSpecRecord): PlanActionState {
-  if (item.action_state) return item.action_state;
-  if (item.kanban_state === "archived") return "archived";
-  if (item.kanban_state === "completed" || item.kanban_state === "done") return "completed";
-  if (item.kanban_state === "blocked") return "blocked";
-  if (item.kanban_state === "running") return "running";
-  if (item.kanban_root_task_id) {
-    return item.freigabe === "operator"
-      && item.kanban_state === "queued"
-      && item.kanban_root_status === "scheduled"
-      ? "held"
-      : "handed_off";
-  }
-  if (!item.valid) return "draft";
-  return item.ingest_would_block ? "blocked" : "ready";
-}
+const planState = planSpecActionState;
 
-const STATE_META: Record<PlanActionState, { label: string; tone: SignalTone }> = {
-  draft: { label: "Entwurf", tone: "neutral" },
-  ready: { label: "Bereit", tone: "ok" },
-  held: { label: "Gehalten", tone: "warn" },
-  handed_off: { label: "Übergeben", tone: "neutral" },
-  running: { label: "Läuft", tone: "neutral" },
-  blocked: { label: "Blockiert", tone: "alert" },
-  completed: { label: "Fertig", tone: "ok" },
-  archived: { label: "Archiv", tone: "neutral" },
+const STATE_META: Record<PlanActionState, { label: string }> = {
+  draft: { label: "Entwurf" },
+  ready: { label: "Bereit" },
+  held: { label: "Gehalten" },
+  handed_off: { label: "Übergeben" },
+  running: { label: "Läuft" },
+  blocked: { label: "Blockiert" },
+  completed: { label: "Fertig" },
+  archived: { label: "Archiv" },
 };
 
 function matchesSegment(item: PlanSpecRecord, state: PlanActionState, segment: PlanSegment): boolean {
@@ -374,9 +364,11 @@ export function PlanTab({
                       {findingCount > 0 ? <span>{findingCount} Befunde</span> : null}
                       {item.target_board ? <span>→ {item.target_board}</span> : null}
                     </span>
-                    {item.action_reason ? <span className="fleet-plan-row-reason">{item.action_reason}</span> : null}
+                    {item.action_reason && !planSpecActionReasonRestatesState(state, item.action_reason) ? (
+                      <span className="fleet-plan-row-reason">{item.action_reason}</span>
+                    ) : null}
                   </span>
-                  <SignalChip tone={meta.tone} label={meta.label} />
+                  <SignalChip tone={PLAN_ACTION_STATE_TONE[state]} label={meta.label} />
                 </button>
               </li>
             );

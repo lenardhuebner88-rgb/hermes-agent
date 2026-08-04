@@ -1,13 +1,53 @@
 import type { PlanSpecRecord } from "../../lib/types";
-import type { ToneName } from "../../lib/types";
+import type { SignalTone } from "../../components/leitstand";
 
-export function planSpecKanbanTone(state: PlanSpecRecord["kanban_state"]): ToneName {
-  if (state === "archived") return "zinc";
-  if (state === "completed" || state === "done") return "emerald";
-  if (state === "blocked") return "red";
-  if (state === "running") return "amber";
-  if (state === "queued") return "violet";
-  return "zinc";
+export type PlanActionState = NonNullable<PlanSpecRecord["action_state"]>;
+
+/**
+ * Der Anzeigezustand eines Plans — EINE Quelle für Listenzeile und Detail,
+ * damit beide denselben Plan nie unterschiedlich einordnen (Befund D1,
+ * 2026-08-04: Liste „Fertig" aus action_state, Detail „geschlossen" aus
+ * Kanban-Feldern, auf demselben Schirm).
+ */
+export function planSpecActionState(item: PlanSpecRecord): PlanActionState {
+  if (item.action_state) return item.action_state;
+  if (item.kanban_state === "archived") return "archived";
+  if (item.kanban_state === "completed" || item.kanban_state === "done") return "completed";
+  if (item.kanban_state === "blocked") return "blocked";
+  if (item.kanban_state === "running") return "running";
+  if (item.kanban_root_task_id) {
+    return item.freigabe === "operator"
+      && item.kanban_state === "queued"
+      && item.kanban_root_status === "scheduled"
+      ? "held"
+      : "handed_off";
+  }
+  if (!item.valid) return "draft";
+  return item.ingest_would_block ? "blocked" : "ready";
+}
+
+/** Ton je Anzeigezustand — Liste und Detail-Chip teilen sich diese Tabelle. */
+export const PLAN_ACTION_STATE_TONE: Record<PlanActionState, SignalTone> = {
+  draft: "neutral",
+  ready: "ok",
+  held: "warn",
+  handed_off: "neutral",
+  running: "neutral",
+  blocked: "alert",
+  completed: "ok",
+  archived: "neutral",
+};
+
+/**
+ * Grundtexte, die nur den Endzustand wiederholen („Die PlanSpec ist
+ * abgeschlossen."), tragen keine Information neben dem Chip — sie werden in
+ * der Zeile unterdrückt, damit echte Gründe auffallen (Live: 399 Zeilen mit
+ * derselben Floskel).
+ */
+export function planSpecActionReasonRestatesState(state: PlanActionState, reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  if (state !== "completed" && state !== "archived") return false;
+  return /abgeschlossen|geschlossen/i.test(reason);
 }
 
 /**

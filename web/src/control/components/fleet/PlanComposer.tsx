@@ -121,9 +121,11 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
       />
 
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+        {/* Sekundär: die Vorprüfung. Die Akzente trägt die Zielhandlung
+            „Plan übernehmen" — vorher wirkte der Zwischenschritt primär. */}
         <button
           type="button"
-          className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-live/40 bg-live/10 px-3 py-2 text-sec font-medium text-bronze-hi hover:bg-live/15 disabled:cursor-not-allowed disabled:opacity-45"
+          className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec font-medium text-ink-2 hover:border-live/40 hover:text-bronze-hi disabled:cursor-not-allowed disabled:opacity-45"
           onClick={() => void handlePreview()}
           disabled={!canPreview}
           aria-busy={previewBusy}
@@ -148,7 +150,7 @@ export function PlanComposer({ onIngestSuccess }: PlanComposerProps) {
           </select>
           <button
             type="button"
-            className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-line bg-surface-2 px-3 py-2 text-sec font-medium text-ink-2 hover:border-live/40 hover:text-bronze-hi disabled:cursor-not-allowed disabled:opacity-45"
+            className="inline-flex min-h-12 min-w-0 flex-1 items-center justify-center gap-2 rounded-card border border-live/40 bg-live/10 px-3 py-2 text-sec font-medium text-bronze-hi hover:bg-live/15 disabled:cursor-not-allowed disabled:opacity-45"
             onClick={() => void handleIngest()}
             disabled={!canIngest}
             aria-busy={ingestBusy}

@@ -408,4 +408,75 @@ describe("PlanSpecDetailDrawer — geschlossene Pläne und Befund-Echo", () => {
     expect(screen.queryByText("Auswirkung")).toBeNull();
     expect(screen.queryByText("Schutz")).toBeNull();
   });
+
+  it("beschriftet Freigabe und Live-Test-Tiefe im Kopf (I1)", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.getAllByText("Freigabe: reviewer").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Live-Test: smoke").length).toBeGreaterThan(0);
+  });
+
+  it("trägt im Kopf denselben Zustands-Ton wie die Listenzeile (I4)", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={closedItem}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    // Liste: completed → Ton ok (grün). Der Detail-Chip zeigte vorher zinc.
+    const chip = screen.getAllByText("erledigt")[0].closest("span.rounded-full");
+    expect(chip?.className).toContain("text-status-ok");
+  });
+
+  it("zeigt den Abschlussbeleg in der Übergabe statt im Überblick (I5)", () => {
+    const mitBeleg = {
+      ...closedItem,
+      closed_by: "operator",
+      receipt: "vault/03-Agents/Claude-Code/receipts/abo-limits.md",
+    };
+    render(
+      <PlanSpecDetailDrawer
+        item={mitBeleg}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    // Überblick: kein Beleg mehr …
+    expect(screen.queryByText("Abschlussbeleg")).toBeNull();
+    // … sondern in der Übergabe — der Tab beantwortet „wie ist es ausgegangen".
+    fireEvent.click(screen.getByRole("tab", { name: "Übergabe" }));
+    expect(screen.getByText("Abschlussbeleg")).toBeTruthy();
+    expect(screen.getByText("Geschlossen von operator")).toBeTruthy();
+    expect(screen.getByText("vault/03-Agents/Claude-Code/receipts/abo-limits.md")).toBeTruthy();
+  });
+
+  it("zählt in der Übergabe-Prüfung nur sichtbare Befunde (I6)", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={{
+          ...baseItem,
+          finding_count: 2,
+          ingest_findings: ["closed status: done", "scope-less code subtask: ER-S2"],
+        }}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Übergabe" }));
+    expect(screen.getByText("1 Befunde · Live-Test smoke")).toBeTruthy();
+  });
 });

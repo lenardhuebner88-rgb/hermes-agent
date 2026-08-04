@@ -340,4 +340,35 @@ describe("PlanTab — Befund-Echo, Stale-Hinweis, Leerzustände", () => {
     expect(screen.getByText("Keine Treffer")).toBeTruthy();
     expect(screen.getByText("Suche oder Register anpassen.")).toBeTruthy();
   });
+
+  it("unterdrückt Grundtexte, die nur den Endzustand wiederholen — echte Gründe bleiben (I2)", () => {
+    renderPlanTab({
+      plans: [
+        plan({
+          topic: "Echo-Grund",
+          open: false,
+          status: "done",
+          closed_reason: "closed status: done",
+          action_state: "completed",
+          action_reason: "Die PlanSpec ist abgeschlossen.",
+        }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/blocked.md",
+          filename: "blocked.md",
+          topic: "Echter Grund",
+          action_state: "blocked",
+          action_reason: "Lane premium nicht auflösbar.",
+        }),
+      ],
+    });
+
+    // Blockierte Zeile in „Offen": der echte Grund bleibt sichtbar.
+    const realRow = screen.getByRole("button", { name: /Echter Grund/ });
+    expect(realRow.textContent).toContain("Lane premium nicht auflösbar.");
+
+    // Erledigte Zeile: die Abschluss-Floskel wiederholt nur den Chip.
+    fireEvent.click(screen.getByRole("tab", { name: "Erledigt24" }));
+    const echoRow = screen.getByRole("button", { name: /Echo-Grund/ });
+    expect(echoRow.textContent).not.toContain("abgeschlossen");
+  });
 });

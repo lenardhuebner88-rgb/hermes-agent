@@ -3,8 +3,15 @@ import { useState, type KeyboardEvent, type ReactNode } from "react";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "../../lib/types";
 import { Eyebrow, SkeletonCard } from "../../components/primitives";
-import { DrawerShell, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
-import { planSpecKanbanTone, planSpecKanbanLabel, planSpecFindingIsStatusEcho, planSpecIsClosed } from "./planSpecKanban";
+import { DrawerShell, SignalChip } from "../../components/leitstand";
+import {
+  PLAN_ACTION_STATE_TONE,
+  planSpecActionState,
+  planSpecKanbanLabel,
+  planSpecFindingIsStatusEcho,
+  planSpecIsClosed,
+  planSpecVisibleFindingCount,
+} from "./planSpecKanban";
 
 function middleEllipsis(value: string, edge = 32): string {
   if (value.length <= edge * 2 + 3) return value;
@@ -60,14 +67,16 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, stale = fal
       headerExtra={(
         <div className="mt-2 grid min-w-0 gap-2">
           <div className="flex flex-wrap items-center gap-2">
-            <SignalChip tone={signalToneFromLegacy(planSpecKanbanTone(item.kanban_state))} label={planSpecKanbanLabel(item)} />
+            {/* Ton = derselbe wie in der Listenzeile (I4); das Label bleibt
+                das präzisere Dispositionswort (ausgeliefert/obsolet/…). */}
+            <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecKanbanLabel(item)} />
             <span className="font-display text-micro uppercase tracking-[0.08em] text-ink-2">
-              {detail?.freigabe || item.freigabe || "ohne Freigabe"}
+              Freigabe: {detail?.freigabe || item.freigabe || "keine"}
             </span>
             {/* Die Live-Test-Tiefe stand nur in der Desktop-Variante; unter lg
                 fehlte damit ein entscheidungsrelevanter Wert im Kopf. */}
             <span className="font-display text-micro uppercase tracking-[0.08em] text-ink-2">
-              {detail?.live_test_depth || item.live_test_depth || "smoke"}
+              Live-Test: {detail?.live_test_depth || item.live_test_depth || "smoke"}
             </span>
             {item.kanban_root_task_id ? (
               <span className="font-data text-micro text-ink-3">Root {middleEllipsis(item.kanban_root_task_id, 10)}</span>
@@ -181,9 +190,9 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
         </div>
       </div> : null}
       {showHeader ? <div className="flex flex-wrap gap-1.5">
-        <SignalChip tone={signalToneFromLegacy(planSpecKanbanTone(item.kanban_state))} label={planSpecKanbanLabel(item)} />
-        <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">{detail?.freigabe || item.freigabe || "ohne Freigabe"}</span>
-        <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">{detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
+        <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecKanbanLabel(item)} />
+        <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">Freigabe: {detail?.freigabe || item.freigabe || "keine"}</span>
+        <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">Live-Test: {detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
         {item.kanban_root_task_id ? (
           <span className="px-1 py-0.5 font-data text-micro text-ink-3">Root {item.kanban_root_task_id}</span>
         ) : null}
@@ -287,14 +296,6 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
                 <ul>{(detail.evidence_required ?? []).map((x) => <li key={x}>{x}</li>)}</ul>
               </details>
             ) : null}
-            {(item.receipt || item.release_evidence || item.closed_by) ? (
-              <section className="fleet-detail-instrument">
-                <Eyebrow>Abschlussbeleg</Eyebrow>
-                {item.closed_by ? <p className="mt-2 text-sec text-ink-2">Geschlossen von {item.closed_by}</p> : null}
-                {item.receipt ? <p className="mt-1 wrap-anywhere font-data text-micro text-ink-3">{item.receipt}</p> : null}
-                {item.release_evidence ? <p className="mt-1 wrap-anywhere text-sec text-ink-2">{item.release_evidence}</p> : null}
-              </section>
-            ) : null}
             {detail.full_text ? (
               <details className="fleet-plan-disclosure">
                 <summary>Quelltext anzeigen</summary>
@@ -339,12 +340,22 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
 
           {tab === "check" ? <div id="fleet-plan-panel-check" role="tabpanel" aria-labelledby="fleet-plan-tab-check" className="mt-4 grid gap-4">
             {/* Für geschlossene Pläne ist die Übergabe-Matrix irreführend —
-                nichts davon landet noch auf einem Board. */}
-            {closed ? null : (
+                nichts davon landet noch auf einem Board. Stattdessen beantwortet
+                der Tab hier die eigentliche Frage: wie ist es ausgegangen? */}
+            {closed ? (
+              (item.receipt || item.release_evidence || item.closed_by) ? (
+                <section className="fleet-detail-instrument">
+                  <Eyebrow>Abschlussbeleg</Eyebrow>
+                  {item.closed_by ? <p className="mt-2 text-sec text-ink-2">Geschlossen von {item.closed_by}</p> : null}
+                  {item.receipt ? <p className="mt-1 wrap-anywhere font-data text-micro text-ink-3">{item.receipt}</p> : null}
+                  {item.release_evidence ? <p className="mt-1 wrap-anywhere text-sec text-ink-2">{item.release_evidence}</p> : null}
+                </section>
+              ) : null
+            ) : (
               <dl className="fleet-plan-decision">
                 <div><dt>Auswirkung</dt><dd>{detail.subtasks.length} Schritte auf {detail.target_board || item.target_board || "dem aktiven Board"}</dd></div>
                 <div><dt>Schutz</dt><dd>{detail.freigabe === "operator" ? "Start erfordert Operator-Freigabe" : "Freigabe laut PlanSpec"}</dd></div>
-                <div><dt>Prüfung</dt><dd>{item.finding_count ?? detail.finding_count ?? 0} Befunde · Live-Test {detail.live_test_depth || "smoke"}</dd></div>
+                <div><dt>Prüfung</dt><dd>{planSpecVisibleFindingCount(item)} Befunde · Live-Test {detail.live_test_depth || "smoke"}</dd></div>
               </dl>
             )}
             {actions}
