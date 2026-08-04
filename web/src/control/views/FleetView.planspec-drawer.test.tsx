@@ -140,6 +140,9 @@ const planSpec = {
   kanban_root_task_id: "t_alpha",
   kanban_root_status: "scheduled",
   kanban_state: "queued",
+  // Seit V1 klassifiziert nur das Backend (action_state); der frühere
+  // Frontend-Fallback (operator+queued+scheduled → held) existiert nicht mehr.
+  action_state: "held",
   kanban_child_done: 1,
   kanban_child_total: 3,
   kanban_child_blocked: 0,
