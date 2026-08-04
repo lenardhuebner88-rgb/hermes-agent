@@ -194,33 +194,74 @@ def way2_run_facts(
         WHERE {where} AND {time_pred}
         """,
         [*params, cutoff_iso],
-    )
+    ).fetchall()
     result = WayResult(way="run_usage_facts", scope=scope)
     for row in rows:
         result.runs += 1
         for name in TOKEN_FIELDS:
             result.tokens[name] += int(row[name] or 0)
-        amount = _price(
-            row["model"],
-            row["provider"],
-            UsageFactsUsage(
-                input_tokens=int(row["input_tokens"] or 0),
-                output_tokens=int(row["output_tokens"] or 0),
-                cache_read_tokens=int(row["cache_read_tokens"] or 0),
-                cache_write_tokens=int(row["cache_write_tokens"] or 0),
-                cache_write_1h_tokens=row["cache_write_1h_tokens"],
-                cache_write_5m_tokens=row["cache_write_5m_tokens"],
-                reasoning_tokens=int(row["reasoning_tokens"] or 0),
-            ),
-            row["origin"],
-        )
-        if amount is None:
-            result.unpriced_runs += 1
-            result.unpriced_tokens += sum(
-                int(row[name] or 0) for name in TOKEN_FIELDS
-            )
+        # Cost at call granularity when call rows exist: the billable-input
+        # rule (Canon §5f) is defined per request; applied to run sums it
+        # misfires on mixed runs (measured: $5.35 drift on run 8886).
+        # Run-level-only rows (foreign lanes) price at their own
+        # granularity — the finest available.
+        call_rows = conn.execute(
+            "SELECT provider, model, origin, input_tokens, output_tokens,"
+            " cache_read_tokens, cache_write_tokens, cache_write_1h_tokens,"
+            " cache_write_5m_tokens, reasoning_tokens"
+            " FROM run_llm_calls WHERE run_id = ?",
+            (row["run_id"],),
+        ).fetchall()
+        if call_rows:
+            amount = Decimal("0")
+            any_unpriced = False
+            for call in call_rows:
+                call_amount = _price(
+                    call["model"],
+                    call["provider"],
+                    UsageFactsUsage(
+                        input_tokens=int(call["input_tokens"] or 0),
+                        output_tokens=int(call["output_tokens"] or 0),
+                        cache_read_tokens=int(call["cache_read_tokens"] or 0),
+                        cache_write_tokens=int(call["cache_write_tokens"] or 0),
+                        cache_write_1h_tokens=call["cache_write_1h_tokens"],
+                        cache_write_5m_tokens=call["cache_write_5m_tokens"],
+                        reasoning_tokens=int(call["reasoning_tokens"] or 0),
+                    ),
+                    call["origin"],
+                )
+                if call_amount is None:
+                    any_unpriced = True
+                else:
+                    amount += call_amount
+            if any_unpriced and amount == 0:
+                result.unpriced_runs += 1
+                result.unpriced_tokens += sum(
+                    int(row[name] or 0) for name in TOKEN_FIELDS
+                )
+                continue
         else:
-            result.cost_equivalent_usd += amount
+            amount = _price(
+                row["model"],
+                row["provider"],
+                UsageFactsUsage(
+                    input_tokens=int(row["input_tokens"] or 0),
+                    output_tokens=int(row["output_tokens"] or 0),
+                    cache_read_tokens=int(row["cache_read_tokens"] or 0),
+                    cache_write_tokens=int(row["cache_write_tokens"] or 0),
+                    cache_write_1h_tokens=row["cache_write_1h_tokens"],
+                    cache_write_5m_tokens=row["cache_write_5m_tokens"],
+                    reasoning_tokens=int(row["reasoning_tokens"] or 0),
+                ),
+                row["origin"],
+            )
+            if amount is None:
+                result.unpriced_runs += 1
+                result.unpriced_tokens += sum(
+                    int(row[name] or 0) for name in TOKEN_FIELDS
+                )
+                continue
+        result.cost_equivalent_usd += amount
     return result
 
 
@@ -500,11 +541,12 @@ def _explanation_facts(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, A
 
     # Cause 1: pre-v6 claude_code call rows carry no occurred_at and are
     # invisible to the per-call time filter while their run is in-window.
-    row = conn.execute(
+    # Priced too — cost shares differ from token shares.
+    rows = conn.execute(
         f"""
-        SELECT COUNT(DISTINCT c.run_id) AS runs,
-               SUM(COALESCE(c.input_tokens,0)+COALESCE(c.output_tokens,0)
-                   +COALESCE(c.cache_read_tokens,0)+COALESCE(c.cache_write_tokens,0)) AS tokens
+        SELECT c.run_id, c.provider, c.model, c.origin, c.input_tokens,
+               c.output_tokens, c.cache_read_tokens, c.cache_write_tokens,
+               c.cache_write_1h_tokens, c.cache_write_5m_tokens, c.reasoning_tokens
         FROM run_llm_calls c
         JOIN run_usage_facts f ON f.run_id = c.run_id
         WHERE {_CLAUDE_ORIGIN_SQL.replace('origin', 'c.origin').replace('run_id', 'c.run_id')}
@@ -512,16 +554,41 @@ def _explanation_facts(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, A
           AND COALESCE(f.last_call_at, f.captured_at) >= ?
         """,
         (cutoff_iso,),
-    ).fetchone()
+    ).fetchall()
+    c1_runs: set[str] = set()
+    c1_tokens = 0
+    c1_cost = Decimal("0")
+    for call in rows:
+        c1_runs.add(call["run_id"])
+        c1_tokens += sum(int(call[name] or 0) for name in TOKEN_FIELDS)
+        amount = _price(
+            call["model"],
+            call["provider"],
+            UsageFactsUsage(
+                input_tokens=int(call["input_tokens"] or 0),
+                output_tokens=int(call["output_tokens"] or 0),
+                cache_read_tokens=int(call["cache_read_tokens"] or 0),
+                cache_write_tokens=int(call["cache_write_tokens"] or 0),
+                cache_write_1h_tokens=call["cache_write_1h_tokens"],
+                cache_write_5m_tokens=call["cache_write_5m_tokens"],
+                reasoning_tokens=int(call["reasoning_tokens"] or 0),
+            ),
+            call["origin"],
+        )
+        if amount is not None:
+            c1_cost += amount
     facts["claude_calls_without_occurred_at"] = {
-        "runs": int(row["runs"] or 0),
-        "tokens": int(row["tokens"] or 0),
+        "runs": len(c1_runs),
+        "tokens": c1_tokens,
+        "cost_usd": float(c1_cost),
     }
 
     # Cause 2: the run aggregate nulls a token total when any single call
     # lacks that field (partial sums would understate usage).  Only the
     # tokens in the *nulled fields* are missing from way2 — sum exactly
-    # those, per field, not the runs' full volume.
+    # those, per field, not the runs' full volume.  The affected calls are
+    # priced too: in cost space their share differs from their token
+    # share (billable-input correction, cache rates).
     for label, scope_sql, scope_params in (
         ("hermes", "f.origin IN ('hermes_agent','hermes_aux')", []),
         (
@@ -530,18 +597,9 @@ def _explanation_facts(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, A
             [],
         ),
     ):
-        row = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT COUNT(DISTINCT f.run_id) AS runs,
-                   SUM(CASE WHEN f.input_tokens IS NULL
-                            THEN COALESCE(c.input_tokens,0) ELSE 0 END
-                     + CASE WHEN f.output_tokens IS NULL
-                            THEN COALESCE(c.output_tokens,0) ELSE 0 END
-                     + CASE WHEN f.cache_read_tokens IS NULL
-                            THEN COALESCE(c.cache_read_tokens,0) ELSE 0 END
-                     + CASE WHEN f.cache_write_tokens IS NULL
-                            THEN COALESCE(c.cache_write_tokens,0) ELSE 0 END
-                   ) AS tokens
+            SELECT DISTINCT f.run_id
             FROM run_usage_facts f
             JOIN run_llm_calls c ON c.run_id = f.run_id
             WHERE {scope_sql}
@@ -550,19 +608,86 @@ def _explanation_facts(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, A
                    OR f.cache_read_tokens IS NULL OR f.cache_write_tokens IS NULL)
             """,
             [*scope_params, cutoff_iso],
-        ).fetchone()
+        ).fetchall()
+        affected_run_ids = [row[0] for row in rows]
+        null_tokens = 0
+        null_cost = Decimal("0")
+        for run_id in affected_run_ids:
+            agg = conn.execute(
+                "SELECT input_tokens, output_tokens, cache_read_tokens,"
+                " cache_write_tokens FROM run_usage_facts WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            null_fields = {
+                name
+                for name in TOKEN_FIELDS
+                if agg[name] is None
+            }
+            for call in conn.execute(
+                "SELECT provider, model, origin, input_tokens, output_tokens,"
+                " cache_read_tokens, cache_write_tokens, cache_write_1h_tokens,"
+                " cache_write_5m_tokens, reasoning_tokens"
+                " FROM run_llm_calls WHERE run_id = ?",
+                (run_id,),
+            ):
+                null_tokens += sum(
+                    int(call[name] or 0) for name in null_fields
+                )
+                amount = _price(
+                    call["model"],
+                    call["provider"],
+                    UsageFactsUsage(
+                        input_tokens=(
+                            int(call["input_tokens"] or 0)
+                            if "input_tokens" in null_fields
+                            else 0
+                        ),
+                        output_tokens=(
+                            int(call["output_tokens"] or 0)
+                            if "output_tokens" in null_fields
+                            else 0
+                        ),
+                        cache_read_tokens=(
+                            int(call["cache_read_tokens"] or 0)
+                            if "cache_read_tokens" in null_fields
+                            else 0
+                        ),
+                        cache_write_tokens=(
+                            int(call["cache_write_tokens"] or 0)
+                            if "cache_write_tokens" in null_fields
+                            else 0
+                        ),
+                        cache_write_1h_tokens=(
+                            call["cache_write_1h_tokens"]
+                            if "cache_write_tokens" in null_fields
+                            else None
+                        ),
+                        cache_write_5m_tokens=(
+                            call["cache_write_5m_tokens"]
+                            if "cache_write_tokens" in null_fields
+                            else None
+                        ),
+                        reasoning_tokens=int(call["reasoning_tokens"] or 0),
+                    ),
+                    call["origin"],
+                )
+                if amount is not None:
+                    null_cost += amount
         facts[f"{label}_partial_sum_null"] = {
-            "runs": int(row["runs"] or 0),
-            "tokens": int(row["tokens"] or 0),
+            "runs": len(affected_run_ids),
+            "tokens": null_tokens,
+            "cost_usd": float(null_cost),
         }
 
     # Cause 2b (kanban scope): correlated claude_code rows also lose
     # pre-v6 calls without occurred_at — same mechanism as cause 1,
-    # restricted to task_run_id rows.
-    row = conn.execute(
+    # restricted to task_run_id rows.  Priced as well: cost shares differ
+    # from token shares.
+    rows = conn.execute(
         f"""
-        SELECT SUM(COALESCE(c.input_tokens,0)+COALESCE(c.output_tokens,0)
-                   +COALESCE(c.cache_read_tokens,0)+COALESCE(c.cache_write_tokens,0)) AS tokens
+        SELECT c.provider, c.model, c.origin, c.input_tokens, c.output_tokens,
+               c.cache_read_tokens, c.cache_write_tokens, c.cache_write_1h_tokens,
+               c.cache_write_5m_tokens, c.reasoning_tokens
         FROM run_llm_calls c
         JOIN run_usage_facts f ON f.run_id = c.run_id
         WHERE {_CLAUDE_ORIGIN_SQL.replace('origin', 'c.origin').replace('run_id', 'c.run_id')}
@@ -571,9 +696,30 @@ def _explanation_facts(conn: sqlite3.Connection, cutoff_iso: str) -> dict[str, A
           AND COALESCE(f.last_call_at, f.captured_at) >= ?
         """,
         (cutoff_iso,),
-    ).fetchone()
+    ).fetchall()
+    c2b_tokens = 0
+    c2b_cost = Decimal("0")
+    for call in rows:
+        c2b_tokens += sum(int(call[name] or 0) for name in TOKEN_FIELDS)
+        amount = _price(
+            call["model"],
+            call["provider"],
+            UsageFactsUsage(
+                input_tokens=int(call["input_tokens"] or 0),
+                output_tokens=int(call["output_tokens"] or 0),
+                cache_read_tokens=int(call["cache_read_tokens"] or 0),
+                cache_write_tokens=int(call["cache_write_tokens"] or 0),
+                cache_write_1h_tokens=call["cache_write_1h_tokens"],
+                cache_write_5m_tokens=call["cache_write_5m_tokens"],
+                reasoning_tokens=int(call["reasoning_tokens"] or 0),
+            ),
+            call["origin"],
+        )
+        if amount is not None:
+            c2b_cost += amount
     facts["kanban_claude_calls_without_occurred_at"] = {
-        "tokens": int(row["tokens"] or 0),
+        "tokens": c2b_tokens,
+        "cost_usd": float(c2b_cost),
     }
 
     # Cause 3: buzz runs from non-claude sources (qwen/grok/codex/kimi
@@ -767,6 +913,7 @@ def run_reconcile(
         shared_metric: Optional[str] = None,
         expected_shared: Optional[tuple[float, str]] = None,
         include_cost: bool = True,
+        expected_cost: Optional[tuple[float, str]] = None,
     ) -> None:
         a, b = ways.get(key_a), ways.get(key_b)
         if a is None or b is None:
@@ -811,6 +958,7 @@ def run_reconcile(
                 )
             )
         if include_cost and a.cost_equivalent_usd is not None and b.cost_equivalent_usd is not None:
+            exp_c, reason_c = expected_cost or (exp_tok, reason_tok)
             deltas.append(
                 compare(
                     a, b,
@@ -818,8 +966,8 @@ def run_reconcile(
                     value_a=float(a.cost_equivalent_usd),
                     value_b=float(b.cost_equivalent_usd),
                     threshold=threshold,
-                    expected_rel=exp_tok,
-                    reason=reason_tok,
+                    expected_rel=exp_c,
+                    reason=reason_c,
                 )
             )
 
@@ -844,6 +992,11 @@ def run_reconcile(
                 f"{null_ts['runs']:,} runs have only pre-v6 call rows without "
                 "occurred_at",
             ),
+            expected_cost=(
+                _rel(null_ts["cost_usd"], float(w2c.cost_equivalent_usd or 0)),
+                f"priced share of the pre-v6 calls without occurred_at is "
+                f"${null_ts['cost_usd']:,.2f}",
+            ),
         )
 
     # hermes/kanban pairs: explained by the partial-sum NULL rule
@@ -855,9 +1008,11 @@ def run_reconcile(
         w2 = ways[f"run_usage_facts:{scope}"]
         w1 = ways[f"run_llm_calls:{scope}"]
         extra = 0
+        extra_cost = 0.0
         extra_note = ""
         if scope == "kanban":
             extra = explanations["kanban_claude_calls_without_occurred_at"]["tokens"]
+            extra_cost = explanations["kanban_claude_calls_without_occurred_at"]["cost_usd"]
             extra_note = (
                 f", plus {_fmt_tokens(extra)} tokens on pre-v6 correlated "
                 "claude calls without occurred_at"
@@ -870,6 +1025,14 @@ def run_reconcile(
                 f"partial-sum NULL rule: {psn['runs']:,} runs null "
                 f"aggregate fields their calls carry "
                 f"({_fmt_tokens(psn['tokens'])} tokens affected){extra_note}",
+            ),
+            expected_cost=(
+                _rel(
+                    psn["cost_usd"] + extra_cost,
+                    float(w2.cost_equivalent_usd or 0),
+                ),
+                f"priced share of the partial-sum-NULLed fields is "
+                f"${psn['cost_usd'] + extra_cost:,.2f}",
             ),
         )
 
