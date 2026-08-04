@@ -170,9 +170,7 @@ class RelayClient(
                             _state.value = State.Ready
                             authGate?.complete(true)
                         } else {
-                            _state.value = State.Failed(
-                                frame.message.ifBlank { "Relay hat die Anmeldung abgelehnt" },
-                            )
+                            _state.value = State.Failed(explain(frame.message))
                             authGate?.complete(false)
                         }
                     } else {
@@ -208,6 +206,27 @@ class RelayClient(
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .pingInterval(25, TimeUnit.SECONDS)
             .build()
+
+        /**
+         * Turns the relay's terse wire reasons into something actionable.
+         *
+         * These strings are what the server actually sends — verified live
+         * against the running relay — and each has a different remedy, so
+         * collapsing them into one "connection failed" would hide the fix.
+         */
+        fun explain(raw: String): String = when {
+            raw.contains("not a relay member") ->
+                "Dieser Schlüssel ist kein Mitglied der Community. " +
+                    "Er muss am Relay als Mitglied eingetragen werden."
+            raw.contains("auth-required") ->
+                "Der Relay hat die Anmeldung nicht angenommen."
+            raw.contains("invalid") && raw.contains("sig") ->
+                "Die Signatur wurde abgelehnt — stimmt der Schlüssel?"
+            raw.contains("404") ->
+                "Der Relay kennt diese Adresse nicht — Host oder Port prüfen."
+            raw.isBlank() -> "Verbindung fehlgeschlagen"
+            else -> raw
+        }
 
         /** `https://host:port` → `wss://host:port`, the form the relay expects. */
         fun webSocketUrl(baseUrl: String): String = baseUrl.trim().trimEnd('/')
