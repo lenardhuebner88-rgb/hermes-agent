@@ -479,4 +479,48 @@ describe("PlanSpecDetailDrawer — geschlossene Pläne und Befund-Echo", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Übergabe" }));
     expect(screen.getByText("1 Befunde · Live-Test smoke")).toBeTruthy();
   });
+
+  it("zeigt den Kettenlauf als eigene Zeile in der Operativen Lage (V2)", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={{ ...baseItem, action_state: "running", kanban_root_task_id: "t_root1", kanban_state: "running" }}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.getByText("Kette")).toBeTruthy();
+    // „läuft" steht jetzt zweifach da: einmal als Plan-Chip, einmal als
+    // Ausführungsachse der Kette — zwei Achsen, zwei Stellen.
+    expect(screen.getAllByText("läuft").length).toBeGreaterThanOrEqual(2);
+
+    // Ohne Wurzel keine Kette-Zeile.
+    cleanup();
+    render(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.queryByText("Kette")).toBeNull();
+  });
+
+  it("zeigt ohne action_state denselben Datenfehler wie die Liste (V1)", () => {
+    render(
+      <PlanSpecDetailDrawer
+        item={{ ...closedItem, action_state: undefined }}
+        detail={closedDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+      />,
+    );
+    expect(screen.getAllByText("ohne Zustand").length).toBeGreaterThan(0);
+    // Kein heimlich abgeleitetes „erledigt" aus den Kanban-Feldern.
+    expect(screen.queryByText("erledigt")).toBeNull();
+  });
 });

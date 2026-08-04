@@ -17,6 +17,7 @@ import {
   PLAN_ACTION_STATE_TONE,
   planSpecActionReasonRestatesState,
   planSpecActionState,
+  planSpecChainStateLabel,
   planSpecVisibleFindingCount,
   type PlanActionState,
 } from "./planSpecKanban";
@@ -61,11 +62,14 @@ const STATE_META: Record<PlanActionState, { label: string }> = {
   blocked: { label: "Blockiert" },
   completed: { label: "Fertig" },
   archived: { label: "Archiv" },
+  unknown: { label: "ohne Zustand" },
 };
 
 function matchesSegment(item: PlanSpecRecord, state: PlanActionState, segment: PlanSegment): boolean {
   // „Offen" (Default/Hauptansicht): geschlossene Pläne (completed/archived)
   // sind Endzustände und bleiben ausgeblendet — erreichbar über „Erledigt".
+  // „unknown" (fehlendes action_state = Datenfehler) bleibt hier bewusst
+  // sichtbar, statt in einem Fach ratend unterzutauchen.
   if (segment === "all") return state !== "completed" && state !== "archived";
   if (segment === "draft" || segment === "ready" || segment === "held") return state === segment;
   if (segment === "attention") return state === "blocked" && !item.kanban_root_task_id;
@@ -77,6 +81,7 @@ function matchesSegment(item: PlanSpecRecord, state: PlanActionState, segment: P
 }
 
 const STATE_SORT_ORDER: Record<PlanActionState, number> = {
+  unknown: -1,
   blocked: 0,
   ready: 1,
   held: 2,
@@ -163,7 +168,7 @@ export function PlanTab({
   const derivedCounts = useMemo(() => {
     const counts = {
       draft: 0, ready: 0, held: 0, handed_off: 0,
-      running: 0, blocked: 0, completed: 0, archived: 0,
+      running: 0, blocked: 0, completed: 0, archived: 0, unknown: 0,
     };
     for (const item of allPlanspecs) counts[planState(item)] += 1;
     return counts;
@@ -347,6 +352,7 @@ export function PlanTab({
             const meta = STATE_META[state];
             const taskCount = item.kanban_child_total || item.subtask_count;
             const findingCount = planSpecVisibleFindingCount(item);
+            const chainLabel = planSpecChainStateLabel(item);
             return (
               <li key={item.path}>
                 <button
@@ -362,6 +368,9 @@ export function PlanTab({
                       <span>{taskCount} Schritte</span>
                       {(item.dependency_count ?? 0) > 0 ? <span>{item.dependency_count} Abhängigkeiten</span> : null}
                       {findingCount > 0 ? <span>{findingCount} Befunde</span> : null}
+                      {/* Ausführungsachse getrennt vom Plan-Chip (V2): der Lauf
+                          der Kette steht als eigenes Datum, nicht im Label. */}
+                      {chainLabel ? <span>Kette: {chainLabel}</span> : null}
                       {item.target_board ? <span>→ {item.target_board}</span> : null}
                     </span>
                     {item.action_reason && !planSpecActionReasonRestatesState(state, item.action_reason) ? (

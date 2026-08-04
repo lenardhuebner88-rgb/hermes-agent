@@ -1,29 +1,23 @@
 import type { PlanSpecRecord } from "../../lib/types";
 import type { SignalTone } from "../../components/leitstand";
 
-export type PlanActionState = NonNullable<PlanSpecRecord["action_state"]>;
+export type PlanActionState = NonNullable<PlanSpecRecord["action_state"]> | "unknown";
 
 /**
  * Der Anzeigezustand eines Plans — EINE Quelle für Listenzeile und Detail,
  * damit beide denselben Plan nie unterschiedlich einordnen (Befund D1,
  * 2026-08-04: Liste „Fertig" aus action_state, Detail „geschlossen" aus
  * Kanban-Feldern, auf demselben Schirm).
+ *
+ * `action_state` ist die Wahrheit — das Backend klassifiziert bereits
+ * (classify_plan_record). Das Frontend leitet NICHTS mehr aus Kanban-Feldern
+ * ab: der frühere Fallback kannte die Backend-Regeln „Live-Kette schlägt
+ * geschlossene Quelle schlägt Wurzel-Stempel" nicht und malte geschlossene
+ * Specs wieder als „Blockiert"/„Im Board". Fehlt `action_state`, ist das ein
+ * Datenfehler und wird als „unknown" sichtbar — nicht heimlich geraten.
  */
 export function planSpecActionState(item: PlanSpecRecord): PlanActionState {
-  if (item.action_state) return item.action_state;
-  if (item.kanban_state === "archived") return "archived";
-  if (item.kanban_state === "completed" || item.kanban_state === "done") return "completed";
-  if (item.kanban_state === "blocked") return "blocked";
-  if (item.kanban_state === "running") return "running";
-  if (item.kanban_root_task_id) {
-    return item.freigabe === "operator"
-      && item.kanban_state === "queued"
-      && item.kanban_root_status === "scheduled"
-      ? "held"
-      : "handed_off";
-  }
-  if (!item.valid) return "draft";
-  return item.ingest_would_block ? "blocked" : "ready";
+  return item.action_state ?? "unknown";
 }
 
 /** Ton je Anzeigezustand — Liste und Detail-Chip teilen sich diese Tabelle. */
@@ -36,7 +30,23 @@ export const PLAN_ACTION_STATE_TONE: Record<PlanActionState, SignalTone> = {
   blocked: "alert",
   completed: "ok",
   archived: "neutral",
+  unknown: "warn",
 };
+
+/**
+ * Ausführungsachse der zugehörigen Kette — getrennt vom Plan-Zustand gezeigt
+ * (Runde-1-Befund: Dokumentzustand und Lauf gehören nicht in ein Feld).
+ * null = keine Kette übergeben bzw. kein lesbarer Laufzustand.
+ */
+export function planSpecChainStateLabel(item: PlanSpecRecord): string | null {
+  if (!item.kanban_root_task_id) return null;
+  if (item.kanban_state === "running") return "läuft";
+  if (item.kanban_state === "blocked") return "blockiert";
+  if (item.kanban_state === "queued") return item.kanban_root_status === "scheduled" ? "gehalten" : "geplant";
+  if (item.kanban_state === "completed" || item.kanban_state === "done") return "fertig";
+  if (item.kanban_state === "archived") return "archiviert";
+  return null;
+}
 
 /**
  * Grundtexte, die nur den Endzustand wiederholen („Die PlanSpec ist
@@ -72,6 +82,15 @@ export function planSpecKanbanLabel(item: PlanSpecRecord): string {
     return CLOSED_DISPOSITION_LABELS[planSpecClosedDispositionLabel(item)] ?? "geschlossen";
   }
   return item.valid ? "offen" : "blocked";
+}
+
+/**
+ * Chip-Label im Detail: das präzise Dispositionswort, solange das Backend
+ * klassifiziert hat. Ohne `action_state` wird nichts abgeleitet — der
+ * Datenfehler heißt dann wie in der Liste „ohne Zustand".
+ */
+export function planSpecStateChipLabel(item: PlanSpecRecord): string {
+  return item.action_state ? planSpecKanbanLabel(item) : "ohne Zustand";
 }
 
 function normalizedClosedReason(item: PlanSpecRecord): string {

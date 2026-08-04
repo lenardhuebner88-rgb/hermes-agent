@@ -371,4 +371,55 @@ describe("PlanTab — Befund-Echo, Stale-Hinweis, Leerzustände", () => {
     const echoRow = screen.getByRole("button", { name: /Echo-Grund/ });
     expect(echoRow.textContent).not.toContain("abgeschlossen");
   });
+
+  it("zeigt fehlendes action_state als sichtbaren Datenfehler statt zu raten (V1)", () => {
+    renderPlanTab({
+      plans: [
+        plan({
+          topic: "Ohne Zustand geschlossen",
+          action_state: undefined,
+          open: false,
+          status: "done",
+          closed_reason: "closed status: done",
+        }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/rooted.md",
+          filename: "rooted.md",
+          topic: "Ohne Zustand mit Wurzel",
+          action_state: undefined,
+          kanban_root_task_id: "t_1",
+          kanban_state: "queued",
+          kanban_root_status: "scheduled",
+        }),
+      ],
+    });
+
+    // Beide erscheinen in „Offen" als das, was sie sind: Datensätze ohne
+    // Backend-Klassifikation. Der entfernte Fallback hätte sie als
+    // „Übergeben"/„Gehalten" (Wurzel) bzw. unsichtbar im Erledigt-Fach gemalt.
+    expect(screen.getAllByText("ohne Zustand").length).toBe(2);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Im Board7" }));
+    expect(screen.queryByText("Ohne Zustand mit Wurzel")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Entwurf7" }));
+    expect(screen.queryByText("Ohne Zustand geschlossen")).toBeNull();
+  });
+
+  it("zeigt den Kettenlauf als eigenes Zeilen-Datum neben dem Plan-Chip (V2)", () => {
+    renderPlanTab({
+      plans: [
+        plan({
+          topic: "Plan mit laufender Kette",
+          action_state: "running",
+          kanban_root_task_id: "t_root1",
+          kanban_state: "running",
+        }),
+      ],
+    });
+
+    const row = screen.getByRole("button", { name: /Plan mit laufender Kette/ });
+    expect(row.textContent).toContain("Kette: läuft");
+    // … und der Chip bleibt der Plan-Zustand, keine Wortmischung.
+    expect(row.textContent).toContain("Läuft");
+  });
 });

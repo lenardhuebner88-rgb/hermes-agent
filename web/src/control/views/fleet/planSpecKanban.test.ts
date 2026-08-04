@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PlanSpecRecord } from "../../lib/types";
-import { planSpecClosedDispositionLabel, planSpecFindingIsStatusEcho, planSpecIsClosed, planSpecKanbanLabel, planSpecVisibleFindingCount } from "./planSpecKanban";
+import { planSpecActionState, planSpecChainStateLabel, planSpecClosedDispositionLabel, planSpecFindingIsStatusEcho, planSpecIsClosed, planSpecKanbanLabel, planSpecStateChipLabel, planSpecVisibleFindingCount } from "./planSpecKanban";
 
 function record(overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
   return {
@@ -156,5 +156,55 @@ describe("planSpec findings — Status-Echo ist kein Befund", () => {
 
     expect(planSpecVisibleFindingCount(record({ finding_count: 0 }))).toBe(0);
     expect(planSpecVisibleFindingCount(record({ finding_count: undefined }))).toBe(0);
+  });
+});
+
+describe("planSpecActionState — action_state ist die Wahrheit, kein Fallback (V1)", () => {
+  it("leitet nichts aus Kanban-Feldern ab: fehlendes action_state wird „unknown“", () => {
+    // Genau diese Fälle malte der entfernte Fallback falsch — die
+    // Backend-Reparaturen vom 2026-07-29/30 (geschlossene Specs als
+    // „Blockiert"/„Im Board") wären im Frontend wiederauferstanden.
+    expect(planSpecActionState(record({
+      action_state: undefined,
+      open: false,
+      closed_reason: "closed status: done",
+      kanban_state: "not_ingested",
+    }))).toBe("unknown");
+    expect(planSpecActionState(record({
+      action_state: undefined,
+      kanban_root_task_id: "t_1",
+      kanban_state: "queued",
+      kanban_root_status: "scheduled",
+    }))).toBe("unknown");
+    expect(planSpecActionState(record({ action_state: undefined, valid: false }))).toBe("unknown");
+    expect(planSpecActionState(record({ action_state: "ready" }))).toBe("ready");
+  });
+
+  it("zeigt ohne action_state kein abgeleitetes Chip-Label", () => {
+    expect(planSpecStateChipLabel(record({
+      action_state: undefined,
+      open: false,
+      closed_reason: "closed status: done",
+      kanban_state: "not_ingested",
+    }))).toBe("ohne Zustand");
+    expect(planSpecStateChipLabel(record({
+      action_state: "completed",
+      open: false,
+      closed_reason: "closed status: done",
+      kanban_state: "not_ingested",
+    }))).toBe("erledigt");
+  });
+});
+
+describe("planSpecChainStateLabel — Ausführungsachse getrennt (V2)", () => {
+  it("beschriftet den Kettenlauf nur bei vorhandener Wurzel", () => {
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: null, kanban_state: "running" }))).toBeNull();
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "running" }))).toBe("läuft");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "blocked" }))).toBe("blockiert");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "queued", kanban_root_status: "scheduled" }))).toBe("gehalten");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "queued", kanban_root_status: null }))).toBe("geplant");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "completed" }))).toBe("fertig");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "archived" }))).toBe("archiviert");
+    expect(planSpecChainStateLabel(record({ kanban_root_task_id: "t_1", kanban_state: "not_ingested" }))).toBeNull();
   });
 });

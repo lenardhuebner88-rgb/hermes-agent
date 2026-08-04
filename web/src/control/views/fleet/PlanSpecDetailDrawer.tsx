@@ -7,7 +7,8 @@ import { DrawerShell, SignalChip } from "../../components/leitstand";
 import {
   PLAN_ACTION_STATE_TONE,
   planSpecActionState,
-  planSpecKanbanLabel,
+  planSpecChainStateLabel,
+  planSpecStateChipLabel,
   planSpecFindingIsStatusEcho,
   planSpecIsClosed,
   planSpecVisibleFindingCount,
@@ -69,7 +70,7 @@ export function PlanSpecDetailDrawer({ item, detail, loading, error, stale = fal
           <div className="flex flex-wrap items-center gap-2">
             {/* Ton = derselbe wie in der Listenzeile (I4); das Label bleibt
                 das präzisere Dispositionswort (ausgeliefert/obsolet/…). */}
-            <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecKanbanLabel(item)} />
+            <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecStateChipLabel(item)} />
             <span className="font-display text-micro uppercase tracking-[0.08em] text-ink-2">
               Freigabe: {detail?.freigabe || item.freigabe || "keine"}
             </span>
@@ -147,6 +148,9 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
   const closed = planSpecIsClosed(item);
   const showNextAction = !closed
     || Boolean(item.next_action && !["none", "open_result"].includes(item.next_action));
+  // Ausführungsachse getrennt vom Plan-Zustand (V2): der Lauf der Kette ist
+  // eine eigene Zeile, kein achtes Wort im Zustandsfeld.
+  const chainLabel = planSpecChainStateLabel(item);
   const tabs = [
     ["target", "Überblick"],
     ["steps", `Ablauf ${detail?.subtasks.length ?? 0}`],
@@ -190,7 +194,7 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
         </div>
       </div> : null}
       {showHeader ? <div className="flex flex-wrap gap-1.5">
-        <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecKanbanLabel(item)} />
+        <SignalChip tone={PLAN_ACTION_STATE_TONE[planSpecActionState(item)]} label={planSpecStateChipLabel(item)} />
         <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">Freigabe: {detail?.freigabe || item.freigabe || "keine"}</span>
         <span className="px-1 py-0.5 font-display text-micro uppercase tracking-[0.08em] text-ink-2">Live-Test: {detail?.live_test_depth || item.live_test_depth || "smoke"}</span>
         {item.kanban_root_task_id ? (
@@ -200,8 +204,14 @@ export function PlanSpecDetailContent({ item, detail, loading, error, stale = fa
       <section className="fleet-plan-decision" aria-label="Operative Lage">
         <div>
           <span>Zustand</span>
-          <strong>{planSpecKanbanLabel(item)}</strong>
+          <strong>{planSpecStateChipLabel(item)}</strong>
         </div>
+        {chainLabel ? (
+          <div>
+            <span>Kette</span>
+            <strong>{chainLabel}</strong>
+          </div>
+        ) : null}
         <div>
           <span>Warum</span>
           <strong>{item.action_reason || "Keine zusätzliche Einordnung vorhanden."}</strong>
