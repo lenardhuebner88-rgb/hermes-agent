@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Kept in sync with Theme.kt; the XML copies exist only for the window
+         background and the launcher icon, which cannot read Compose values. -->
+    <color name="deck_bg">#0B0711</color>
+    <color name="deck_accent">#8B5CF6</color>
+</resources>

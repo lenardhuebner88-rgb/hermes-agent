@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose paints the whole surface; this theme only has to avoid a white
+         flash before the first frame and keep the system bars dark. -->
+    <style name="Theme.HermesDeck" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/deck_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
