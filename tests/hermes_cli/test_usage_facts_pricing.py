@@ -278,6 +278,39 @@ def test_ttl_split_replaces_total_in_billing() -> None:
     assert USAGE_FACTS_PRICING_VERSION in result.pricing_version
 
 
+def test_billable_input_subtracts_cache_when_contained() -> None:
+    """Canon register §5f: OpenAI-convention rows count cached reads inside
+    input_tokens; pricing both bills them twice (measured 8.1x on codex/kimi
+    lanes over 30d).  gpt-5.5 rates: input $5.00, cache_read $0.50."""
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=400_000)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    # billable input 600k * $5 + 400k * $0.50
+    assert result.amount_usd == Decimal("3.00") + Decimal("0.20")
+
+
+def test_billable_input_untouched_for_anthropic_convention() -> None:
+    """Anthropic input excludes cache; cache reads far above input must not
+    trigger the subtraction.  claude-sonnet-5: input $3.00, cache_read $0.30."""
+    usage = UsageFactsUsage(input_tokens=1_000, cache_read_tokens=50_000)
+    result = estimate_equivalent_cost("claude-sonnet-5", usage, provider="anthropic")
+    assert result.amount_usd == (
+        Decimal("1000") * Decimal("3.00") / Decimal(_ONE_MILLION)
+        + Decimal("50000") * Decimal("0.30") / Decimal(_ONE_MILLION)
+    )
+
+
+def test_billable_input_fully_cached_row_prices_zero_uncached_input() -> None:
+    usage = UsageFactsUsage(input_tokens=1_000_000, cache_read_tokens=1_000_000)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    assert result.amount_usd == Decimal("0.50")
+
+
+def test_billable_input_neutral_without_cache() -> None:
+    usage = UsageFactsUsage(input_tokens=_ONE_MILLION)
+    result = estimate_equivalent_cost("gpt-5.5", usage, provider="openai")
+    assert result.amount_usd == Decimal("5.00")
+
+
 def test_no_split_falls_back_to_total() -> None:
     usage = UsageFactsUsage(cache_write_tokens=708)
     result = estimate_equivalent_cost("claude-opus-4-8", usage, provider="anthropic")

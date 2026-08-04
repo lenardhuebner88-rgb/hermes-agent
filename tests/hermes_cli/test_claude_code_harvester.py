@@ -2305,7 +2305,10 @@ def test_session_dir_subagent_layout_and_sparse_meta(db_path: Path, tmp_path: Pa
     assert len(runs) == 1
     assert runs[0]["call_kind"] == "subagent"
     assert runs[0]["profile"] == "general-purpose"
-    assert runs[0]["lane"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    # B2 repair (Canon register 7.6): lane is a category, never a session
+    # identity.  This transcript is not under a Buzz workspace, so lane is
+    # NULL; the parent session identity lives in parent_session_id below.
+    assert runs[0]["lane"] is None
     # The one documented exception: parent_session_id is observed from the
     # enclosing session path even though this sparse meta file lacks binding.
     expected_binding = (

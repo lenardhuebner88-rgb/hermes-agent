@@ -490,11 +490,28 @@ def _rate_table_for_route(
 
 
 def _billable_components(usage: UsageFactsUsage) -> dict[str, int]:
-    """Token amounts per component after the cache-write split rule."""
+    """Token amounts per component after the cache-write split rule.
+
+    Input counting follows the row-wise, self-detecting rule of Canon
+    register §5f: providers disagree on whether ``input_tokens`` already
+    contains cached reads (OpenAI convention: yes; Anthropic: no;
+    ``hermes_agent`` mixes both).  Without the correction the same cached
+    tokens are billed twice — measured 2026-07-31 as a 6.3x cost error on
+    the foreign lanes.  The cached share is subtracted only when it
+    provably fits inside the reported input; Anthropic rows (cache reads
+    far above uncached input) are untouched, as are cache-free runs.
+    """
+    input_tokens = int(usage.input_tokens)
+    cache_read = int(usage.cache_read_tokens)
+    billable_input = (
+        input_tokens - cache_read
+        if 0 < cache_read <= input_tokens
+        else input_tokens
+    )
     components = {
-        "input_tokens": int(usage.input_tokens),
+        "input_tokens": billable_input,
         "output_tokens": int(usage.output_tokens),
-        "cache_read_tokens": int(usage.cache_read_tokens),
+        "cache_read_tokens": cache_read,
         "reasoning_tokens": int(usage.reasoning_tokens),
     }
     split_present = (
