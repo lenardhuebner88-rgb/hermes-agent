@@ -29,6 +29,27 @@ RUFF="${GATE_RUFF:-$LIVE_VENV/bin/ruff}"
 [ -x "$RUFF" ] || { echo "GATE: live venv ruff fehlt: $RUFF"; exit 2; }
 
 export PYTHONPATH="$WT"
+
+# Lastdeckel NUR für Loop-Gates. Seit der Repo-Lock verengt ist, kann mehr als
+# ein Pack gleichzeitig bauen, und daneben laufen Kanban-Worker auf derselben
+# Maschine (12 Kerne). `scripts/run_tests.sh` setzt sonst 8 Worker — zwei
+# parallele Loop-Gates plus Kanban überzeichnen damit die Maschine, und die
+# Kanban-Runs, die ein Mensch abwartet, werden langsamer.
+#
+# Kanban geht NICHT durch dieses Skript (es ruft `scripts/run_tests.sh` bzw.
+# `run-affected.sh` direkt) und behält seine 8 — gedrosselt wird ausschliesslich
+# die Hintergrundarbeit der Nachtläufe.
+#
+# `hermes_cli/affected_test_budget.py` liest dieselbe Variable für seine
+# Laufzeit-Vorhersage, sieht also denselben Wert und rechnet konsistent.
+#
+# Bewusst AUTORITATIV statt `${HERMES_TEST_WORKERS:-4}`: das systemd-User-
+# Environment trägt bereits `HERMES_TEST_WORKERS=8`, und jede `hermes-loop@`-
+# Unit erbt das. Ein Fallback-Default hätte in Produktion nie gegriffen und in
+# einer sauberen Testumgebung trotzdem grün ausgesehen. Der Operator hebt den
+# Deckel deshalb über eine EIGENE Variable an, die niemand sonst setzt.
+export HERMES_TEST_WORKERS="${HERMES_LOOP_TEST_WORKERS:-4}"
+
 cd "$WT"
 
 CHANGED=$(git diff --name-only --diff-filter=ACMR "$REF" -- '*.py' | sort -u)
