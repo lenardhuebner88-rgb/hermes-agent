@@ -1384,6 +1384,21 @@ class TestWebServerEndpoints:
 
         assert web_server._dashboard_local_update_managed_externally() is True
 
+    def test_dashboard_update_capability_fails_closed_when_container_check_breaks(self, monkeypatch, caplog):
+        """An unverified runtime must not expose the in-dashboard updater."""
+        import hermes_constants
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_default_hermes_root_is_opt_data", lambda: False)
+
+        def broken_container_probe():
+            raise OSError("cgroup status unavailable")
+
+        monkeypatch.setattr(hermes_constants, "is_container", broken_container_probe)
+
+        assert web_server._dashboard_local_update_managed_externally() is True
+        assert "Could not verify whether dashboard updates are externally managed" in caplog.text
+
     def test_dashboard_update_capability_allows_git_in_container(self, monkeypatch):
         """A git checkout inside a container (e.g. bind-mounted in hermes-webui)
         should still offer dashboard updates — the checkout is self-managed."""

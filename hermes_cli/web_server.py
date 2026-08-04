@@ -2747,7 +2747,12 @@ def _dashboard_local_update_managed_externally() -> bool:
         if not is_container():
             return False
     except Exception:
-        return False
+        _log.warning(
+            "Could not verify whether dashboard updates are externally managed; "
+            "disabling the local updater",
+            exc_info=True,
+        )
+        return True
     # We are inside a container, but the install may still be self-managed.
     # If the install method is git, the dashboard update button works against
     # the mounted checkout and should be offered. Keep pip blocked inside
