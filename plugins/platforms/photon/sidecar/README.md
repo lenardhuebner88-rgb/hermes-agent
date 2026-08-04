@@ -40,7 +40,9 @@ it by hand.
 
 ## Why a sidecar at all?
 
-Photon publishes webhooks (inbound) but their docs state explicitly:
+Photon's documented webhook events are not used by this plugin. Inbound
+messages arrive through the Spectrum SDK stream, while their docs state
+explicitly:
 
 > Pass `space.id` to `Space.send(...)` from a separate `spectrum-ts`
 > SDK instance to reply.  No public HTTP send endpoint exists today.
