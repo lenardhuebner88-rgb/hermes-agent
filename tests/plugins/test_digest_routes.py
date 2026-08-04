@@ -18,13 +18,17 @@ from hermes_cli import kanban_scores_digest as digest
 _FIXED_NOW = 1_784_563_200
 
 
-def _load_plugin_router():
+def _load_plugin_router(monkeypatch):
     repo_root = Path(__file__).resolve().parents[2]
     plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
     spec = importlib.util.spec_from_file_location("digest_routes_test_plugin", plugin_file)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    # This synthetic module name is visible process-wide.  Use monkeypatch so
+    # a pre-existing module (or its original absence) is restored when the
+    # test ends instead of leaking this dynamically imported plugin to the
+    # next test file in the same pytest worker.
+    monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     return module.router
 
@@ -40,10 +44,22 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(kanban_home):
+def client(kanban_home, monkeypatch):
     app = FastAPI()
-    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    app.include_router(_load_plugin_router(monkeypatch), prefix="/api/plugins/kanban")
     return TestClient(app)
+
+
+def test_router_loader_restores_preexisting_synthetic_module(monkeypatch):
+    module_name = "digest_routes_test_plugin"
+    original = type(sys)(module_name)
+    monkeypatch.setitem(sys.modules, module_name, original)
+
+    with monkeypatch.context() as isolated:
+        _load_plugin_router(isolated)
+        assert sys.modules[module_name] is not original
+
+    assert sys.modules[module_name] is original
 
 
 def _make_run(conn, *, profile="coder", model="test-model"):
