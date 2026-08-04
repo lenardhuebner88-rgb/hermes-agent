@@ -112,6 +112,13 @@ describe("ScorecardView", () => {
     expect(scores.run_outcome_kind).toMatchObject({ value: { completed: 2 }, count: 2 });
   });
 
+  it("rejects a malformed quality run count instead of reporting zero reviews", () => {
+    const data = baseData();
+    data.quality!.overall = { runs: "unknown" as unknown as number, approved: 9, approval_rate: .75 };
+
+    expect(() => ScorecardResponseSchema.parse(data)).toThrow(/runs/);
+  });
+
   it("zeigt Qualitätsentscheidungen mit sichtbaren Nennern", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
     expect(markup).toContain("Worker Scorecard");
