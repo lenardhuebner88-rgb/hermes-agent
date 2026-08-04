@@ -17,8 +17,10 @@ def test_usage_consumption_endpoint_is_registered_as_observability_edge() -> Non
         for route in plugin_api.router.routes
         if route.path == "/stats/usage-consumption"
     )
+    # Beide Usage-Leserouten leben in einem Extension-Modul — plugin_api.py
+    # steht an der 4000-Zeilen-Hartgrenze des Route-Contract-Guards.
     assert Path(route.endpoint.__code__.co_filename).name == (
-        "usage_consumption_routes.py"
+        "usage_facts_routes.py"
     )
 
 
