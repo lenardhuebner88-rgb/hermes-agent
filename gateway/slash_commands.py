@@ -590,6 +590,12 @@ class GatewaySlashCommandsMixin:
             except (TypeError, ValueError):
                 return 0
 
+        def _token_value(value: Any) -> int | None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         title = None
         session_row: dict[str, Any] = {}
         # Pull token totals from the SQLite session DB rather than the
@@ -598,7 +604,7 @@ class GatewaySlashCommandsMixin:
         # so session_entry.total_tokens is always 0.  SessionDB is the
         # single source of truth; reading it here keeps /status accurate
         # without duplicating token writes into two stores.
-        db_total_tokens = 0
+        db_total_tokens: int | None = 0
         if self._session_db:
             try:
                 title = await self._session_db.get_session_title(session_entry.session_id)
@@ -608,15 +614,16 @@ class GatewaySlashCommandsMixin:
                 row = await self._session_db.get_session(session_entry.session_id)
                 if isinstance(row, dict):
                     session_row = row
-                    db_total_tokens = (
-                        _int_value(row.get("input_tokens"))
-                        + _int_value(row.get("output_tokens"))
-                        + _int_value(row.get("cache_read_tokens"))
-                        + _int_value(row.get("cache_write_tokens"))
-                        + _int_value(row.get("reasoning_tokens"))
+                    token_values = (
+                        _token_value(row.get("input_tokens")),
+                        _token_value(row.get("output_tokens")),
+                        _token_value(row.get("cache_read_tokens")),
+                        _token_value(row.get("cache_write_tokens")),
+                        _token_value(row.get("reasoning_tokens")),
                     )
+                    db_total_tokens = None if None in token_values else sum(token_values)
             except Exception:
-                db_total_tokens = 0
+                db_total_tokens = None
 
         # Resolve model/context for cockpit-style status. Prefer the live or
         # cached agent because it carries the actual runtime route and context
@@ -708,7 +715,10 @@ class GatewaySlashCommandsMixin:
         if context_line:
             lines.append(context_line)
         lines.extend([
-            t("gateway.status.tokens", tokens=f"{db_total_tokens:,}"),
+            t(
+                "gateway.status.tokens",
+                tokens=f"{db_total_tokens:,}" if db_total_tokens is not None else "unavailable",
+            ),
             t("gateway.status.agent_running", state=t("gateway.status.state_yes") if is_running else t("gateway.status.state_no")),
         ])
         if queue_depth:
