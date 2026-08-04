@@ -66,6 +66,18 @@ DEFAULT_STATE_ROOT = _HERMES_HOME / "loops"
 NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
+
+# Wartefenster auf den Repo-Lock bei der Landung. Grosszuegig bemessen, weil
+# eine fremde Landung ihn ueber ihre gesamten Gates haelt (zwei Laeufe a 2400 s
+# Timeout) und ein deterministischer Sammellauf sogar ueber seinen ganzen Lauf.
+# Warten ist hier immer besser als Abbrechen: der verifizierte Commit ist fertig
+# und wuerde sonst bis zur naechsten Nacht liegenbleiben.
+LAND_LOCK_WAIT_S = 5400.0
+
+# Kurzes Fenster fuer das Ziehen der Basis (BASE-REFRESH). Es braucht den Lock
+# nur, um NICHT mitten in eine fremde Landung hineinzulesen — laeuft eine, ist
+# Weiterarbeiten auf der alten Basis die richtige Antwort, nicht Warten.
+BASE_SAMPLE_WAIT_S = 120.0
 DEFAULT_STOP = {
     "max_rounds": 12,
     "max_hours": 7,
@@ -726,6 +738,16 @@ def select_test_python(repo: Path) -> tuple[Path | None, str]:
     return Path(picked), ""
 
 
+# Auch die LANDUNGS-Gates laufen unter dem Loop-Lastdeckel. Sie erben sonst das
+# `HERMES_TEST_WORKERS=8` aus dem systemd-User-Environment und liefen mit dem
+# doppelten Gewicht der Bau-Gates — waehrend daneben andere Packs bauen und
+# Kanban-Worker arbeiten. Denselben Hebel wie `loops/gate.sh`, damit der
+# Operator beides mit einer Variable anhebt.
+def _land_gate_env() -> dict[str, str]:
+    return {**os.environ, "HERMES_TEST_WORKERS": os.environ.get(
+        "HERMES_LOOP_TEST_WORKERS", "4")}
+
+
 def _land_gates(
     repo: Path,
     base: str,
@@ -751,6 +773,7 @@ def _land_gates(
                     errors="replace",
                     timeout=2400,
                     check=False,
+                    env=_land_gate_env(),
                 )
             except (subprocess.TimeoutExpired, OSError) as exc:
                 return False, f"{command}: {exc}"
@@ -830,6 +853,7 @@ def _land_gates(
                 errors="replace",
                 timeout=2400,
                 check=False,
+                env=_land_gate_env(),
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             return False, f"{label}: {exc}"
@@ -1199,6 +1223,17 @@ class LoopRunner:
         repo_lock_path = self.state.parent / f".repo-{repo_key}.lock"
         with repo_lock_path.open("w", encoding="utf-8") as repo_fh:
             self._acquire_flock(repo_fh, "Repo", blocking=blocking, timeout=timeout)
+            # Halter hinterlegen: wer den Lock hält, ist von außen sonst nicht
+            # feststellbar. Das Dashboard leitete den Blockierer bisher aus
+            # "welches Pack läuft gerade" ab — seit Bauen parallel erlaubt ist,
+            # ist ein laufendes Pack aber KEIN Beleg fürs Lock-Halten, und die
+            # Anzeige benannte dann das falsche. Nur gültig, solange der Lock
+            # steht: `open("w")` truncatet, ein freigegebener Lock ist leer.
+            try:
+                repo_fh.write(f"{self.pack.name}\n{os.getpid()}\n")
+                repo_fh.flush()
+            except OSError:
+                pass  # Die Landung darf an einer Anzeige-Notiz nicht scheitern.
             self._repo_lock_depth += 1
             try:
                 yield
@@ -2004,11 +2039,32 @@ class LoopRunner:
             return False
         return res.returncode != 0
 
+    def _auto_rebase_on_settled_base(self, **kw) -> tuple[bool, str]:
+        """``_auto_rebase``, aber nie mitten in eine fremde Landung hinein.
+
+        Der Rebase selbst läuft im pack-eigenen Worktree — er LIEST aber
+        ``main`` im Live-Checkout, und genau dort ist ``main`` während einer
+        fremden Landung unfertig: nach dem ff-Merge, aber vor dem Urteil der
+        Landungs-Gates. Fallen die rot, rollt ``_safe_land_rollback`` main per
+        ``reset --keep`` zurück — ein Pack, das in diesem Fenster rebast hat,
+        trägt die zurückgerollten Commits danach in seinem Branch und
+        ff-merged sie bei seiner eigenen Landung wieder nach main.
+
+        Deshalb kurz den Repo-Lock nehmen. Läuft die fremde Landung länger,
+        ist Weiterarbeiten auf der ALTEN Basis die richtige Antwort — ein
+        Base-Refresh darf die Nacht nie blockieren (bestehender Vertrag).
+        """
+        try:
+            with self.repo_locked(blocking=True, timeout=BASE_SAMPLE_WAIT_S):
+                return self._auto_rebase(self.pack.repo, **kw)
+        except RuntimeError as exc:
+            return False, f"fremde Landung hält den Repo-Lock ({exc})"
+
     def _refresh_base_if_stale(self, why: str) -> bool:
         """Basis nachziehen, wenn sie das Gate blocken würde. True = wieder frisch."""
         if not self.base_stale_blocks_gate():
             return True
-        ok, msg = self._auto_rebase(self.pack.repo, collapse_net_zero=True)
+        ok, msg = self._auto_rebase_on_settled_base(collapse_net_zero=True)
         first = msg.splitlines()[0] if msg else ""
         if ok:
             self.ledger(f"BASE-REFRESH ({why}): {first}")
@@ -2589,7 +2645,15 @@ class LoopRunner:
                 self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")
                 self.ledger_event(round=rnd, phase="verify", verdict="ok", plan=building.name,
                                    build_secs=self.phase_secs.get("build"), verify_secs=self.phase_secs.get("verify"))
-            elif self.base_stale_blocks_gate():
+            elif (
+                # Nur ein Verifier, der wirklich GELAUFEN ist und ein Urteil
+                # abgegeben hat, kann am stale Gate gescheitert sein. TIMEOUT
+                # und Engine-Abbrüche (rc != 0) haben andere Ursachen — sie
+                # hier mitzufangen würde echte Fehler als Basisproblem tarnen.
+                verify.rc == 0
+                and not verify.timed_out
+                and self.base_stale_blocks_gate()
+            ):
                 # Kein Urteil über den Kandidaten: der branch-age-Preflight hat
                 # das Gate rotgestellt, bevor ein Test lief (live 2026-08-04 an
                 # dashboard-polish — parallele main-Merges während des Laufs).
@@ -2859,8 +2923,8 @@ class LoopRunner:
             and self.overrides.get("SKIP_BASE_REFRESH", "").strip().lower()
             not in ("1", "true", "yes")
         ):
-            reb_ok, reb_msg = self._auto_rebase(
-                self.pack.repo, collapse_net_zero=True
+            reb_ok, reb_msg = self._auto_rebase_on_settled_base(
+                collapse_net_zero=True
             )
             first_line = reb_msg.splitlines()[0] if reb_msg else ""
             if reb_ok:
@@ -3058,9 +3122,31 @@ class LoopRunner:
     def cmd_land(self, push: bool = True, require_push: bool = False) -> bool:
         """Landung — läuft komplett unter dem Repo-Lock (siehe ``repo_locked``):
         der geteilte Live-Checkout ``self.pack.repo`` wird von der
-        Sauberkeits-Prüfung bis zu Gates/Push/Rollback exklusiv gebraucht."""
-        with self.repo_locked():
-            return self._cmd_land_locked(push=push, require_push=require_push)
+        Sauberkeits-Prüfung bis zu Gates/Push/Rollback exklusiv gebraucht.
+
+        Der Lock wird WARTEND genommen. Nicht-blockierend war er ein
+        Nachtbetriebs-Defekt: eine fremde Landung hält ihn minutenlang (die
+        Landungs-Gates laufen im Live-Checkout), der Einmal-Retry nach 1 s
+        greift dagegen nie, und der RuntimeError lief ungefangen bis
+        ``main()`` durch — Exit 3, ohne Ledger-Zeile und ohne Notify. Der
+        verifizierte Commit blieb bis zur nächsten Nacht liegen, und morgens
+        stand nichts darüber im Ledger.
+        """
+        try:
+            with self.repo_locked(blocking=True, timeout=LAND_LOCK_WAIT_S):
+                return self._cmd_land_locked(push=push, require_push=require_push)
+        except RuntimeError as exc:
+            # Fail-closed, aber laut: nichts wurde angefasst (der Lock wurde nie
+            # genommen), und der Operator sieht den Grund im Ledger.
+            self.say(f"ABBRUCH: Repo-Lock nicht freigeworden — {exc}")
+            self.ledger(f"LAND verschoben: {exc} (fremde Landung läuft; nichts verändert)")
+            self.notify(
+                f"{self.pack.name}: Landung verschoben — Repo-Lock nach "
+                f"{LAND_LOCK_WAIT_S / 60:.0f} min noch belegt."
+            )
+            self.ledger_event(phase="land", verdict="blocked", fail_kind="repo_lock_timeout",
+                               reason=str(exc))
+            return False
 
     def _cmd_land_locked(self, push: bool = True, require_push: bool = False) -> bool:
         repo = self.pack.repo
