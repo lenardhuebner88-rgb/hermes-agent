@@ -54,6 +54,9 @@ dependencies {
     // directly — an implicit version would be a silent break on any bump.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    // Lifecycle-aware polling: the pulse loop must stop when the app leaves the
+    // foreground, or a live screen keeps a journal query running in the pocket.
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

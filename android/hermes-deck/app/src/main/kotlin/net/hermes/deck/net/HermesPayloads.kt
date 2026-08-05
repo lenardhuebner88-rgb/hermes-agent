@@ -136,4 +136,28 @@ object HermesPayloads {
         "agent_not_found" -> "Diesen Agenten gibt es auf dem Server nicht."
         else -> detail
     }
+
+    /**
+     * What an intervention endpoint said it did.
+     *
+     * These routes answer in at least three shapes — a bare `{"ok":true}`, a
+     * `{"detail":…}`, and a body describing what was terminated — and the one
+     * thing the operator must never see is a silent success. So an unrecognised
+     * shape falls through to a sentence that admits the ambiguity rather than
+     * to "Erledigt".
+     */
+    fun actionOutcome(json: JSONObject): String {
+        readError(json.opt("error"))?.let { return it }
+        val detail = json.optString("detail", "").ifBlank { null }
+        val message = json.optString("message", "").ifBlank { null }
+        return when {
+            message != null -> message
+            detail != null -> detail
+            json.optBoolean("ok", false) -> "Vom Server bestätigt."
+            json.optBoolean("terminated", false) -> "Lauf beendet."
+            json.optBoolean("released", false) -> "Freigabe gelöst."
+            json.has("cancelled") -> "Kette abgebrochen (${json.optInt("cancelled")} Karten)."
+            else -> "Angenommen — der Server hat nichts weiter gemeldet."
+        }
+    }
 }

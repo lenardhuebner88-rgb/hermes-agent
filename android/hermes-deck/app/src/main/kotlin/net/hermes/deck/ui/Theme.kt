@@ -10,6 +10,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -134,3 +135,40 @@ val labelStyle = TextStyle(
     fontWeight = FontWeight.SemiBold,
     letterSpacing = 1.sp,
 )
+
+/**
+ * Shell commands and tool labels, straight out of an agent's journal.
+ *
+ * Monospace is not decoration here: the content *is* a command line, and
+ * proportional type turns `rg -n foo` into something that reads like prose and
+ * hides where the arguments start. Kept small and secondary so a screen full of
+ * these never competes with the agent names above them.
+ */
+val monoStyle = TextStyle(
+    fontSize = 12.sp,
+    fontFamily = FontFamily.Monospace,
+    letterSpacing = 0.sp,
+)
+
+/**
+ * Every "seit"/"vor" timer on a polled screen.
+ *
+ * Tabular figures are the whole point: without them the digits change width as
+ * the value ticks, and a column of ages jitters sideways every eight seconds.
+ * On a live screen that reads as instability in the system rather than in the
+ * font.
+ */
+val tickerStyle = TextStyle(
+    fontSize = 11.sp,
+    fontFeatureSettings = "tnum",
+)
+
+/**
+ * A section whose data has gone stale keeps its layout and loses its confidence.
+ *
+ * Dimming rather than hiding is deliberate: a blanked section is
+ * indistinguishable from an empty one, and this app has shipped that confusion
+ * before. The number stays readable, it just stops looking like evidence — and
+ * the header says how old it is.
+ */
+const val STALE_ALPHA = 0.55f

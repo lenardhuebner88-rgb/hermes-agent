@@ -65,6 +65,7 @@ fun HomeScreen(
     viewModel: DeckViewModel,
     onOpenTask: (DeckTask) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenPulse: () -> Unit = {},
 ) {
     val deck = LocalDeck.current
     val snapshot by viewModel.snapshot.collectAsState()
@@ -165,6 +166,7 @@ fun HomeScreen(
                 },
                 onShowMentions = { showMentions = true },
                 onSync = { viewModel.sync() },
+                onOpenPulse = onOpenPulse,
             )
             Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
         }

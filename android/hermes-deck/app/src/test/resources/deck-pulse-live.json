@@ -1,0 +1,690 @@
+{
+ "as_of": "2026-08-05T19:06:21+0200",
+ "board": null,
+ "agents": {
+  "data": {
+   "agents": [
+    {
+     "stem": "claude",
+     "display_name": "Claude",
+     "model": "opus[1m]",
+     "agent_command": "claude-agent-acp",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:04 CEST",
+     "tool_calls_window": 32,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T18:50:11+0200",
+     "last_tool_call_seconds_ago": 970,
+     "working": false,
+     "activity": {
+      "stem": "claude",
+      "calls_in_window": 19,
+      "latest": {
+       "at": "2026-08-05T18:50:11+0200",
+       "seconds_ago": 969,
+       "label": "Terminal",
+       "kind": "execute"
+      },
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": 941,
+      "recent": [
+       {
+        "at": "2026-08-05T18:50:11+0200",
+        "seconds_ago": 969,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:49:39+0200",
+        "seconds_ago": 1002,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:49:19+0200",
+        "seconds_ago": 1021,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:49:04+0200",
+        "seconds_ago": 1036,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:48:46+0200",
+        "seconds_ago": 1055,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:48:36+0200",
+        "seconds_ago": 1065,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:48:27+0200",
+        "seconds_ago": 1074,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:48:26+0200",
+        "seconds_ago": 1075,
+        "label": "Terminal",
+        "kind": "execute"
+       }
+      ]
+     }
+    },
+    {
+     "stem": "codex",
+     "display_name": "Codex",
+     "model": "gpt-5.6-sol[high]",
+     "agent_command": "codex-acp",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:06 CEST",
+     "tool_calls_window": 40,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T18:16:58+0200",
+     "last_tool_call_seconds_ago": 2963,
+     "working": false,
+     "activity": {
+      "stem": "codex",
+      "calls_in_window": 0,
+      "latest": null,
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": null,
+      "recent": []
+     }
+    },
+    {
+     "stem": "fable",
+     "display_name": "Fable",
+     "model": "claude-fable-5[1m]",
+     "agent_command": "claude-agent-acp",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:08 CEST",
+     "tool_calls_window": 33,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T19:01:17+0200",
+     "last_tool_call_seconds_ago": 303,
+     "working": false,
+     "activity": {
+      "stem": "fable",
+      "calls_in_window": 33,
+      "latest": {
+       "at": "2026-08-05T19:01:17+0200",
+       "seconds_ago": 303,
+       "label": "Terminal",
+       "kind": "execute"
+      },
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": 301,
+      "recent": [
+       {
+        "at": "2026-08-05T19:01:17+0200",
+        "seconds_ago": 303,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:01:12+0200",
+        "seconds_ago": 309,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:01:08+0200",
+        "seconds_ago": 313,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:01:03+0200",
+        "seconds_ago": 318,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:00:45+0200",
+        "seconds_ago": 335,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:00:34+0200",
+        "seconds_ago": 347,
+        "label": "Terminal",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:00:21+0200",
+        "seconds_ago": 359,
+        "label": "Edit",
+        "kind": "edit"
+       },
+       {
+        "at": "2026-08-05T18:59:50+0200",
+        "seconds_ago": 390,
+        "label": "Edit",
+        "kind": "edit"
+       }
+      ]
+     }
+    },
+    {
+     "stem": "grok",
+     "display_name": "Grok",
+     "model": "grok-4.5",
+     "agent_command": "grok",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:09 CEST",
+     "tool_calls_window": 0,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": null,
+     "last_tool_call_seconds_ago": null,
+     "working": false,
+     "activity": {
+      "stem": "grok",
+      "calls_in_window": 0,
+      "latest": null,
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": null,
+      "recent": []
+     }
+    },
+    {
+     "stem": "hermes",
+     "display_name": "Hermes",
+     "model": "openai-codex:gpt-5.6-sol",
+     "agent_command": "hermes-acp",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:11 CEST",
+     "tool_calls_window": 15,
+     "tool_calls_recent": 5,
+     "last_tool_call_at": "2026-08-05T19:06:21+0200",
+     "last_tool_call_seconds_ago": 0,
+     "working": true,
+     "activity": {
+      "stem": "hermes",
+      "calls_in_window": 10,
+      "latest": {
+       "at": "2026-08-05T19:06:21+0200",
+       "seconds_ago": 0,
+       "label": "terminal: set -e",
+       "kind": "unknown"
+      },
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": 0,
+      "recent": [
+       {
+        "at": "2026-08-05T19:06:21+0200",
+        "seconds_ago": 0,
+        "label": "terminal: set -e",
+        "kind": "unknown"
+       },
+       {
+        "at": "2026-08-05T19:06:14+0200",
+        "seconds_ago": 7,
+        "label": "terminal: date -u +%Y-%m-%dT%H:%M:%SZ",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:06:13+0200",
+        "seconds_ago": 8,
+        "label": "terminal: /mnt/data/services/buzz/target/release/buzz canvas get --channel 7abf1e2a-662...",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T19:06:08+0200",
+        "seconds_ago": 12,
+        "label": "terminal: python3 - <<'PY'",
+        "kind": "unknown"
+       },
+       {
+        "at": "2026-08-05T19:05:58+0200",
+        "seconds_ago": 22,
+        "label": "terminal: export BOARD_RELAY=/home/piet/.hermes/hermes-agent/scripts/relay_kanban_escal...",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:46:22+0200",
+        "seconds_ago": 1198,
+        "label": "terminal: set -e",
+        "kind": "unknown"
+       },
+       {
+        "at": "2026-08-05T18:46:13+0200",
+        "seconds_ago": 1208,
+        "label": "terminal: date -u +%Y-%m-%dT%H:%M:%SZ",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:46:11+0200",
+        "seconds_ago": 1209,
+        "label": "terminal: /mnt/data/services/buzz/target/release/buzz canvas get --channel 7abf1e2a-662...",
+        "kind": "execute"
+       }
+      ]
+     }
+    },
+    {
+     "stem": "kimi",
+     "display_name": "Kimi",
+     "model": "kimi-code/k3",
+     "agent_command": "kimi",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:13 CEST",
+     "tool_calls_window": 16,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T18:13:26+0200",
+     "last_tool_call_seconds_ago": 3175,
+     "working": false,
+     "activity": {
+      "stem": "kimi",
+      "calls_in_window": 0,
+      "latest": null,
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": null,
+      "recent": []
+     }
+    },
+    {
+     "stem": "qwen",
+     "display_name": "Qwen",
+     "model": "qwen-route:v1:WRuqteCqSoPIdAbL",
+     "agent_command": "qwen",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:15 CEST",
+     "tool_calls_window": 0,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": null,
+     "last_tool_call_seconds_ago": null,
+     "working": false,
+     "activity": {
+      "stem": "qwen",
+      "calls_in_window": 0,
+      "latest": null,
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": null,
+      "recent": []
+     }
+    },
+    {
+     "stem": "terra",
+     "display_name": "Terra",
+     "model": "gpt-5.6-terra",
+     "agent_command": "codex-acp",
+     "active_state": "active",
+     "last_start": "Wed 2026-08-05 12:48:19 CEST",
+     "tool_calls_window": 5,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T18:50:46+0200",
+     "last_tool_call_seconds_ago": 935,
+     "working": false,
+     "activity": {
+      "stem": "terra",
+      "calls_in_window": 5,
+      "latest": {
+       "at": "2026-08-05T18:50:46+0200",
+       "seconds_ago": 934,
+       "label": "pwd",
+       "kind": "execute"
+      },
+      "looks_open": false,
+      "open_for_seconds": null,
+      "last_signal_seconds_ago": 934,
+      "recent": [
+       {
+        "at": "2026-08-05T18:50:46+0200",
+        "seconds_ago": 934,
+        "label": "pwd",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T18:50:22+0200",
+        "seconds_ago": 959,
+        "label": "Read file '/home/piet/.codex/skills/worktree-arbeiten/SKILL.md'",
+        "kind": "read"
+       },
+       {
+        "at": "2026-08-05T18:50:22+0200",
+        "seconds_ago": 959,
+        "label": "Read file '/home/piet/vault/00-Canon/vision.md'",
+        "kind": "read"
+       },
+       {
+        "at": "2026-08-05T18:50:22+0200",
+        "seconds_ago": 959,
+        "label": "Read file '/home/piet/.codex/skills/buzz-cli/SKILL.md'",
+        "kind": "read"
+       },
+       {
+        "at": "2026-08-05T18:50:22+0200",
+        "seconds_ago": 959,
+        "label": "Read file '/home/piet/.agents/skills/codex-vault-coordination/SKILL.md'",
+        "kind": "read"
+       }
+      ]
+     }
+    }
+   ],
+   "heartbeat_window_seconds": 3600,
+   "heartbeat_recent_seconds": 300,
+   "heartbeat_error": null,
+   "activity_window_seconds": 1800,
+   "activity_error": null,
+   "activity_diagnostics": {
+    "lines_seen": 303,
+    "lines_understood": 303,
+    "suspicious": false
+   },
+   "as_of": "2026-08-05T19:06:21+0200"
+  },
+  "error": null,
+  "as_of": "2026-08-05T19:06:21+0200"
+ },
+ "workers": {
+  "data": {
+   "workers": [
+    {
+     "run_id": 9204,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "task_status": "running",
+     "task_assignee": "coder",
+     "profile": "coder",
+     "worker_pid": 1805847,
+     "started_at": 1785949439,
+     "claim_lock": "huebners:851040",
+     "claim_expires": 1785950467,
+     "last_heartbeat_at": 1785949567,
+     "max_runtime_seconds": null,
+     "run_status": "running",
+     "run_outcome": null,
+     "block_reason": null,
+     "liveness_state": "running",
+     "liveness_reason": "heartbeat_fresh",
+     "liveness_observed_at": 1785949581,
+     "last_heartbeat_note": "receiving stream response",
+     "last_heartbeat_note_at": 1785949567,
+     "heartbeat_ticks": [
+      1785949444,
+      1785949505,
+      1785949567
+     ],
+     "input_tokens": null,
+     "output_tokens": null,
+     "token_status": "no_live_sample",
+     "token_status_reason": "task_runs has no live token counters for this active worker yet",
+     "eta_p50_seconds": 372,
+     "eta_p90_seconds": 1091,
+     "step_key": null,
+     "model_override": null,
+     "run_progress": null,
+     "requested_provider": "openai-codex",
+     "requested_model": "gpt-5.6-sol",
+     "active_provider": "openai-codex",
+     "active_model": "gpt-5.6-sol",
+     "model_state": "in_flight",
+     "model_source": "runtime_request",
+     "model_observed_at": 1785949580,
+     "effective_model": "gpt-5.6-sol"
+    }
+   ],
+   "count": 1,
+   "cap": 3,
+   "checked_at": 1785949581
+  },
+  "error": null,
+  "as_of": "2026-08-05T19:06:21+0200"
+ },
+ "holds": {
+  "data": {
+   "holds": [
+    {
+     "task_id": "t_7f265c8a",
+     "title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
+     "assignee": "coder",
+     "priority": 0,
+     "bucket": "chain_worktree_serialized",
+     "since": 1785948785,
+     "chain_root_id": "t_903e7b7c"
+    },
+    {
+     "task_id": "t_7f265c8a",
+     "title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
+     "assignee": "coder",
+     "priority": 0,
+     "bucket": "worktree_writer_active",
+     "since": 1785948785
+    }
+   ],
+   "count": 2,
+   "checked_at": 1785949582
+  },
+  "error": null,
+  "as_of": "2026-08-05T19:06:21+0200"
+ },
+ "events": {
+  "data": {
+   "events": [
+    {
+     "id": 97636,
+     "run_id": 9204,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "receiving stream response",
+     "at": 1785949567
+    },
+    {
+     "id": 97635,
+     "run_id": 9204,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "receiving stream response",
+     "at": 1785949505
+    },
+    {
+     "id": 97632,
+     "run_id": 9204,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "starting API call #1",
+     "at": 1785949444
+    },
+    {
+     "id": 97621,
+     "run_id": 9204,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "profile": "coder",
+     "kind": "claimed",
+     "note": null,
+     "at": 1785949439
+    },
+    {
+     "id": 97616,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "completed",
+     "note": null,
+     "at": 1785949398
+    },
+    {
+     "id": 97612,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "tool completed: process (60.0s)",
+     "at": 1785949195
+    },
+    {
+     "id": 97611,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "tool completed: process (60.0s)",
+     "at": 1785949132
+    },
+    {
+     "id": 97610,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "tool completed: process (60.0s)",
+     "at": 1785949067
+    },
+    {
+     "id": 97609,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "Post-Commit-Affected-Gate läuft gegen HEAD~1.",
+     "at": 1785949006
+    },
+    {
+     "id": 97608,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "tool completed: patch (2.5s)",
+     "at": 1785948968
+    },
+    {
+     "id": 97607,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "terminal command running (10s elapsed)",
+     "at": 1785948906
+    },
+    {
+     "id": 97603,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "starting API call #1",
+     "at": 1785948837
+    },
+    {
+     "id": 97595,
+     "run_id": 9203,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "claimed",
+     "note": null,
+     "at": 1785948830
+    },
+    {
+     "id": 97593,
+     "run_id": null,
+     "task_id": "t_a54a1773",
+     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
+     "profile": "coder",
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785948792
+    },
+    {
+     "id": 97592,
+     "run_id": null,
+     "task_id": "t_7f265c8a",
+     "task_title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
+     "profile": "coder",
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785948792
+    },
+    {
+     "id": 97591,
+     "run_id": null,
+     "task_id": "t_75d8f785",
+     "task_title": "Alarm block_loop_detected abonnementfrei zustellen",
+     "profile": "coder",
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785948792
+    },
+    {
+     "id": 97590,
+     "run_id": null,
+     "task_id": "t_66ced2fb",
+     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "profile": "coder",
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785948792
+    },
+    {
+     "id": 97589,
+     "run_id": null,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785948792
+    },
+    {
+     "id": 97568,
+     "run_id": null,
+     "task_id": "t_d81b9bef",
+     "task_title": "PlanSpec disposition-di_b0a73086: Konflikt-Fixer-Exit nach Commit + CAS-Resume-Fingerprint-Bug beheben",
+     "profile": null,
+     "kind": "completed",
+     "note": null,
+     "at": 1785942277
+    },
+    {
+     "id": 97566,
+     "run_id": null,
+     "task_id": "t_d81b9bef",
+     "task_title": "PlanSpec disposition-di_b0a73086: Konflikt-Fixer-Exit nach Commit + CAS-Resume-Fingerprint-Bug beheben",
+     "profile": null,
+     "kind": "unblocked",
+     "note": null,
+     "at": 1785942276
+    }
+   ],
+   "count": 20,
+   "latest_id": 97636,
+   "checked_at": 1785949582
+  },
+  "error": null,
+  "as_of": "2026-08-05T19:06:21+0200"
+ }
+}

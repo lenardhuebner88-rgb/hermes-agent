@@ -6,7 +6,10 @@ import androidx.lifecycle.viewModelScope
 import java.io.File
 import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,13 +23,14 @@ import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
+import net.hermes.deck.model.DeckPulse
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.DueDates
 import net.hermes.deck.model.Mention
-import net.hermes.deck.model.ThreadActivity
 import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
+import net.hermes.deck.model.ThreadActivity
 import net.hermes.deck.net.HermesClient
 
 class DeckViewModel(app: Application) : AndroidViewModel(app) {
@@ -396,6 +400,115 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    // ---- Live pulse -----------------------------------------------------
+
+    /**
+     * The polled half of the app.
+     *
+     * Until now every dashboard number was fetched once, on screen entry, and
+     * then kept claiming to be current for as long as the user looked at it. On
+     * a screen whose subject is "what is happening right now" that is the
+     * expensive kind of wrong, because it is indistinguishable from being right.
+     */
+    data class PulseState(
+        val pulse: DeckPulse? = null,
+        val loading: Boolean = false,
+        val error: String? = null,
+        /** Consecutive failures — drives the backoff and the error band. */
+        val failures: Int = 0,
+        val actionBusy: Boolean = false,
+    )
+
+    private val _pulse = MutableStateFlow(PulseState())
+    val pulse: StateFlow<PulseState> = _pulse.asStateFlow()
+
+    private var pollJob: Job? = null
+
+    /**
+     * Starts the poll loop, idempotently.
+     *
+     * Callers are `LaunchedEffect`s tied to a screen's lifecycle, and Compose
+     * will re-run those more often than the screen actually appears; a loop
+     * started twice would double the request rate on a journal query that is
+     * not free.
+     */
+    fun startPulsePolling() {
+        if (pollJob?.isActive == true) return
+        pollJob = viewModelScope.launch {
+            while (isActive) {
+                val ok = refreshPulse()
+                val failures = _pulse.value.failures
+                delay(pollDelayMillis(if (ok) 0 else failures))
+            }
+        }
+    }
+
+    fun stopPulsePolling() {
+        pollJob?.cancel()
+        pollJob = null
+    }
+
+    fun refreshPulseNow() = viewModelScope.launch { refreshPulse() }
+
+    private suspend fun refreshPulse(): Boolean {
+        val client = hermes()
+        if (!client.isConfigured) {
+            _pulse.value = _pulse.value.copy(
+                loading = false,
+                error = "Dashboard-Zugang fehlt — unter Einstellungen eintragen.",
+            )
+            return false
+        }
+        _pulse.value = _pulse.value.copy(loading = true)
+        val result = withContext(Dispatchers.IO) { runCatching { client.pulse() } }
+        return result.fold(
+            onSuccess = {
+                _pulse.value = PulseState(pulse = it, loading = false, failures = 0)
+                true
+            },
+            onFailure = { failure ->
+                // The last good payload is kept on purpose. It is stale, the
+                // header says so, and a stale reading plus an error band beats a
+                // blank screen that hides what the system was doing a minute ago.
+                _pulse.value = _pulse.value.copy(
+                    loading = false,
+                    error = failure.message ?: "Puls nicht abrufbar",
+                    failures = _pulse.value.failures + 1,
+                )
+                false
+            },
+        )
+    }
+
+    // ---- Interventions ---------------------------------------------------
+
+    fun terminateRun(runId: Long) = intervene { it.terminateRun(runId) }
+
+    fun cancelChain(taskId: String) = intervene { it.cancelChain(taskId) }
+
+    fun releaseGate(taskId: String) = intervene { it.releaseGate(taskId) }
+
+    /**
+     * Runs one destructive call and reports what the *server* said.
+     *
+     * No optimistic UI: these stop real work, and a button that turns green
+     * before the server agrees is how an operator comes to believe a runaway run
+     * was killed when it was not. The pulse is refreshed straight after so the
+     * screen shows the consequence rather than the claim.
+     */
+    private fun intervene(call: (HermesClient) -> String) = viewModelScope.launch {
+        val client = hermes()
+        if (!client.isConfigured) {
+            _message.value = "Dashboard-Zugang fehlt — unter Einstellungen eintragen."
+            return@launch
+        }
+        _pulse.value = _pulse.value.copy(actionBusy = true)
+        val result = withContext(Dispatchers.IO) { runCatching { call(client) } }
+        _pulse.value = _pulse.value.copy(actionBusy = false)
+        _message.value = result.getOrElse { it.message ?: "Aktion fehlgeschlagen" }
+        refreshPulse()
+    }
+
     fun loadModels(stem: String) = viewModelScope.launch {
         _agents.value = _agents.value.copy(
             modelsFor = stem,
@@ -440,5 +553,18 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
             },
             onFailure = { _message.value = it.message ?: "Modellwechsel fehlgeschlagen" },
         )
+    }
+
+    private companion object {
+        /**
+         * One tick, then a widening retreat. Eight seconds is the shortest
+         * interval the server's five-second journal cache makes meaningful; the
+         * backoff exists so an unreachable tail-net does not spend the battery
+         * retrying at full rate for an hour.
+         */
+        val POLL_BACKOFF_SECONDS = listOf(8L, 16L, 32L, 60L)
+
+        fun pollDelayMillis(failures: Int): Long =
+            POLL_BACKOFF_SECONDS[failures.coerceIn(0, POLL_BACKOFF_SECONDS.lastIndex)] * 1000L
     }
 }

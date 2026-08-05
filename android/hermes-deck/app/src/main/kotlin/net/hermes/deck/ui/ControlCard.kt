@@ -55,11 +55,12 @@ fun ControlCard(
     onShowToday: () -> Unit,
     onShowMentions: () -> Unit,
     onSync: () -> Unit,
+    onOpenPulse: () -> Unit = {},
 ) {
     val deck = LocalDeck.current
     GlassCard(Modifier.fillMaxWidth()) {
         Column {
-            PulseBand(summary.pulse)
+            PulseBand(summary.pulse, onOpenPulse)
 
             if (!summary.waiting.isEmpty) {
                 Spacer(Modifier.height(12.dp))
@@ -100,9 +101,15 @@ private fun Divider() {
 }
 
 @Composable
-private fun PulseBand(pulse: ControlSummary.Pulse) {
+private fun PulseBand(pulse: ControlSummary.Pulse, onOpenPulse: () -> Unit = {}) {
     val deck = LocalDeck.current
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // The band answers "is anyone working"; the pulse screen answers "on what".
+    // Making the band the door there is cheaper than a second nav item, and it
+    // is where the hand already is.
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onOpenPulse),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Box(
             Modifier
                 .size(8.dp)

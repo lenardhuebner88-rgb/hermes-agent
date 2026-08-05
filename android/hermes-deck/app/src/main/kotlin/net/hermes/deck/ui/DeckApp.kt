@@ -21,9 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -48,10 +48,18 @@ import kotlinx.coroutines.delay
 import net.hermes.deck.DeckViewModel
 import net.hermes.deck.model.DeckTask
 
+/**
+ * Four tabs, and the pulse is deliberately not the first one.
+ *
+ * The deck stays on tab one because that is where approvals live — the place
+ * the operator has to *act*, not the place they watch. The pulse takes the slot
+ * the agent list held, because it answers everything that list did and more;
+ * models and budgets are still reachable from an agent's sheet.
+ */
 enum class DeckTab(val label: String, val icon: ImageVector) {
     DECK("Deck", Icons.Filled.Home),
     PROJECTS("Projekte", Icons.Filled.List),
-    AGENTS("Agenten", Icons.Filled.Person),
+    PULSE("Puls", Icons.Filled.Favorite),
     SETTINGS("Mehr", Icons.Filled.Settings),
 }
 
@@ -61,6 +69,9 @@ fun DeckApp(viewModel: DeckViewModel) {
     var tab by remember { mutableStateOf(DeckTab.DECK) }
     var capturing by remember { mutableStateOf(false) }
     var openTask by remember { mutableStateOf<DeckTask?>(null) }
+    // The old agent list is not gone, only demoted: models and budgets live
+    // one tap deeper, behind the pulse that made the list redundant.
+    var showAgents by remember { mutableStateOf(false) }
 
     val snapshot by viewModel.snapshot.collectAsState()
     val message by viewModel.message.collectAsState()
@@ -94,19 +105,33 @@ fun DeckApp(viewModel: DeckViewModel) {
                 viewModel = viewModel,
                 onOpenTask = { openTask = it },
                 onOpenSettings = { tab = DeckTab.SETTINGS },
+                onOpenPulse = { showAgents = false; tab = DeckTab.PULSE },
             )
             DeckTab.PROJECTS -> ProjectsScreen(viewModel) { channelId ->
                 viewModel.setFilterChannel(channelId)
                 tab = DeckTab.DECK
             }
-            DeckTab.AGENTS -> AgentsScreen(viewModel)
+            DeckTab.PULSE -> if (showAgents) AgentsScreen(viewModel) else PulseTab(
+                viewModel = viewModel,
+                onOpenTask = { taskId ->
+                    // The stack hands back an id; the sheet wants the task. A
+                    // row whose task is not in the local snapshot (a kanban card
+                    // the deck never synced) simply does not open — better than
+                    // a sheet full of blanks.
+                    openTask = snapshot.tasks.firstOrNull { it.id == taskId }
+                    if (openTask == null) tab = DeckTab.DECK
+                },
+                onOpenAgents = { showAgents = true },
+            )
             DeckTab.SETTINGS -> SettingsScreen(viewModel)
         }
 
         BottomBar(
             current = tab,
             pendingCount = snapshot.pendingCount,
-            onSelect = { tab = it },
+            // Tapping the tab always returns to the pulse itself; without this
+            // the agent list would become a place you can enter and not leave.
+            onSelect = { showAgents = false; tab = it },
             onCapture = { capturing = true },
             modifier = Modifier.align(Alignment.BottomCenter),
         )
@@ -252,7 +277,7 @@ private fun BottomBar(
                 Icon(Icons.Filled.Add, contentDescription = "Neu erfassen", tint = Color.White)
             }
 
-            NavIcon(DeckTab.AGENTS, current, onSelect)
+            NavIcon(DeckTab.PULSE, current, onSelect)
             Box {
                 NavIcon(DeckTab.SETTINGS, current, onSelect)
                 if (pendingCount > 0) {

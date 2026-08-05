@@ -87,6 +87,55 @@ Clamping a card is necessary but not sufficient: a *section* of clamped cards
 can still eat the screen. The first thing the deck shows must be the deck's own
 content, not a queue of foreign messages ahead of it.
 
+## Motion — bewegt sich nur, was einen Zustand beweist
+
+Hinzugefügt 2026-08-05 mit dem Puls-Screen.
+
+Bewegung ist in dieser App eine **Behauptung über den Zustand**, kein Schmuck.
+Es gibt genau eine erlaubte Animation: die Opazitäts-Atmung (≈1,1 s, `Reverse`)
+auf dem Punkt eines Agenten, dessen Tool-Call offen ist. Sonst nichts — kein
+Aufblitzen beim Poll-Takt, keine Übergänge zwischen Listenständen, keine
+Fortschrittsbalken, die laufen, ohne dass etwas läuft.
+
+Der Grund ist derselbe wie bei der Akzent-Doktrin: ein Puls, der immer pulsiert,
+sagt nichts. Auf einem Überwachungsschirm ist er schlimmer als nichts, weil er
+Leben suggeriert, wo keins gemessen wurde.
+
+## Frische — jede gepollte Zahl trägt ihr Alter
+
+Hinzugefügt 2026-08-05. Betrifft alles, was `/api/deck/pulse` speist.
+
+Ein Wert auf einem gepollten Schirm behauptet, jetzt zu gelten. Bis 2026-08-05
+war das schlicht falsch: die Agentendaten wurden **einmal** beim Screen-Eintritt
+geladen und sahen danach beliebig lange frisch aus.
+
+Regel: Der Kopf einer Live-Sektion trägt „Stand vor 12 s" in `tickerStyle` und
+`textFaint`. Ab `Freshness.STALE_SECONDS` (60 s) wechselt die Zeile auf
+`warning`, und der Inhalt darunter dimmt auf `STALE_ALPHA` (0,55).
+**Gedimmt, nicht ausgeblendet** — eine geleerte Sektion ist von einer leeren
+nicht zu unterscheiden, und genau diese Verwechslung hat die App schon
+ausgeliefert.
+
+## Zwei neue Textstile
+
+- **`monoStyle`** (12 sp, Monospace, `textSecondary`) — für Shell-Kommandos und
+  Tool-Labels aus dem Journal. Kein Schmuck: der Inhalt *ist* eine Kommandozeile,
+  und Proportionalschrift verwischt, wo die Argumente anfangen.
+- **`tickerStyle`** (11 sp, `tnum`) — für jeden „seit"/„vor"-Timer. Ohne
+  Tabellenziffern wandern die Stellen bei jedem 8-Sekunden-Takt seitwärts, und
+  das liest sich als Unruhe im System statt in der Schrift.
+
+Beide leben in `Theme.kt` — die eine Token-Quelle bleibt die eine Token-Quelle.
+
+## `edgeFor()` gilt jetzt auch für Profile
+
+Die Projekt-Kante war „the *only* place a non-accent hue appears as chrome".
+Der Puls-Screen erweitert das benannt: eine Kanban-Laufkarte trägt dieselbe
+3-dp-Kante, gehasht über den **Profilnamen** (`coder`, `kimi`, `claude-cli`).
+Es ist dieselbe Mechanik für dieselbe Absicht — eine Herkunft wiedererkennbar
+machen, ohne sie zu beschriften — und deshalb eine Erweiterung der Regel, keine
+Ausnahme von ihr.
+
 ## Sheets
 
 Bottom sheets are the app's only modal. `SheetScaffold` owns the geometry:
@@ -154,6 +203,33 @@ picture; the dump is for coordinates.
 3. **A tapped attachment does nothing.** It has a thumbnail now but no full
    view.
 4. **Agent names are short pubkeys.** `kind:0` profiles are never fetched.
+
+Closed on 2026-08-05 with the pulse screen, verified by 26 instrumented tests
+on the emulator plus a live payload captured from the running dashboard:
+
+- **„Kein Gefühl für Fortschritt" ist für die System-Seite beantwortet.** Eine
+  Kanban-Laufkarte trägt Laufzeit, Heartbeat-Notiz und — nur wenn der Server
+  eine Zahl verantwortet — einen Fortschrittsbalken. Eine ungedeckelte Lane
+  bekommt **keinen** Balken; eine erfundene Prozentzahl wäre schlimmer als gar
+  keine. Für die Buzz-Task-Seite bleibt die Lücke offen.
+- **„Alles ist eine flache Liste" ist auf dem Puls-Screen beantwortet**, aber
+  nicht auf dem Deck: der Puls gruppiert in JETZT DRAN · ARBEITET · LÄUFT ·
+  STEHT · STILL · ZULETZT PASSIERT. Die Aufgabenliste ist weiter flach.
+
+Neu offen seit 2026-08-05:
+
+1. **Kein Regelbruch-Vermerk für den Puls-Screen selbst.** Er hat bewusst
+   *keine* Hero-Karte, obwohl jede andere Ansicht eine trägt. Begründung: der
+   Schirm hat kein einzelnes Subjekt, das eine gesättigte Fläche verdient — vier
+   Sektionen mit gleichem Rang, und eine Hero-Karte hätte willkürlich eine davon
+   zur Hauptsache erklärt. Das ist der Bruch, hiermit benannt.
+2. **Der Handlungsstapel hat noch keine Aktion pro Zeile.** Er *öffnet* das
+   passende Sheet, aber Freigaben und Holds führen ins Deck statt zu einem
+   Knopf an Ort und Stelle. Ein Stapel, den man nur ansehen kann, ist wieder
+   eine Statusanzeige.
+3. **Keine Benachrichtigungen.** Die App meldet sich nicht; sie muss geöffnet
+   werden. Ein WorkManager-Job, der nur bei Zustandswechsel meldet, braucht kein
+   FCM — er ist geplant und nicht gebaut.
 
 Two earlier entries were **checked and removed**: the horizontal project row
 exists (`HomeScreen`, below the approvals), and an empty search does render

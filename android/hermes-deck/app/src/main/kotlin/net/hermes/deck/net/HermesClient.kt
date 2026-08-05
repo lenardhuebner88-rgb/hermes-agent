@@ -4,6 +4,7 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.BuzzAgent
+import net.hermes.deck.model.DeckPulse
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
@@ -100,6 +101,51 @@ class HermesClient(
     fun accountUsage(): List<AccountUsage> =
         AccountUsage.listFromJson(getJson("/api/account-usage"))
 
+    /**
+     * Everything the live screens poll, in one request.
+     *
+     * `receivedAt` is stamped here, at the moment the bytes land, and not in the
+     * view model: the freshness the operator sees has to be the age of the data,
+     * not the age of the last recomposition.
+     */
+    fun pulse(limit: Int = 12, board: String? = null): DeckPulse {
+        val query = buildString {
+            append("/api/deck/pulse?limit=").append(limit)
+            if (!board.isNullOrBlank()) append("&board=").append(board)
+        }
+        return DeckPulse.fromJson(getJson(query), receivedAt = System.currentTimeMillis())
+    }
+
+    /**
+     * The three interventions the operator can make from the phone.
+     *
+     * They live behind the Kanban plugin's own prefix rather than the
+     * dashboard's own namespace — plugin backends mount under
+     * `/api/plugins/<name>/`, and a call to the bare path returns the SPA's
+     * index.html with a cheerful 200, which would read as success.
+     */
+    fun terminateRun(runId: Long): String = postForMessage("$KANBAN/runs/$runId/terminate")
+
+    fun cancelChain(taskId: String): String = postForMessage("$KANBAN/tasks/$taskId/cancel-chain")
+
+    fun releaseGate(taskId: String): String = postForMessage("$KANBAN/tasks/$taskId/flow-release")
+
+    /**
+     * Posts and returns what the server said about it.
+     *
+     * Deliberately not optimistic: these calls stop real work, and a button that
+     * reports success before the server has agreed is how an operator ends up
+     * believing a runaway run was killed when it was not.
+     */
+    private fun postForMessage(path: String): String {
+        val request = Request.Builder()
+            .url("${baseUrl.trimEnd('/')}$path")
+            .post(EMPTY_JSON.toRequestBody(JSON))
+            .build()
+        val json = executeJson(request, retryOnUnauthorised = true)
+        return HermesPayloads.actionOutcome(json)
+    }
+
     fun availableModels(stem: String): HermesPayloads.ModelChoices =
         HermesPayloads.modelChoices(getJson("/api/buzz/agents/$stem/models"))
 
@@ -147,5 +193,9 @@ class HermesClient(
 
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
+        const val EMPTY_JSON = "{}"
+
+        /** Plugin backends mount here; the bare path answers with the SPA. */
+        const val KANBAN = "/api/plugins/kanban"
     }
 }
