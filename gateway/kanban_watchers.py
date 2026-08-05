@@ -2277,6 +2277,17 @@ class GatewayKanbanWatchersMixin:
             if resolved in seen_db_paths:
                 continue
             seen_db_paths.add(resolved)
+            # Every F1 candidate comes from ``kanban_notify_subs``.  Preserve
+            # the notifier's zero-subscription cost gate here as well: this
+            # sweep runs before delivery collection and would otherwise
+            # writable-open every board even though the collection loop skips
+            # those same empty boards.  Probe failures remain fail-open so a
+            # locked/corrupt read-only probe cannot suppress a real flush.
+            try:
+                if _kb.count_notify_subs(board=slug) == 0:
+                    continue
+            except Exception:
+                pass
             try:
                 conn = _kb.connect(board=slug)
             except Exception:
