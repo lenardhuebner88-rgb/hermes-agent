@@ -1,8 +1,13 @@
+// @vitest-environment jsdom
+
+import { cleanup, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { BacklogItem } from "../../lib/schemas";
 import { FoBacklogQueueSkeleton, FoBacklogQueueTable } from "./FoBacklogQueueTable";
+
+afterEach(cleanup);
 
 const LEGACY_CLASSES = [
   "cyan-",
@@ -80,5 +85,23 @@ describe("FoBacklogQueueTable sheet-A render branches", () => {
     expect(html).toMatch(/data-fo-row="0002"[^>]*aria-current="true"[^>]*shadow-\[inset_3px_0_0_var\(--color-bronze\)\]/);
     expect(html).not.toContain("ring-live/70");
     expect(html).toContain("tabular-nums");
+  });
+});
+
+describe("FoBacklogQueueTable deutsche Spaltenköpfe", () => {
+  it("zeigt alle neun Spaltenköpfe als sichtbaren deutschen Text", () => {
+    const { container } = render(
+      <FoBacklogQueueTable
+        items={[item("0001")]}
+        nowSec={1_783_700_000}
+        nextTaskId={null}
+        onOpen={() => undefined}
+      />,
+    );
+
+    for (const header of ["Titel", "Status", "Risiko", "Verantwortlich", "Bereich", "Nächster Schritt"]) {
+      expect(screen.getByRole("columnheader", { name: header })).toBeTruthy();
+    }
+    expect(container.querySelector("thead")!.textContent).not.toMatch(/Title|Risk|Owner|Area|Next Action|Source/);
   });
 });
