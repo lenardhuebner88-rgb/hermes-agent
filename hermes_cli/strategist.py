@@ -1671,9 +1671,28 @@ def propose(
     qualitative_excepted: set[str] = set()
     if drafts is not None:
         suppressed = set(context.get("suppressed") or ())
+        noise_rows = (
+            _read_harvest_noise_candidates(notes_dir) if notes_dir is not None else []
+        )
+        disposition_noise = {
+            str(row.get("suggested_key") or "").strip(): str(
+                row.get("noise_class") or ""
+            ).strip()
+            for row in noise_rows
+            if str(row.get("suggested_key") or "").strip()
+        }
         candidates = []
         for lever in _levers_from_drafts(drafts):
             if lever.key in suppressed:
+                continue
+            if lever.key in disposition_noise:
+                gated_out.append(
+                    {
+                        "key": lever.key,
+                        "title": lever.title,
+                        "reason": f"disposition_noise:{disposition_noise[lever.key]}",
+                    }
+                )
                 continue
             verdict = grounding_gate(lever)
             if not verdict.passed:
@@ -3621,6 +3640,53 @@ def read_last_runs(state_dir: Path) -> dict[str, Any]:
 # that survived the propose gate.
 # --------------------------------------------------------------------------- #
 _DIGEST_RECOMMENDATIONS = ("drop", "collect", "planspec")
+_DIGEST_NOISE_CLASSES = ("transient", "confounded")
+
+
+def _read_harvest_noise_candidates(state_dir: Path) -> list[dict[str, Any]]:
+    """Read the deterministic noise partition produced by :func:`run_harvest`.
+
+    Digest input is LLM-produced, so it must not be trusted to classify its own
+    evidence as noise.  The Python harvest owns that classification and this
+    reader only carries those already-classified rows into the persisted digest.
+    """
+    try:
+        raw = json.loads((Path(state_dir) / "harvest_candidates.json").read_text())
+    except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+    rows = raw.get("noise_candidates", []) if isinstance(raw, dict) else []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _normalize_digest_noise(
+    candidates: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    noise: list[dict[str, Any]] = []
+    noise_ids: set[str] = set()
+    for candidate in candidates:
+        item_id = str(candidate.get("suggested_key") or "").strip()
+        noise_class = str(candidate.get("noise_class") or "").strip().lower()
+        if not item_id or item_id in noise_ids or noise_class not in _DIGEST_NOISE_CLASSES:
+            continue
+        triage_severity = _normalize_digest_triage_severity(
+            candidate.get("triage_severity", candidate.get("severity"))
+        )
+        entry: dict[str, Any] = {
+            "item_id": item_id,
+            "reason": str(candidate.get("noise_reason") or "").strip(),
+            "noise_class": noise_class,
+            "kind": str(candidate.get("kind") or "item").strip() or "item",
+            "source_severity": str(candidate.get("source_severity") or "none").strip()
+            or "none",
+            "triage_severity": triage_severity,
+            "severity": triage_severity,
+        }
+        age_days = candidate.get("age_days")
+        if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
+            entry["age_days"] = age_days
+        noise.append(entry)
+        noise_ids.add(item_id)
+    return noise, noise_ids
 
 
 def _normalize_digest_triage_severity(value: Any) -> str:
@@ -3647,7 +3713,12 @@ def disposition_digest_path(state_dir: Optional[Path] = None) -> Path:
     return base / "disposition_digest.json"
 
 
-def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
+def _normalize_digest(
+    payload: dict[str, Any],
+    *,
+    now: int,
+    noise_candidates: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
     """Validate + normalize the Sonnet-supplied clustering decision into the
     persisted digest schema. Raises ``ValueError`` on a malformed contract so a
     bad LLM payload fails loud (CLI exits 2) instead of writing garbage.
@@ -3662,6 +3733,7 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("digest payload must be a JSON object")
 
+    noise, noise_ids = _normalize_digest_noise(noise_candidates)
     raw_clusters = payload.get("clusters", [])
     if not isinstance(raw_clusters, list):
         raise ValueError("digest 'clusters' must be a list")
@@ -3683,7 +3755,9 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         raw_ids = cluster.get("item_ids", [])
         if not isinstance(raw_ids, list):
             raise ValueError(f"cluster[{idx}] 'item_ids' must be a list")
-        item_ids = [str(i) for i in raw_ids]
+        item_ids = [str(i) for i in raw_ids if str(i) not in noise_ids]
+        if not item_ids:
+            continue
         seen_items.update(item_ids)
         if recommendation == "drop":
             reaped_derived += len(item_ids)
@@ -3703,7 +3777,12 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
             norm["age_days"] = age_days
         planspec_key = cluster.get("planspec_key")
-        if planspec_key:
+        if planspec_key and str(planspec_key).strip() in noise_ids:
+            # A stale/manual digest may still name a quarantined candidate as
+            # the cluster key.  Keep any actionable peers visible, but force a
+            # fresh collection pass rather than drafting the noise candidate.
+            norm["recommendation"] = "collect"
+        elif planspec_key:
             norm["planspec_key"] = str(planspec_key).strip()
         clusters.append(norm)
 
@@ -3717,6 +3796,8 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         item_id = str(entry.get("item_id") or "").strip()
         if not item_id:
             raise ValueError(f"left[{idx}] has an empty 'item_id'")
+        if item_id in noise_ids:
+            continue
         seen_items.add(item_id)
         triage_severity = _normalize_digest_triage_severity(
             entry.get("triage_severity", entry.get("severity"))
@@ -3737,9 +3818,12 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
             norm_left["disposition"] = str(disposition).strip()
         left.append(norm_left)
 
+    seen_items.update(noise_ids)
     total_open = payload.get("total_open")
     if not isinstance(total_open, int) or isinstance(total_open, bool) or total_open < 0:
         total_open = len(seen_items)
+    else:
+        total_open = max(total_open, len(seen_items))
     reaped = payload.get("reaped")
     if not isinstance(reaped, int) or isinstance(reaped, bool) or reaped < 0:
         reaped = reaped_derived
@@ -3750,6 +3834,7 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         "reaped": reaped,
         "clusters": clusters,
         "left": left,
+        "noise": noise,
     }
 
 
@@ -3758,7 +3843,11 @@ def write_disposition_digest(
 ) -> Path:
     """Validate + persist the harvest clustering decision atomically. Returns
     the digest path. See :func:`_normalize_digest` for the contract."""
-    digest = _normalize_digest(payload, now=now)
+    digest = _normalize_digest(
+        payload,
+        now=now,
+        noise_candidates=_read_harvest_noise_candidates(state_dir),
+    )
     path = disposition_digest_path(state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -3790,6 +3879,7 @@ def run_digest(args) -> dict[str, Any]:
             "total_open": digest["total_open"],
             "reaped": digest["reaped"],
             "left": len(digest["left"]),
+            "noise": len(digest["noise"]),
         },
     )
     return {
@@ -3799,6 +3889,7 @@ def run_digest(args) -> dict[str, Any]:
         "total_open": digest["total_open"],
         "reaped": digest["reaped"],
         "left": len(digest["left"]),
+        "noise": len(digest["noise"]),
     }
 
 
@@ -4220,6 +4311,79 @@ def _read_harvest_since(marker_path: Path, *, now: int) -> int:
         return now - HARVEST_WINDOW_FALLBACK_SECONDS
 
 
+_TRANSIENT_DISPOSITION_PATTERNS = (
+    re.compile(r"\b(?:nicht|not) reproduzierbar\b", re.IGNORECASE),
+    re.compile(r"\bnon[- ]reproducible\b", re.IGNORECASE),
+    re.compile(r"\bbei (?:der )?n[aä]chsten\b.*\b(?:pr[uü]fen|beobachten|check)", re.IGNORECASE),
+    re.compile(r"\bbei erneutem\b", re.IGNORECASE),
+    re.compile(r"\bfalls\b.*\b(?:erneut|wieder)\b", re.IGNORECASE),
+    re.compile(r"\bif\b.*\bagain\b", re.IGNORECASE),
+)
+_CONFOUNDED_DISPOSITION_TEXT_PATTERNS = (
+    re.compile(r"\b(?:noch )?nicht (?:in|auf) main\b", re.IGNORECASE),
+    re.compile(r"\bnot (?:yet )?in main\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:integrator|operator|chain-end)\b.*\b(?:post[- ]merge|nach (?:dem )?merge|live[- ]smoke|visuell)",
+        re.IGNORECASE,
+    ),
+)
+_CONFOUNDED_DISPOSITION_ACTION_PATTERNS = (
+    re.compile(
+        r"^\s*(?:nach|after|post[- ])(?: dem | the )?(?:merge|deployment|deploy|restart|gateway-restart)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\blive[- ]smoke\b", re.IGNORECASE),
+    re.compile(r"\bvisuell(?:e|en|er|es)? (?:abnahme|abnehmen|pr[uü]fen)\b", re.IGNORECASE),
+)
+
+
+def _disposition_noise(candidate: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """Classify ledger-only, evidence-bounded run noise.
+
+    The rules deliberately require an explicit non-reproduction/recurrence
+    marker or an external verification dependency.  Generic ``risk`` and
+    ``scope-note`` rows stay actionable; their severity is not a noise signal.
+    """
+    if candidate.get("source") != "ledger":
+        return None
+    text = str(candidate.get("excerpt") or "")
+    next_action = text.split(" — ", 1)[0]
+    if any(pattern.search(text) for pattern in _TRANSIENT_DISPOSITION_PATTERNS):
+        return (
+            "transient",
+            "one-off outcome is not reproduced or is only watched for recurrence",
+        )
+    if any(
+        pattern.search(next_action)
+        for pattern in _CONFOUNDED_DISPOSITION_ACTION_PATTERNS
+    ) or any(
+        pattern.search(text) for pattern in _CONFOUNDED_DISPOSITION_TEXT_PATTERNS
+    ):
+        return (
+            "confounded",
+            "verification depends on merge/restart/deploy/live acceptance",
+        )
+    return None
+
+
+def _partition_disposition_noise(
+    candidates: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    actionable: list[dict[str, Any]] = []
+    noise: list[dict[str, Any]] = []
+    for candidate in candidates:
+        classification = _disposition_noise(candidate)
+        if classification is None:
+            actionable.append(candidate)
+            continue
+        noise_class, noise_reason = classification
+        classified = dict(candidate)
+        classified["noise_class"] = noise_class
+        classified["noise_reason"] = noise_reason
+        noise.append(classified)
+    return actionable, noise
+
+
 def run_harvest(args) -> dict[str, Any]:
     """CLI-Adapter: Receipts sammeln + vorfiltern → Kandidaten-Datei + Marker.
 
@@ -4270,7 +4434,9 @@ def run_harvest(args) -> dict[str, Any]:
     # nicht kennt (Übergangs-Fallback für Alt-Receipts ohne Ledger-Item).
     ledger_task_ids: set[str] = {c["task_id"] for c in ledger_cands}
     keyword_only = [c for c in keyword_cands if c["task_id"] not in ledger_task_ids]
-    candidates = ledger_cands + keyword_only
+    candidates, noise_candidates = _partition_disposition_noise(
+        ledger_cands + keyword_only
+    )
 
     cand_path = state_dir / "harvest_candidates.json"
     cand_path.write_text(
@@ -4281,6 +4447,7 @@ def run_harvest(args) -> dict[str, Any]:
                 "ledger_candidates": len(ledger_cands),
                 "keyword_candidates": len(keyword_cands),
                 "reaped_dispositions": reaped_dispositions,
+                "noise_candidates": noise_candidates,
                 "candidates": candidates,
             },
             ensure_ascii=False,
@@ -4298,6 +4465,7 @@ def run_harvest(args) -> dict[str, Any]:
             "ledger_candidates": len(ledger_cands),
             "keyword_candidates": len(keyword_cands),
             "reaped_dispositions": reaped_dispositions,
+            "noise_candidates": len(noise_candidates),
             "candidates": len(candidates),
         },
     )
@@ -4308,6 +4476,7 @@ def run_harvest(args) -> dict[str, Any]:
         "ledger_candidates": len(ledger_cands),
         "keyword_candidates": len(keyword_cands),
         "reaped_dispositions": reaped_dispositions,
+        "noise_candidates": len(noise_candidates),
         "candidates": len(candidates),
         "candidates_path": str(cand_path),
     }

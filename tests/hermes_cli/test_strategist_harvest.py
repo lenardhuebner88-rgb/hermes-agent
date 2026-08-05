@@ -255,6 +255,57 @@ def test_run_harvest_reaps_drop_and_excludes_terminal_dispositions(kanban_home):
         assert all(kb.get_disposition_item(conn, item_id) is not None for item_id in terminal_ids)
 
 
+def test_run_harvest_separates_transient_and_confounded_noise(kanban_home):
+    """Deferred verification and one-off recurrence watches are not lever input."""
+    now = int(time.time())
+    with kb.connect() as conn:
+        task_ids = {
+            name: kb.create_task(conn, title=name, assignee="coder", created_by="test")
+            for name in ("transient", "confounded", "actionable")
+        }
+        transient_id = kb.insert_disposition_item(
+            conn,
+            source_task_id=task_ids["transient"],
+            typ="risk",
+            disposition="defer",
+            next_action="Bei nächster realer Fixer-Episode erneut prüfen",
+            severity="real-risk",
+            evidence="Der einmalige Lauf war danach 3/3 grün und nicht reproduzierbar.",
+        )
+        confounded_id = kb.insert_disposition_item(
+            conn,
+            source_task_id=task_ids["confounded"],
+            typ="follow_up",
+            disposition="defer",
+            next_action="Nach dem Gateway-Restart einen Live-Smoke ausführen",
+            severity="scope-note",
+            evidence="Die Änderung ist noch nicht in main.",
+        )
+        actionable_id = kb.insert_disposition_item(
+            conn,
+            source_task_id=task_ids["actionable"],
+            typ="follow_up",
+            disposition="defer",
+            next_action="Die fehlende Retry-Grenze implementieren",
+            severity="scope-note",
+            evidence="Drei unabhängige Runs überschritten dieselbe Grenze.",
+        )
+        with kb.write_txn(conn):
+            conn.execute("UPDATE disposition_items SET created_at=?", (now,))
+
+    result = strategist.run_harvest(types.SimpleNamespace(board=None))
+
+    data = json.loads(
+        (strategist.default_state_dir() / "harvest_candidates.json").read_text()
+    )
+    assert result["candidates"] == 1
+    assert result["noise_candidates"] == 2
+    assert [item["disposition_item_id"] for item in data["candidates"]] == [actionable_id]
+    noise = {item["disposition_item_id"]: item for item in data["noise_candidates"]}
+    assert noise[transient_id]["noise_class"] == "transient"
+    assert noise[confounded_id]["noise_class"] == "confounded"
+
+
 def test_run_harvest_since_uses_marker(kanban_home):
     import json
 
