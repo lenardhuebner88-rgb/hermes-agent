@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from loops.runner import PACKS_DIR, load_pack
@@ -136,7 +137,7 @@ def test_cli_runs_pinned_vulture_and_writes_machine_readable_report(tmp_path: Pa
 
     result = subprocess.run(
         [
-            str(REPO_ROOT / ".venv" / "bin" / "python"),
+            sys.executable,
             str(SCANNER),
             "--repo-root",
             str(repo),
