@@ -287,6 +287,12 @@ use_purity=""
 leakers_json="[]"
 leaker_only=""
 iso_leaker_summary=""
+failure_classification=""
+failed_test_files_json="[]"
+quarantined_test_files_json="[]"
+blocking_test_files_json="[]"
+unattributed_fail_gates_json="[]"
+quarantine_policy_sha256=""
 if [ "${GREEN_GATE_RECORD_RESULT:-1}" != "0" ]; then
   if [ "${#fails[@]}" -eq 0 ]; then
     hermes vision record-gate-result pass "${sha_args[@]+"${sha_args[@]}"}" >/dev/null 2>&1 || \
@@ -297,14 +303,43 @@ if [ "${GREEN_GATE_RECORD_RESULT:-1}" != "0" ]; then
     first_fail_detail="${fails[0]}"
 
     # Python failures rerun against the committed checkout. Vitest remains
-    # deliberately tied to the live frontend tree. Each result is folded in
-    # gate order; this changes cause attribution only, never the RED verdict.
+    # deliberately tied to the live frontend tree. Isolation changes cause
+    # attribution only. The separate exact-name classification below stamps
+    # whether landing may tolerate the otherwise still-RED gate record.
     iso_all_ok=1
     iso_any=0
     iso_all_leaker=1
     first_iso_gate=""
     first_iso_detail=""
     iso_leakers=()
+    classification_gate_args=()
+    classification_unattributed_args=()
+    quarantine_allowlist="$PY_CHECKOUT/scripts/green_gate_quarantine_allowlist.json"
+    [ -f "$quarantine_allowlist" ] || \
+      quarantine_allowlist="$REPO/scripts/green_gate_quarantine_allowlist.json"
+
+    # Collect classification evidence for EVERY red gate before isolation.
+    # Isolation may stop early; classification must never inherit that truncation.
+    for classification_gate in "${fail_gates[@]}"; do
+      classification_log_path=""
+      case "$classification_gate" in
+        python) classification_log_path="${py_log:-}" ;;
+        tsc) classification_log_path="${tsc_log:-}" ;;
+        vitest) classification_log_path="${vi_log:-}" ;;
+        build) classification_log_path="${bd_log:-}" ;;
+        *) ;;
+      esac
+      if [ -n "$classification_log_path" ] && [ -f "$classification_log_path" ]; then
+        classification_gate_args+=(
+          --gate-log "$classification_gate=$classification_log_path"
+        )
+      else
+        classification_unattributed_args+=(
+          --unattributed-gate "$classification_gate"
+        )
+      fi
+    done
+
     for g in "${fail_gates[@]}"; do
       case "$g" in
         python)
@@ -366,6 +401,36 @@ print("one_leaker_only=%s" % shlex.quote("1" if d.get("leaker_only") else ""))
       unset one_ok one_gate one_detail one_leakers one_leaker_only
     done
 
+    classification_log="$RUN_LOG_DIR/classify-failures.log"
+    if classification_json="$(hermes vision classify-gate-failures \
+        --quarantine-allowlist "$quarantine_allowlist" \
+        ${classification_gate_args[@]+"${classification_gate_args[@]}"} \
+        ${classification_unattributed_args[@]+"${classification_unattributed_args[@]}"} \
+        --json 2>"$classification_log")"; then
+      eval "$(printf '%s' "$classification_json" | python3 -c '
+import json, shlex, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+print("classification_ok=1")
+print("failure_classification=%s" % shlex.quote(d.get("failure_classification") or ""))
+for key in ("failed_test_files", "quarantined_test_files", "blocking_test_files", "unattributed_fail_gates"):
+    print("%s_json=%s" % (key, shlex.quote(json.dumps(d.get(key) or [], ensure_ascii=False))))
+print("quarantine_policy_sha256=%s" % shlex.quote(d.get("quarantine_policy_sha256") or ""))
+' 2>/dev/null)"
+      if [ "${classification_ok:-}" != "1" ] || \
+         [ -z "$failure_classification" ] || \
+         [ -z "$quarantine_policy_sha256" ]; then
+        failure_classification=""
+        log "WARN: gate failure classification returned incomplete data"
+      else
+        log "gate failures classified: $failure_classification"
+      fi
+    else
+      log "WARN: gate failure classification unavailable; landing stays blocked"
+    fi
+
     if [ "$iso_all_ok" -eq 1 ] && [ "$iso_any" -eq 1 ]; then
       use_purity=1
       if [ "${#iso_leakers[@]}" -gt 0 ]; then
@@ -386,20 +451,26 @@ print("one_leaker_only=%s" % shlex.quote("1" if d.get("leaker_only") else ""))
       log "WARN: isolate-fails skipped/unavailable; using raw first_fail"
     fi
 
-    if [ -n "$use_purity" ]; then
-      rec_args=(fail --first-fail-gate "$first_fail_gate" \
-        --first-fail-detail "$first_fail_detail" --leakers-json "$leakers_json" \
-        "${sha_args[@]+"${sha_args[@]}"}")
-      [ -n "$leaker_only" ] && rec_args+=(--leaker-only)
-      hermes vision record-gate-result "${rec_args[@]}" >/dev/null 2>&1 || \
-        hermes vision record-gate-result fail >/dev/null 2>&1 || \
-        log "WARN: vision record-gate-result fail failed"
-    elif ! hermes vision record-gate-result fail \
-      --first-fail-gate "$first_fail_gate" \
+    rec_args=(fail --first-fail-gate "$first_fail_gate" \
       --first-fail-detail "$first_fail_detail" \
-      "${sha_args[@]+"${sha_args[@]}"}" \
-      >/dev/null 2>&1; then
-      hermes vision record-gate-result fail >/dev/null 2>&1 || \
+      "${sha_args[@]+"${sha_args[@]}"}")
+    if [ -n "$use_purity" ]; then
+      rec_args+=(--leakers-json "$leakers_json")
+      [ -n "$leaker_only" ] && rec_args+=(--leaker-only)
+    fi
+    if [ -n "$failure_classification" ]; then
+      rec_args+=(--failure-classification "$failure_classification" \
+        --failed-test-files-json "$failed_test_files_json" \
+        --quarantined-test-files-json "$quarantined_test_files_json" \
+        --blocking-test-files-json "$blocking_test_files_json" \
+        --unattributed-fail-gates-json "$unattributed_fail_gates_json" \
+        --quarantine-policy-sha256 "$quarantine_policy_sha256")
+    fi
+    if ! hermes vision record-gate-result "${rec_args[@]}" >/dev/null 2>&1; then
+      fallback_args=(fail --first-fail-gate "$first_fail_gate" \
+        --first-fail-detail "$first_fail_detail" \
+        "${sha_args[@]+"${sha_args[@]}"}")
+      hermes vision record-gate-result "${fallback_args[@]}" >/dev/null 2>&1 || \
         log "WARN: vision record-gate-result fail failed"
     fi
 

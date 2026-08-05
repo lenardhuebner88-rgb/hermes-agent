@@ -37,6 +37,7 @@ from typing import Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli import kanban_db as kb
+from hermes_cli.green_gate_quarantine import MAX_FAILURE_EVIDENCE_FILES
 
 DAY_SECONDS = 86_400
 # v2: cost_per_task averages metered (>0) tasks only + explicit `coverage`
@@ -78,6 +79,8 @@ GATE_FIRST_FAIL_MAX_BYTES = 2048
 # ledger: at most this many entries, each a single redacted/length-capped line.
 GATE_LEAKERS_MAX = 25
 GATE_LEAKER_ENTRY_MAX = 200
+GATE_FAILURE_FILES_MAX = MAX_FAILURE_EVIDENCE_FILES
+GATE_FAILURE_FILE_MAX = 512
 
 # Heiler classes that indicate a *real* problem was detected (not a transient
 # blip). A task counted "autonomous" that nonetheless carries one of these is
@@ -251,6 +254,76 @@ def _build_leakers(leakers: Optional[list]) -> list[str]:
     return out
 
 
+def _build_gate_file_list(items: Optional[list]) -> list[str]:
+    """Redact and validate bounded gate evidence without dropping entries."""
+    values = list(items or [])
+    if len(values) > GATE_FAILURE_FILES_MAX:
+        raise ValueError("gate failure evidence exceeds the file-count limit")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not isinstance(item, str):
+            raise ValueError("gate failure file lists must contain strings")
+        value = " ".join(redact_sensitive_text(item, force=True).split())
+        if len(value) > GATE_FAILURE_FILE_MAX:
+            raise ValueError("gate failure evidence contains an overlong entry")
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _build_quarantine_evidence(
+    *,
+    failure_classification: Optional[str],
+    failed_test_files: Optional[list],
+    quarantined_test_files: Optional[list],
+    blocking_test_files: Optional[list],
+    unattributed_fail_gates: Optional[list],
+    quarantine_policy_sha256: Optional[str],
+) -> dict[str, object]:
+    if failure_classification is None:
+        return {}
+    classification = str(failure_classification).strip()
+    if classification not in {"environment_quarantine", "regression"}:
+        raise ValueError(f"invalid failure classification: {classification!r}")
+    if any(
+        value is None
+        for value in (
+            failed_test_files,
+            quarantined_test_files,
+            blocking_test_files,
+            unattributed_fail_gates,
+        )
+    ):
+        raise ValueError("classified gate evidence requires all four lists")
+    failed = _build_gate_file_list(failed_test_files)
+    quarantined = _build_gate_file_list(quarantined_test_files)
+    blocking = _build_gate_file_list(blocking_test_files)
+    unattributed = _build_gate_file_list(unattributed_fail_gates)
+    digest = str(quarantine_policy_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("quarantine policy digest must be 64 lowercase hex chars")
+    if set(quarantined) & set(blocking):
+        raise ValueError("quarantined and blocking files overlap")
+    if set(quarantined) | set(blocking) != set(failed):
+        raise ValueError("quarantined and blocking files must partition failures")
+    if classification == "environment_quarantine" and (
+        not failed or blocking or unattributed or failed != quarantined
+    ):
+        raise ValueError("environment quarantine evidence is not fail-closed")
+    if classification == "regression" and not (blocking or unattributed):
+        raise ValueError("regression evidence needs a blocking file or gate")
+    return {
+        "failure_classification": classification,
+        "failed_test_files": failed,
+        "quarantined_test_files": quarantined,
+        "blocking_test_files": blocking,
+        "unattributed_fail_gates": unattributed,
+        "quarantine_policy_sha256": digest,
+    }
+
+
 def record_gate_result(
     result: str,
     *,
@@ -262,6 +335,12 @@ def record_gate_result(
     leakers: Optional[list] = None,
     leaker_only: bool = False,
     head_sha: Optional[str] = None,
+    failure_classification: Optional[str] = None,
+    failed_test_files: Optional[list] = None,
+    quarantined_test_files: Optional[list] = None,
+    blocking_test_files: Optional[list] = None,
+    unattributed_fail_gates: Optional[list] = None,
+    quarantine_policy_sha256: Optional[str] = None,
 ) -> dict:
     """Append one structured green-gate record to the ledger.
 
@@ -322,6 +401,16 @@ def record_gate_result(
         cleaned_leakers = _build_leakers(leakers)
         if cleaned_leakers:
             record["leakers"] = cleaned_leakers
+        record.update(
+            _build_quarantine_evidence(
+                failure_classification=failure_classification,
+                failed_test_files=failed_test_files,
+                quarantined_test_files=quarantined_test_files,
+                blocking_test_files=blocking_test_files,
+                unattributed_fail_gates=unattributed_fail_gates,
+                quarantine_policy_sha256=quarantine_policy_sha256,
+            )
+        )
     target = path or gate_ledger_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:

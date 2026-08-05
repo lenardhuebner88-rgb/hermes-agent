@@ -25,6 +25,12 @@ from typing import Optional
 from hermes_cli import gate_leaker
 from hermes_cli import strategist
 from hermes_cli import vision_metrics as vm
+from hermes_cli.green_gate_quarantine import (
+    MAX_FAILURE_EVIDENCE_FILES,
+    classify_failures,
+    gate_file_evidence_complete,
+    load_quarantine_policy,
+)
 
 
 def build_vision_parser(subparsers) -> None:
@@ -314,6 +320,12 @@ def build_vision_parser(subparsers) -> None:
             "against the nearest earlier sha-carrying record."
         ),
     )
+    record.add_argument("--failure-classification", default=None)
+    record.add_argument("--failed-test-files-json", default=None)
+    record.add_argument("--quarantined-test-files-json", default=None)
+    record.add_argument("--blocking-test-files-json", default=None)
+    record.add_argument("--unattributed-fail-gates-json", default=None)
+    record.add_argument("--quarantine-policy-sha256", default=None)
     record.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- isolate-fails (GREEN-GATE-LEAKER-CAUSE-PURITY-S1) ---
@@ -374,6 +386,25 @@ def build_vision_parser(subparsers) -> None:
         ),
     )
     isolate.add_argument("--json", action="store_true", help="Emit JSON output")
+
+    classify = sub.add_parser(
+        "classify-gate-failures",
+        help="Classify red gate files through the exact-name quarantine policy",
+    )
+    classify.add_argument("--quarantine-allowlist", required=True)
+    classify.add_argument(
+        "--gate-log",
+        action="append",
+        default=[],
+        metavar="GATE=PATH",
+    )
+    classify.add_argument(
+        "--unattributed-gate",
+        action="append",
+        default=[],
+        metavar="GATE",
+    )
+    classify.add_argument("--json", action="store_true", help="Emit JSON output")
 
 
 def vision_command(args: argparse.Namespace) -> int:
@@ -566,6 +597,24 @@ def vision_command(args: argparse.Namespace) -> int:
             leakers=leakers,
             leaker_only=getattr(args, "leaker_only", False),
             head_sha=getattr(args, "head_sha", None),
+            failure_classification=getattr(
+                args, "failure_classification", None
+            ),
+            failed_test_files=_parse_string_list_json(
+                getattr(args, "failed_test_files_json", None)
+            ),
+            quarantined_test_files=_parse_string_list_json(
+                getattr(args, "quarantined_test_files_json", None)
+            ),
+            blocking_test_files=_parse_string_list_json(
+                getattr(args, "blocking_test_files_json", None)
+            ),
+            unattributed_fail_gates=_parse_string_list_json(
+                getattr(args, "unattributed_fail_gates_json", None)
+            ),
+            quarantine_policy_sha256=getattr(
+                args, "quarantine_policy_sha256", None
+            ),
         )
         if getattr(args, "json", False):
             print(json.dumps(record, ensure_ascii=False))
@@ -603,10 +652,33 @@ def vision_command(args: argparse.Namespace) -> int:
                 print("isolate-fails: nothing to isolate (no failing gate logs)")
         return 0
 
+    if action == "classify-gate-failures":
+        result = run_classify_gate_failures(args)
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print(result["failure_classification"])
+        return 0
+
     parser = getattr(args, "_vision_parser", None)
     if parser is not None:
         parser.print_help()
     return 0
+
+
+def _parse_string_list_json(raw: Optional[str]) -> Optional[list]:
+    """Parse a JSON list of strings, returning None for malformed input."""
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) for item in parsed
+    ):
+        return None
+    return parsed
 
 
 def _parse_leakers_json(raw: Optional[str]) -> Optional[list]:
@@ -674,3 +746,39 @@ def run_isolate_fails(args) -> dict:
         "reproduced_total": result.get("reproduced_total", 0),
         "capped": result.get("capped", False),
     }
+
+
+def run_classify_gate_failures(args) -> dict[str, object]:
+    """Parse every red gate log and apply only the checked-in exact-name list."""
+    failed_files: list[str] = []
+    unattributed_gates = [
+        str(gate).strip().lower()
+        for gate in (getattr(args, "unattributed_gate", None) or [])
+        if str(gate).strip()
+    ]
+    for spec in getattr(args, "gate_log", None) or []:
+        if "=" not in spec:
+            continue
+        gate, _, path = spec.partition("=")
+        gate = gate.strip().lower()
+        if not gate:
+            continue
+        log_text = _read_log(path.strip())
+        files = gate_leaker.parse_failed_files(gate, log_text)
+        if files and gate_file_evidence_complete(gate, log_text, files):
+            failed_files.extend(files)
+        else:
+            unattributed_gates.append(gate)
+    if not failed_files and not unattributed_gates:
+        unattributed_gates.append("missing_gate_evidence")
+    if len(set(failed_files)) > MAX_FAILURE_EVIDENCE_FILES:
+        failed_files = []
+        unattributed_gates.append("failure_evidence_overflow")
+    policy = load_quarantine_policy(
+        Path(args.quarantine_allowlist).expanduser()
+    )
+    return classify_failures(
+        failed_files,
+        unattributed_fail_gates=unattributed_gates,
+        policy=policy,
+    )

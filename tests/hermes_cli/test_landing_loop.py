@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import landing_loop as landing_module
+from hermes_cli import vision_metrics
 from hermes_cli.landing_loop import (
     BaselineProbe,
     FailureClass,
@@ -754,6 +755,192 @@ def test_nightly_fail_for_same_sha_overrides_landing_pass():
     assert probe.failure_class is FailureClass.MAIN_RED
     assert probe.source == "nightly"
     assert "rot" in probe.reason
+
+
+def _quarantine_record(
+    baseline: str,
+    *,
+    failed: list[str],
+    quarantined: list[str],
+    blocking: list[str],
+    policy_sha256: str,
+):
+    return {
+        "result": "fail",
+        "head_sha": baseline,
+        "failure_classification": (
+            "environment_quarantine" if not blocking else "regression"
+        ),
+        "failed_test_files": failed,
+        "quarantined_test_files": quarantined,
+        "blocking_test_files": blocking,
+        "unattributed_fail_gates": [],
+        "quarantine_policy_sha256": policy_sha256,
+    }
+
+
+def test_baseline_consumes_the_actual_persisted_gate_record_format(tmp_path):
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+    policy = landing_module.load_quarantine_policy(allowlist)
+    ledger = tmp_path / "green-gate-ledger.jsonl"
+    baseline = "3cca3aac0f60227bca5c6a0e1a2ee9a51ca433e3"
+    vision_metrics.record_gate_result(
+        "fail",
+        path=ledger,
+        head_sha=baseline,
+        failure_classification="environment_quarantine",
+        failed_test_files=["tests/env/test_clock.py"],
+        quarantined_test_files=["tests/env/test_clock.py"],
+        blocking_test_files=[],
+        unattributed_fail_gates=[],
+        quarantine_policy_sha256=policy.sha256,
+    )
+
+    probe = BaselineProbe.from_records(
+        baseline,
+        vision_metrics.read_gate_records(ledger),
+        quarantine_policy=policy,
+    )
+
+    assert probe.green is True
+    assert probe.quarantined_files == ("tests/env/test_clock.py",)
+
+
+def test_quarantined_environment_failure_lands_and_receipt_names_file(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("quarantine-ok")
+    commit_loop(worktree, "quarantine-ok")
+    allowlist = repo / "scripts" / "green_gate_quarantine_allowlist.json"
+    allowlist.parent.mkdir(exist_ok=True)
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+    git(repo, "add", allowlist.relative_to(repo).as_posix())
+    git(repo, "commit", "-m", "version quarantine policy")
+    baseline = git(repo, "rev-parse", "main").stdout.strip()
+    policy = landing_module.load_quarantine_policy(allowlist)
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        baseline_records=lambda: [
+            _quarantine_record(
+                baseline,
+                failed=["tests/env/test_clock.py"],
+                quarantined=["tests/env/test_clock.py"],
+                blocking=[],
+                policy_sha256=policy.sha256,
+            )
+        ],
+        gate_runner=lambda _repo, _base: (True, "gates grün"),
+    ).run()
+
+    assert outcome(run, "loop/quarantine-ok").action == "landed"
+    assert run.plan.baseline.quarantined_files == ("tests/env/test_clock.py",)
+    assert run.ledger_path is not None
+    receipt = run.ledger_path.read_text(encoding="utf-8")
+    assert "tests/env/test_clock.py" in receipt
+    assert "Quarantänisierte Umgebungsdefekte" in receipt
+
+
+def test_real_regression_blocks_even_beside_quarantined_failure(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("mixed-red")
+    commit_loop(worktree, "mixed-red")
+    allowlist = repo / "scripts" / "green_gate_quarantine_allowlist.json"
+    allowlist.parent.mkdir(exist_ok=True)
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+    git(repo, "add", allowlist.relative_to(repo).as_posix())
+    git(repo, "commit", "-m", "version quarantine policy")
+    baseline = git(repo, "rev-parse", "main").stdout.strip()
+    policy = landing_module.load_quarantine_policy(allowlist)
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        baseline_records=lambda: [
+            _quarantine_record(
+                baseline,
+                failed=[
+                    "tests/env/test_clock.py",
+                    "tests/product/test_regression.py",
+                ],
+                quarantined=["tests/env/test_clock.py"],
+                blocking=["tests/product/test_regression.py"],
+                policy_sha256=policy.sha256,
+            )
+        ],
+        gate_runner=lambda _repo, _base: pytest.fail("red baseline must stop"),
+    ).run()
+
+    assert outcome(run, "loop/mixed-red").action == "parked"
+    assert run.plan.baseline.green is False
+
+
+def test_unlisted_failure_still_blocks_landing(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("unlisted-red")
+    commit_loop(worktree, "unlisted-red")
+    allowlist = repo / "scripts" / "green_gate_quarantine_allowlist.json"
+    allowlist.parent.mkdir(exist_ok=True)
+    allowlist.write_text("[]\n", encoding="utf-8")
+    git(repo, "add", allowlist.relative_to(repo).as_posix())
+    git(repo, "commit", "-m", "version empty quarantine policy")
+    baseline = git(repo, "rev-parse", "main").stdout.strip()
+    policy = landing_module.load_quarantine_policy(allowlist)
+
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        baseline_records=lambda: [
+            _quarantine_record(
+                baseline,
+                failed=["tests/product/test_regression.py"],
+                quarantined=[],
+                blocking=["tests/product/test_regression.py"],
+                policy_sha256=policy.sha256,
+            )
+        ],
+        gate_runner=lambda _repo, _base: pytest.fail("red baseline must stop"),
+    ).run()
+
+    assert outcome(run, "loop/unlisted-red").action == "parked"
+    assert run.plan.baseline.green is False
+
+
+def test_uncommitted_allowlist_edit_cannot_authorize_landing(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("dirty-policy")
+    commit_loop(worktree, "dirty-policy")
+    allowlist = repo / "scripts" / "green_gate_quarantine_allowlist.json"
+    allowlist.parent.mkdir(exist_ok=True)
+    allowlist.write_text("[]\n", encoding="utf-8")
+    git(repo, "add", allowlist.relative_to(repo).as_posix())
+    git(repo, "commit", "-m", "version empty quarantine policy")
+    baseline = git(repo, "rev-parse", "main").stdout.strip()
+
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+    dirty_policy = landing_module.load_quarantine_policy(allowlist)
+    run = make_loop(
+        repo,
+        loops_root,
+        ledger_dir,
+        baseline_records=lambda: [
+            _quarantine_record(
+                baseline,
+                failed=["tests/env/test_clock.py"],
+                quarantined=["tests/env/test_clock.py"],
+                blocking=[],
+                policy_sha256=dirty_policy.sha256,
+            )
+        ],
+        gate_runner=lambda _repo, _base: pytest.fail("dirty policy must not open"),
+    ).run()
+
+    assert outcome(run, "loop/dirty-policy").action == "parked"
+    assert run.plan.baseline.green is False
 
 
 def test_two_runs_land_consecutively_from_dedicated_landing_evidence(git_world):
