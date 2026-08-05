@@ -54,6 +54,19 @@ dann beende den Turn.
 - Kein zweites Item „mitnehmen". Kein Scope-Creep. Lieber ehrliches BUILD_FAIL
   als ein Commit, der das done_when nur behauptet.
 
+## done_when ist eine vollständige Checkliste
+`done_when` ist nicht das Hauptziel plus optionaler Kleinkram — JEDER Punkt ist
+abzuarbeiten, inklusive explizit genannter Test-Updates in `tests:`-Dateien.
+- Änderst du UI-Text (Labels, Überschriften, Übersetzungen), greppe danach die
+  zugehörigen Test-Erwartungen auf den alten Text und ziehe sie MIT
+  (`rg -n "<alter Text>" web/src/control --include='*.test.tsx'`). „Bleibt
+  bewusst stehen" ist kein gültiger Grund, wenn `done_when` die Umstellung verlangt.
+- Ein Build, der `done_when` nur teilweise erfüllt, ist NICHT fertig — auch wenn
+  Gates grün sind. Teilziel erreicht, Rest offen = BUILD_FAIL, nicht Commit.
+(Verifier-Fail 08-05: neun `<th>`-Köpfe übersetzt, aber die zwei im `done_when`
+ausdrücklich benannten Erwartungen in `BacklogView.test.tsx:52`/`:92` blieben
+englisch → FAIL + Revert.)
+
 ## Einspruchsrecht — statt gegen besseres Wissen zu bauen
 
 Du liest als Erster den ECHTEN Code. Stellst du dabei fest, dass der Plan das falsche
