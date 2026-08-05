@@ -1664,6 +1664,93 @@ def test_land_gates_custom_all_green(tmp_path, fake_engine):
     assert ok is True
 
 
+def test_land_gates_continues_after_vitest_failure_passes_alone(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    (repo / "web").mkdir()
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir,
+        "loaded-gate",
+        "pipeline",
+        repo,
+        land_gates=["npm exec vitest -- run", "true"],
+    )
+    pack = load_pack(packs_dir, "loaded-gate")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs.get("cwd")))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                (
+                    " FAIL  src/TerminalHandoffPanel.test.tsx > retries\n"
+                    " FAIL  src/OtherPanel.test.tsx > renders\n"
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is True
+    assert "Lastartefakt: vitest" in report
+    assert "src/TerminalHandoffPanel.test.tsx" in report
+    assert "src/OtherPanel.test.tsx" in report
+    assert [call[0] for call in calls] == [
+        ["npm", "exec", "vitest", "--", "run"],
+        [
+            "node_modules/.bin/vitest",
+            "run",
+            "src/TerminalHandoffPanel.test.tsx",
+        ],
+        ["node_modules/.bin/vitest", "run", "src/OtherPanel.test.tsx"],
+        ["true"],
+    ]
+    assert calls[1][1] == str(repo / "web")
+
+
+def test_land_gates_empty_failed_file_list_stays_red(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir,
+        "poisoned-gate",
+        "pipeline",
+        repo,
+        land_gates=["npm exec vitest -- run"],
+    )
+    pack = load_pack(packs_dir, "poisoned-gate")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "================ fixture payload ================\n",
+            "",
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is False
+    assert "Lastartefakt" not in report
+    assert "rot (rc=1)" in report
+    assert calls == [["npm", "exec", "vitest", "--", "run"]]
+
+
 def test_shared_land_gates_can_reuse_collection_proof(
     tmp_path, monkeypatch
 ):
@@ -2930,6 +3017,19 @@ def test_land_happy_path_merges_tags_archives_and_freshens(tmp_path, fake_engine
     # FRESH: Branch neu von neuem main gezogen → nichts mehr ahead
     assert g(repo, "rev-list", "--count", f"main..{runner.pack.branch}").stdout.strip() == "0"
     assert "LAND ✅" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_land_records_isolated_green_failure_as_load_artifact(tmp_path, fake_engine):
+    repo, runner, _pushes = make_landable(tmp_path)
+    runner._land_gates = lambda repo, base: (
+        True,
+        "land_gates grün\nLastartefakt: vitest rot unter Last; isoliert grün: Foo.test.tsx",
+    )
+
+    assert runner.cmd_land(push=False) is True
+
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "LAND Lastartefakt: vitest rot unter Last" in ledger
 
 
 def test_land_push_false_skips_push(tmp_path, fake_engine, monkeypatch):

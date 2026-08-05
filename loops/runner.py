@@ -47,6 +47,7 @@ from typing import Literal, Mapping, NoReturn
 
 import yaml
 
+from hermes_cli.gate_leaker import build_runner, isolate_from_logs
 from hermes_constants import get_hermes_home
 from loops import engines
 
@@ -760,6 +761,41 @@ def _land_gate_env() -> dict[str, str]:
         "HERMES_LOOP_TEST_WORKERS", "4")}
 
 
+def _isolatable_gate(command: list[str], label: str = "") -> str | None:
+    """Return the per-file gate kind, or ``None`` when rerunning is unsafe."""
+    if label == "affected":
+        return "python"
+    if label == "vitest":
+        return "vitest"
+    command_text = " ".join(command).lower()
+    if "vitest" in command_text:
+        return "vitest"
+    if any(token in command_text for token in ("run-affected.sh", "run_tests.sh", "pytest")):
+        return "python"
+    return None
+
+
+def _is_load_artifact(repo: Path, gate: str | None, output: str) -> tuple[bool, str]:
+    """Prove a red per-file gate harmless by rerunning every red file alone.
+
+    ``isolate_from_logs`` deliberately fails closed for an empty/unparseable
+    failed-file list, capped reruns, timeouts, and reproduced failures.
+    """
+    if gate is None:
+        return False, ""
+    result = isolate_from_logs(
+        [(gate, output)],
+        runner_factory=lambda name: build_runner(name, repo),
+    )
+    if not result["leaker_only"]:
+        return False, ""
+    files = [entry.removeprefix(f"{gate}: ") for entry in result["leakers"]]
+    return (
+        True,
+        f"Lastartefakt: {gate} rot unter Last; isoliert grün: {', '.join(files)}",
+    )
+
+
 def _land_gates(
     repo: Path,
     base: str,
@@ -774,6 +810,7 @@ def _land_gates(
     proven gate sequence reusable without constructing a model-driven runner.
     """
     if land_gates is not None:
+        load_artifacts: list[str] = []
         for command in land_gates:
             argv = shlex.split(command)
             try:
@@ -790,11 +827,20 @@ def _land_gates(
             except (subprocess.TimeoutExpired, OSError) as exc:
                 return False, f"{command}: {exc}"
             if res.returncode != 0:
-                tail = "\n".join(
-                    ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
-                )
+                output = (res.stdout or "") + (res.stderr or "")
+                if res.returncode == 1:
+                    is_artifact, detail = _is_load_artifact(
+                        repo, _isolatable_gate(argv), output
+                    )
+                    if is_artifact:
+                        load_artifacts.append(detail)
+                        continue
+                tail = "\n".join(output.splitlines()[-15:])
                 return False, f"{command} rot (rc={res.returncode}):\n{tail}"
-        return True, "land_gates grün (" + ", ".join(land_gates) + ")"
+        report = "land_gates grün (" + ", ".join(land_gates) + ")"
+        if load_artifacts:
+            report += "\n" + "\n".join(load_artifacts)
+        return True, report
 
     steps: list[tuple[str, list[str], Path]] = []
     if include_collection:
@@ -855,6 +901,7 @@ def _land_gates(
             ("tsc", ["npx", "tsc", "-b", "--noEmit"], repo / "web"),
             ("vitest", ["npx", "vitest", "run"], repo / "web"),
         ]
+    load_artifacts: list[str] = []
     for label, command, cwd in steps:
         try:
             res = subprocess.run(
@@ -870,18 +917,27 @@ def _land_gates(
         except (subprocess.TimeoutExpired, OSError) as exc:
             return False, f"{label}: {exc}"
         if res.returncode != 0:
-            tail = "\n".join(
-                ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
-            )
+            output = (res.stdout or "") + (res.stderr or "")
+            tail = "\n".join(output.splitlines()[-15:])
             if label == "affected" and res.returncode == 3:
                 return False, f"affected nicht gelaufen (rc=3):\n{tail}"
             if label == "affected" and res.returncode == 4:
                 return False, f"affected unmapped (rc=4):\n{tail}"
+            if res.returncode == 1:
+                is_artifact, detail = _is_load_artifact(
+                    repo, _isolatable_gate(command, label), output
+                )
+                if is_artifact:
+                    load_artifacts.append(detail)
+                    continue
             return False, f"{label} rot (rc={res.returncode}):\n{tail}"
     suffix = " + frontend" if touched_web else ""
     prefix = "collection + affected" if include_collection else "affected"
     batched = " (Collection im Lauf bereits bewiesen)" if not include_collection else ""
-    return True, f"{prefix}{suffix} grün{batched}"
+    report = f"{prefix}{suffix} grün{batched}"
+    if load_artifacts:
+        report += "\n" + "\n".join(load_artifacts)
+    return True, report
 
 
 # Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht
@@ -3314,6 +3370,9 @@ class LoopRunner:
                 self.ledger_event(phase="land", verdict="blocked", fail_kind="land_gates_fail",
                                    reason=f"{rollback_report}; {report.splitlines()[0]}")
             return False
+        for line in report.splitlines():
+            if line.startswith("Lastartefakt:"):
+                self.ledger(f"LAND {line}")
         pushed = ""
         if push and self.pack.land_push:
             current = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
