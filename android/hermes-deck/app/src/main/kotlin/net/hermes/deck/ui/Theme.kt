@@ -39,9 +39,13 @@ data class DeckColors(
     val success: Color = Color(0xFF34D399),
     val info: Color = Color(0xFF38BDF8),
 ) {
-    /** The hero card's wash. Two stops only — a busier gradient reads as noise. */
+    /**
+     * The hero card's wash. Two stops only — a busier gradient reads as noise.
+     * Deliberately deeper than the accent: on the device the brighter first
+     * draft dominated the screen and flattened everything below it.
+     */
     val heroBrush: Brush
-        get() = Brush.linearGradient(listOf(Color(0xFF3B1D6E), Color(0xFF6D28D9)))
+        get() = Brush.linearGradient(listOf(Color(0xFF241046), Color(0xFF4C1D95)))
 
     val accentBrush: Brush
         get() = Brush.linearGradient(listOf(Color(0xFF8B5CF6), Color(0xFFA855F7)))

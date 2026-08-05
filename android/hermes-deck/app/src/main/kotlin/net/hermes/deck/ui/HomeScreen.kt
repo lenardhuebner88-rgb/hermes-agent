@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -61,6 +62,13 @@ fun HomeScreen(
     val syncState by viewModel.syncState.collectAsState()
     val search by viewModel.search.collectAsState()
     val filter by viewModel.filterChannel.collectAsState()
+    val decisions by viewModel.decisions.collectAsState()
+
+    // Decisions live in ordinary channel chatter, so they can only be found by
+    // scanning; do it once per screen entry rather than on every recomposition.
+    LaunchedEffect(snapshot.channels.size) {
+        if (snapshot.channels.isNotEmpty()) viewModel.loadDecisions()
+    }
 
     val channels = snapshot.channels
     val byId = channels.associateBy { it.id }
@@ -92,7 +100,11 @@ fun HomeScreen(
         item {
             val failure = (syncState as? net.hermes.deck.data.DeckRepository.SyncState.Failed)?.reason
             HeroPanel(
-                title = if (open == 0) "Nichts offen" else "$open offene Punkte",
+                title = when (open) {
+                    0 -> "Nichts offen"
+                    1 -> "1 offener Punkt"
+                    else -> "$open offene Punkte"
+                },
                 // A failed sync has to stay on screen. As a transient message it
                 // vanished after four seconds and left a screen that looked
                 // exactly like "nothing captured yet" — measured on the device.
@@ -117,6 +129,76 @@ fun HomeScreen(
                 }
             }
             Spacer(Modifier.height(DeckMetrics.gap + 12.dp))
+        }
+
+        // Hidden while searching or filtering: the decisions block is tall, and
+        // it pushed the actual search result off the screen — seen on device.
+        val showDecisions = decisions.isNotEmpty() && search.isBlank() && filter == null
+        if (showDecisions) {
+            item {
+                SectionHeader(title = "Warten auf dich", action = "${decisions.size}")
+            }
+            items(decisions.take(MAX_DECISIONS), key = { it.eventId }) { decision ->
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .width(3.dp)
+                                    .height(20.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(deck.warning),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                decision.channelName,
+                                color = deck.textFaint,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            decision.text,
+                            color = deck.textPrimary,
+                            fontSize = 14.sp,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(DeckMetrics.chipRadius))
+                                    .background(deck.success.copy(alpha = 0.16f))
+                                    .clickable { viewModel.approve(decision) }
+                                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                            ) {
+                                Text(
+                                    "Freigeben",
+                                    color = deck.success,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Text(relativeTime(decision.askedAt), color = deck.textFaint, fontSize = 11.sp)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
+            }
+            if (decisions.size > MAX_DECISIONS) {
+                item {
+                    Text(
+                        "und ${decisions.size - MAX_DECISIONS} weitere",
+                        color = deck.textFaint,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = DeckMetrics.gap),
+                    )
+                }
+            }
+            item { Spacer(Modifier.height(DeckMetrics.gap)) }
         }
 
         if (channels.isNotEmpty()) {
@@ -431,3 +513,6 @@ fun relativeTime(epochSeconds: Long): String {
         else -> "vor ${delta / 86400} Tagen"
     }
 }
+
+/** Keeps the deck readable: the rest stay one tap away behind the count. */
+private const val MAX_DECISIONS = 3

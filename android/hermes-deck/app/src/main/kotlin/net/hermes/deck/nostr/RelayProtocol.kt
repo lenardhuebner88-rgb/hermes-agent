@@ -147,6 +147,17 @@ object RelayProtocol {
         put("limit", limit)
     }
 
+    /**
+     * Recent plain messages in a channel, for finding decisions that start with
+     * the stop sign. There is no tag to filter on — the marker lives in the
+     * content — so this pulls a bounded window and sifts it on the client.
+     */
+    fun decisionFilter(channelId: String, limit: Int = 120): JSONObject = JSONObject().apply {
+        put("kinds", JSONArray().put(Kind.CHANNEL_MESSAGE))
+        put("#h", JSONArray().put(channelId))
+        put("limit", limit)
+    }
+
     fun threadFilter(rootEventId: String, limit: Int = 200): JSONObject = JSONObject().apply {
         put("kinds", JSONArray().put(Kind.CHANNEL_MESSAGE).put(Kind.MESSAGE_EDIT))
         put("#e", JSONArray().put(rootEventId))

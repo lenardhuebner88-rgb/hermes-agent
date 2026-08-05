@@ -178,6 +178,56 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun uploadAttachment(bytes: ByteArray, mime: String, name: String): Result<Attachment> =
         runCatching { repository.uploadAttachment(bytes, mime, name) }
 
+    // --- Thread und Freigaben ---------------------------------------------
+
+    private val _thread = MutableStateFlow<List<net.hermes.deck.nostr.NostrEvent>>(emptyList())
+    val thread: StateFlow<List<net.hermes.deck.nostr.NostrEvent>> = _thread.asStateFlow()
+
+    private val _threadLoading = MutableStateFlow(false)
+    val threadLoading: StateFlow<Boolean> = _threadLoading.asStateFlow()
+
+    fun loadThread(task: DeckTask) = viewModelScope.launch {
+        _threadLoading.value = true
+        _thread.value = emptyList()
+        _thread.value = repository.thread(task)
+        _threadLoading.value = false
+    }
+
+    fun replyTo(task: DeckTask, text: String) = viewModelScope.launch {
+        if (text.isBlank()) return@launch
+        runCatching { repository.reply(task, text) }
+            .onSuccess {
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) "Antwort gesendet." else "Antwort wartet auf Verbindung."
+                loadThread(task)
+            }
+            .onFailure { _message.value = it.message ?: "Antwort fehlgeschlagen." }
+    }
+
+    private val _decisions = MutableStateFlow<List<DeckRepository.Decision>>(emptyList())
+    val decisions: StateFlow<List<DeckRepository.Decision>> = _decisions.asStateFlow()
+
+    private val _decisionsLoading = MutableStateFlow(false)
+    val decisionsLoading: StateFlow<Boolean> = _decisionsLoading.asStateFlow()
+
+    fun loadDecisions() = viewModelScope.launch {
+        _decisionsLoading.value = true
+        _decisions.value = repository.openDecisions()
+        _decisionsLoading.value = false
+    }
+
+    fun approve(decision: DeckRepository.Decision) = viewModelScope.launch {
+        runCatching { repository.approve(decision) }
+            .onSuccess {
+                // Take it off the list at once; the relay round-trip only
+                // confirms what the user already decided.
+                _decisions.value = _decisions.value.filterNot { it.eventId == decision.eventId }
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) "Freigegeben." else "Freigabe wartet auf Verbindung."
+            }
+            .onFailure { _message.value = it.message ?: "Freigabe fehlgeschlagen." }
+    }
+
     fun channelsById(channels: List<Channel>): Map<String, Channel> = channels.associateBy { it.id }
 
     // --- Buzz agents via the Hermes dashboard -----------------------------

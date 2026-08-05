@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -189,7 +190,13 @@ fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> U
     val deck = LocalDeck.current
     val snapshot by viewModel.snapshot.collectAsState()
     val channel = snapshot.channels.firstOrNull { it.id == task.channelId }
+    val thread by viewModel.thread.collectAsState()
+    val threadLoading by viewModel.threadLoading.collectAsState()
+    val me = viewModel.settings.pubkeyHex
     var note by remember { mutableStateOf("") }
+    var answer by remember { mutableStateOf("") }
+
+    LaunchedEffect(task.id) { viewModel.loadThread(task) }
 
     SheetScaffold(title = channel?.displayName ?: "Aufgabe", onDismiss = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -225,6 +232,48 @@ fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> U
             if (task.attachments.isNotEmpty()) {
                 Spacer(Modifier.height(DeckMetrics.gap + 4.dp))
                 AttachmentRow(task.attachments, uploading = false, onAdd = null)
+            }
+
+            Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
+            Text(
+                if (thread.isEmpty()) "VERLAUF" else "VERLAUF (${thread.size})",
+                color = deck.textFaint,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(8.dp))
+            when {
+                threadLoading -> Text("Lädt aus Buzz …", color = deck.textFaint, fontSize = 12.sp)
+                thread.isEmpty() -> Text("Noch keine Antworten.", color = deck.textFaint, fontSize = 12.sp)
+                else -> thread.forEach { event ->
+                    val mine = event.pubkey == me
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (mine) deck.accentSoft else deck.surfaceRaised)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    ) {
+                        Column {
+                            Text(
+                                if (mine) "Du" else event.pubkey.take(8),
+                                color = if (mine) deck.accent else deck.edgeFor(event.pubkey),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(event.content, color = deck.textSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            MultilineField(placeholder = "Antworten …", value = answer, minHeight = 44) { answer = it }
+            Spacer(Modifier.height(8.dp))
+            SecondaryButton("Antwort in den Thread") {
+                viewModel.replyTo(task, answer)
+                answer = ""
             }
 
             Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
