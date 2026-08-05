@@ -24126,7 +24126,15 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 elif kind == "nonzero_exit":
                     error_text = f"pid {pid} exited with code {code}"
                     event_kind = "crashed"
-                    event_payload = {"pid": pid, "claimer": row["claim_lock"]}
+                    event_payload = {
+                        "pid": pid,
+                        "claimer": row["claim_lock"],
+                        "exit_kind": kind,
+                        "exit_code": code,
+                    }
+                    event_payload.update(
+                        _protocol_violation_worker_log_fields(row["id"])
+                    )
                 elif kind == "signaled":
                     error_text = f"pid {pid} killed by signal {code}"
                     event_kind = "crashed"
@@ -29367,7 +29375,7 @@ def _kanban_heartbeat_counts_for_conn(
         "self_healed_today": 0,
         "parked_open": 0,
         "open_escalations": 0,
-        "stranded": 0,
+        "decision_queue": 0,
     }
 
     for row in conn.execute(
@@ -29404,7 +29412,9 @@ def _kanban_heartbeat_counts_for_conn(
     counts["open_escalations"] += int(row["n"] or 0) if row else 0
 
     try:
-        counts["stranded"] += int(decision_queue(conn, now=now).get("count") or 0)
+        counts["decision_queue"] += int(
+            decision_queue(conn, now=now).get("count") or 0
+        )
     except Exception:
         pass
     return counts
@@ -29415,7 +29425,7 @@ def _merge_count_dicts(items: Iterable[dict]) -> dict:
         "self_healed_today": 0,
         "parked_open": 0,
         "open_escalations": 0,
-        "stranded": 0,
+        "decision_queue": 0,
     }
     for item in items:
         for key in merged:
@@ -29451,7 +29461,7 @@ def write_kanban_dispatcher_heartbeat(
                 "self_healed_today": 0,
                 "parked_open": 0,
                 "open_escalations": 0,
-                "stranded": 0,
+                "decision_queue": 0,
             }
         board_counts.append(counts)
         boards_payload.append({"slug": slug, "counts": counts})

@@ -2285,6 +2285,10 @@ class GatewayKanbanWatchersMixin:
             # locked/corrupt read-only probe cannot suppress a real flush.
             try:
                 if _kb.count_notify_subs(board=slug) == 0:
+                    logger.debug(
+                        "kanban notifier: stall-flush sweep board %s has no subscriptions; skipping open",
+                        slug,
+                    )
                     continue
             except Exception:
                 pass

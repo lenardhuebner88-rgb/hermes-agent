@@ -343,10 +343,15 @@ def _integration_gate_for_repo(
 
 GIT_TIMEOUT_SECONDS = 120
 MERGE_TIMEOUT_SECONDS = 300
-# Must comfortably exceed a worst-case post-merge gate (ruff 300s +
-# pytest 1200s + tsc 600s) so a second completer waits instead of parking
-# on pure lock contention.
-LOCK_TIMEOUT_SECONDS = 2400
+# Must match the worker/loop budget in scripts/run-affected.sh so the same
+# affected suite does not inherit a narrower deadline in the integrator.
+POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS = 3600
+# Must comfortably exceed the worst-case post-merge gate (ruff 300s +
+# pytest 3600s + tsc 600s = 4500s).  The extra 300s ensures a second
+# completer waits instead of parking on pure lock contention.
+LOCK_TIMEOUT_SECONDS = (
+    POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS + 300 + 600 + 300
+)
 
 # S6: Disk-Preflight vor Merge-Gate — klare Meldung statt kryptischem ENOSPC.
 # Default 2 GiB: Validation-Worktree + Vitest/tsc-Scratch unter Last.
@@ -6112,7 +6117,7 @@ def _default_quick_gate_pytest(
         return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
             [runner, *modules],
-            repo_root, 1200, notes,
+            repo_root, POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS, notes,
         )
     notes.append("pytest skipped (no applicable Python production paths)")
     return None
@@ -8347,10 +8352,13 @@ def maybe_integrate_on_complete(
     sibling commits and spawn phantom fixers (Opus R2-1).
     """
     row = conn.execute(
-        "SELECT workspace_path, skills FROM tasks WHERE id = ?", (task_id,)
+        "SELECT workspace_path, skills, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
     ).fetchone()
     if not row:
         return None
+    from hermes_cli import kanban_db as kb
+
     try:
         task_skills = json.loads(row["skills"]) if row["skills"] else []
     except (TypeError, json.JSONDecodeError):
@@ -8359,6 +8367,16 @@ def maybe_integrate_on_complete(
     # lives. Their chain worktree is worker isolation only, not an integration
     # target; the pinned repair skill is the durable card-level discriminator.
     if isinstance(task_skills, list) and "loop-branch-repair" in task_skills:
+        kb._append_event(
+            conn,
+            task_id,
+            "integration_skipped",
+            {
+                "reason": "loop_branch_repair",
+                "skills": task_skills,
+            },
+            run_id=row["current_run_id"],
+        )
         return None
     if not row["workspace_path"]:
         return None
@@ -8366,8 +8384,6 @@ def maybe_integrate_on_complete(
     if provisioned is None:
         return None
     repo_root, root_id, wt = provisioned
-
-    from hermes_cli import kanban_db as kb
 
     # Ensure lane-scope fixer lifecycle consumer is registered (no kanban_db
     # edit — self-register via the public hook API whenever a provisioned

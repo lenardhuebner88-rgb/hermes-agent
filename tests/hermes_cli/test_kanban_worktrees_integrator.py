@@ -109,6 +109,17 @@ def test_loop_branch_repair_completion_skips_chain_integration(kanban_home, repo
 
         assert outcome is None
         assert not kwt._branch_is_ancestor(repo, loop_commit, "main")
+        event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'integration_skipped' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        assert event is not None
+        assert json.loads(event["payload"]) == {
+            "reason": "loop_branch_repair",
+            "skills": ["loop-branch-repair"],
+        }
 
 
 def _acquire_writer_lease(conn, task_id, worktree):
