@@ -392,8 +392,10 @@ async def test_matrix_status_marks_malformed_persisted_token_totals_unavailable(
 
     result = await runner._handle_status_command(_event("/status", source))
 
-    assert "**Cumulative API tokens (re-sent each call):** unavailable" in result
-    assert "**Cumulative API tokens (re-sent each call):** 0" not in result
+    # Wortlaut kommt aus locales/en.yaml -> gateway.status.tokens (Upstream hat ihn
+    # beim T1-Sync umformuliert). Geprueft wird die Semantik: "unavailable", nie "0".
+    assert "**Lifetime tokens billed:** unavailable" in result
+    assert "**Lifetime tokens billed:** 0" not in result
 
 
 @pytest.mark.asyncio
