@@ -4570,6 +4570,102 @@ def test_plan_stop_reaches_the_unit_as_nonzero_exit(tmp_path, fake_engine, monke
     assert calls.count("plan") == 2, f"erwartet 2x plan (1 Retry), got {calls}"
 
 
+def test_guard_clean_failure_is_loud_for_non_autoland(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Ein fehlender Worktree muss Ledger, Notify und roten Unit-Exit liefern.
+
+    ``ensure_wt`` wird nur an der Prozessgrenze ausgeschaltet, damit die echte
+    ``guard_clean``-Fehlerform (Worktree fehlt) durch ``cmd_night`` und ``main``
+    läuft. Das Pack hat bewusst kein Autoland: genau dort wurde der Fehler bis
+    2026-08-05 als erfolgreicher systemd-Lauf gemeldet.
+    """
+    _, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "guard-stop-rc", "pipeline", repo)
+    pack = runner_module.load_pack(tmp_path / "packs", "guard-stop-rc")
+    assert pack.autoland is False, "Fixture muss den Mehrheitsfall abbilden"
+
+    notifies: list[str] = []
+    monkeypatch.setattr(
+        runner_module.LoopRunner, "ensure_wt", lambda self, fresh=False: None
+    )
+    monkeypatch.setattr(
+        runner_module.LoopRunner, "notify", lambda self, msg: notifies.append(msg)
+    )
+
+    rc = runner_module.main([
+        "--pack", "guard-stop-rc",
+        "--cmd", "night",
+        "--skip-plan",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == 3, f"guard_clean-Abbruch muss den RuntimeError-Pfad liefern, got {rc}"
+    assert calls == [], "Vor dem Guard-Abbruch darf keine Engine-Phase starten"
+    ledger_lines = (
+        tmp_path / "state" / "guard-stop-rc" / "LEDGER.md"
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(ledger_lines) == 1, ledger_lines
+    assert "GUARD-CLEAN" in ledger_lines[0]
+    assert "Worktree fehlt" in ledger_lines[0]
+    assert len(notifies) == 1, notifies
+    assert "GUARD-CLEAN" in notifies[0]
+    assert "Worktree fehlt" in notifies[0]
+
+
+@pytest.mark.parametrize(
+    ("night_ok", "expected_rc"),
+    [(True, 0), (False, 4)],
+)
+def test_non_autoland_night_exit_follows_result(
+    tmp_path, fake_engine, monkeypatch, night_ok, expected_rc
+):
+    """Review-Packs bleiben bei Erfolg grün, verschlucken aber kein False mehr."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "review-exit", "pipeline", repo)
+    monkeypatch.setattr(
+        runner_module.LoopRunner,
+        "cmd_night",
+        lambda self, fresh=False, skip_plan=False: night_ok,
+    )
+
+    rc = runner_module.main([
+        "--pack", "review-exit",
+        "--cmd", "night",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == expected_rc
+
+
+@pytest.mark.parametrize(
+    ("night_ok", "expected_rc"),
+    [(True, 0), (False, 4)],
+)
+def test_autoland_night_exit_contract_is_unchanged(
+    tmp_path, fake_engine, monkeypatch, night_ok, expected_rc
+):
+    """Der vorhandene Autoland-Vertrag bleibt Erfolg=0, Fehlausgang=4."""
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner_module.LoopRunner,
+        "cmd_night",
+        lambda self, fresh=False, skip_plan=False: night_ok,
+    )
+
+    rc = runner_module.main([
+        "--pack", pack.name,
+        "--cmd", "night",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == expected_rc
+
+
 def test_cmd_night_dry_zero_plans_no_retry(tmp_path, fake_engine, monkeypatch):
     """Echter DRY: 0 Pläne + last-status DRY → einmal planen, keine Anomalie."""
     behaviors, calls = fake_engine
