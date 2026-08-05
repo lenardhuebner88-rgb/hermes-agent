@@ -2654,6 +2654,78 @@ def test_sweep_stops_on_blocked_streak(tmp_path, fake_engine):
     assert calls == ["round", "round"]  # fail_streak=2
 
 
+def test_sweep_prepared_requires_artifacts_and_notifies(tmp_path, fake_engine, monkeypatch):
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs",
+        "prepared",
+        "sweep",
+        repo,
+        params={
+            "required_artifacts": "dead-writer-unstick.patch,test_dead_writer_unstick.py"
+        },
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "prepared")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def prepare(values, _cwd):
+        state_dir = Path(values["STATE"])
+        (state_dir / "dead-writer-unstick.patch").write_text("patch\n", encoding="utf-8")
+        (state_dir / "test_dead_writer_unstick.py").write_text("test\n", encoding="utf-8")
+        (state_dir / "last-status").write_text(
+            "PREPARED dead-writer-unstick\n", encoding="utf-8"
+        )
+        return engines.EngineResult(
+            rc=0, output="PREPARED dead-writer-unstick", usage_limit=False
+        )
+
+    behaviors["round"] = prepare
+    notices: list[str] = []
+    monkeypatch.setattr(runner, "notify", notices.append)
+
+    assert runner.cmd_run() == 0
+    assert (
+        "prepared: PREPARED — dead-writer-unstick.patch, test_dead_writer_unstick.py"
+        in notices
+    )
+    assert "PREPARED: Artefakte dead-writer-unstick.patch, test_dead_writer_unstick.py" in (
+        runner.ledger_path.read_text(encoding="utf-8")
+    )
+
+
+def test_sweep_prepared_without_required_artifact_becomes_blocked(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs",
+        "prepared-missing",
+        "sweep",
+        repo,
+        params={"required_artifacts": "patch.diff,repro.py"},
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "prepared-missing")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def incomplete(values, _cwd):
+        state_dir = Path(values["STATE"])
+        (state_dir / "patch.diff").write_text("patch\n", encoding="utf-8")
+        (state_dir / "last-status").write_text("PREPARED incomplete\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="PREPARED incomplete", usage_limit=False)
+
+    behaviors["round"] = incomplete
+    notices: list[str] = []
+    monkeypatch.setattr(runner, "notify", notices.append)
+
+    assert runner.cmd_run() == 0
+    assert runner.last_status() == "BLOCKED PREPARED-Artefakte fehlen: repro.py"
+    assert not any("PREPARED —" in notice for notice in notices)
+
+
 def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
     import json
 

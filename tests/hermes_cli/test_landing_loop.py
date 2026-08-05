@@ -227,6 +227,25 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
     assert git(repo, "rev-parse", "loop/green").stdout.strip() == new_main
 
 
+def test_dead_writer_unstick_branch_is_parked_before_kanban_db_merge(git_world):
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    worktree = add_loop("dead-writer-unstick")
+    target = worktree / "hermes_cli" / "kanban_db.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("SHOULD_NOT_LAND = True\n", encoding="utf-8")
+    git(worktree, "add", "hermes_cli/kanban_db.py")
+    git(worktree, "commit", "-m", "unsafe dead-writer patch")
+    main_before = git(repo, "rev-parse", "main").stdout.strip()
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    item = outcome(run, "loop/dead-writer-unstick")
+    assert item.action == "parked"
+    assert "eingecheckte Landing-Policy" in item.reason
+    assert git(repo, "rev-parse", "main").stdout.strip() == main_before
+    assert not (repo / "hermes_cli" / "kanban_db.py").exists()
+
+
 def test_landing_multiple_branches_accepts_behind_change_caused_by_this_run(
     git_world,
 ):

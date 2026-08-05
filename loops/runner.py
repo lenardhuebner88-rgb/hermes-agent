@@ -2774,6 +2774,34 @@ class LoopRunner:
                 self.ledger_event(round=rnd, phase="sweep", verdict="blocked", fail_kind="usage_limit")
                 break
             status = "TIMEOUT" if result.timed_out else self.last_status()
+            required_artifacts = tuple(
+                name.strip()
+                for name in str(self.pack.params.get("required_artifacts", "")).split(",")
+                if name.strip()
+            )
+            if status.startswith("PREPARED") and required_artifacts:
+                unsafe = [
+                    name
+                    for name in required_artifacts
+                    if Path(name).is_absolute() or Path(name).name != name or name in {".", ".."}
+                ]
+                if unsafe:
+                    status = f"BLOCKED PREPARED-Artefaktnamen ungültig: {', '.join(unsafe)}"
+                    self.status_path.write_text(status + "\n", encoding="utf-8")
+                else:
+                    missing = [
+                        name
+                        for name in required_artifacts
+                        if not (self.state / name).is_file()
+                        or (self.state / name).stat().st_size == 0
+                    ]
+                    if missing:
+                        status = f"BLOCKED PREPARED-Artefakte fehlen: {', '.join(missing)}"
+                        self.status_path.write_text(status + "\n", encoding="utf-8")
+                    else:
+                        artifacts = ", ".join(required_artifacts)
+                        self.ledger(f"PREPARED: Artefakte {artifacts}")
+                        self.notify(f"{self.pack.name}: PREPARED — {artifacts}")
             # "?" las sich als "Status unbekannt, vermutlich ok". Der Grund ist
             # bekannt: die Runde hat den Statuskontrakt nicht erfüllt.
             self.ledger(
