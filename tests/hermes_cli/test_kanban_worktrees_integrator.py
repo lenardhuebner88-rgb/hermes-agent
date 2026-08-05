@@ -1636,6 +1636,30 @@ def test_affected_pytest_module_mapping(repo):
     assert mods == ["tests/hermes_cli/", "tests/hermes_cli/test_kanban_db.py"]
 
 
+def test_integrator_affected_mapping_uses_post_merge_budget(
+    repo, monkeypatch,
+):
+    captured: dict[str, object] = {}
+
+    def fake_mapping(repo_root, changed_files, *, mode, budget_env):
+        captured["repo_root"] = repo_root
+        captured["changed_files"] = changed_files
+        captured["mode"] = mode
+        captured["budget"] = budget_env["HERMES_AFFECTED_TIME_BUDGET"]
+        return []
+
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1200")
+    monkeypatch.setattr(kwt, "_shared_affected_pytest_modules", fake_mapping)
+
+    assert kwt._affected_pytest_modules(repo, ["hermes_cli/kanban_db.py"]) == []
+    assert captured == {
+        "repo_root": repo,
+        "changed_files": ["hermes_cli/kanban_db.py"],
+        "mode": "integration",
+        "budget": str(kwt.POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS),
+    }
+
+
 def test_affected_pytest_module_matches_submodule_from_import_sibling(repo):
     (repo / "hermes_cli").mkdir(parents=True)
     (repo / "tests" / "hermes_cli").mkdir(parents=True)

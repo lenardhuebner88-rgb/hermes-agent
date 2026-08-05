@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from hermes_cli.affected_test_budget import AFFECTED_TIME_BUDGET_ENV
 from hermes_cli.affected_test_mapping import (
     EXPLICIT_TEST_PATTERNS,
     GitTimeoutError as AffectedTestGitTimeout,
@@ -5199,11 +5200,16 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
 
 def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[str]:
     """Compatibility wrapper around the shared integration classifier."""
+    budget_env = dict(os.environ)
+    budget_env[AFFECTED_TIME_BUDGET_ENV] = str(
+        POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS
+    )
     try:
         return _shared_affected_pytest_modules(
             repo_root,
             changed_files,
             mode="integration",
+            budget_env=budget_env,
         )
     except AffectedTestGitTimeout as exc:
         raise WorktreeTimeout(str(exc)) from exc
