@@ -561,6 +561,35 @@ def classify_gate_nights(records: list[dict]) -> dict[str, str]:
     return out
 
 
+def repaired_red_gate_nights(records: list[dict]) -> list[str]:
+    """Return red dates whose real failure was followed by a same-day pass.
+
+    This is deliberately additive to :func:`classify_gate_nights`: a later pass
+    makes the repair visible but never demotes the night's real regression.
+    Ledger order is append order and therefore run chronology.
+    """
+    classifications = classify_gate_nights(records)
+    grouped: dict[str, list[dict]] = {}
+    for rec in records:
+        date = str(rec.get("date") or "")
+        if date:
+            grouped.setdefault(date, []).append(rec)
+
+    repaired: list[str] = []
+    for date, day_records in grouped.items():
+        if classifications.get(date) != NIGHT_RED:
+            continue
+        saw_real_fail = False
+        for rec in day_records:
+            result = str(rec.get("result", "")).lower()
+            if result != "pass" and not bool(rec.get("leaker_only")):
+                saw_real_fail = True
+            elif result == "pass" and saw_real_fail:
+                repaired.append(date)
+                break
+    return sorted(repaired)
+
+
 def _latest_record_result(records: list[dict]) -> tuple[Optional[str], Optional[str]]:
     """(result, ts) of the newest record by epoch — for the raw ``last_result``
     surface (unchanged by neutral semantics: it reports what the most recent run
@@ -625,6 +654,7 @@ def derive_gate_streak(records: list[dict]) -> dict:
         "total_recorded_nights": len(nights),
         "last_result": latest_result,
         "last_ts": latest_ts,
+        "repaired_red_dates": repaired_red_gate_nights(records),
     }
 
 

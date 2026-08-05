@@ -88,6 +88,7 @@ GATE_TRIAGE_AUTHOR = "green-gate-persistent-red-triage"
 # Re-export the N-of-M triage defaults so the CLI layer has one import site.
 GATE_TRIAGE_MIN_REDS = vision_metrics.GATE_TRIAGE_MIN_REDS
 GATE_TRIAGE_WINDOW = vision_metrics.GATE_TRIAGE_WINDOW
+GATE_TRIAGE_ARCHIVED_COOLDOWN_DAYS = 7
 
 # Re-export the default streak threshold so the CLI layer has one import site.
 GATE_FIX_MIN_NIGHTS = vision_metrics.GATE_FIX_MIN_NIGHTS
@@ -634,11 +635,10 @@ def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
     if red_files is None:
         red_files = cause.get("red_files") or set()
     token = _cost_lane_token(gate) or "UNKNOWN"
-    # Short, stable digest of the file-set fingerprint so two distinct red-file
-    # sets on the same gate get distinct keys while an identical set keys
-    # identically (idempotent). Deterministic (sha1) — safe for idempotency.
-    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
-    key = f"GATE-TRIAGE-{token}-{digest}"
+    # The operator-facing topic is the gate slice, not whichever test files
+    # happened to be red on the anchor night. Rotating failures must refresh
+    # one held triage spec instead of minting one chain per file-set digest.
+    key = f"GATE-TRIAGE-{token}"
     file_list = ", ".join(sorted(red_files)) if red_files else "(unbekannt)"
     return Lever(
         key=key,
@@ -1955,9 +1955,9 @@ def propose_persistent_red_triage(
     recorded nights are red — regardless of whether the first_fail cause
     changed between nights — does it ingest a single ``freigabe:operator``
     (HELD) Triage-PlanSpec listing the CURRENTLY red test files (AC-1).
-    Never auto-deploy, never auto-release. Re-running while the same red file
-    set persists hits the ingest idempotency key and reports
-    ``already_ingested`` instead of minting a second chain (AC-2). When the head
+    Never auto-deploy, never auto-release. Re-running for the same gate topic
+    refreshes the held source spec and reports ``already_ingested`` instead of
+    minting a second chain, even when the red file set rotated (AC-2). When the head
     is green or fewer than ``min_reds`` reds are in the window it is a no-op
     (``triggered: False``) — idle is correct, and a single isolated flake-night
     is deliberately NOT triage-opening (AC-2 guard).
@@ -1969,7 +1969,7 @@ def propose_persistent_red_triage(
     fix-PlanSpec AND a persistent-red triage-PlanSpec, each HELD for the
     operator. They are different lenses (one names a recurring cause to fix, the
     other flags a persistently-red head), not duplicates; within each path the
-    fingerprint/key dedup prevents re-opening the SAME spec on re-runs. The
+    gate-topic key dedup prevents re-opening the SAME spec on re-runs. The
     existing same-cause path remains UNCHANGED (AC-2:
     no Doppel-Ingest).
     """
@@ -2021,6 +2021,60 @@ def propose_persistent_red_triage(
         return summary
 
     spec_path = _write_spec(out_dir, lever)
+    resolved_source = str(spec_path.resolve())
+    conn = kanban_db.connect(board=board)
+    try:
+        active_root = None
+        recent_archived_root = None
+        rows = conn.execute(
+            """
+            SELECT t.id, t.status, e.payload,
+                   (SELECT MAX(a.created_at)
+                      FROM task_events AS a
+                     WHERE a.task_id = t.id
+                       AND a.kind = 'archived') AS archived_at
+              FROM tasks AS t
+              JOIN task_events AS e ON e.task_id = t.id
+             WHERE e.kind = 'specified'
+             ORDER BY t.created_at DESC, t.id DESC
+            """
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"] or "{}")
+            if (
+                payload.get("source") == "planspec_ingest"
+                and str(Path(payload.get("path", "")).resolve()) == resolved_source
+            ):
+                if row["status"] not in {"done", "archived"}:
+                    active_root = row
+                    break
+                if (
+                    row["status"] == "archived"
+                    and row["archived_at"] is not None
+                    and int(row["archived_at"])
+                    >= int(time.time()) - (GATE_TRIAGE_ARCHIVED_COOLDOWN_DAYS * 86400)
+                ):
+                    recent_archived_root = row
+    finally:
+        conn.close()
+    if active_root is not None:
+        summary["ingested"] = {
+            "key": lever.key,
+            "title": lever.title,
+            "path": resolved_source,
+            "root_task_id": active_root["id"],
+            "subtask_count": None,
+            "freigabe": "operator",
+            "already_ingested": True,
+            "updated_existing": True,
+        }
+        return summary
+    if recent_archived_root is not None:
+        summary["ingested"] = None
+        summary["skipped_recent_topic"] = True
+        summary["recent_root_task_id"] = recent_archived_root["id"]
+        return summary
+
     parsed_spec = planspecs.parse_binding_planspec(spec_path, plans_root=Path(out_dir))
     idempotency_key = planspecs.ingest_idempotency_key(parsed_spec)
     conn = kanban_db.connect(board=board)
@@ -2046,6 +2100,7 @@ def propose_persistent_red_triage(
     summary["ingested"] = {
         "key": lever.key,
         "title": lever.title,
+        "path": resolved_source,
         "root_task_id": result.get("root_task_id"),
         "subtask_count": result.get("subtask_count"),
         "freigabe": result.get("freigabe"),
@@ -3914,17 +3969,20 @@ def run_persistent_red_triage(args) -> dict[str, Any]:
     GREEN-GATE-PERSISTENT-RED-TRIAGE-S1 — the N-of-M changing-cause trigger,
     orthogonal to :func:`run_gate_fix` (same-cause). When the head is red AND
     >=N reds in the last M nights, ingests a single HELD Triage-PlanSpec
-    listing the currently-red test files; idempotent on the file-set fingerprint.
-    """
+    listing the currently-red test files; idempotent on the gate topic."""
     state_dir = default_state_dir()
     out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
-    return propose_persistent_red_triage(
-        board=getattr(args, "board", None),
-        out_dir=out_dir,
-        min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
-        window=getattr(args, "window", GATE_TRIAGE_WINDOW),
-        do_ingest=not getattr(args, "dry_run", False),
-    )
+    # Both the nightly script and the propose cron may enter here. Serialize
+    # across processes so the topic-level existence check and ingest form one
+    # single-flight section rather than racing into two held roots.
+    with outcomes.shared_state_lock(out_dir / ".triage-check"):
+        return propose_persistent_red_triage(
+            board=getattr(args, "board", None),
+            out_dir=out_dir,
+            min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
+            window=getattr(args, "window", GATE_TRIAGE_WINDOW),
+            do_ingest=not getattr(args, "dry_run", False),
+        )
 
 
 def run_deflake_check(args) -> dict[str, Any]:
