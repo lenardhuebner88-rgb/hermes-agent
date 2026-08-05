@@ -653,6 +653,44 @@ def test_draft_without_grounding_is_blocked(board_home, monkeypatch):
         assert strategist_surface.held_operator_proposals(conn) == []
 
 
+def test_classified_noise_draft_is_blocked_before_ingest(board_home, monkeypatch, tmp_path):
+    _patch_budget(monkeypatch, 20.0)
+    notes_dir = tmp_path / "notes"
+    notes_dir.mkdir()
+    (notes_dir / "harvest_candidates.json").write_text(
+        json.dumps(
+            {
+                "noise_candidates": [
+                    {
+                        "suggested_key": "disposition-di_transient",
+                        "noise_class": "transient",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    draft = _grounded_draft(key="disposition-di_transient")
+
+    result = strategist.propose(
+        board=None,
+        out_dir=board_home / "specs",
+        notes_dir=notes_dir,
+        drafts=[draft],
+    )
+
+    assert result["ingested"] == []
+    assert result["gated_out"] == [
+        {
+            "key": "disposition-di_transient",
+            "title": draft["title"],
+            "reason": "disposition_noise:transient",
+        }
+    ]
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
 def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
     """(b) A draft WITH a non-empty grounding field is ingested and the evidence
     is visible in the held root body AND on the held_operator_proposals surface."""
