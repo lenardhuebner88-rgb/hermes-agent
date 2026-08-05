@@ -53,6 +53,7 @@ fun ControlCard(
     onShowDecisions: () -> Unit,
     onShowOverdue: () -> Unit,
     onShowToday: () -> Unit,
+    onShowMentions: () -> Unit,
     onSync: () -> Unit,
 ) {
     val deck = LocalDeck.current
@@ -64,7 +65,13 @@ fun ControlCard(
                 Spacer(Modifier.height(12.dp))
                 Divider()
                 Spacer(Modifier.height(12.dp))
-                WaitingBand(summary.waiting, onShowDecisions, onShowOverdue, onShowToday)
+                WaitingBand(
+                    summary.waiting,
+                    onShowDecisions,
+                    onShowOverdue,
+                    onShowToday,
+                    onShowMentions,
+                )
             }
 
             summary.capacity?.let { capacity ->
@@ -152,6 +159,7 @@ private fun WaitingBand(
     onShowDecisions: () -> Unit,
     onShowOverdue: () -> Unit,
     onShowToday: () -> Unit,
+    onShowMentions: () -> Unit,
 ) {
     val deck = LocalDeck.current
     Column {
@@ -173,9 +181,10 @@ private fun WaitingBand(
                 WaitChip("Heute", waiting.dueToday, deck.accent, onShowToday)
             }
             if (waiting.mentions > 0) {
-                // No action: reading the mention is Buzz's job, and a chip that
-                // opened a half-rendered conversation here would be worse.
-                WaitChip("Erwähnt", waiting.mentions, deck.textSecondary, null)
+                // Reading the mention is still Buzz's job — the chip opens the
+                // list and each row hands the message over, it does not render
+                // a conversation here.
+                WaitChip("Erwähnt", waiting.mentions, deck.textSecondary, onShowMentions)
             }
         }
     }

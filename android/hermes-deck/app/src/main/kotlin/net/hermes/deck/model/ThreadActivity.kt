@@ -111,30 +111,13 @@ object ThreadActivity {
         entries.map { it.lastAuthorPubkey }.toSet()
 
     /**
-     * Mentions of [me] that arrived after my own last word in the same channel.
+     * How many mentions of [me] are still waiting — the size of [Mention.of].
      *
-     * Lives here because it sifts the same chatter pool. The per-channel cut is
-     * what makes the number fall again: a plain count over the window only ever
-     * rises, and reported 63 against the real workspace, the oldest 133 hours
-     * old. A mention in a channel I have never written in is counted — nothing
-     * there says I have seen it, and pretending otherwise would hide it.
+     * Deliberately not a second implementation: the chip and the list behind it
+     * must never be able to disagree. The rule itself lives in [Mention].
      */
-    fun unansweredMentions(events: Collection<NostrEvent>, me: String): Int {
-        val messages = events.filter { it.kind == Kind.CHANNEL_MESSAGE }
-        val myLastWord = HashMap<String, Long>()
-        for (event in messages) {
-            if (event.pubkey != me) continue
-            val channel = event.channelId ?: continue
-            if (event.createdAt > (myLastWord[channel] ?: Long.MIN_VALUE)) {
-                myLastWord[channel] = event.createdAt
-            }
-        }
-        return messages.count { event ->
-            event.pubkey != me &&
-                me in event.tagValues("p") &&
-                event.createdAt > (myLastWord[event.channelId] ?: Long.MIN_VALUE)
-        }
-    }
+    fun unansweredMentions(events: Collection<NostrEvent>, me: String): Int =
+        Mention.of(events, emptyList(), emptyMap(), me).size
 
     /**
      * Said of a thread whose root is older than the window that pulled its

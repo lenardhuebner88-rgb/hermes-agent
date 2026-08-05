@@ -22,6 +22,7 @@ import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.Mention
 import net.hermes.deck.model.ThreadActivity
 import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
@@ -214,10 +215,8 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
      * channel clears it, which is the one signal available here without
      * inventing a read-state Buzz already owns.
      */
-    fun mentionCount(snapshot: DeckRepository.Snapshot): Int {
-        val me = settings.pubkeyHex ?: return 0
-        return ThreadActivity.unansweredMentions(snapshot.chatter, me)
-    }
+    fun mentions(snapshot: DeckRepository.Snapshot): List<Mention.Entry> =
+        Mention.of(snapshot.chatter, snapshot.channels, snapshot.profiles, settings.pubkeyHex)
 
     fun capture(
         channelId: String,
