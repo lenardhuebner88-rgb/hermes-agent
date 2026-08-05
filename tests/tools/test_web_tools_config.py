@@ -386,6 +386,7 @@ class TestParallelClientConfig:
         import tools.web_tools
         tools.web_tools._parallel_client = None
         os.environ.pop("PARALLEL_API_KEY", None)
+        self._original_parallel = sys.modules.get("parallel")
         fake_parallel = types.ModuleType("parallel")
 
         class Parallel:
@@ -404,7 +405,10 @@ class TestParallelClientConfig:
         import tools.web_tools
         tools.web_tools._parallel_client = None
         os.environ.pop("PARALLEL_API_KEY", None)
-        sys.modules.pop("parallel", None)
+        if self._original_parallel is None:
+            sys.modules.pop("parallel", None)
+        else:
+            sys.modules["parallel"] = self._original_parallel
 
     def test_creates_client_with_key(self):
         """PARALLEL_API_KEY set → creates Parallel client."""
@@ -428,6 +432,21 @@ class TestParallelClientConfig:
             client1 = _get_parallel_client()
             client2 = _get_parallel_client()
             assert client1 is client2
+
+
+def test_parallel_client_fixture_restores_preexisting_module(monkeypatch):
+    """The class-level fake must not remove another file's loaded module."""
+    original_parallel = types.ModuleType("parallel")
+    monkeypatch.setitem(sys.modules, "parallel", original_parallel)
+    test_case = TestParallelClientConfig()
+
+    test_case.setup_method()
+    try:
+        assert sys.modules["parallel"] is not original_parallel
+    finally:
+        test_case.teardown_method()
+
+    assert sys.modules["parallel"] is original_parallel
 
 
 class TestWebSearchSchema:

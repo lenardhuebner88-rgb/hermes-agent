@@ -11,32 +11,15 @@ from hermes_cli import main as hermes_main
 
 
 # ---------------------------------------------------------------------------
-# Module isolation: _import_cli() wipes tools.* / cli / run_agent from
-# sys.modules so it can re-import cli fresh.  Without cleanup the wiped
-# modules leak into subsequent tests, breaking
-# mock patches that target "tools.file_tools._get_file_ops" etc.
+# Module isolation: _import_cli() purges and may inject modules in order to
+# re-import cli fresh.  Restore the complete table after every test: limiting
+# cleanup to cli/tools left injected optional-dependency stubs behind.
 # ---------------------------------------------------------------------------
 
-def _reset_modules(prefixes: tuple[str, ...]):
-    for name in list(sys.modules):
-        if any(name == p or name.startswith(p + ".") for p in prefixes):
-            sys.modules.pop(name, None)
-
-
 @pytest.fixture(autouse=True)
-def _restore_cli_and_tool_modules():
-    """Save and restore tools/cli/run_agent modules around every test."""
-    prefixes = ("tools", "cli", "run_agent")
-    original_modules = {
-        name: module
-        for name, module in sys.modules.items()
-        if any(name == p or name.startswith(p + ".") for p in prefixes)
-    }
-    try:
-        yield
-    finally:
-        _reset_modules(prefixes)
-        sys.modules.update(original_modules)
+def _restore_cli_imports(restore_sys_modules):
+    """Keep ``_import_cli``'s fresh-import state local to each test."""
+    yield
 
 
 def _install_prompt_toolkit_stubs():
