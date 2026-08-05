@@ -120,6 +120,26 @@ fun PulseTab(
         onAgent = { openAgent = it },
         onRun = { openRun = it },
         onOpenAgents = onOpenAgents,
+        onCallOut = { row, text ->
+            val pubkey = row.session?.pubkey
+            if (pubkey == null) {
+                // The bar is not drawn without an identity; this is the guard
+                // for the case where the payload changed under an open screen.
+                viewModel.report("Für ${row.agent.displayName} ist keine Buzz-Kennung bekannt.")
+            } else {
+                viewModel.callOut(pubkey, row.agent.displayName, text)
+            }
+        },
+        onOpenAction = { item ->
+            when (val target = item.target) {
+                is ActionStack.Target.Run ->
+                    openRun = state.pulse?.workerRuns?.firstOrNull { it.runId == target.runId }
+                is ActionStack.Target.Task -> onOpenTask(target.taskId)
+                is ActionStack.Target.Agent ->
+                    openAgent = state.pulse?.agentRows?.firstOrNull { it.agent.stem == target.stem }
+                ActionStack.Target.Budget -> onOpenAgents()
+            }
+        },
     )
 
     openAgent?.let { row ->

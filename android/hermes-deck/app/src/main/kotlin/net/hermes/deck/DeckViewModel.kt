@@ -303,6 +303,40 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
             }.onFailure { _message.value = it.message ?: "Übergabe fehlgeschlagen." }
         }
 
+    /**
+     * The Zuruf: one line into a running turn, addressed by `p` tag.
+     *
+     * The hard part is *which channel*. A call-out has no task, so there is no
+     * thread to inherit — and a `p` tag alone does not deliver: the agent has
+     * to be subscribed to the channel the event lands in. So the channel is
+     * picked from the ones the operator shares with that agent, by membership,
+     * not by guessing a default. No shared channel ⇒ no send and a plain
+     * refusal, never a silent enqueue.
+     */
+    /** Show one line in the snackbar — for guards the UI cannot resolve itself. */
+    fun report(text: String) {
+        _message.value = text
+    }
+
+    fun callOut(agentPubkey: String, agentName: String, text: String) = viewModelScope.launch {
+        val channel = repository.snapshot.value.channels
+            .firstOrNull { agentPubkey in it.memberPubkeys }
+        if (channel == null) {
+            _message.value = "Kein gemeinsamer Kanal mit $agentName — Zuruf nicht gesendet."
+            return@launch
+        }
+        runCatching { repository.callOut(channel.id, text, agentPubkey) }
+            .onSuccess {
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) {
+                    "Zuruf an $agentName ist raus."
+                } else {
+                    "Zuruf wartet auf Verbindung."
+                }
+            }
+            .onFailure { _message.value = it.message ?: "Zuruf fehlgeschlagen." }
+    }
+
     suspend fun uploadAttachment(bytes: ByteArray, mime: String, name: String): Result<Attachment> =
         runCatching { repository.uploadAttachment(bytes, mime, name) }
 

@@ -56,12 +56,20 @@ data class DeckEvent(
         fun fromJson(json: JSONObject): DeckEvent = DeckEvent(
             id = json.optLong("id"),
             kind = json.optString("kind").ifBlank { "unknown" },
-            taskId = json.optString("task_id"),
-            title = json.optString("task_title").ifBlank { json.optString("task_id") },
-            profile = json.optString("profile").ifBlank { null },
-            note = json.optString("note").ifBlank { null },
+            taskId = json.nullable("task_id").orEmpty(),
+            title = json.nullable("task_title") ?: json.nullable("task_id") ?: "ohne Titel",
+            profile = json.nullable("profile"),
+            note = json.nullable("note"),
             at = json.optLong("at"),
         )
+
+        /**
+         * `optString` on a JSON `null` hands back the four letters "null", and
+         * the stream printed exactly that under six of twenty events before a
+         * screenshot showed it. A missing field has to stay missing.
+         */
+        private fun JSONObject.nullable(key: String): String? =
+            if (isNull(key)) null else optString(key).ifBlank { null }
     }
 }
 
@@ -100,6 +108,12 @@ data class AgentsBlock(
 data class DeckPulse(
     /** Device clock at the moment the payload arrived — the basis for freshness. */
     val receivedAt: Long,
+    /**
+     * The *server's* clock at capture, in seconds. Board events carry an
+     * absolute `at` from that same clock, so `serverNow - at` is a legitimate
+     * age — where mixing in the device clock would not be.
+     */
+    val serverNow: Long,
     val board: String?,
     val agents: Section<AgentsBlock>,
     val workers: Section<List<WorkerRun>>,
@@ -129,6 +143,7 @@ data class DeckPulse(
 
             return DeckPulse(
                 receivedAt = receivedAt,
+                serverNow = checkedAt,
                 board = json.optString("board").ifBlank { null },
                 agents = Section.of(json.optJSONObject("agents")) { parseAgents(it) },
                 workers = Section.of(json.optJSONObject("workers")) { block ->

@@ -50,6 +50,19 @@ GROK_STEMS = frozenset({"grok"})
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _STEERING_RE = re.compile(r"steering_supported=(true|false)")
+# The startup banner of `buzz-acp`, which is the only place the mapping from a
+# stem to its nostr identity is written down: neither the agent config
+# (`~/.config/buzz-agents/<stem>.env`, which carries the *private* key) nor any
+# code in this repo states the pubkey in the clear.
+#
+# Anchored to the banner prefix on purpose. Two measured false positives make
+# an unanchored match dangerous: a `tool_call` log line quoting the words
+# "buzz-acp starting" (an agent grepping its own logs), and another printing
+# `BUZZ_ACP_RECOVERY_PATH=/…/acp/<64 hex>/…`. Either would hand back a
+# confident, wrong identity — and a Zuruf sent to the wrong pubkey is silent,
+# not loud.
+_IDENTITY_RE = re.compile(r"buzz-acp starting:.*?\bpubkey=([0-9a-f]{64})\b")
+_SUBSCRIBE_RE = re.compile(r"buzz-acp starting:.*?\bsubscribe=(\w+)")
 
 _WORKSPACE_ROOT = "/mnt/data/services/buzz-agent-workspaces"
 
@@ -112,6 +125,21 @@ class SessionFacts:
     compacts: int = 0
     last_compaction: LastCompaction | None = None
     steerable: bool | None = None
+    #: Nostr identity, read from the agent's startup banner. Without it the
+    #: phone cannot address the agent at all.
+    pubkey: str | None = None
+    #: ``Mentions`` | ``Config`` | ... — which events the agent subscribes to.
+    subscribe: str | None = None
+
+    @property
+    def addressable(self) -> bool:
+        """Can a `p`-tagged message reach this agent at all?
+
+        Deliberately only about *addressing*. Whether the agent then wakes is
+        its own client-side rule set (`buzz-acp`'s `filter.rs` plus
+        `<stem>-rules.toml`), not something this process can prove.
+        """
+        return self.pubkey is not None
 
     @property
     def percent(self) -> float | None:
@@ -134,11 +162,26 @@ class SessionFacts:
             "measured_at": _iso_or_none(measured_at),
             "source": self.source,
             "steerable": self.steerable,
+            "pubkey": self.pubkey,
+            "subscribe": self.subscribe,
+            "addressable": self.addressable,
         }
 
     @staticmethod
-    def none(stem: str, *, steerable: bool | None = None) -> "SessionFacts":
-        return SessionFacts(stem=stem, source="none", steerable=steerable)
+    def none(
+        stem: str,
+        *,
+        steerable: bool | None = None,
+        pubkey: str | None = None,
+        subscribe: str | None = None,
+    ) -> "SessionFacts":
+        return SessionFacts(
+            stem=stem,
+            source="none",
+            steerable=steerable,
+            pubkey=pubkey,
+            subscribe=subscribe,
+        )
 
 
 def _iso_or_none(epoch_seconds: float | None) -> str | None:
@@ -679,6 +722,64 @@ def steering_command(stem: str) -> list[str]:
     ]
 
 
+def identity_command(stem: str) -> list[str]:
+    """The journal command that yields the agent's nostr identity.
+
+    Same shape as :func:`steering_command`, and for the same reason: the
+    journal is the only source.
+
+    Twenty lines rather than one: `-g` matches the *text* of a log line, and
+    agents that grep their own logs reproduce the banner's wording inside a
+    tool call. Measured on `codex`, whose newest match was such an echo — with
+    `-n 1` its real identity would simply have been missing. The strict regex
+    in :data:`_IDENTITY_RE` then picks the first genuine banner out of the
+    twenty.
+    """
+    return [
+        "journalctl",
+        "--user",
+        "-u",
+        f"buzz-agent@{stem}.service",
+        "--no-pager",
+        "-o",
+        "json",
+        "--output-fields=_SYSTEMD_USER_UNIT,MESSAGE",
+        "-g",
+        "buzz-acp starting",
+        "--reverse",
+        "-n",
+        "20",
+    ]
+
+
+def parse_identity(stdout: str) -> tuple[str | None, str | None]:
+    """``(pubkey, subscribe_mode)`` from the newest startup banner.
+
+    Returns ``(None, None)`` when the banner is absent — an agent whose
+    identity cannot be read must not get a button that promises delivery.
+    """
+    for raw in stdout.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message = decode_message(entry.get("MESSAGE"))
+        if message is None:
+            continue
+        plain = _ANSI_RE.sub("", message)
+        identity = _IDENTITY_RE.search(plain)
+        if identity is None:
+            continue
+        subscribe = _SUBSCRIBE_RE.search(plain)
+        return identity.group(1), (subscribe.group(1) if subscribe else None)
+    return None, None
+
+
 def parse_steering(stdout: str) -> bool | None:
     for raw in stdout.splitlines():
         raw = raw.strip()
@@ -759,6 +860,7 @@ class SessionFactsService:
 
     def _compute(self, stem: str) -> SessionFacts:
         steerable = self._read_steerable(stem)
+        pubkey, subscribe = self._read_identity(stem)
 
         if stem in CLAUDE_STEMS:
             facts = self._compute_claude(stem)
@@ -774,7 +876,9 @@ class SessionFactsService:
             facts = None
 
         if facts is None:
-            return SessionFacts.none(stem, steerable=steerable)
+            return SessionFacts.none(
+                stem, steerable=steerable, pubkey=pubkey, subscribe=subscribe
+            )
         return SessionFacts(
             stem=stem,
             source=facts.source,
@@ -785,6 +889,8 @@ class SessionFactsService:
             compacts=facts.compacts,
             last_compaction=facts.last_compaction,
             steerable=steerable,
+            pubkey=pubkey,
+            subscribe=subscribe,
         )
 
     def _compute_claude(self, stem: str) -> SessionFacts | None:
@@ -875,6 +981,12 @@ class SessionFactsService:
             compacts=facts.compacts,
             last_compaction=facts.last_compaction,
         )
+
+    def _read_identity(self, stem: str) -> tuple[str | None, str | None]:
+        result = self._runner.run(identity_command(stem), timeout=10.0)
+        if result.returncode != 0:
+            return None, None
+        return parse_identity(result.stdout)
 
     def _read_steerable(self, stem: str) -> bool | None:
         result = self._runner.run(steering_command(stem), timeout=10.0)

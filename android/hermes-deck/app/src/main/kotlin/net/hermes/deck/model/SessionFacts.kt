@@ -29,7 +29,31 @@ data class SessionFacts(
     val source: Source,
     /** Null when the journal never said; never guessed as false. */
     val steerable: Boolean?,
+    /** The agent's nostr identity — without it nothing can be addressed to it. */
+    val pubkey: String? = null,
+    /** `Mentions` / `Config` / … — how the agent subscribes. */
+    val subscribe: String? = null,
 ) {
+    /**
+     * What the Zuruf bar may honestly say.
+     *
+     * The distinction that matters is *addressing* versus *waking*. A `p` tag
+     * with a known pubkey provably reaches the agent; whether it then
+     * interrupts the running turn is decided by rules this app cannot read
+     * (`buzz-acp`'s `filter.rs` and `<stem>-rules.toml`). So the loudest
+     * promise here is "geht raus", never "lenkt sofort".
+     */
+    enum class Reachability {
+        /** Identity known: the message will be delivered. */
+        ADDRESSABLE,
+
+        /** No banner in the journal — the app does not know where to send. */
+        UNKNOWN,
+    }
+
+    val reachability: Reachability
+        get() = if (pubkey.isNullOrBlank()) Reachability.UNKNOWN else Reachability.ADDRESSABLE
+
     enum class Source {
         CLAUDE, CODEX, QWEN, KIMI, GROK,
 
@@ -111,10 +135,16 @@ data class SessionFacts(
                 source = Source.fromWire(json.optString("source")),
                 steerable = if (!json.has("steerable") || json.isNull("steerable")) null
                 else json.optBoolean("steerable"),
+                pubkey = json.optStringOrNull("pubkey"),
+                subscribe = json.optStringOrNull("subscribe"),
             )
         }
 
         private fun JSONObject.optIntOrNull(key: String): Int? =
             if (!has(key) || isNull(key)) null else optInt(key)
+
+        /** `optString` renders a JSON null as the four letters "null". */
+        private fun JSONObject.optStringOrNull(key: String): String? =
+            if (!has(key) || isNull(key)) null else optString(key).ifBlank { null }
     }
 }

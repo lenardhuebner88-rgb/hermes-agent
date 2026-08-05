@@ -3,6 +3,7 @@ package net.hermes.deck.model
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -247,5 +248,72 @@ class DeckPulseTest {
         assertEquals(true, rows["codex"]?.session?.steerable)
         assertEquals(false, rows["kimi"]?.session?.steerable)
         assertEquals(false, rows["qwen"]?.session?.steerable)
+    }
+
+    // --- identity / Zuruf ------------------------------------------------
+
+    @Test
+    fun `the live payload carries a distinct identity per agent`() {
+        val sessions = parsed().agentRows.mapNotNull { it.session }
+        val pubkeys = sessions.mapNotNull { it.pubkey }
+        assertTrue("no pubkey survived the wire", pubkeys.isNotEmpty())
+        // Two agents resolving to one identity would send every Zuruf to the
+        // same place, and nothing would look wrong on screen.
+        assertEquals("pubkeys must be unique", pubkeys.size, pubkeys.toSet().size)
+        pubkeys.forEach { assertEquals("pubkey is 32-byte hex", 64, it.length) }
+    }
+
+    @Test
+    fun `an agent without a readable banner is not addressable`() {
+        // `kimi` is that agent in this capture: its unit was being reconfigured
+        // while the payload was taken, so no startup banner was in the journal.
+        val kimi = parsed().agentRows.first { it.agent.stem == "kimi" }.session
+        assertNotNull(kimi)
+        assertNull("no identity may be invented", kimi!!.pubkey)
+        assertEquals(SessionFacts.Reachability.UNKNOWN, kimi.reachability)
+
+        // Control: an agent from the same payload that *is* addressable, so
+        // this proves discrimination rather than a parser returning nothing.
+        val codex = parsed().agentRows.first { it.agent.stem == "codex" }.session
+        assertEquals(SessionFacts.Reachability.ADDRESSABLE, codex!!.reachability)
+        assertEquals("Mentions", codex.subscribe)
+    }
+
+    @Test
+    fun `claude subscribes by config rather than by mentions`() {
+        // The one agent that differs, and the reason the mode travels at all.
+        val claude = parsed().agentRows.first { it.agent.stem == "claude" }.session
+        assertEquals("Config", claude!!.subscribe)
+        // Addressing still works — whether it *wakes* is its own rule set.
+        assertEquals(SessionFacts.Reachability.ADDRESSABLE, claude.reachability)
+    }
+
+    // --- events ----------------------------------------------------------
+
+    @Test
+    fun `a JSON null never reaches the screen as the word null`() {
+        // `optString` renders JSON null as "null"; six of twenty events in this
+        // very payload have a null task_title, and the stream printed it.
+        val events = parsed().recentEvents
+        assertTrue(events.isNotEmpty())
+        events.forEach { event ->
+            assertNotEquals("null", event.note)
+            assertNotEquals("null", event.title)
+            assertNotEquals("null", event.profile)
+        }
+        assertTrue("this payload must contain the null case at all",
+            events.any { it.note == null })
+    }
+
+    @Test
+    fun `board events are aged against the server clock`() {
+        val pulse = parsed()
+        assertTrue("payload carries no server clock", pulse.serverNow > 0L)
+        val event = pulse.recentEvents.first()
+        val age = pulse.serverNow - event.at
+        assertTrue("age must not be negative", age >= 0L)
+        // The device clock (receivedAt = 1_000_000 ms) is deliberately absurd
+        // here: if it ever leaked into the age, this would be far off.
+        assertTrue("age is a plausible span, not a clock mixture", age < 86_400L)
     }
 }

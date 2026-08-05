@@ -6,6 +6,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,12 +14,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -26,12 +30,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -79,6 +87,8 @@ fun PulseScreen(
     onAgent: (AgentRow) -> Unit,
     onRun: (WorkerRun) -> Unit,
     onOpenAgents: () -> Unit = {},
+    onOpenAction: (ActionStack.Item) -> Unit = {},
+    onCallOut: (AgentRow, String) -> Unit = { _, _ -> },
 ) {
     val deck = LocalDeck.current
     val rows = pulse?.agentRows.orEmpty()
@@ -88,7 +98,12 @@ fun PulseScreen(
         ?.let { subject -> rows.firstOrNull { it.agent.stem == subject.stem } }
 
     LazyColumn(
-        Modifier.fillMaxSize().background(deck.background),
+        Modifier
+            .fillMaxSize()
+            .background(deck.background)
+            // Without this the title sat *under* the clock and the battery
+            // icon — a screenshot caught it; no test could have.
+            .windowInsetsPadding(WindowInsets.statusBars),
         contentPadding = PaddingValues(
             start = DeckMetrics.screenPadding,
             end = DeckMetrics.screenPadding,
@@ -98,6 +113,13 @@ fun PulseScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         item { LeitstandHeader(freshness, loading, onRefresh) }
+
+        // The draft carries this in all three states, and the data was already
+        // being computed and thrown away: PulseScreen took `actions` and never
+        // rendered them.
+        actions.firstOrNull()?.let { top ->
+            item { NowDueDock(top, actions.size, onOpenAction) }
+        }
 
         if (rows.isNotEmpty()) {
             item { FleetRail(rows, pinnedStem) { stem -> onPin(if (stem == pinnedStem) null else stem) } }
@@ -126,7 +148,8 @@ fun PulseScreen(
         item {
             when {
                 choice.subject == FocusPick.Subject.Budget -> BudgetFocusCard(choice, usage, rows)
-                focusRow != null -> AgentFocusCard(choice, focusRow) { onAgent(focusRow) }
+                focusRow != null ->
+                    AgentFocusCard(choice, focusRow, onCallOut) { onAgent(focusRow) }
                 else -> RestingCard(pulse, rows.size)
             }
         }
@@ -185,6 +208,64 @@ private fun LeitstandHeader(freshness: Freshness, loading: Boolean, onRefresh: (
             style = tickerStyle,
             color = if (freshness.isStale) deck.warning else deck.textFaint,
         )
+    }
+}
+
+// --------------------------------------------------------------- now due
+
+/**
+ * "Jetzt dran" — the single loudest item, with the count of what is queued
+ * behind it.
+ *
+ * The stack already ranks severity before age ([ActionStack]); this only shows
+ * its head. Listing all of them would recreate the panel-of-everything the
+ * stack exists to replace, and a number is enough to say "there is more".
+ */
+@Composable
+private fun NowDueDock(top: ActionStack.Item, total: Int, onOpen: (ActionStack.Item) -> Unit) {
+    val deck = LocalDeck.current
+    val tint = when (top.severity) {
+        ActionStack.Severity.CRITICAL -> deck.danger
+        ActionStack.Severity.WARNING -> deck.warning
+        ActionStack.Severity.INFO -> deck.accent
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(DeckMetrics.chipRadius))
+            .background(deck.surfaceRaised)
+            .clickable { onOpen(top) }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(22.dp).clip(CircleShape).background(tint.copy(alpha = 0.18f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("$total", color = tint, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(11.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                if (total > 1) "Jetzt dran — $total für dich" else "Jetzt dran",
+                color = deck.textPrimary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                listOfNotNull(
+                    top.title.takeIf { it.isNotBlank() },
+                    top.detail,
+                    top.ageSeconds?.let { "seit ${duration(it)}" },
+                ).joinToString(" · "),
+                color = deck.textSecondary,
+                fontSize = 11.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text("Öffnen →", color = deck.accent, fontSize = 12.sp)
     }
 }
 
@@ -360,7 +441,12 @@ private fun BurnBand(rows: List<AgentRow>, usage: List<AccountUsage>) {
 private val ALARM_BRUSH = Brush.linearGradient(listOf(Color(0xFF3B1220), Color(0xFF7A1D3A)))
 
 @Composable
-private fun AgentFocusCard(choice: FocusPick.Choice, row: AgentRow, onOpen: () -> Unit) {
+private fun AgentFocusCard(
+    choice: FocusPick.Choice,
+    row: AgentRow,
+    onCallOut: (AgentRow, String) -> Unit,
+    onOpen: () -> Unit,
+) {
     val deck = LocalDeck.current
     val alarm = choice.rank == FocusPick.Rank.ALARM
     val session = row.session
@@ -430,6 +516,79 @@ private fun AgentFocusCard(choice: FocusPick.Choice, row: AgentRow, onOpen: () -
                 Text(chain.summary, fontSize = 10.sp, color = Color.White.copy(alpha = 0.55f))
             }
         }
+
+        Spacer(Modifier.height(12.dp))
+        ZurufBar(row.agent.displayName, session?.reachability) { text -> onCallOut(row, text) }
+    }
+}
+
+/**
+ * Say something into the running turn, without ending it.
+ *
+ * The button says **"geht raus"**, not "lenkt sofort", and that is the whole
+ * point. What is provable is delivery: a known pubkey plus a `p` tag reaches
+ * the agent. Whether the agent then interrupts its turn is decided by
+ * `buzz-acp`'s own rules, which this app cannot read — so it is not promised.
+ * Without an identity there is no field at all: an input box that cannot send
+ * is worse than an honest absence.
+ */
+@Composable
+private fun ZurufBar(
+    agentName: String,
+    reachability: SessionFacts.Reachability?,
+    onSend: (String) -> Unit,
+) {
+    if (reachability != SessionFacts.Reachability.ADDRESSABLE) {
+        Text(
+            "Zuruf nicht möglich — für $agentName ist keine Buzz-Kennung lesbar.",
+            fontSize = 10.sp,
+            color = Color.White.copy(alpha = 0.5f),
+        )
+        return
+    }
+    var text by remember(agentName) { mutableStateOf("") }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(Color.Black.copy(alpha = 0.28f))
+            .padding(start = 14.dp, end = 5.dp, top = 5.dp, bottom = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = true,
+            textStyle = monoStyle.copy(color = Color.White, fontSize = 12.sp),
+            cursorBrush = SolidColor(Color.White),
+            modifier = Modifier.weight(1f),
+            decorationBox = { inner ->
+                if (text.isEmpty()) {
+                    Text(
+                        "Zuruf an $agentName …",
+                        style = monoStyle,
+                        fontSize = 12.sp,
+                        color = Color.White.copy(alpha = 0.45f),
+                    )
+                }
+                inner()
+            },
+        )
+        Spacer(Modifier.width(8.dp))
+        val armed = text.isNotBlank()
+        Text(
+            "GEHT RAUS",
+            style = labelStyle,
+            color = if (armed) Color(0xFF07120C) else Color.White.copy(alpha = 0.45f),
+            modifier = Modifier
+                .clip(RoundedCornerShape(18.dp))
+                .background(if (armed) Color(0xFF34D399) else Color.White.copy(alpha = 0.10f))
+                .clickable(enabled = armed) {
+                    onSend(text.trim())
+                    text = ""
+                }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+        )
     }
 }
 
@@ -685,14 +844,20 @@ internal fun buildStream(pulse: DeckPulse?, limit: Int = 12): List<StreamEntry> 
             who = event.profile ?: "Kanban",
             kind = event.label,
             what = event.note ?: event.title,
-            ageSeconds = null,
+            // Both stamps come off the server clock, so the subtraction is
+            // sound. An event from a payload without a clock keeps no age at
+            // all rather than borrowing the phone's.
+            ageSeconds = (pulse.serverNow - event.at)
+                .takeIf { pulse.serverNow > 0L && event.at > 0L && it >= 0L }
+                ?.toInt(),
             tone = if (event.isFailure) StreamEntry.Tone.BAD else StreamEntry.Tone.GOOD,
             mono = false,
         )
     }
-    // Agents first, by measured age. Board events carry an absolute stamp that
-    // would need a second clock to compare, so they are not interleaved by time.
-    return (fromAgents.sortedBy { it.ageSeconds ?: Int.MAX_VALUE } + fromBoard).take(limit)
+    // One stream, one order: everything that has a measured age sorts by it,
+    // and anything unmeasurable sinks to the bottom instead of interleaving on
+    // a guess.
+    return (fromAgents + fromBoard).sortedBy { it.ageSeconds ?: Int.MAX_VALUE }.take(limit)
 }
 
 @Composable

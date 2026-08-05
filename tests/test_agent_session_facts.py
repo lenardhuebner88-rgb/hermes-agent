@@ -10,6 +10,7 @@ not a hand-written JSON blob. See ``tests/fixtures/agent_session_facts/``.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from hermes_cli.agent_session_facts import (
     find_latest_grok_session_dir,
     find_latest_kimi_session_dir,
     grok_session_root,
+    parse_identity,
     parse_steering,
     read_claude_session,
     read_codex_session,
@@ -274,10 +276,27 @@ def test_find_latest_grok_session_dir_picks_the_newest_mtime() -> None:
     assert found == root / "fixture-session-0001"
 
 
-def test_read_grok_session_does_not_add_cached_prompt_tokens() -> None:
-    session_dir = (
+def test_read_grok_session_does_not_add_cached_prompt_tokens(tmp_path: Path) -> None:
+    # Grok is the one source whose session start is a file *mtime*, and git
+    # does not carry mtimes: checked out fresh, every fixture file gets the
+    # time of the checkout. Asserting against the mtimes the files happened to
+    # have when they were written passed in the worktree that wrote them and
+    # failed in every later clone. So the test sets the times it asserts on.
+    source_dir = (
         FIXTURES / "grok" / "sessions" / "%2Fmnt%2Fdata%2Fservices%2Fbuzz-agent-workspaces%2Fgrok" / "fixture-session-0001"
     )
+    session_dir = tmp_path / "fixture-session-0001"
+    session_dir.mkdir(parents=True)
+    mtimes = {
+        "prompt_context.json": 1785957871,  # the oldest — the expected answer
+        "chat_history.jsonl": 1785957999,
+        "events.jsonl": 1785958100,
+    }
+    for name, mtime in mtimes.items():
+        target = session_dir / name
+        target.write_bytes((source_dir / name).read_bytes())
+        os.utime(target, (mtime, mtime))
+
     unified_log = FIXTURES / "grok" / "unified.jsonl"
     facts = read_grok_session(session_dir, unified_log, session_id="fixture-session-0001")
     assert facts is not None
@@ -310,6 +329,90 @@ def test_parse_steering_reads_the_real_captured_journal_lines() -> None:
 
 def test_parse_steering_is_none_when_nothing_matched() -> None:
     assert parse_steering("") is None
+
+
+# --- identity -----------------------------------------------------------
+
+
+def _identity_lines() -> dict[str, list[str]]:
+    """Real journal output, ANSI intact, MESSAGE as a byte array.
+
+    Keyed by unit as a *list*: `codex` deliberately contributes two lines —
+    its genuine banner and one `tool_call` line that merely quotes the
+    banner's wording.
+    """
+    per_unit: dict[str, list[str]] = {}
+    raw_text = (FIXTURES / "identity_journal_lines.jsonl").read_text(encoding="utf-8")
+    for raw in raw_text.splitlines():
+        entry = json.loads(raw)
+        per_unit.setdefault(entry["_SYSTEMD_USER_UNIT"], []).append(raw)
+    return per_unit
+
+
+def test_parse_identity_reads_the_real_captured_startup_banners() -> None:
+    per_unit = _identity_lines()
+
+    claude_pubkey, claude_subscribe = parse_identity(
+        "\n".join(per_unit["buzz-agent@claude.service"])
+    )
+    assert claude_pubkey is not None
+    assert len(claude_pubkey) == 64
+    # The one agent that does *not* run in plain `Mentions` mode — the whole
+    # reason the subscribe mode travels with the pubkey.
+    assert claude_subscribe == "Config"
+
+    codex_pubkey, codex_subscribe = parse_identity(
+        "\n".join(per_unit["buzz-agent@codex.service"])
+    )
+    assert codex_subscribe == "Mentions"
+    # Two agents must never resolve to one identity; that would silently send
+    # every Zuruf to the same place.
+    assert codex_pubkey != claude_pubkey
+
+
+def test_parse_identity_skips_a_tool_call_that_only_quotes_the_banner() -> None:
+    """The measured false positive, pinned.
+
+    `journalctl -g` matches the *text* of a line, and an agent grepping its
+    own logs reproduces "buzz-acp starting" inside a tool call. That line was
+    codex's newest match — with the old `-n 1` command its identity would have
+    come back empty.
+    """
+    per_unit = _identity_lines()
+    codex_lines = per_unit["buzz-agent@codex.service"]
+    assert len(codex_lines) == 2, "fixture must keep the trap line next to the banner"
+
+    trap = next(line for line in codex_lines if parse_identity(line)[0] is None)
+    assert parse_identity(trap) == (None, None)
+    # Control: the *other* line of the same unit is a real banner, so this test
+    # proves discrimination rather than a parser that rejects everything.
+    banner = next(line for line in codex_lines if line != trap)
+    assert parse_identity(banner)[0] is not None
+
+
+def test_parse_identity_is_none_when_the_banner_is_absent() -> None:
+    assert parse_identity("") == (None, None)
+
+
+def test_parse_identity_ignores_a_hex_string_outside_a_banner() -> None:
+    """`BUZZ_ACP_RECOVERY_PATH=…/acp/<64 hex>/…` appears in real tool output."""
+    entry = json.dumps(
+        {"MESSAGE": "tool_call: echo BUZZ_ACP_RECOVERY_PATH=/s/acp/pubkey=" + "a" * 64}
+    )
+    assert parse_identity(entry) == (None, None)
+
+
+def test_facts_without_a_readable_banner_are_not_addressable(tmp_path: Path) -> None:
+    """No identity ⇒ no promise that a Zuruf could arrive."""
+    service = SessionFactsService(
+        claude_projects_dir=tmp_path / "projects",
+        context_window_resolver=lambda provider, model: None,
+        runner=FakeRunner(returncode=1),
+    )
+    facts = service.facts_for_stem("hermes")
+    assert facts.pubkey is None
+    assert facts.addressable is False
+    assert facts.as_payload()["addressable"] is False
 
 
 def test_stem_without_any_store_gets_none_never_zero(tmp_path: Path) -> None:
@@ -371,12 +474,18 @@ def test_facts_are_cached_within_the_ttl() -> None:
         clock=lambda: clock["t"],
         ttl_seconds=10.0,
     )
+    # Counted per *recompute*, not per journalctl call: one compute issues
+    # several journal reads (steering, identity), and pinning that number here
+    # would make the test fail every time a new fact is read rather than when
+    # the cache breaks.
     service.facts_for_stem("hermes")
+    per_compute = len(calls)
+    assert per_compute > 0
     service.facts_for_stem("hermes")
-    assert len(calls) == 1
+    assert len(calls) == per_compute, "second lookup inside the TTL must not re-read"
     clock["t"] += 11.0
     service.facts_for_stem("hermes")
-    assert len(calls) == 2
+    assert len(calls) == 2 * per_compute
 
 
 # --- percent / payload shape ------------------------------------------

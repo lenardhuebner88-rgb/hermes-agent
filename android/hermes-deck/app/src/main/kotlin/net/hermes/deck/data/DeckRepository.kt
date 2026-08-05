@@ -210,6 +210,33 @@ class DeckRepository(
             enqueue(event)
         }
 
+    /**
+     * The Zuruf: a `p`-tagged line into a channel, with no task under it.
+     *
+     * [reply] cannot express this — it needs a [DeckTask] for its `e` tags, and
+     * a call into a running turn is not about a card. What makes an agent read
+     * it is the `p` tag alone; `@name` in the text would be decoration.
+     *
+     * Whether the agent then *wakes* is its own rule set (`buzz-acp`'s
+     * `filter.rs` plus `<stem>-rules.toml`), which this app cannot see. So this
+     * returns once the event is enqueued and promises delivery, never a reaction.
+     */
+    suspend fun callOut(channelId: String, text: String, agentPubkey: String) =
+        withContext(Dispatchers.IO) {
+            val key = requireNotNull(settings.secretKey) { "Kein Schlüssel hinterlegt." }
+            val event = NostrEvent.signed(
+                secretKey = key,
+                kind = Kind.CHANNEL_MESSAGE,
+                content = text,
+                tags = listOf(
+                    listOf("h", channelId),
+                    listOf("p", agentPubkey),
+                ),
+                createdAt = clock(),
+            )
+            enqueue(event)
+        }
+
     suspend fun uploadAttachment(bytes: ByteArray, mime: String, name: String): Attachment =
         withContext(Dispatchers.IO) {
             val key = requireNotNull(settings.secretKey) { "Kein Schlüssel hinterlegt." }

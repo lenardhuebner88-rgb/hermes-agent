@@ -77,7 +77,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "claude",
-      "steerable": true
+      "steerable": true,
+      "pubkey": "f1d66f405a79e94579dfdd629dc1b2e09c7e6752bc2baa2867aa925c33db31e9",
+      "subscribe": "Config",
+      "addressable": true
      }
     },
     {
@@ -153,7 +156,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "codex",
-      "steerable": true
+      "steerable": true,
+      "pubkey": "2799cedde4838b8c322a1a509681e270d9d46d7b2b66b691dda82e9dd51beb84",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     },
     {
@@ -187,7 +193,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "claude",
-      "steerable": true
+      "steerable": true,
+      "pubkey": "2bc5de5e2f4185cd95d860e074960ad7f662819101d477eb822a6e70ae2b3c6e",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     },
     {
@@ -221,7 +230,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "grok",
-      "steerable": false
+      "steerable": false,
+      "pubkey": "087a6263862f9aae262e3e5f4461acbac912a689c4bb3799b8f9b2efd095e8e6",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     },
     {
@@ -297,7 +309,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "none",
-      "steerable": false
+      "steerable": false,
+      "pubkey": "0b0aa341a6d520b4c924a13f02877e3683dd6e84c2fd8cc03d43a3645d050b43",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     },
     {
@@ -331,7 +346,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "kimi",
-      "steerable": false
+      "steerable": false,
+      "pubkey": null,
+      "subscribe": null,
+      "addressable": false
      }
     },
     {
@@ -365,7 +383,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "qwen",
-      "steerable": false
+      "steerable": false,
+      "pubkey": "fa6050b3b18f1c59f33af480ca47d299ef7c33a70fcf4c58c8153ea9077b3610",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     },
     {
@@ -399,7 +420,10 @@
       "last_compaction": null,
       "measured_at": "2026-08-05T22:13:21+0200",
       "source": "codex",
-      "steerable": true
+      "steerable": true,
+      "pubkey": "a8b9ab1564b2b54e24edb409575fc8f71f0312fa103a507f57910c9f83ce3860",
+      "subscribe": "Mentions",
+      "addressable": true
      }
     }
    ],

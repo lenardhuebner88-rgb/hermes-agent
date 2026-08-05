@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only overlay: the screenshot activity.
+
+  It exists so that "does the built screen look like the draft?" can be answered
+  with a picture instead of a text assurance, and it lives in `src/debug` so it
+  can never reach a release APK (`scripts/release-deck-apk.sh` builds release).
+
+  Why an activity and not a Compose screenshot test: `captureToImage()` over the
+  Compose root reproducibly takes the hermes-deck AVD down with it (AGENTS.md).
+  `adb exec-out screencap` runs on the host against surfaceflinger and never
+  touches the app process, so it sidesteps that failure entirely — and it needs
+  no new Gradle dependency.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name="net.hermes.deck.shot.ShotActivity"
+            android:exported="true"
+            android:label="Deck Shot"
+            android:theme="@style/Theme.HermesDeck" />
+    </application>
+</manifest>

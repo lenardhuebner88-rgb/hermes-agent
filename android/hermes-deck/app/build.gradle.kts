@@ -16,6 +16,11 @@ android {
     // than no screenshot.
     sourceSets.getByName("androidTest").resources.srcDir("src/test/resources")
 
+    // The same bytes again, this time as debug *assets*, so `ShotActivity` can
+    // render them on a device and be photographed from the host. Debug only —
+    // the release APK never carries the fixture.
+    sourceSets.getByName("debug").assets.srcDir("src/test/resources")
+
     namespace = "net.hermes.deck"
     compileSdk = 37
 
