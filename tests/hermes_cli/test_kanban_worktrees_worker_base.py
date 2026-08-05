@@ -1556,3 +1556,332 @@ def test_prepare_reused_task_worktree_keeps_current_run_guard(
             match="current task run is missing before worker base preparation",
         ):
             kwt.prepare_reused_task_worktree(conn, task, workspace)
+
+
+# ---------------------------------------------------------------------------
+# Revert-aware worker-base preparation (live incident t_903e7b7c, 2026-08-05):
+# a merge+revert cycle poisons patch-ID classification — cherry reports the
+# chain commits as landed while the revert removed their content, and a plain
+# rebase skips them or replays an empty range, leaving the branch exactly at
+# the target with the chain silently gone.
+# ---------------------------------------------------------------------------
+
+
+def _make_merged_then_reverted_chain(repo, task_id):
+    """Two-commit chain branch, merged into main, merge then reverted."""
+    info = kwt.ensure_worktree(repo, task_id)
+    worktree = info["path"]
+    (worktree / "s1.txt").write_text("slice one\n")
+    _git(worktree, "add", "s1.txt")
+    _git(worktree, "commit", "-m", "chain: slice 1")
+    (worktree / "s2.txt").write_text("slice two\n")
+    _git(worktree, "add", "s2.txt")
+    _git(worktree, "commit", "-m", "chain: slice 2")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", f"merge {task_id}", info["branch"],
+    )
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "revert", "-m", "1", "--no-edit", merge_commit)
+    assert not (repo / "s1.txt").exists()
+    return info, recorded_head, merge_commit
+
+
+def test_prepare_worker_base_recovers_multi_commit_reverted_merge(repo):
+    """After a merge+revert, base-prep must replay the whole chain, not empty it."""
+    info, recorded_head, merge_commit = _make_merged_then_reverted_chain(
+        repo, "t_revert_recovery"
+    )
+
+    result = kwt.prepare_worker_base(
+        info["path"],
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_revert_recovery",
+    )
+
+    assert result["action"] == "rebased"
+    assert result["reverted_merge_recovery"] == merge_commit
+    assert (info["path"] / "s1.txt").read_text() == "slice one\n"
+    assert (info["path"] / "s2.txt").read_text() == "slice two\n"
+    assert _git(info["path"], "rev-parse", "HEAD") != _git(repo, "rev-parse", "main")
+    assert kwt.dirty_files(info["path"]) == []
+
+
+def test_prepare_worker_base_landed_then_line_reformatted_is_already_landed(repo):
+    """B8: a landed line that main later reformats is still landed work.
+
+    Replaces the removed reset-path loss guard: patch-equivalence plus
+    later target evolution is the normal 'already landed' shape, and no
+    blob/line comparison may park it (opus review rounds 2-3: the guard
+    fired on 8/8 real branches in exactly this state).
+    """
+    info = kwt.ensure_worktree(repo, "t_landed_reformat")
+    worktree = info["path"]
+    (worktree / "mod.py").write_text("def f():\n    timeout=30\n    return 1\n")
+    _git(worktree, "add", "mod.py")
+    _git(worktree, "commit", "-m", "branch adds mod.py")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "unrelated.txt").write_text("u\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "unrelated main work")
+    _git(repo, "cherry-pick", recorded_head)
+    (repo / "mod.py").write_text("def f():\n    timeout = 30\n    return 1\n")
+    _git(repo, "add", "mod.py")
+    _git(repo, "commit", "-m", "main reformats the landed line")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_landed_reformat",
+    )
+
+    assert result["action"] == "already_landed"
+    assert _git(worktree, "rev-parse", "HEAD") == _git(repo, "rev-parse", "main")
+
+
+def test_prepare_worker_base_rebase_through_target_rename(repo):
+    """B7: a rename on the target is not a loss of the branch's change."""
+    (repo / "old.py").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "old.py")
+    _git(repo, "commit", "-m", "add old.py")
+
+    info = kwt.ensure_worktree(repo, "t_target_rename")
+    worktree = info["path"]
+    (worktree / "old.py").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "old.py")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    _git(repo, "mv", "old.py", "new.py")
+    _git(repo, "commit", "-m", "main renames old.py to new.py")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_target_rename",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "old.py").exists()
+    assert "l9 branch" in (worktree / "new.py").read_text()
+
+
+def test_prepare_worker_base_recovers_reverted_merge_despite_target_rename(repo):
+    """Runde-4-Befund: a rename on the target must not trip the recovery.
+
+    Git's rename detection rides the branch change into the renamed file
+    during the replay; the old path is gone from BOTH target and result.
+    Any content-comparison guard reads that as a loss — the replay itself
+    is correct, so the recovery trusts the rebase (full reapplication,
+    loud conflicts) and no post-hoc blob guard.
+    """
+    (repo / "old.py").write_text("l1\nl2\nl3\nl4\nl5\n")
+    _git(repo, "add", "old.py")
+    _git(repo, "commit", "-m", "add old.py")
+
+    info = kwt.ensure_worktree(repo, "t_recovery_rename")
+    worktree = info["path"]
+    (worktree / "old.py").write_text("l1\nl2\nl3 branch\nl4\nl5\n")
+    _git(worktree, "add", "old.py")
+    _git(worktree, "commit", "-m", "chain touches line three")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", "merge t_recovery_rename", info["branch"],
+    )
+    _git(repo, "revert", "-m", "1", "--no-edit", "HEAD")
+    _git(repo, "mv", "old.py", "new.py")
+    _git(repo, "commit", "-m", "main renames old.py to new.py after the revert")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_recovery_rename",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "old.py").exists()
+    assert "l3 branch" in (worktree / "new.py").read_text()
+
+
+def test_prepare_worker_base_reverted_merge_recovery_moves_branch_ref(repo):
+    """B1: the recovery must rebase the BRANCH, not detach HEAD at the sha."""
+    info, recorded_head, _merge = _make_merged_then_reverted_chain(
+        repo, "t_branch_ref"
+    )
+
+    result = kwt.prepare_worker_base(
+        info["path"],
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_branch_ref",
+    )
+
+    assert result["action"] == "rebased"
+    assert _git(info["path"], "symbolic-ref", "-q", "--short", "HEAD") == info["branch"]
+    assert _git(info["path"], "rev-parse", info["branch"]) == result["head"]
+    # Work committed after the preparation lands on the branch ref.
+    (info["path"] / "worker.txt").write_text("worker output\n")
+    _git(info["path"], "add", "worker.txt")
+    _git(info["path"], "commit", "-m", "worker follow-up")
+    assert (
+        _git(info["path"], "rev-parse", f"{info['branch']}:worker.txt")
+        == _git(info["path"], "rev-parse", "HEAD:worker.txt")
+    )
+
+
+def test_prepare_worker_base_rebase_through_shared_file_keeps_both_sides(repo):
+    """B2: a clean rebase over a file BOTH sides changed is not a loss.
+
+    The result blob is a third state (target change + branch change); the
+    guard must read that as preserved, not as a drop.
+    """
+    (repo / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "add shared")
+
+    info = kwt.ensure_worktree(repo, "t_shared_file")
+    worktree = info["path"]
+    (worktree / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "shared.txt")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "shared.txt").write_text(
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "main touches line two")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_shared_file",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "shared.txt").read_text() == (
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+
+
+def test_prepare_worker_base_recovers_two_revert_cycles(repo):
+    """B3: with two merge+revert cycles the OLDEST reverted merge sets the base."""
+    info, recorded_head, _m1 = _make_merged_then_reverted_chain(
+        repo, "t_two_cycles"
+    )
+    worktree = info["path"]
+    # Fixer slice on the branch, then a second merge+revert cycle.
+    (worktree / "s3.txt").write_text("slice three\n")
+    _git(worktree, "add", "s3.txt")
+    _git(worktree, "commit", "-m", "chain: fixer slice 3")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", "merge t_two_cycles (2nd)", info["branch"],
+    )
+    _git(repo, "revert", "-m", "1", "--no-edit", "HEAD")
+    assert not (repo / "s1.txt").exists()
+    assert not (repo / "s3.txt").exists()
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_two_cycles",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "s1.txt").read_text() == "slice one\n"
+    assert (worktree / "s2.txt").read_text() == "slice two\n"
+    assert (worktree / "s3.txt").read_text() == "slice three\n"
+
+
+def test_prepare_worker_base_already_landed_when_target_extended_afterwards(repo):
+    """B5: patch-equivalent landing + later target edits must still reset cleanly.
+
+    Blob equality cannot express 'landed': the target moved on, so the blobs
+    differ while every branch-added line is present in the target version.
+    """
+    info = kwt.ensure_worktree(repo, "t_landed_extended")
+    worktree = info["path"]
+    (worktree / "f.txt").write_text("one\ntwo\n")
+    _git(worktree, "add", "f.txt")
+    _git(worktree, "commit", "-m", "branch adds f.txt")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Unrelated commit first: prevents a cherry-pick fast-forward, so the
+    # landing is patch-equivalent (different sha), not literal ancestry.
+    (repo / "unrelated.txt").write_text("u\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "unrelated main work")
+    _git(repo, "cherry-pick", recorded_head)
+    (repo / "f.txt").write_text("one\ntwo\nthree\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "main extends f.txt after the landing")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_landed_extended",
+    )
+
+    assert result["action"] == "already_landed"
+    assert _git(worktree, "rev-parse", "HEAD") == _git(repo, "rev-parse", "main")
+
+
+def test_prepare_worker_base_rebase_absorbed_subset_is_not_a_loss(repo):
+    """B6: a branch commit absorbed as a subset of a target commit is landed.
+
+    The rebase drops the branch commit (its patch becomes empty), so the
+    result blob equals the target blob — containment, not loss.
+    """
+    (repo / "shared.txt").write_text("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "add shared")
+
+    info = kwt.ensure_worktree(repo, "t_absorbed_subset")
+    worktree = info["path"]
+    (worktree / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "shared.txt")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Main lands the branch's change PLUS an independent one in ONE commit
+    # (not patch-equivalent, so the branch commit is replayed and becomes
+    # empty — the absorption shape).
+    (repo / "shared.txt").write_text(
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "main lands both line edits")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_absorbed_subset",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "shared.txt").read_text() == (
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )

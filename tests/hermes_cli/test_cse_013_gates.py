@@ -223,6 +223,59 @@ def test_default_quick_gate_pytest_uses_canonical_test_python_wrapper(
     assert "tests/hermes_cli/" in pcall and "tests/foo/test_bar.py" in pcall
 
 
+def test_post_merge_pytest_budget_matches_worker_and_lock_covers_worst_case(
+    repo, monkeypatch,
+):
+    calls = []
+
+    def fake_quick_gate(name, argv, cwd, timeout, notes, extra_env=None):
+        calls.append((name, argv, cwd, timeout, extra_env))
+        return None
+
+    monkeypatch.delenv("HERMES_TEST_FILE_TIMEOUT", raising=False)
+    monkeypatch.setattr(
+        kwt,
+        "_affected_pytest_modules",
+        lambda _root, _changed: ["tests/hermes_cli/test_cse_013_gates.py"],
+    )
+    monkeypatch.setattr(kwt, "_quick_gate_run_cmd", fake_quick_gate)
+
+    err = kwt._default_quick_gate_pytest(repo, ["hermes_cli/kanban_worktrees.py"], [])
+
+    assert err is None
+    assert calls[0][3] == kwt.POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS == 3600
+    assert kwt.LOCK_TIMEOUT_SECONDS > (
+        300 + kwt.POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS + 600
+    )
+    # The per-file cap must rise with the integrator's parallel load
+    # (runner default 300s SIGKILLed the heaviest file under gate load).
+    assert calls[0][4] == {
+        "HERMES_TEST_FILE_TIMEOUT": str(kwt.POST_MERGE_TEST_FILE_TIMEOUT_SECONDS)
+    }
+    assert kwt.POST_MERGE_TEST_FILE_TIMEOUT_SECONDS >= 600
+
+
+def test_post_merge_pytest_file_timeout_respects_operator_env(repo, monkeypatch):
+    calls = []
+
+    def fake_quick_gate(name, argv, cwd, timeout, notes, extra_env=None):
+        calls.append((name, extra_env))
+        return None
+
+    monkeypatch.setattr(
+        kwt,
+        "_affected_pytest_modules",
+        lambda _root, _changed: ["tests/hermes_cli/test_cse_013_gates.py"],
+    )
+    monkeypatch.setattr(kwt, "_quick_gate_run_cmd", fake_quick_gate)
+    monkeypatch.setenv("HERMES_TEST_FILE_TIMEOUT", "1234")
+
+    err = kwt._default_quick_gate_pytest(repo, ["hermes_cli/kanban_worktrees.py"], [])
+
+    assert err is None
+    assert calls[0][1] == {"HERMES_TEST_FILE_TIMEOUT": "1234"}
+
+
 # ---------------------------------------------------------------------------
 # #3-A — worker_gate stamp in submitted_for_review + verifier render
 # ---------------------------------------------------------------------------
