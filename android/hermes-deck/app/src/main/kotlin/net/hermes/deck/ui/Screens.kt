@@ -43,6 +43,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -50,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.hermes.deck.DeckViewModel
+import net.hermes.deck.model.AgentActivity
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.TaskStatus
@@ -186,6 +193,18 @@ fun AgentsScreen(viewModel: DeckViewModel) {
             }
         }
 
+        // Shown above the cards, not inside them: when the journal is
+        // unreadable every dot below is uninformative, and a per-card hint
+        // would repeat eight times while still looking like eight verdicts.
+        state.heartbeatError?.let { error ->
+            item {
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Text(error, color = deck.warning, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(DeckMetrics.gap))
+            }
+        }
+
         if (state.agents.isEmpty() && state.error == null) {
             item { EmptyHint(if (state.loading) "Lädt …" else "Keine Agenten gemeldet") }
         }
@@ -198,6 +217,8 @@ fun AgentsScreen(viewModel: DeckViewModel) {
                 modelsError = if (expanded == agent.stem) state.modelsError else null,
                 modelsLoading = expanded == agent.stem && state.modelsLoading,
                 busy = state.busyStem == agent.stem,
+                windowSeconds = state.heartbeatWindowSeconds,
+                recentSeconds = state.heartbeatRecentSeconds,
                 onToggle = {
                     expanded = if (expanded == agent.stem) null else agent.stem
                     if (expanded == agent.stem) viewModel.loadModels(agent.stem)
@@ -211,6 +232,36 @@ fun AgentsScreen(viewModel: DeckViewModel) {
     }
 }
 
+/**
+ * The status dot, which pulses only while the agent is actually making tool
+ * calls. Motion is reserved for that one state on purpose: it is the only
+ * claim on the card that is worth an eye-catch, and a dot that always pulsed
+ * would be the old always-green dot with extra steps.
+ */
+@Composable
+private fun HeartbeatDot(tint: Color, beating: Boolean) {
+    val alpha = if (beating) {
+        val transition = rememberInfiniteTransition(label = "heartbeat")
+        transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.25f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "heartbeatAlpha",
+        ).value
+    } else {
+        1f
+    }
+    Box(
+        Modifier
+            .size(9.dp)
+            .clip(CircleShape)
+            .background(tint.copy(alpha = alpha)),
+    )
+}
+
 @Composable
 private fun AgentCard(
     agent: BuzzAgent,
@@ -219,14 +270,21 @@ private fun AgentCard(
     modelsError: String?,
     modelsLoading: Boolean,
     busy: Boolean,
+    windowSeconds: Int,
+    recentSeconds: Int,
     onToggle: () -> Unit,
     onPick: (String) -> Unit,
 ) {
     val deck = LocalDeck.current
-    val stateTint = when {
-        agent.isRunning -> deck.success
-        agent.isFailed -> deck.danger
-        else -> deck.textFaint
+    val activity = AgentActivity.of(agent, windowSeconds, recentSeconds)
+    // The dot used to be green whenever systemd held the unit up, which made
+    // eight green dots out of four working agents. It now follows the work.
+    val stateTint = when (activity.state) {
+        AgentActivity.State.WORKING -> deck.success
+        AgentActivity.State.RECENT -> deck.accent
+        AgentActivity.State.QUIET -> deck.textFaint
+        AgentActivity.State.FAILED -> deck.danger
+        AgentActivity.State.UNKNOWN -> deck.warning
     }
     GlassCard(Modifier.fillMaxWidth(), onClick = onToggle) {
         Column {
@@ -243,14 +301,16 @@ private fun AgentCard(
                     Spacer(Modifier.height(2.dp))
                     Text(agent.model, color = deck.accent, fontSize = 12.sp)
                 }
-                Box(
-                    Modifier
-                        .size(9.dp)
-                        .clip(CircleShape)
-                        .background(stateTint),
-                )
+                HeartbeatDot(stateTint, beating = activity.state == AgentActivity.State.WORKING)
             }
             Spacer(Modifier.height(8.dp))
+            Text(
+                activity.label,
+                color = stateTint,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.height(3.dp))
             Text(
                 // The start time is the honest part: a changed model only takes
                 // effect from the next start, so both are shown together.
