@@ -568,6 +568,7 @@ export const de = {
     detailLogTruncated: "Log abgeschnitten — zeige die letzten 100 Zeilen.",
     detailActivityEmpty: "Keine Aktivitäts-Events.",
     detailErgebnisEmpty: "Kein Review-Verdict für diesen Task.",
+    detailListMore: (n: number) => `… und ${n} weitere`,
     detailKopieren: "Kopieren",
     detailKopiert: "Kopiert",
     detailSchliessen: "Schließen",

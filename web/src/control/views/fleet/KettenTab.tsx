@@ -480,6 +480,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
           type="button"
           className="chain-expander"
           onClick={() => setCompletedExpanded((v) => !v)}
+          aria-expanded={completedExpanded}
         >
           {completedExpanded ? "weniger anzeigen" : `+${hiddenCompletedCount} weitere fertige`}
         </button>

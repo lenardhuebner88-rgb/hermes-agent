@@ -210,11 +210,11 @@ function WorkingNowCard({ sessions }: { sessions: { agent: string; task: string;
   );
 }
 
-function KnowledgeQuickShelf({ catalog, onSelect }: { catalog: KnowledgeCatalog | null; onSelect: (id: string) => void }) {
+function KnowledgeQuickShelf({ catalog, onSelect, density = "airy" }: { catalog: KnowledgeCatalog | null; onSelect: (id: string) => void; density?: Density }) {
   return (
-    <section className="mt-6">
+    <section className="mt-6" data-density={density}>
       <SectionHeader label={t.knowledgeTitle} meta={t.knowledgeSubtitle} rule={false} />
-      <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={`mt-3 grid ${density === "compact" ? "gap-2" : "gap-3"} sm:grid-cols-2 lg:grid-cols-4`}>
         {(catalog?.collections ?? []).map((collection) => {
           return (
             <div
@@ -223,7 +223,7 @@ function KnowledgeQuickShelf({ catalog, onSelect }: { catalog: KnowledgeCatalog 
               tabIndex={0}
               onClick={() => onSelect(collection.id)}
               onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelect(collection.id); } }}
-              className="min-h-12 cursor-pointer rounded-card border border-line bg-surface-2 p-4 transition-all hover:-translate-y-0.5 hover:border-live/40 hover:bg-surface-3"
+              className={`min-h-12 cursor-pointer rounded-card border border-line bg-surface-2 transition-all hover:-translate-y-0.5 hover:border-live/40 hover:bg-surface-3 ${density === "compact" ? "p-3" : "p-4"}`}
             >
               <div className="grid size-12 place-items-center rounded-card border border-line bg-surface-1 text-brand">
                 <CollectionGlyph name={collection.icon} className="h-5 w-5" />
@@ -243,7 +243,7 @@ interface BriefingsShelfProps {
   density?: Density;
 }
 
-export function BriefingsShelf({ onOpenItem }: BriefingsShelfProps) {
+export function BriefingsShelf({ onOpenItem, density = "airy" }: BriefingsShelfProps) {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [issues, setIssues] = useState<LibraryItem[]>([]);
   const [data, setData] = useState<LibraryListResponse | null>(null);
@@ -349,7 +349,7 @@ export function BriefingsShelf({ onOpenItem }: BriefingsShelfProps) {
         <WorkingNowCard sessions={provenance.data?.open_sessions ?? []} />
       </div>
 
-      <KnowledgeQuickShelf catalog={knowledge.data} onSelect={openCollection} />
+      <KnowledgeQuickShelf catalog={knowledge.data} onSelect={openCollection} density={density} />
 
       <Disclosure className="[&>button]:min-h-12" summary={<span className="text-sec font-semibold text-ink">{t.provenanceTitle}</span>} defaultOpen={false}>
         <div className="pt-2">

@@ -91,6 +91,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
         actions={(
           <button
             onClick={() => setShowForm((v) => !v)}
+            aria-expanded={showForm}
             className="min-h-12 shrink-0 rounded-card border border-line px-3 py-1 text-sec text-live transition-colors duration-150 ease-out hover:border-live hover:bg-live/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
           >
             {showForm ? "Abbrechen" : "＋ Neue Karte"}
@@ -105,6 +106,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            aria-label="Titel"
             placeholder="Titel — z. B. Header überlappt auf Tablet"
             className="mt-2 min-h-12 w-full rounded-card border border-line bg-surface-2 p-2 text-body text-ink placeholder:text-ink-3 focus:border-live"
           />
@@ -113,6 +115,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
               <button
                 key={k}
                 onClick={() => setKind(k)}
+                aria-pressed={kind === k}
                 className={`min-h-12 rounded-card border border-line px-2 py-1 text-micro ${
                   kind === k ? "text-live" : "text-ink-3"
                 }`}
@@ -124,6 +127,7 @@ export function DesignBoardView(_props: { density?: string } = {}) {
           <input
             value={targetView}
             onChange={(e) => setTargetView(e.target.value)}
+            aria-label="Ziel-View (optional)"
             placeholder="Ziel-View (optional) — z. B. FleetView"
             className="mt-2 min-h-12 w-full rounded-card border border-line bg-surface-2 p-2 text-body text-ink placeholder:text-ink-3 focus:border-live"
           />

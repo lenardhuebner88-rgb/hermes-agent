@@ -720,6 +720,49 @@ function eyb_led(eyeb: Element | null): Element | null {
   return eyeb?.querySelector(".lk-led") ?? null;
 }
 
+// ─── P3: Chip-Expander meldet seinen Auf-/Zu-Zustand via aria-expanded ──────
+
+describe("KettenTab P3 — Expander für fertige Chips trägt aria-expanded", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Kein Graph — Sections 4-6 (mit eigenen aria-expanded-Buttons) rendern nicht,
+    // damit der Rollen-Query eindeutig den Chip-Expander trifft.
+    fetchJSONMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/chain-graph")) {
+        return Promise.resolve({ ...CHAIN_GRAPH_PAYLOAD, nodes: [], edges: [] });
+      }
+      return Promise.resolve({});
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("expander meldet collapsed → expanded und wechselt sichtbar auf „weniger anzeigen“", () => {
+    const fourDone: BoardResponse = lk2Board([
+      lk2Summary({ root_id: "t_p3_d1", kennung: "Fertig eins", done: 3, status_counts: { done: 3 }, latest_completed_at: 1900 }),
+      lk2Summary({ root_id: "t_p3_d2", kennung: "Fertig zwei", done: 3, status_counts: { done: 3 }, latest_completed_at: 1800 }),
+      lk2Summary({ root_id: "t_p3_d3", kennung: "Fertig drei", done: 3, status_counts: { done: 3 }, latest_completed_at: 1700 }),
+      lk2Summary({ root_id: "t_p3_d4", kennung: "Fertig vier", done: 3, status_counts: { done: 3 }, latest_completed_at: 1600 }),
+    ]);
+    render(
+      <KettenTab board={fourDone} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    const expander = screen.getByRole("button", { expanded: false });
+    expect(expander.getAttribute("aria-expanded")).toBe("false");
+    expect(expander.textContent).toBe("+1 weitere fertige");
+
+    fireEvent.click(expander);
+
+    const expanded = screen.getByRole("button", { expanded: true });
+    expect(expanded.getAttribute("aria-expanded")).toBe("true");
+    expect(expanded.textContent).toBe("weniger anzeigen");
+  });
+});
+
 // ─── LK-2: Aufmerksamkeits-Ordnung, Kopf-Zähler, Leer/Laden/Fehler ───────────
 // Verbindliche Vorlage wie LK-1: Design-Board c_ee80d956 / e_a4b27b43.
 

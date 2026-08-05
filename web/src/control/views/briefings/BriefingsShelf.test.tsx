@@ -165,6 +165,40 @@ describe("BriefingsShelf: Nachschlagewerk-Schnellauswahl (S6)", () => {
   });
 });
 
+describe("BriefingsShelf: Dichte-Schalter wirkt auf die Schnellauswahl", () => {
+  it("trägt data-density am Schnellauswahl-Container — compact und airy unterscheiden sich", async () => {
+    mockFetch();
+    const { unmount } = render(
+      <MemoryRouter initialEntries={["/control/bibliothek"]}>
+        <BriefingsShelf onOpenItem={() => {}} density="compact" />
+      </MemoryRouter>,
+    );
+    await screen.findByText("LLM-Wiki");
+    const compactShelf = document.querySelector("[data-density]");
+    expect(compactShelf?.getAttribute("data-density")).toBe("compact");
+    // Kontrollprobe: Inhalte der Schnellauswahl bleiben im Kompakt-Modus da.
+    for (const collection of KNOWLEDGE_FIXTURE.collections) {
+      expect(screen.getByText(collection.title)).toBeTruthy();
+    }
+    unmount();
+
+    mockFetch();
+    render(
+      <MemoryRouter initialEntries={["/control/bibliothek"]}>
+        <BriefingsShelf onOpenItem={() => {}} density="airy" />
+      </MemoryRouter>,
+    );
+    await screen.findByText("LLM-Wiki");
+    const airyShelf = document.querySelector("[data-density]");
+    expect(airyShelf?.getAttribute("data-density")).toBe("airy");
+    expect(airyShelf?.getAttribute("data-density")).not.toBe(compactShelf?.getAttribute("data-density"));
+    // Kontrollprobe: Inhalte auch in der luftigen Dichte unverändert vorhanden.
+    for (const collection of KNOWLEDGE_FIXTURE.collections) {
+      expect(screen.getByText(collection.title)).toBeTruthy();
+    }
+  });
+});
+
 describe("BriefingsShelf: strukturierte KI-Frontpage (S5)", () => {
   it("rendert Top-Story, verlinkte Modell-News, Watchlist und Frische-Stempel", async () => {
     mockFetch({ ...EMPTY_ITEMS, items: [STRUCTURED_BRIEF], count: 1 });

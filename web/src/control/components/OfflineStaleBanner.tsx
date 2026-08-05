@@ -64,10 +64,16 @@ export function OfflineStaleBanner({ health }: {
   const age = health.lastUpdated == null ? "noch nie" : `vor ${Math.max(0, clientNow - health.lastUpdated)}s`;
   const label = health.error ? de.staleBanner.fetchError : ageStale ? de.staleBanner.pausedOrStale : de.staleBanner.stale;
 
+  // Datengetriebenes Erscheinen ohne Fokuswechsel → Live-Region nötig: ein
+  // echter Fetch-Fehler wird assertiv (alert), bloße Staleness höflich (status)
+  // angesagt, damit Screenreader die Unterscheidung mitbekommen.
+  const liveRole = health.error ? "alert" : "status";
   return (
     <div
       className="sticky top-0 z-50 border-b border-status-warn/30 bg-status-warn/10 px-4 py-2 text-sm text-status-warn backdrop-blur"
       data-offline-banner=""
+      role={liveRole}
+      aria-live={health.error ? "assertive" : "polite"}
     >
       <div className="mx-auto flex max-w-6xl items-center gap-2">
         <WifiOff className="h-4 w-4 shrink-0" />
