@@ -518,7 +518,7 @@ export function DictionaryEditorPanel() {
       ) : (
         <div className="grid grid-cols-1 gap-3">
           {doc && !doc.exists ? (
-            <p className="text-xs text-ink-3">
+            <p className="text-xs text-ink-2">
               Noch kein gespeichertes Wörterbuch — Felder sind leer, das ist kein Fehler.
             </p>
           ) : null}

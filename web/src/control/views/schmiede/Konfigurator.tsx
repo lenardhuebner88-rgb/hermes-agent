@@ -93,7 +93,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
           >
             {loading ? "Generiere …" : "Prompt generieren"}
           </button>
-          <p className="text-xs text-ink-3">Die KI baut daraus einen sauberen Prompt mit messbaren Akzeptanzkriterien — du musst keine Dateien/Scope angeben.</p>
+          <p className="text-xs text-ink-2">Die KI baut daraus einen sauberen Prompt mit messbaren Akzeptanzkriterien — du musst keine Dateien/Scope angeben.</p>
         </div>
         {target ? <p className="mt-2 text-xs text-ink-3">{target.mechanicNote}</p> : null}
       </FleetPanel>
@@ -128,7 +128,7 @@ export function Konfigurator({ catalog, models }: { catalog: PromptForgeCatalog;
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs text-ink-3">Volle Punktzahl = gut · unter der Hälfte = Drift-Risiko. Es zählen nur die für diesen Task-Typ relevanten Checks; „–" = nicht relevant.</p>
+          <p className="mt-2 text-xs text-ink-2">Volle Punktzahl = gut · unter der Hälfte = Drift-Risiko. Es zählen nur die für diesen Task-Typ relevanten Checks; „–" = nicht relevant.</p>
         </FleetPanel>
       ) : null}
     </div>

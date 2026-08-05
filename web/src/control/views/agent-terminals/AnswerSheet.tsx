@@ -213,7 +213,7 @@ export function AnswerSheet({
         </div>
 
         {!current && (
-          <p className="text-sm text-ink-3" data-testid="answer-sheet-closed-hint">
+          <p className="text-sm text-ink-2" data-testid="answer-sheet-closed-hint">
             {closedHint
               || "Keine offenen Fragen. Das Sheet kann geschlossen werden."}
           </p>

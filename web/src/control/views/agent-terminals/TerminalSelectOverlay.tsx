@@ -139,7 +139,7 @@ export function TerminalSelectOverlay({
           <div className="min-w-0">
             <Eyebrow>Verlauf</Eyebrow>
             <h2 className="text-sm font-semibold text-ink">Verlauf lesen</h2>
-            <p className="mt-0.5 text-[11px] text-ink-3">
+            <p className="mt-0.5 text-[11px] text-ink-2">
               {view.filtered
                 ? `${view.lines.length} von ${view.total} Zeilen`
                 : `${view.total} Zeilen — lang drücken zum Markieren.`}
