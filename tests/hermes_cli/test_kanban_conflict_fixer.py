@@ -151,6 +151,147 @@ def test_conflict_fixer_brief_instructs_terminal_kanban_actions_and_keeps_cage()
     assert "operator" in body
 
 
+def _spawn_marker(conn, parent_id: str, child_id: str, reason: str) -> None:
+    """Record the ``conflict_fixer_for`` back-reference a dispatch would write."""
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            child_id,
+            "conflict_fixer_for",
+            {
+                "parent_id": parent_id,
+                "conflict_fingerprint": kb._conflict_fingerprint(reason),
+            },
+        )
+
+
+def _repark_integration(conn, parent_id: str, reason: str) -> None:
+    """Re-park an already-blocked parent the way an integration sweep does.
+
+    ``_system_park_set_blocked`` accepts ``status = 'blocked'``, so a parked
+    chain task can collect a SECOND ``blocked`` event with a different reason
+    text while its fixer is still running.
+    """
+    with kb.write_txn(conn):
+        assert kb._system_park_set_blocked(
+            conn,
+            parent_id,
+            kind="integration",
+            where_sql="status IN ('running', 'ready', 'blocked')",
+        ) == 1
+        kb._append_event(
+            conn,
+            parent_id,
+            "blocked",
+            kb._system_blocked_event_payload(reason, "integration"),
+        )
+
+
+def test_completed_fixer_resumes_a_parent_reparked_under_a_new_reason(kanban_home):
+    """CONFLICT-FIXER-REPARK-CAS: a re-park must not silently strand the chain.
+
+    The parent is parked (reason A), a fixer is dispatched for A, and while it
+    runs the parent is re-parked with a different integration reason (B). The
+    pre-fix CAS compared A against the LATEST blocked event (B), mismatched,
+    and returned ``False`` without any event — the chain stayed blocked until
+    a timeout.
+    """
+    reason_a = "integration parked: merge conflict/failure (aborted): foo.py"
+    reason_b = "integration parked: merge conflict/failure (aborted): bar.py"
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked finalizer", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason_a, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        _spawn_marker(conn, parent_id, child_id, reason_a)
+        _repark_integration(conn, parent_id, reason_b)
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+        resume_events = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert parent is not None
+    assert parent.status == "ready"
+    assert parent.block_kind is None
+    assert [event.payload for event in resume_events] == [
+        {
+            "child_id": child_id,
+            "conflict_fingerprint": kb._conflict_fingerprint(reason_a),
+            "reparked_fingerprint": kb._conflict_fingerprint(reason_b),
+            "status": "ready",
+        }
+    ]
+
+
+def test_late_fixer_completion_does_not_resume_a_closed_episode(kanban_home):
+    """Fail-closed boundary: resume → unrelated re-park → late fixer completion.
+
+    Once the episode was closed after dispatch (here: an operator ``unblocked``),
+    the park holding the parent now is a DIFFERENT one; the stale fixer must
+    leave it alone.
+    """
+    reason_a = "integration parked: merge conflict/failure (aborted): foo.py"
+    reason_b = "integration parked: merge conflict/failure (aborted): bar.py"
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked finalizer", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason_a, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        _spawn_marker(conn, parent_id, child_id, reason_a)
+        assert kb.unblock_task(conn, parent_id)
+        _repark_integration(conn, parent_id, reason_b)
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+        resume_events = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert parent is not None
+    assert parent.status == "blocked"
+    assert resume_events == []
+
+
+def test_fixer_dispatched_for_a_foreign_park_never_resumes(kanban_home):
+    """The dispatch-time park must carry the fixer's fingerprint, not just any park."""
+    reason_a = "integration parked: merge conflict/failure (aborted): foo.py"
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(conn, title="parked finalizer", assignee="coder")
+        assert kb.claim_task(conn, parent_id) is not None
+        assert kb.block_task(conn, parent_id, reason=reason_a, kind="integration")
+        child_id = kb.create_task(conn, title="conflict fixer", assignee="premium")
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                child_id,
+                "conflict_fixer_for",
+                {
+                    "parent_id": parent_id,
+                    "conflict_fingerprint": kb._conflict_fingerprint(
+                        "integration parked: a conflict this parent never had"
+                    ),
+                },
+            )
+
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, parent_id)
+        resume_events = [
+            event
+            for event in kb.list_events(conn, parent_id)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert parent is not None
+    assert parent.status == "blocked"
+    assert resume_events == []
+
+
 def test_completed_conflict_fixer_resumes_its_parent_without_retry_sweep(kanban_home):
     reason = "integration parked: merge conflict/failure (aborted): foo.py"
     with kb.connect_closing() as conn:
