@@ -3158,22 +3158,29 @@ class LoopRunner:
         # am 2026-08-05 geprueft und VERWORFEN worden: `max_plans` deckelt, was
         # der Planner PRO TURN neu schreiben darf, nicht den Queue-Bestand.
         # Beleg gegen die eigene Annahme — builder-reviewer (max_plans=8,
-        # max_rounds=12) stand real bei 8 und 9 wartenden Plaenen
-        # ("PLAN: 9 Pläne (status=PLANNED 4)", LEDGER 05.07.); eine Schwelle
-        # bei 8 haette dort geplant, obwohl 3-4 der 12 Rundenslots frei waren.
+        # max_rounds=12) trug nach der Plan-Phase real 8 bzw. 9 wartende Plaene
+        # ("PLAN: 8/9 Pläne (status=PLANNED 4)", LEDGER 04./05.07.). Das zeigt,
+        # dass der Bestand ueber max_plans hinauswaechst; eine Schwelle bei 8
+        # haette dort also kuenftig die Planung UEBERSPRUNGEN, obwohl noch 3-4
+        # der 12 Rundenslots frei waren. (Streng gelesen belegen die Zeilen die
+        # Tiefe NACH dem Planen, nicht dass die Schwelle vorher schon stand —
+        # fuer die Widerlegung von "max_plans ist die Queue-Grenze" reicht das.)
         # Wer das nachmisst: die Queue-Tiefe steht in "PLAN: N Pläne", NICHT im
         # "planned=N" der Autoland-Resume-Zeile (die emittiert nur
         # dashboard-experience, max_rounds=1 — daher sieht sie nie mehr als 1
         # und liest sich faelschlich wie die globale Obergrenze).
         #
-        # Nachgemessen 2026-08-05 gegen ~/.hermes/loops/*/LEDGER.md (die
-        # Commit-Message von 2b3f0d3fbc nannte 16 DRY-Laeufe / ~2 h; das war der
-        # Topf ALLER ertraglosen Plan-Phasen): wegen belegtem Slot liefen 5
-        # Naechte ertraglos (dashboard-experience, 16./30./31.07., 01./05.08.),
-        # bei Ø ~484 s Plan-Phase rund 40 min Modellzeit. Der groessere Block —
-        # 12 Naechte dashboard-polish — war NICHT die Queue, sondern
-        # "DRY web fehlt" und ist seit 0e92dc7f58 (ensure_frontend_deps, 04.08.)
-        # geheilt: in der Nacht darauf 3 verifizierte Runden statt DRY.
+        # Nachgemessen 2026-08-05 gegen ledger.jsonl (die Commit-Message von
+        # 2b3f0d3fbc nannte 16 DRY-Laeufe / ~2 h; das war der Topf ALLER
+        # ertraglosen Plan-Phasen): dem Skip zurechenbar sind VIER Naechte in
+        # dashboard-experience — 16.07. 154 s, 30.07. 756 s, 01.08. 357 s,
+        # 05.08. 341 s = 1608 s, rund 27 min. Die fuenfte ertraglose Nacht
+        # (31.07., 366 s) zaehlt NICHT: dort lag der belegte Slot in
+        # 10-building, und der Planner requeuete (retry=2), statt nichts zu tun.
+        # Der groessere Block — 12 Naechte dashboard-polish — war ohnehin nicht
+        # die Queue, sondern "DRY web fehlt", und ist seit 0e92dc7f58
+        # (ensure_frontend_deps, 04.08.) geheilt: in der Nacht darauf 3
+        # verifizierte Runden statt DRY.
         queue_full_plan_skip = (
             self.pack.type == "pipeline"
             and not skip_plan
