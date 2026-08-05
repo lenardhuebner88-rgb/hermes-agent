@@ -590,6 +590,12 @@ class GatewaySlashCommandsMixin:
             except (TypeError, ValueError):
                 return 0
 
+        def _token_value(value: Any) -> int | None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         title = None
         session_row: dict[str, Any] = {}
         # Pull token totals from the SQLite session DB rather than the
@@ -598,7 +604,7 @@ class GatewaySlashCommandsMixin:
         # so session_entry.total_tokens is always 0.  SessionDB is the
         # single source of truth; reading it here keeps /status accurate
         # without duplicating token writes into two stores.
-        db_total_tokens = 0
+        db_total_tokens: int | None = 0
         if self._session_db:
             try:
                 title = await self._session_db.get_session_title(session_entry.session_id)
@@ -608,15 +614,16 @@ class GatewaySlashCommandsMixin:
                 row = await self._session_db.get_session(session_entry.session_id)
                 if isinstance(row, dict):
                     session_row = row
-                    db_total_tokens = (
-                        _int_value(row.get("input_tokens"))
-                        + _int_value(row.get("output_tokens"))
-                        + _int_value(row.get("cache_read_tokens"))
-                        + _int_value(row.get("cache_write_tokens"))
-                        + _int_value(row.get("reasoning_tokens"))
+                    token_values = (
+                        _token_value(row.get("input_tokens")),
+                        _token_value(row.get("output_tokens")),
+                        _token_value(row.get("cache_read_tokens")),
+                        _token_value(row.get("cache_write_tokens")),
+                        _token_value(row.get("reasoning_tokens")),
                     )
+                    db_total_tokens = None if None in token_values else sum(token_values)
             except Exception:
-                db_total_tokens = 0
+                db_total_tokens = None
 
         # Resolve model/context for cockpit-style status. Prefer the live or
         # cached agent because it carries the actual runtime route and context
@@ -639,24 +646,27 @@ class GatewaySlashCommandsMixin:
         model_name = ""
         provider_name = ""
         base_url = ""
-        context_used = 0
-        context_total = 0
+        context_used: int | None = 0
+        context_total: int | None = 0
         if status_agent is not None and status_agent is not _AGENT_PENDING_SENTINEL:
             model_name = _clean_str(getattr(status_agent, "model", ""))
             provider_name = _clean_str(getattr(status_agent, "provider", ""))
             base_url = _clean_str(getattr(status_agent, "base_url", ""))
             ctx = getattr(status_agent, "context_compressor", None)
             if ctx is not None:
-                context_used = _int_value(getattr(ctx, "last_prompt_tokens", 0))
-                context_total = _int_value(getattr(ctx, "context_length", 0))
+                context_used = _token_value(getattr(ctx, "last_prompt_tokens", 0))
+                context_total = _token_value(getattr(ctx, "context_length", 0))
+
+        context_unavailable = context_used is None or context_total is None
 
         model_name = model_name or _clean_str(session_row.get("model"))
         provider_name = provider_name or _clean_str(session_row.get("billing_provider"))
         base_url = base_url or _clean_str(session_row.get("billing_base_url"))
-        context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
+        if not context_unavailable:
+            context_used = context_used or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
 
         user_config: dict[str, Any] = {}
-        if not model_name or not provider_name or not context_total:
+        if not model_name or not provider_name or (not context_total and not context_unavailable):
             try:
                 user_config = _load_gateway_config()
             except Exception:
@@ -667,7 +677,7 @@ class GatewaySlashCommandsMixin:
             model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
             if isinstance(model_cfg, dict):
                 provider_name = _clean_str(model_cfg.get("provider"))
-        if not context_total:
+        if not context_total and not context_unavailable:
             model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
             configured_context = model_cfg.get("context_length") if isinstance(model_cfg, dict) else None
             if isinstance(configured_context, int) and configured_context > 0:
@@ -681,7 +691,9 @@ class GatewaySlashCommandsMixin:
                 model_line = t("gateway.status.model", model=model_name)
 
         context_line = ""
-        if context_total:
+        if context_unavailable:
+            context_line = "**Context:** unavailable"
+        elif context_total:
             pct = min(100, round((context_used / context_total) * 100)) if context_total else 0
             context_line = t(
                 "gateway.status.context",
@@ -708,7 +720,10 @@ class GatewaySlashCommandsMixin:
         if context_line:
             lines.append(context_line)
         lines.extend([
-            t("gateway.status.tokens", tokens=f"{db_total_tokens:,}"),
+            t(
+                "gateway.status.tokens",
+                tokens=f"{db_total_tokens:,}" if db_total_tokens is not None else "unavailable",
+            ),
             t("gateway.status.agent_running", state=t("gateway.status.state_yes") if is_running else t("gateway.status.state_no")),
         ])
         if queue_depth:

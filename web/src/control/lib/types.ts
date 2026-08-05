@@ -3,9 +3,12 @@
 // per zod-catch als "default"/„Standard". Anzeige-Labels: lib/tones.ts.
 export type WorkerProfile = string;
 
-export type TaskStatus =
+export type KnownTaskStatus =
   | "triage" | "todo" | "scheduled" | "ready" | "running"
   | "blocked" | "review" | "done" | "archived";
+
+/** A status outside the wire contract is shown as a visible sentinel. */
+export type TaskStatus = KnownTaskStatus | "unknown";
 
 export type KnownRunStatus =
   | "running" | "done" | "blocked" | "crashed" | "timed_out" | "failed" | "released";

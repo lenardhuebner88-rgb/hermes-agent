@@ -4237,6 +4237,21 @@ def test_read_ledger_stats_tolerates_malformed_lines(tmp_path):
     assert stats["fails_by_kind"] == {"build_fail": 1}
 
 
+def test_read_ledger_stats_logs_malformed_lines_before_skipping(tmp_path, caplog):
+    """A torn append must not masquerade as a clean, smaller ledger."""
+    state_dir = tmp_path / "torn-ledger"
+    state_dir.mkdir()
+    (state_dir / "ledger.jsonl").write_text(
+        '{"round": 7, "verdict": "fail"\n', encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=runner_module.__name__):
+        stats = read_ledger_stats(state_dir)
+
+    assert stats["rounds"] == 0
+    assert any("malformed ledger event" in record.message for record in caplog.records)
+
+
 def test_read_ledger_stats_missing_file_returns_zeroed(tmp_path):
     stats = read_ledger_stats(tmp_path / "nicht-vorhanden")
     assert stats == {
@@ -4882,6 +4897,22 @@ def test_dry_streak_escalates_from_third_night(tmp_path, fake_engine, monkeypatc
     assert runner.ledger_path.read_text(encoding="utf-8").count("DRY-STREAK:") == 2
     assert calls.count("plan") == 4
     assert "build" not in calls
+
+
+def test_dry_streak_malformed_state_is_logged_before_zeroing(
+    tmp_path, fake_engine, monkeypatch, caplog
+):
+    """A truncated persistent counter must not masquerade as a first DRY night."""
+    _behaviors, _calls, runner, _notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-streak-malformed"
+    )
+    runner.state.mkdir(parents=True, exist_ok=True)
+    runner.dry_streak_path.write_text('{"streak":', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert runner._read_dry_streak() == 0
+
+    assert any("dry-streak read failed" in record.message for record in caplog.records)
 
 
 def test_dry_streak_resets_on_non_dry_end(tmp_path, fake_engine, monkeypatch):
