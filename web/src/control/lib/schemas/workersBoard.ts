@@ -47,7 +47,9 @@ export const WorkerSchema = z.object({
   task_title: z.string().catch("Ohne Titel"),
   // A newer or malformed task state must never paint an active worker as
   // "running". The visible sentinel makes the contract drift actionable.
-  task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"]).catch("unknown"),
+  // "unknown" gehoert ins Enum, nicht nur in den TS-Typ: .catch() muss einen
+  // Wert des Enums liefern, sonst bricht tsc (TS2769).
+  task_status: z.enum(["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived", "unknown"]).catch("unknown"),
   task_assignee: z.string().catch("hermes"),
   // Profile sind operator-definiert (Lanes!) — kein Enum: das stempelte echte
   // claude-cli-Lanes (coder-claude, premium, reviewer) zu "default" um.
