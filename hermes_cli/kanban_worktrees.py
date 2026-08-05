@@ -342,10 +342,15 @@ def _integration_gate_for_repo(
 
 GIT_TIMEOUT_SECONDS = 120
 MERGE_TIMEOUT_SECONDS = 300
-# Must comfortably exceed a worst-case post-merge gate (ruff 300s +
-# pytest 1200s + tsc 600s) so a second completer waits instead of parking
-# on pure lock contention.
-LOCK_TIMEOUT_SECONDS = 2400
+# Must match the worker/loop budget in scripts/run-affected.sh so the same
+# affected suite does not inherit a narrower deadline in the integrator.
+POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS = 3600
+# Must comfortably exceed the worst-case post-merge gate (ruff 300s +
+# pytest 3600s + tsc 600s = 4500s).  The extra 300s ensures a second
+# completer waits instead of parking on pure lock contention.
+LOCK_TIMEOUT_SECONDS = (
+    POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS + 300 + 600 + 300
+)
 
 # S6: Disk-Preflight vor Merge-Gate — klare Meldung statt kryptischem ENOSPC.
 # Default 2 GiB: Validation-Worktree + Vitest/tsc-Scratch unter Last.
@@ -6106,7 +6111,7 @@ def _default_quick_gate_pytest(
         return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
             [runner, *modules],
-            repo_root, 1200, notes,
+            repo_root, POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS, notes,
         )
     notes.append("pytest skipped (no applicable Python production paths)")
     return None
