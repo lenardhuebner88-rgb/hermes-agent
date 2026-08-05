@@ -21,14 +21,17 @@ Rules (config: ``kanban.alerts:`` in the ROOT config.yaml, additive):
       produced an outcome, so it rides the same rule as an always-alert
       case); ``deployed``/``held_live_test``/``aborted_pre_live_test`` stay
       silent (successes and expected holds).
+  (e) ``block_loop_detected`` — repeated blocks routed to triage that must
+      reach the board-wide reporting channel without a task subscription.
 
 Rate limit: max one alert per rule per ``cooldown_seconds`` (default 15 min).
 A suppressed alert is dropped, not queued — the next qualifying event after
 the cooldown alerts again. Alerts go to Discord only (Telegram ist ab).
 
 Send-confirmation cursor gating (A1, 2026-07-06): the monotonic-cursor rules
-(``operator_escalation``, ``auto_release_attention``, and since 2026-07-10
-``run_failed`` — its run-id cursor is equally irreversible) accept an
+(``operator_escalation``, ``auto_release_attention``, ``block_loop_detected``,
+and since 2026-07-10 ``run_failed`` — its run-id cursor is equally
+irreversible) accept an
 optional ``send_fn`` — when given, the cursor for a rule only commits AFTER
 ``send_fn(alert)`` confirms delivery (truthy, no exception); a failed send
 leaves the cursor untouched so the next tick re-fetches and retries the SAME
@@ -66,6 +69,7 @@ _MAX_FAILURES_LISTED = 5
 _OPERATOR_ESCALATION_EVENT = "operator_escalation"
 _AUTO_RELEASE_EVENT = "auto_release"
 _AUTO_RELEASE_HOOK_CRASHED_EVENT = "auto_release_hook_crashed"
+_BLOCK_LOOP_EVENT = "block_loop_detected"
 _AUTO_RELEASE_HOOK_CRASHED_EMOJI = "🔴"
 # outcome -> emoji, attention-only (deployed / held_live_test /
 # aborted_pre_live_test are successes or expected operator-gated holds and
@@ -92,7 +96,12 @@ _MAX_SEND_ATTEMPTS = 3
 # ``gateway.kanban_watchers`` can filter on it without duplicating the
 # rule-name strings.
 SEND_GATED_RULES = frozenset(
-    {_OPERATOR_ESCALATION_EVENT, "auto_release_attention", "run_failed"}
+    {
+        _OPERATOR_ESCALATION_EVENT,
+        "auto_release_attention",
+        _BLOCK_LOOP_EVENT,
+        "run_failed",
+    }
 )
 
 # Terminal failure classification. status covers the run row's own state;
@@ -170,6 +179,7 @@ def new_alert_state() -> dict:
         "last_seen_run_id": None,
         "last_seen_operator_escalation_event_id": None,
         "last_seen_auto_release_event_id": None,
+        "last_seen_block_loop_event_id": None,
         "last_sent": {},
         # rule -> consecutive confirmed-send-failure count (A1, send-gated
         # cursor rules only; reset to 0 on a confirmed send or a backstop).
@@ -190,6 +200,7 @@ def load_alert_state(path: str | Path) -> dict:
         "last_seen_run_id",
         "last_seen_operator_escalation_event_id",
         "last_seen_auto_release_event_id",
+        "last_seen_block_loop_event_id",
     ):
         value = payload.get(key)
         if value is None or isinstance(value, int):
@@ -513,6 +524,73 @@ def _rule_auto_release_attention(
     )
 
 
+def _rule_block_loop_detected(
+    conn: sqlite3.Connection,
+    acfg: dict,
+    state: dict,
+    now: int,
+    *,
+    send_fn: Optional[Callable[[dict], bool]] = None,
+    max_send_attempts: int = _MAX_SEND_ATTEMPTS,
+    backstop_fn: Optional[Callable[[dict], None]] = None,
+) -> Optional[dict]:
+    """Alert repeated blocks independently of per-task subscriptions."""
+    del now
+    last_seen = state.get("last_seen_block_loop_event_id")
+    if last_seen is None:
+        row = conn.execute(
+            "SELECT MAX(id) AS m FROM task_events WHERE kind = ?",
+            (_BLOCK_LOOP_EVENT,),
+        ).fetchone()
+        state["last_seen_block_loop_event_id"] = (
+            int(row["m"]) if row and row["m"] is not None else 0
+        )
+        return None
+
+    rows = conn.execute(
+        "SELECT e.id, e.task_id, e.payload, t.title "
+        "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
+        "WHERE e.id > ? AND e.kind = ? ORDER BY e.id ASC",
+        (int(last_seen), _BLOCK_LOOP_EVENT),
+    ).fetchall()
+    if not rows:
+        return None
+    new_cursor = max(int(row["id"]) for row in rows)
+
+    lines = [
+        f"🚨 **Kanban block loop:** {len(rows)} Karte(n) wiederholt blockiert"
+    ]
+    for row in rows[:_MAX_FAILURES_LISTED]:
+        payload = _payload_dict(row["payload"])
+        title = _snippet(row["title"]) or "(ohne Titel)"
+        kind = _snippet(payload.get("kind")) or "unclassified"
+        recurrences = payload.get("recurrences")
+        reason = _snippet(payload.get("reason")) or "kein Grund angegeben"
+        detail = f"{kind}, {recurrences} Wiederholungen" if recurrences else kind
+        lines.append(
+            f"• **{title}** (`{row['task_id']}`) — {detail}: {reason}"
+        )
+    if len(rows) > _MAX_FAILURES_LISTED:
+        lines.append(f"… und {len(rows) - _MAX_FAILURES_LISTED} weitere")
+    alert = {"rule": _BLOCK_LOOP_EVENT, "text": "\n".join(lines)}
+    # 2026-08-05: intentionally invert this module's operator-attention
+    # convention. Route to channel_id, not escalation_channel_id, as a
+    # deliberate workaround for the environment defect behind the 2026-08-03
+    # false-alarm incident; this is not an architecture precedent.
+    if acfg.get("channel_id"):
+        alert["channel_id"] = acfg["channel_id"]
+    return _confirm_or_defer(
+        state,
+        _BLOCK_LOOP_EVENT,
+        "last_seen_block_loop_event_id",
+        new_cursor,
+        alert,
+        send_fn,
+        max_send_attempts,
+        backstop_fn,
+    )
+
+
 def _rule_run_failed(
     conn: sqlite3.Connection,
     acfg: dict,
@@ -657,9 +735,9 @@ def evaluate_alerts(
 
     ``send_fn`` (A1, 2026-07-06; extended to ``run_failed`` 2026-07-10):
     when given, it gates the MONOTONIC-cursor rules (``operator_escalation``,
-    ``auto_release_attention``, ``run_failed`` — see ``_confirm_or_defer``
-    and ``SEND_GATED_RULES``) on a confirmed send instead of advancing the
-    cursor eagerly. ``error_rate``/``daily_cost`` stay ungated (no cursor —
+    ``auto_release_attention``, ``block_loop_detected``, ``run_failed`` — see
+    ``_confirm_or_defer`` and ``SEND_GATED_RULES``) on a confirmed send instead
+    of advancing the cursor eagerly. ``error_rate``/``daily_cost`` stay ungated (no cursor —
     window-based, the condition re-fires after cooldown, so a dropped send
     is bounded, not permanent). The production watcher
     (``gateway.kanban_watchers._kanban_notifier_watcher``) DOES pass
@@ -682,7 +760,12 @@ def evaluate_alerts(
             continue
         if alert is not None:
             alerts.append(alert)
-    for rule_fn in (_rule_run_failed, _rule_operator_escalation, _rule_auto_release_attention):
+    for rule_fn in (
+        _rule_run_failed,
+        _rule_operator_escalation,
+        _rule_auto_release_attention,
+        _rule_block_loop_detected,
+    ):
         try:
             alert = rule_fn(
                 conn, acfg, state, ts,
