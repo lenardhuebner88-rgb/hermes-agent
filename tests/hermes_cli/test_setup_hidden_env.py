@@ -107,9 +107,9 @@ class TestCliWizard:
 
         from hermes_cli import gateway as gw
 
-        platform = next(p for p in gw._PLATFORMS if p["key"] == "mattermost")
+        platform = next(p for p in gw._all_platforms() if p["key"] == "mattermost")
         monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(answers) + "\n"))
-        gw._setup_standard_platform(dict(platform))
+        gw._configure_platform(dict(platform))
 
     def _env(self, home):
         path = home / ".env"

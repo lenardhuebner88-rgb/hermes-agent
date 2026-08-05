@@ -1131,12 +1131,13 @@ def interactive_setup() -> None:
 
     Mirrors Discord/Teams' ``interactive_setup`` shape: lazy-imports CLI
     helpers so the plugin's import surface stays small, prompts for the
-    server URL + bot token, captures an allowlist, and offers to set a
-    home channel.  Replaces the central
-    ``hermes_cli/setup.py::_setup_mattermost`` function this migration
-    removes.
+    server URL + bot token, and captures an allowlist.  The home channel
+    is deliberately not asked (self-configuring knob, hidden on every
+    setup surface): ``/set-home`` in a channel sets it later.  Replaces
+    the central ``hermes_cli/setup.py::_setup_mattermost`` function this
+    migration removes.
     """
-    from hermes_cli.config import get_env_value, remove_env_value, save_env_value
+    from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli.cli_output import (
         prompt,
         prompt_yes_no,
@@ -1178,15 +1179,7 @@ def interactive_setup() -> None:
         print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
 
     print()
-    print_info("📬 Home Channel: where Hermes delivers cron job results and notifications.")
-    print_info("   To get a channel ID: click channel name → View Info → copy the ID")
-    print_info("   You can also set this later by typing /set-home in a Mattermost channel.")
-    home_channel = prompt("Home channel ID (leave empty to set later with /set-home)").strip()
-    if home_channel:
-        save_env_value("MATTERMOST_HOME_CHANNEL", home_channel)
-    else:
-        if remove_env_value("MATTERMOST_HOME_CHANNEL"):
-            print_info("Home channel cleared.")
+    print_info("📬 Cron/notification delivery: set later with /set-home in a channel.")
     print_info("   Open config in your editor:  hermes config edit")
 
 
