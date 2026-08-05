@@ -12,6 +12,7 @@ Ruff is found via the same probe order the script uses: main-repo venv first.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,7 +68,29 @@ RUFF_PATH = _find_ruff()
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "worker-gate-ruff.sh"
 # Helper scripts worker-gate-ruff.sh invokes via "$SCRIPT_DIR/<name>"; they must
 # travel with it into the fixture worktree or the script runs degraded.
-SCRIPT_HELPERS = (SCRIPT.parent / "gate_diff_base.py",)
+#
+# DERIVED from the script source, never hand-listed: the hand-listed variant is
+# exactly how this file went red on 2026-08-05 — the script grew a
+# ``$SCRIPT_DIR/gate_diff_base.py`` call, the fixture kept shipping only the
+# script, and the resulting "[Errno 2] No such file or directory" tripped the
+# crash guard in contract 4. A future helper must not be able to repeat that
+# silently; ``test_fixture_ships_every_helper_the_script_calls`` below turns a
+# drifted list into a loud, self-explaining failure.
+#
+# The name must carry an extension (``gate_diff_base.py``): ``$SCRIPT_DIR/..``
+# is the script's own repo-root walk-up, not a helper, and copying it would
+# make the fixture blow up on a directory instead of failing usefully.
+_SCRIPT_DIR_CALL_RE = re.compile(
+    r"\$(?:\{)?SCRIPT_DIR(?:\})?/([A-Za-z0-9_-]+\.[A-Za-z0-9_.-]+)"
+)
+
+
+def _discover_script_helpers() -> tuple[Path, ...]:
+    names = sorted(set(_SCRIPT_DIR_CALL_RE.findall(SCRIPT.read_text(encoding="utf-8"))))
+    return tuple(SCRIPT.parent / name for name in names)
+
+
+SCRIPT_HELPERS = _discover_script_helpers()
 
 
 # ---------------------------------------------------------------------------
@@ -219,4 +242,31 @@ def test_ruff_gate_deleted_py_no_crash(main_repo, worktree):
     combined = result.stdout + result.stderr
     assert "No such file" not in combined, (
         f"Script passed deleted file to ruff:\n{combined}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Contract 5: the fixture must not silently drift away from the script
+# ---------------------------------------------------------------------------
+
+def test_fixture_ships_every_helper_the_script_calls():
+    """Every ``$SCRIPT_DIR/<helper>`` the script shells out to must exist and
+    be shipped into the fixture worktree.
+
+    Guards the 2026-08-05 green-gate red: the script gained a helper call
+    (``gate_diff_base.py``), the hand-listed fixture did not, so the script ran
+    degraded and its own "[Errno 2] No such file or directory" tripped the
+    crash guard in contract 4 — a red night with no product defect behind it.
+    Deriving the list makes that impossible; this test makes the derivation
+    itself falsifiable (an empty match set would silently ship nothing).
+    """
+    assert SCRIPT_HELPERS, (
+        "no $SCRIPT_DIR/<helper> call found in scripts/worker-gate-ruff.sh — "
+        "either the script stopped using helpers (drop this guard) or the "
+        "regex no longer matches how they are invoked"
+    )
+    missing = [str(h) for h in SCRIPT_HELPERS if not h.is_file()]
+    assert not missing, (
+        "worker-gate-ruff.sh calls helper(s) that do not exist next to it: "
+        f"{missing}"
     )
