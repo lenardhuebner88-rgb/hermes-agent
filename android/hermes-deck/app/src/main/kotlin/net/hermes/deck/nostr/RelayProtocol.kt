@@ -148,14 +148,32 @@ object RelayProtocol {
     }
 
     /**
-     * Recent plain messages in a channel, for finding decisions that start with
-     * the stop sign. There is no tag to filter on — the marker lives in the
-     * content — so this pulls a bounded window and sifts it on the client.
+     * Recent plain messages in a channel.
+     *
+     * Two things need this and neither can be filtered server-side: decisions
+     * are marked by a stop sign in the *content*, and replies to a task carry
+     * no `deck-task` tag at all — they are ordinary messages pointing at the
+     * root with an `e` tag. So this pulls one bounded window and the client
+     * sifts it for both.
      */
-    fun decisionFilter(channelId: String, limit: Int = 120): JSONObject = JSONObject().apply {
+    fun recentMessagesFilter(channelId: String, limit: Int = 120): JSONObject = JSONObject().apply {
         put("kinds", JSONArray().put(Kind.CHANNEL_MESSAGE))
         put("#h", JSONArray().put(channelId))
         put("limit", limit)
+    }
+
+    /**
+     * `kind:0` profiles for a set of authors.
+     *
+     * `authors` is a top-level filter field, not a tag, so it is unaffected by
+     * the single-letter tag rule that governs [deckTaskFilter]. The limit is
+     * generous because relays return every historical profile per author, not
+     * just the current one — the caller keeps the newest.
+     */
+    fun profileFilter(pubkeys: Collection<String>): JSONObject = JSONObject().apply {
+        put("kinds", JSONArray().put(Kind.PROFILE))
+        put("authors", JSONArray().apply { pubkeys.forEach { put(it) } })
+        put("limit", 500)
     }
 
     fun threadFilter(rootEventId: String, limit: Int = 200): JSONObject = JSONObject().apply {

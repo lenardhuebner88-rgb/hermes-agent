@@ -22,6 +22,12 @@ class DeckStore(private val file: File) {
         /** Raw task roots and their edits, folded into tasks at read time. */
         val events: List<NostrEvent> = emptyList(),
         val outbox: List<NostrEvent> = emptyList(),
+        /**
+         * Raw `kind:0` events, kept so names survive offline. Small and bounded
+         * by the number of people and agents, unlike channel chatter — which is
+         * why that stays in memory and these do not.
+         */
+        val profiles: List<NostrEvent> = emptyList(),
         val lastSyncAt: Long = 0,
     )
 
@@ -36,6 +42,9 @@ class DeckStore(private val file: File) {
             channels = readChannels(json.optJSONArray("channels")),
             events = readEvents(json.optJSONArray("events")),
             outbox = readEvents(json.optJSONArray("outbox")),
+            // Absent in files written before profiles existed; an empty list
+            // simply means every name renders as a short key until the next sync.
+            profiles = readEvents(json.optJSONArray("profiles")),
             lastSyncAt = json.optLong("lastSyncAt", 0),
         )
     }
@@ -47,6 +56,7 @@ class DeckStore(private val file: File) {
             put("channels", JSONArray().apply { snapshot.channels.forEach { put(writeChannel(it)) } })
             put("events", JSONArray().apply { snapshot.events.forEach { put(it.toJson()) } })
             put("outbox", JSONArray().apply { snapshot.outbox.forEach { put(it.toJson()) } })
+            put("profiles", JSONArray().apply { snapshot.profiles.forEach { put(it.toJson()) } })
         }
         // Write-then-rename: a crash mid-write leaves the previous good file.
         val temp = File(file.parentFile, file.name + ".tmp")

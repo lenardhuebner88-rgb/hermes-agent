@@ -22,6 +22,7 @@ import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.ThreadActivity
 import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
@@ -182,6 +183,31 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         search: String,
         due: LocalDate?,
     ): List<DeckTask> = TaskFilter.apply(tasks, channel, search, due)
+
+    /**
+     * Threads with recent words in them.
+     *
+     * Takes `now` rather than reading the clock so the window advances with the
+     * screen instead of freezing at whatever second the last sync happened —
+     * and so the whole thing is testable with a fixed instant.
+     */
+    fun activeThreads(
+        snapshot: DeckRepository.Snapshot,
+        now: Long,
+    ): List<ThreadActivity.Entry> = ThreadActivity.of(
+        events = snapshot.chatter,
+        tasks = snapshot.tasks,
+        channels = snapshot.channels,
+        profiles = snapshot.profiles,
+        me = settings.pubkeyHex,
+        now = now,
+    )
+
+    /** Messages that name me, in the window the chatter covers. */
+    fun mentionCount(snapshot: DeckRepository.Snapshot): Int {
+        val me = settings.pubkeyHex ?: return 0
+        return snapshot.chatter.count { it.pubkey != me && it.tagValues("p").contains(me) }
+    }
 
     fun capture(
         channelId: String,

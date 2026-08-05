@@ -49,6 +49,7 @@ import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 import net.hermes.deck.DeckViewModel
 import net.hermes.deck.model.Channel
+import net.hermes.deck.model.ControlSummary
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.DueDates
 import net.hermes.deck.model.TaskFilter
@@ -67,12 +68,18 @@ fun HomeScreen(
     val filter by viewModel.filterChannel.collectAsState()
     val dueFilter by viewModel.filterDue.collectAsState()
     val decisions by viewModel.decisions.collectAsState()
+    val agentsState by viewModel.agents.collectAsState()
 
     // Decisions live in ordinary channel chatter, so they can only be found by
     // scanning; do it once per screen entry rather than on every recomposition.
     LaunchedEffect(snapshot.channels.size) {
         if (snapshot.channels.isNotEmpty()) viewModel.loadDecisions()
     }
+    // The control card claims who is working and how much budget is left, and
+    // both come from the dashboard rather than the relay. Without this the card
+    // would render its agent band empty until the Agents tab had been visited —
+    // which reads as "nobody is working".
+    LaunchedEffect(Unit) { viewModel.loadAgents() }
 
     val channels = snapshot.channels
     val byId = channels.associateBy { it.id }
@@ -88,6 +95,27 @@ fun HomeScreen(
     val week = DueDates.week(today)
     val dueCounts = TaskFilter.openCountsByDay(snapshot.tasks, week)
     val overdue = TaskFilter.overdue(snapshot.tasks, today)
+
+    // Same reason as `today`: the activity window has to move with the screen,
+    // not freeze at whatever second the last sync ran.
+    val now = System.currentTimeMillis() / 1000
+    val activeThreads = viewModel.activeThreads(snapshot, now)
+    val syncFailure = (syncState as? net.hermes.deck.data.DeckRepository.SyncState.Failed)?.reason
+    val summary = ControlSummary.of(
+        tasks = snapshot.tasks,
+        agents = agentsState.agents,
+        heartbeatWindowSeconds = agentsState.heartbeatWindowSeconds,
+        heartbeatRecentSeconds = agentsState.heartbeatRecentSeconds,
+        usage = agentsState.usage,
+        activeThreads = activeThreads,
+        decisions = decisions.size,
+        mentions = viewModel.mentionCount(snapshot),
+        today = today,
+        pending = snapshot.pendingCount,
+        lastSyncAt = snapshot.lastSyncAt,
+        failure = syncFailure,
+        syncing = syncState is net.hermes.deck.data.DeckRepository.SyncState.Running,
+    )
 
     LazyColumn(
         Modifier
@@ -110,37 +138,54 @@ fun HomeScreen(
         }
 
         item {
-            val failure = (syncState as? net.hermes.deck.data.DeckRepository.SyncState.Failed)?.reason
-            HeroPanel(
-                title = when (open) {
-                    0 -> "Nichts offen"
-                    1 -> "1 offener Punkt"
-                    else -> "$open offene Punkte"
+            ControlCard(
+                summary = summary,
+                onShowDecisions = {
+                    viewModel.setFilterChannel(null)
+                    viewModel.setFilterDue(null)
                 },
-                // A failed sync has to stay on screen. As a transient message it
-                // vanished after four seconds and left a screen that looked
-                // exactly like "nothing captured yet" — measured on the device.
-                subtitle = when {
-                    failure != null -> "Abgleich fehlgeschlagen: $failure"
-                    syncState is net.hermes.deck.data.DeckRepository.SyncState.Running ->
-                        "Gleicht mit Buzz ab …"
-                    snapshot.pendingCount > 0 ->
-                        "${snapshot.pendingCount} wartet auf Verbindung zu Buzz"
-                    snapshot.lastSyncAt == 0L -> "Noch nicht abgeglichen"
-                    else -> "Abgeglichen ${relativeTime(snapshot.lastSyncAt)}"
+                onShowOverdue = {
+                    viewModel.setFilterChannel(null)
+                    viewModel.setFilterDue(null)
+                    viewModel.setSearch("")
                 },
-                warn = failure != null,
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StatPill("Offen", open.toString(), highlighted = true) {
-                        viewModel.setFilterChannel(null)
-                    }
-                    StatPill("Dringend", urgent.toString(), highlighted = false)
-                    StatPill("Erledigt", doneToday.toString(), highlighted = false)
-                    StatPill("Projekte", channels.size.toString(), highlighted = false)
+                onShowToday = {
+                    viewModel.setFilterChannel(null)
+                    viewModel.setFilterDue(today)
+                },
+                onSync = { viewModel.sync() },
+            )
+            Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
+        }
+
+        // The deck's own numbers keep their row, below the system state: they
+        // answer "how much work is there", which the control card deliberately
+        // does not, because it is about what is happening right now.
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StatPill("Offen", open.toString(), highlighted = true) {
+                    viewModel.setFilterChannel(null)
                 }
+                StatPill("Dringend", urgent.toString(), highlighted = false)
+                StatPill("Erledigt", doneToday.toString(), highlighted = false)
+                StatPill("Projekte", channels.size.toString(), highlighted = false)
             }
             Spacer(Modifier.height(DeckMetrics.gap + 12.dp))
+        }
+
+        // Only while nothing is filtered: this block is about "where is
+        // something happening", which a filtered deck is not asking.
+        if (activeThreads.isNotEmpty() && search.isBlank() && filter == null && dueFilter == null) {
+            item {
+                SectionHeader(title = "Gerade im Gespräch", action = "${activeThreads.size}")
+            }
+            items(activeThreads, key = { "thread-${it.taskId}" }) { entry ->
+                ActiveThreadRow(entry) {
+                    snapshot.tasks.firstOrNull { it.id == entry.taskId }?.let(onOpenTask)
+                }
+                Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
+            }
+            item { Spacer(Modifier.height(DeckMetrics.gap)) }
         }
 
         item {

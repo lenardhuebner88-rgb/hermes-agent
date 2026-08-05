@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.Profile
 import net.hermes.deck.model.TaskAssembler
 import net.hermes.deck.model.TaskCodec
 import net.hermes.deck.model.TaskPriority
@@ -38,6 +39,16 @@ class DeckRepository(
         val tasks: List<DeckTask> = emptyList(),
         val pendingCount: Int = 0,
         val lastSyncAt: Long = 0,
+        /**
+         * Recent plain channel messages, held for this session only.
+         *
+         * Deliberately not persisted: 120 messages per channel across thirteen
+         * channels would grow the single-file store without bound, and "what is
+         * being said right now" is a question the next sync answers in a second
+         * anyway. Task roots and their edits keep being persisted as before.
+         */
+        val chatter: List<NostrEvent> = emptyList(),
+        val profiles: Map<String, Profile> = emptyMap(),
     )
 
     sealed interface SyncState {
@@ -54,6 +65,9 @@ class DeckRepository(
     val syncState: StateFlow<SyncState> = _syncState.asStateFlow()
 
     private var cached: DeckStore.Snapshot = DeckStore.Snapshot()
+
+    /** Session-only; see [Snapshot.chatter] for why this is not persisted. */
+    private var sessionChatter: List<NostrEvent> = emptyList()
 
     /** Reads the offline copy. Cheap and safe to call before any network exists. */
     suspend fun loadLocal() = withContext(Dispatchers.IO) {
@@ -92,22 +106,39 @@ class DeckRepository(
 
             val projects = channels.filter { it.usableAsProject }
             val events = ArrayList<NostrEvent>()
+            val chatter = ArrayList<NostrEvent>()
             for (channel in projects) {
                 val result = relay.query(
                     listOf(
                         RelayProtocol.deckTaskFilter(channel.id),
                         RelayProtocol.taskOverlayFilter(channel.id),
+                        // Replies carry no `deck-task` marker — they are plain
+                        // channel messages pointing at the root — so the task
+                        // filter above can never see them. Without this pull the
+                        // reply count on every card is structurally zero, which
+                        // is exactly what it was.
+                        RelayProtocol.recentMessagesFilter(channel.id),
                     ),
                 )
-                events.addAll(result.events)
+                for (event in result.events) {
+                    if (TaskCodec.isTaskRoot(event) || event.kind != Kind.CHANNEL_MESSAGE) {
+                        events.add(event)
+                    } else {
+                        chatter.add(event)
+                    }
+                }
             }
+
+            val profiles = fetchProfiles(relay, events + chatter, channels)
 
             cached = cached.copy(
                 channels = channels,
                 events = mergeEvents(cached.events, events),
+                profiles = mergeEvents(cached.profiles, profiles),
                 lastSyncAt = clock(),
             )
             store.save(cached)
+            sessionChatter = chatter
             publishSnapshot()
             _syncState.value = SyncState.Done(cached.lastSyncAt, _snapshot.value.tasks.size)
             null
@@ -225,7 +256,7 @@ class DeckRepository(
             for (channel in channels) {
                 val result = relay.query(
                     listOf(
-                        RelayProtocol.decisionFilter(channel.id),
+                        RelayProtocol.recentMessagesFilter(channel.id),
                         RelayProtocol.taskOverlayFilter(channel.id, limit = 200),
                     ),
                 )
@@ -342,12 +373,43 @@ class DeckRepository(
         const val DONE_MARK = "\u2705"
     }
 
+    /**
+     * Profiles for everyone who appears on screen: task authors, assignees,
+     * whoever last spoke in a thread, and every channel member.
+     *
+     * One query for all of them — `authors` is a top-level filter field, so the
+     * single-letter tag rule that constrains task filters does not apply. A
+     * failure here is not worth failing the sync over: the screens fall back to
+     * short pubkeys, which is what they showed before profiles existed.
+     */
+    private suspend fun fetchProfiles(
+        relay: RelayClient,
+        events: Collection<NostrEvent>,
+        channels: Collection<Channel>,
+    ): List<NostrEvent> {
+        val wanted = buildSet {
+            events.forEach { event ->
+                add(event.pubkey)
+                addAll(event.tagValues("p"))
+            }
+            channels.forEach { addAll(it.memberPubkeys) }
+        }.filter { it.length == 64 }
+        if (wanted.isEmpty()) return emptyList()
+        return runCatching {
+            relay.query(listOf(RelayProtocol.profileFilter(wanted))).events
+        }.getOrDefault(emptyList())
+    }
+
     private fun publishSnapshot() {
         _snapshot.value = Snapshot(
             channels = cached.channels.filter { it.usableAsProject },
-            tasks = TaskAssembler.assemble(cached.events),
+            // Chatter is folded in here too, so a reply raises the reply count
+            // on the card it belongs to instead of only inside the open thread.
+            tasks = TaskAssembler.assemble(cached.events + sessionChatter),
             pendingCount = cached.outbox.size,
             lastSyncAt = cached.lastSyncAt,
+            chatter = sessionChatter,
+            profiles = Profile.newestByPubkey(cached.profiles),
         )
     }
 }
