@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests._module_isolation import preserve_sys_modules
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,13 @@ def _isolate_env(tmp_path, monkeypatch):
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     yield hermes_home
+
+
+@pytest.fixture(autouse=True)
+def _restore_plugin_module_cache():
+    """Keep dynamically loaded hermes_plugins modules inside each test."""
+    with preserve_sys_modules():
+        yield
 
 
 def _load_lib():
