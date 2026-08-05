@@ -79,4 +79,16 @@ dependencies {
     // The Android stub org.json throws "Stub!" on the host JVM test classpath;
     // the real implementation has to be on it. Same reason as hermes-voice.
     testImplementation("org.json:json:20260522")
+
+    // Instrumented Compose tests. Until these existed the whole Compose layer
+    // carried no gate at all — four of six defects in the 2026-08-05 session
+    // lived exactly there and were found only by looking at a running emulator.
+    // Versions read off Google's maven-metadata, not guessed.
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    // Supplies the empty activity `createComposeRule` launches into. Without it
+    // every test dies with "No instrumentation registered".
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
