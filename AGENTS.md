@@ -330,6 +330,19 @@ run_agent.py, cli.py, batch_runner.py, environments/
   returned **829**. Both wrong answers look plausible — no error, no empty output. Redirect to
   a file first and count with `awk`/`wc -l < file`, or use a counting subcommand
   (`git rev-list --count`). Never build a measurement out of a long pipe.
+  **It bites `journalctl` too, and there it invents regressions.** On 2026-08-05
+  `journalctl -u … --since … --until … | rg -c <pattern>` returned **0** for a warning that a
+  file-based count put at **4995** in the same window — read as "this started with our deploy",
+  which produced a confident, entirely wrong root cause. The contradiction only surfaced
+  because a second query ("earliest hit") disagreed with the first. Before concluding
+  *"this is new"*, dump the journal to a file and count there.
+- **Never `git apply --3way` a patch onto a JSON lockfile.** After an upstream merge changed
+  `package-lock.json`, a saved 7-line foreign diff no longer applied; `--3way` "succeeded with
+  conflicts" and wrote conflict markers *into the JSON*, leaving the file unparseable while
+  `git status` showed only a normal `UU`. Recovery is `git checkout HEAD -- <lockfile>` plus a
+  targeted edit of the intended lines. To carry a foreign lockfile change across a merge:
+  re-derive it (drop/add the named entry) instead of replaying the patch, and verify with
+  `json.load` plus `git diff --numstat` matching the original insert/delete counts.
 - **`git merge-tree` conflict lines are not one format.** `CONFLICT (content): Merge conflict in
   <path>` ends with the path, but `CONFLICT (modify/delete): … Version X of <path> left in tree.`
   ends with `tree.` — a generic `awk '{print $NF}'` extractor invents a file called `tree.` and
