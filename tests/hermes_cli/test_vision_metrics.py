@@ -1604,6 +1604,62 @@ def test_fail_without_payload_omits_first_fail(state_dir):
     assert "first_fail" not in rec
 
 
+def test_fail_record_persists_machine_readable_quarantine_classes(state_dir):
+    rec = vm.record_gate_result(
+        "fail",
+        ts="2026-08-05T03:00:00+00:00",
+        failure_classification="regression",
+        failed_test_files=["tests/env/test_clock.py", "tests/product/test_bug.py"],
+        quarantined_test_files=["tests/env/test_clock.py"],
+        blocking_test_files=["tests/product/test_bug.py"],
+        unattributed_fail_gates=[],
+        quarantine_policy_sha256="a" * 64,
+    )
+
+    assert rec["failure_classification"] == "regression"
+    assert rec["failed_test_files"] == [
+        "tests/env/test_clock.py",
+        "tests/product/test_bug.py",
+    ]
+    assert rec["quarantined_test_files"] == ["tests/env/test_clock.py"]
+    assert rec["blocking_test_files"] == ["tests/product/test_bug.py"]
+    assert rec["unattributed_fail_gates"] == []
+    assert rec["quarantine_policy_sha256"] == "a" * 64
+    assert vm.read_gate_records()[-1] == rec
+
+
+def test_classified_failure_evidence_never_truncates_to_a_false_allow(state_dir):
+    files = [f"tests/env/test_{index}.py" for index in range(101)]
+
+    with pytest.raises(ValueError, match="file-count limit"):
+        vm.record_gate_result(
+            "fail",
+            failure_classification="environment_quarantine",
+            failed_test_files=files,
+            quarantined_test_files=files,
+            blocking_test_files=[],
+            unattributed_fail_gates=[],
+            quarantine_policy_sha256="a" * 64,
+        )
+
+    assert vm.read_gate_records() == []
+
+
+def test_environment_label_cannot_hide_a_blocking_file(state_dir):
+    with pytest.raises(ValueError, match="not fail-closed"):
+        vm.record_gate_result(
+            "fail",
+            failure_classification="environment_quarantine",
+            failed_test_files=["tests/env/test_clock.py", "tests/product/test_bug.py"],
+            quarantined_test_files=["tests/env/test_clock.py"],
+            blocking_test_files=["tests/product/test_bug.py"],
+            unattributed_fail_gates=[],
+            quarantine_policy_sha256="a" * 64,
+        )
+
+    assert vm.read_gate_records() == []
+
+
 def test_first_fail_detail_redacts_secrets(state_dir):
     # AC-2: the captured tail runs through the existing response redaction so
     # no token reaches the on-disk ledger.

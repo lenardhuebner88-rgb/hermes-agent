@@ -90,6 +90,97 @@ def test_cli_record_bad_leakers_json_is_ignored(tmp_path, monkeypatch, state_dir
     assert rec["first_fail"]["gate"] == "python"
 
 
+def test_cli_classifies_exact_allowlisted_file_and_persists_it(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    gate_log = tmp_path / "python.log"
+    gate_log.write_text(
+        "=== 1 file with test failures (1 test failed) ===\n"
+        "  tests/env/test_clock.py  (1 test failed)\n",
+        encoding="utf-8",
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+
+    rc = _run_cli(
+        [
+            "vision",
+            "classify-gate-failures",
+            "--quarantine-allowlist",
+            str(allowlist),
+            "--gate-log",
+            f"python={gate_log}",
+            "--json",
+        ],
+        monkeypatch,
+        tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    classified = json.loads(capsys.readouterr().out)
+    assert classified["failure_classification"] == "environment_quarantine"
+
+    rc = _run_cli(
+        [
+            "vision",
+            "record-gate-result",
+            "fail",
+            "--failure-classification",
+            classified["failure_classification"],
+            "--failed-test-files-json",
+            json.dumps(classified["failed_test_files"]),
+            "--quarantined-test-files-json",
+            json.dumps(classified["quarantined_test_files"]),
+            "--blocking-test-files-json",
+            json.dumps(classified["blocking_test_files"]),
+            "--unattributed-fail-gates-json",
+            json.dumps(classified["unattributed_fail_gates"]),
+            "--quarantine-policy-sha256",
+            classified["quarantine_policy_sha256"],
+        ],
+        monkeypatch,
+        tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    rec = vm.read_gate_records()[-1]
+    assert rec["failure_classification"] == "environment_quarantine"
+    assert rec["quarantined_test_files"] == ["tests/env/test_clock.py"]
+
+
+def test_cli_incomplete_file_attribution_and_missing_gate_both_block(
+    tmp_path, monkeypatch, state_dir, capsys
+):
+    gate_log = tmp_path / "python.log"
+    gate_log.write_text(
+        "=== 2 files with test failures (2 tests failed) ===\n"
+        "  tests/env/test_clock.py  (1 test failed)\n",
+        encoding="utf-8",
+    )
+    allowlist = tmp_path / "allowlist.json"
+    allowlist.write_text('["tests/env/test_clock.py"]\n', encoding="utf-8")
+
+    rc = _run_cli(
+        [
+            "vision",
+            "classify-gate-failures",
+            "--quarantine-allowlist",
+            str(allowlist),
+            "--gate-log",
+            f"python={gate_log}",
+            "--unattributed-gate",
+            "build",
+            "--json",
+        ],
+        monkeypatch,
+        tmp_path / "kanban.db",
+    )
+
+    assert rc == 0
+    classified = json.loads(capsys.readouterr().out)
+    assert classified["failure_classification"] == "regression"
+    assert classified["failed_test_files"] == []
+    assert classified["unattributed_fail_gates"] == ["build", "python"]
+
+
 # ---------------------------------------------------------------------------
 # isolate-fails (runner monkeypatched so no subprocess runs)
 # ---------------------------------------------------------------------------
