@@ -1023,16 +1023,29 @@ go to `~/.hermes/skills/.archive/` and are restorable.
 - **Core:** `agent/curator.py` (review loop, auto-transitions, LLM review
   prompt) + `agent/curator_backup.py` (pre-run tar.gz snapshots).
 - **CLI:** `hermes_cli/curator.py` wires `hermes curator <verb>` where
-  verbs are: `status`, `run`, `pause`, `resume`, `pin`, `unpin`,
-  `archive`, `restore`, `prune`, `backup`, `rollback`.
+  verbs are: `status`, `usage`, `run`, `pause`, `resume`, `pin`, `unpin`,
+  `list-unmanaged`, `adopt`, `archive`, `restore`, `list-archived`,
+  `prune`, `backup`, `rollback`.
 - **Telemetry:** `tools/skill_usage.py` owns the sidecar
   `~/.hermes/skills/.usage.json` — per-skill `use_count`, `view_count`,
   `patch_count`, `last_activity_at`, `state` (active / stale /
   archived), `pinned`.
 
 Invariants:
-- Curator only touches skills with `created_by: "agent"` provenance —
-  bundled + hub-installed skills are off-limits.
+- **Hub-installed and external-dir skills are off-limits** — they have an
+  upstream owner (`is_curation_eligible` in `tools/skill_usage.py`).
+- **Bundled built-ins are NOT off-limits by default.** They become
+  curation-eligible whenever `curator.prune_builtins` is on, and that flag
+  **defaults to `True`** (`agent/curator.py:get_prune_builtins`,
+  `tools/skill_usage.py:_prune_builtins_enabled`). Set
+  `curator.prune_builtins: false` to exempt all built-ins. Independent of the
+  flag, the names in `PROTECTED_BUILTIN_SKILLS` (currently `plan`) are never
+  archived or consolidated on any path — they back load-bearing UX.
+- `created_by: "agent"` in `.usage.json` is a **curator-management opt-in
+  flag, not provenance** (see the naming note on
+  `_is_curator_managed_record`). Users can flip it for a manually authored
+  skill via `hermes curator adopt`; `hermes curator list-unmanaged` shows the
+  candidates. Non-bundled skills without that marker stay untracked.
 - Never deletes; max destructive action is archive.
 - Pinned skills are exempt from every auto-transition and from the
   LLM review pass.
@@ -1042,7 +1055,8 @@ Invariants:
 
 Config section (`curator:` in `config.yaml`):
 `enabled`, `interval_hours`, `min_idle_hours`, `stale_after_days`,
-`archive_after_days`, `backup.*`.
+`archive_after_days`, `prune_builtins` (default `true`), `consolidate`,
+`backup.*`.
 
 Full user-facing docs: `website/docs/user-guide/features/curator.md`.
 
