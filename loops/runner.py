@@ -171,6 +171,19 @@ def _autoland_safety_hash(raw: dict) -> str:
         # A retirement target grants authority to disable a timer, so an
         # autoland pack must bind it. Omitting the key preserves legacy hashes.
         projection["goal"] = raw.get("goal")
+    if "plan_skip_when_queue_full" in raw:
+        # Gleiche Bauart wie `goal`, gleicher Grund: der Schalter entscheidet,
+        # ob im UNBEAUFSICHTIGTEN Nachtlauf ueberhaupt geplant wird. Ein Flip
+        # auf false in einem Vertrags-Autoland-Pack aendert dessen Verhalten
+        # ohne Zuschauer und muss deshalb den Hash drehen.
+        # Nur bei GESETZTEM Key aufnehmen: ein zusaetzlicher Projektions-Key
+        # dreht den Hash sonst auch mit Default (json.dumps sieht ihn), und
+        # genau das haette die kuratierten SHAs gebrochen. Das war die reale
+        # Sorge hinter dem urspruenglichen Auslassen (2b3f0d3fbc) — sie ist mit
+        # diesem Muster geloest, statt die Bindung ganz aufzugeben.
+        projection["plan_skip_when_queue_full"] = raw.get(
+            "plan_skip_when_queue_full"
+        )
     canonical = json.dumps(
         projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -513,10 +526,11 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         raise ManifestError(f"Pack {name!r}: autoland muss boolean sein")
     autoland = autoland_raw
     # Opt-out (Default an): Packs, deren Vertrag jede Nacht frische Pläne
-    # verlangt, setzen plan_skip_when_queue_full: false. Bewusst AUSSERHALB der
-    # Autoland-Sicherheitsprojektion (_autoland_safety_hash listet ihre Keys
-    # explizit) — sonst kippte der kuratierte Hash, sobald ein Pack das Feld
-    # überhaupt setzt.
+    # verlangt, setzen plan_skip_when_queue_full: false. Der Key IST an die
+    # Autoland-Sicherheitsprojektion gebunden, aber nur wenn ein Manifest ihn
+    # setzt (_autoland_safety_hash, Muster wie `goal`) — so dreht ein Flip auf
+    # false den Hash fail-closed, ohne die kuratierten SHAs der Packs zu
+    # brechen, die den Key gar nicht führen.
     plan_skip_raw = raw.get("plan_skip_when_queue_full", True)
     if not isinstance(plan_skip_raw, bool):
         raise ManifestError(
@@ -3135,10 +3149,38 @@ class LoopRunner:
                 self.ledger(f"BASE-REFRESH übersprungen: {first_line}")
         # Plan-Phase sparen, wenn die Queue ohnehin voll ist: cmd_plan wuerde
         # nur Modellzeit (Rate-Limit-Kontingent) fuer Plaene verbrennen, fuer
-        # die kein Round-Slot frei ist (Nachtbetrieb-Audit 2026-08-05: 16
-        # DRY-Laeufe, ~2 h ohne Ertrag). Opt-out per Manifest fuer Packs, deren
+        # die kein Round-Slot frei ist. Opt-out per Manifest fuer Packs, deren
         # Vertrag jede Nacht frische Plaene verlangt. fresh bleibt unberuehrt:
         # ohne cmd_plan steht der Worktree noch nicht, cmd_run uebernimmt.
+        #
+        # `max_rounds` ist hier die RICHTIGE und einzige Schranke. Die
+        # naheliegende Verschaerfung auf min(max_rounds, params.max_plans) ist
+        # am 2026-08-05 geprueft und VERWORFEN worden: `max_plans` deckelt, was
+        # der Planner PRO TURN neu schreiben darf, nicht den Queue-Bestand.
+        # Beleg gegen die eigene Annahme — builder-reviewer (max_plans=8,
+        # max_rounds=12) trug nach der Plan-Phase real 8 bzw. 9 wartende Plaene
+        # ("PLAN: 8/9 Pläne (status=PLANNED 4)", LEDGER 04./05.07.). Das zeigt,
+        # dass der Bestand ueber max_plans hinauswaechst; eine Schwelle bei 8
+        # haette dort also kuenftig die Planung UEBERSPRUNGEN, obwohl noch 3-4
+        # der 12 Rundenslots frei waren. (Streng gelesen belegen die Zeilen die
+        # Tiefe NACH dem Planen, nicht dass die Schwelle vorher schon stand —
+        # fuer die Widerlegung von "max_plans ist die Queue-Grenze" reicht das.)
+        # Wer das nachmisst: die Queue-Tiefe steht in "PLAN: N Pläne", NICHT im
+        # "planned=N" der Autoland-Resume-Zeile (die emittiert nur
+        # dashboard-experience, max_rounds=1 — daher sieht sie nie mehr als 1
+        # und liest sich faelschlich wie die globale Obergrenze).
+        #
+        # Nachgemessen 2026-08-05 gegen ledger.jsonl (die Commit-Message von
+        # 2b3f0d3fbc nannte 16 DRY-Laeufe / ~2 h; das war der Topf ALLER
+        # ertraglosen Plan-Phasen): dem Skip zurechenbar sind VIER Naechte in
+        # dashboard-experience — 16.07. 154 s, 30.07. 756 s, 01.08. 357 s,
+        # 05.08. 341 s = 1608 s, rund 27 min. Die fuenfte ertraglose Nacht
+        # (31.07., 366 s) zaehlt NICHT: dort lag der belegte Slot in
+        # 10-building, und der Planner requeuete (retry=2), statt nichts zu tun.
+        # Der groessere Block — 12 Naechte dashboard-polish — war ohnehin nicht
+        # die Queue, sondern "DRY web fehlt", und ist seit 0e92dc7f58
+        # (ensure_frontend_deps, 04.08.) geheilt: in der Nacht darauf 3
+        # verifizierte Runden statt DRY.
         queue_full_plan_skip = (
             self.pack.type == "pipeline"
             and not skip_plan

@@ -1080,6 +1080,31 @@ def test_dashboard_experience_safety_projection_still_pinned():
     )
 
 
+def test_safety_projection_binds_plan_skip_only_when_the_manifest_sets_it():
+    """Der Plan-Skip-Schalter aendert unbeaufsichtigtes Nachtverhalten und muss
+    deshalb fail-closed binden — aber nur bei gesetztem Key, sonst braeche der
+    zusaetzliche Projektions-Key die kuratierten SHAs (Muster wie `goal`)."""
+    manifest = PACKS_DIR / "dashboard-experience" / "pack.yaml"
+    raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    assert "plan_skip_when_queue_full" not in raw, (
+        "Kontrollprobe: sobald das Pack den Key fuehrt, muss der kuratierte "
+        "SHA neu signiert werden — dieser Test wuerde es sonst verdecken"
+    )
+    base = runner_module._autoland_safety_hash(raw)
+
+    # Default-Wert explizit gesetzt: dreht den Hash bewusst (der Key ist ab
+    # jetzt Teil der Autoritaet, auch wenn der Wert dem Default entspricht).
+    same_value = runner_module._autoland_safety_hash(
+        {**raw, "plan_skip_when_queue_full": True}
+    )
+    flipped = runner_module._autoland_safety_hash(
+        {**raw, "plan_skip_when_queue_full": False}
+    )
+    assert same_value != base
+    assert flipped != base
+    assert flipped != same_value, "true/false muessen unterscheidbar hashen"
+
+
 def test_autoland_rejects_prompt_content_drift(tmp_path, fake_engine, monkeypatch):
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
@@ -5013,6 +5038,47 @@ def test_load_pack_plan_skip_when_queue_full_default_and_type(tmp_path, fake_eng
     )
     with pytest.raises(runner_module.ManifestError, match="plan_skip_when_queue_full"):
         load_pack(tmp_path / "packs2", "skip-badtype")
+
+
+# ── Plan-Skip: Regressionen rund um die Queue-Schranke ──────────────────────
+
+def test_plan_skip_ignores_stale_10_building(tmp_path, fake_engine):
+    """10-building darf die Planung NICHT blocken: was dort liegt, ist laut
+    _expire_stale_building verwaist und wird beim Pipeline-Start gebounct — es
+    belegt keinen Round-Slot dieses Laufs. Der Skip zaehlt deshalb nur
+    00-planned. (Live 31.07. dashboard-experience: Slot 'in 10-building
+    blockiert'.)"""
+    behaviors, calls = fake_engine
+    runner = _runner_with_queued_plans(
+        tmp_path, "skip-stale-building", 0,
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
+    )
+    (runner.queue / "10-building" / "P9-verwaist.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+
+    def plan_writes_one(kv, cwd):
+        (runner.queue / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY.replace(
+                "id: fl-20260702-beispiel\n", "id: fl-20260702-beispiel-1\n", 1
+            ),
+            encoding="utf-8",
+        )
+        return engines.EngineResult(rc=0, output="PLANNED 1", usage_limit=False)
+
+    behaviors["plan"] = plan_writes_one
+    _build_and_verify_ok(behaviors)
+
+    assert runner.cmd_night() is True
+
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "plan" in calls, "verwaister 10-building-Eintrag hat die Planung erstickt"
+    assert "PLAN übersprungen" not in ledger
+    # Die Begruendung fuers Nicht-Mitzaehlen muss auch eingeloest werden: der
+    # verwaiste Eintrag ist danach wirklich weg, nicht bloss ignoriert.
+    assert not (runner.queue / "10-building" / "P9-verwaist.md").exists()
+    assert (runner.queue / "90-bounced" / "P9-verwaist.md").exists()
+    assert "building-expired: P9-verwaist.md" in ledger
 
 
 # ── Verify-Phase Statuskontrakt-Backstop (Incident 2026-07-17 empty last-status) ─
