@@ -379,7 +379,12 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport, scenario) 
     checks,
     status: ok ? "passed" : "failed",
     screenshot: path.basename(screenshotPath),
-    viewport: viewport.name,
+    // NICHT wieder "viewport" nennen: das Feld ist oben schon an das Viewport-
+    // OBJEKT gebunden, und JS laesst den letzten Schluessel gewinnen. Genau so
+    // wurde das Feld am 2026-07-22 still zum String — der Runner verlangt in
+    // _validate_visual_evidence_dir ein Dict mit "width", also schlug die
+    // Visual-Attestation ab da jede Nacht fehl, ohne dass jemand es sah.
+    viewportName: viewport.name,
     viewportSize: { width: viewport.width, height: viewport.height },
     error,
   };
