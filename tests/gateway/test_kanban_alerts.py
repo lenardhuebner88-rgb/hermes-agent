@@ -81,6 +81,43 @@ def _primed_state(conn) -> dict:
     return state
 
 
+def test_block_loop_alert_sends_without_subscription_to_reporting_channel(
+    kanban_home,
+):
+    """A recurrence alarm must not depend on per-task subscriptions."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Wiederholt blockierte Karte")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "block_loop_detected",
+                {
+                    "kind": "needs_input",
+                    "recurrences": 3,
+                    "reason": "dieselbe Entscheidung fehlt erneut",
+                },
+            )
+        send = _ScriptedSend()
+
+        alerts = evaluate_alerts(
+            conn,
+            _acfg(channel_id="reporting", escalation_channel_id="escalation"),
+            state,
+            now=NOW + 1,
+            send_fn=send,
+        )
+
+    assert [alert["rule"] for alert in alerts] == ["block_loop_detected"]
+    assert len(send.calls) == 1
+    alert = send.calls[0]
+    assert alert["channel_id"] == "reporting"
+    assert "Wiederholt blockierte Karte" in alert["text"]
+    assert tid in alert["text"]
+    assert "dieselbe Entscheidung fehlt erneut" in alert["text"]
+
+
 # ---------------------------------------------------------------------------
 # Rule (a): failed/blocked runs
 # ---------------------------------------------------------------------------

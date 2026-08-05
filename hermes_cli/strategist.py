@@ -88,6 +88,7 @@ GATE_TRIAGE_AUTHOR = "green-gate-persistent-red-triage"
 # Re-export the N-of-M triage defaults so the CLI layer has one import site.
 GATE_TRIAGE_MIN_REDS = vision_metrics.GATE_TRIAGE_MIN_REDS
 GATE_TRIAGE_WINDOW = vision_metrics.GATE_TRIAGE_WINDOW
+GATE_TRIAGE_ARCHIVED_COOLDOWN_DAYS = 7
 
 # Re-export the default streak threshold so the CLI layer has one import site.
 GATE_FIX_MIN_NIGHTS = vision_metrics.GATE_FIX_MIN_NIGHTS
@@ -634,11 +635,10 @@ def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
     if red_files is None:
         red_files = cause.get("red_files") or set()
     token = _cost_lane_token(gate) or "UNKNOWN"
-    # Short, stable digest of the file-set fingerprint so two distinct red-file
-    # sets on the same gate get distinct keys while an identical set keys
-    # identically (idempotent). Deterministic (sha1) — safe for idempotency.
-    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
-    key = f"GATE-TRIAGE-{token}-{digest}"
+    # The operator-facing topic is the gate slice, not whichever test files
+    # happened to be red on the anchor night. Rotating failures must refresh
+    # one held triage spec instead of minting one chain per file-set digest.
+    key = f"GATE-TRIAGE-{token}"
     file_list = ", ".join(sorted(red_files)) if red_files else "(unbekannt)"
     return Lever(
         key=key,
@@ -1671,9 +1671,28 @@ def propose(
     qualitative_excepted: set[str] = set()
     if drafts is not None:
         suppressed = set(context.get("suppressed") or ())
+        noise_rows = (
+            _read_harvest_noise_candidates(notes_dir) if notes_dir is not None else []
+        )
+        disposition_noise = {
+            str(row.get("suggested_key") or "").strip(): str(
+                row.get("noise_class") or ""
+            ).strip()
+            for row in noise_rows
+            if str(row.get("suggested_key") or "").strip()
+        }
         candidates = []
         for lever in _levers_from_drafts(drafts):
             if lever.key in suppressed:
+                continue
+            if lever.key in disposition_noise:
+                gated_out.append(
+                    {
+                        "key": lever.key,
+                        "title": lever.title,
+                        "reason": f"disposition_noise:{disposition_noise[lever.key]}",
+                    }
+                )
                 continue
             verdict = grounding_gate(lever)
             if not verdict.passed:
@@ -1955,9 +1974,9 @@ def propose_persistent_red_triage(
     recorded nights are red — regardless of whether the first_fail cause
     changed between nights — does it ingest a single ``freigabe:operator``
     (HELD) Triage-PlanSpec listing the CURRENTLY red test files (AC-1).
-    Never auto-deploy, never auto-release. Re-running while the same red file
-    set persists hits the ingest idempotency key and reports
-    ``already_ingested`` instead of minting a second chain (AC-2). When the head
+    Never auto-deploy, never auto-release. Re-running for the same gate topic
+    refreshes the held source spec and reports ``already_ingested`` instead of
+    minting a second chain, even when the red file set rotated (AC-2). When the head
     is green or fewer than ``min_reds`` reds are in the window it is a no-op
     (``triggered: False``) — idle is correct, and a single isolated flake-night
     is deliberately NOT triage-opening (AC-2 guard).
@@ -1969,7 +1988,7 @@ def propose_persistent_red_triage(
     fix-PlanSpec AND a persistent-red triage-PlanSpec, each HELD for the
     operator. They are different lenses (one names a recurring cause to fix, the
     other flags a persistently-red head), not duplicates; within each path the
-    fingerprint/key dedup prevents re-opening the SAME spec on re-runs. The
+    gate-topic key dedup prevents re-opening the SAME spec on re-runs. The
     existing same-cause path remains UNCHANGED (AC-2:
     no Doppel-Ingest).
     """
@@ -2021,6 +2040,60 @@ def propose_persistent_red_triage(
         return summary
 
     spec_path = _write_spec(out_dir, lever)
+    resolved_source = str(spec_path.resolve())
+    conn = kanban_db.connect(board=board)
+    try:
+        active_root = None
+        recent_archived_root = None
+        rows = conn.execute(
+            """
+            SELECT t.id, t.status, e.payload,
+                   (SELECT MAX(a.created_at)
+                      FROM task_events AS a
+                     WHERE a.task_id = t.id
+                       AND a.kind = 'archived') AS archived_at
+              FROM tasks AS t
+              JOIN task_events AS e ON e.task_id = t.id
+             WHERE e.kind = 'specified'
+             ORDER BY t.created_at DESC, t.id DESC
+            """
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row["payload"] or "{}")
+            if (
+                payload.get("source") == "planspec_ingest"
+                and str(Path(payload.get("path", "")).resolve()) == resolved_source
+            ):
+                if row["status"] not in {"done", "archived"}:
+                    active_root = row
+                    break
+                if (
+                    row["status"] == "archived"
+                    and row["archived_at"] is not None
+                    and int(row["archived_at"])
+                    >= int(time.time()) - (GATE_TRIAGE_ARCHIVED_COOLDOWN_DAYS * 86400)
+                ):
+                    recent_archived_root = row
+    finally:
+        conn.close()
+    if active_root is not None:
+        summary["ingested"] = {
+            "key": lever.key,
+            "title": lever.title,
+            "path": resolved_source,
+            "root_task_id": active_root["id"],
+            "subtask_count": None,
+            "freigabe": "operator",
+            "already_ingested": True,
+            "updated_existing": True,
+        }
+        return summary
+    if recent_archived_root is not None:
+        summary["ingested"] = None
+        summary["skipped_recent_topic"] = True
+        summary["recent_root_task_id"] = recent_archived_root["id"]
+        return summary
+
     parsed_spec = planspecs.parse_binding_planspec(spec_path, plans_root=Path(out_dir))
     idempotency_key = planspecs.ingest_idempotency_key(parsed_spec)
     conn = kanban_db.connect(board=board)
@@ -2046,6 +2119,7 @@ def propose_persistent_red_triage(
     summary["ingested"] = {
         "key": lever.key,
         "title": lever.title,
+        "path": resolved_source,
         "root_task_id": result.get("root_task_id"),
         "subtask_count": result.get("subtask_count"),
         "freigabe": result.get("freigabe"),
@@ -3566,6 +3640,53 @@ def read_last_runs(state_dir: Path) -> dict[str, Any]:
 # that survived the propose gate.
 # --------------------------------------------------------------------------- #
 _DIGEST_RECOMMENDATIONS = ("drop", "collect", "planspec")
+_DIGEST_NOISE_CLASSES = ("transient", "confounded")
+
+
+def _read_harvest_noise_candidates(state_dir: Path) -> list[dict[str, Any]]:
+    """Read the deterministic noise partition produced by :func:`run_harvest`.
+
+    Digest input is LLM-produced, so it must not be trusted to classify its own
+    evidence as noise.  The Python harvest owns that classification and this
+    reader only carries those already-classified rows into the persisted digest.
+    """
+    try:
+        raw = json.loads((Path(state_dir) / "harvest_candidates.json").read_text())
+    except (FileNotFoundError, TypeError, ValueError, json.JSONDecodeError):
+        return []
+    rows = raw.get("noise_candidates", []) if isinstance(raw, dict) else []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _normalize_digest_noise(
+    candidates: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    noise: list[dict[str, Any]] = []
+    noise_ids: set[str] = set()
+    for candidate in candidates:
+        item_id = str(candidate.get("suggested_key") or "").strip()
+        noise_class = str(candidate.get("noise_class") or "").strip().lower()
+        if not item_id or item_id in noise_ids or noise_class not in _DIGEST_NOISE_CLASSES:
+            continue
+        triage_severity = _normalize_digest_triage_severity(
+            candidate.get("triage_severity", candidate.get("severity"))
+        )
+        entry: dict[str, Any] = {
+            "item_id": item_id,
+            "reason": str(candidate.get("noise_reason") or "").strip(),
+            "noise_class": noise_class,
+            "kind": str(candidate.get("kind") or "item").strip() or "item",
+            "source_severity": str(candidate.get("source_severity") or "none").strip()
+            or "none",
+            "triage_severity": triage_severity,
+            "severity": triage_severity,
+        }
+        age_days = candidate.get("age_days")
+        if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
+            entry["age_days"] = age_days
+        noise.append(entry)
+        noise_ids.add(item_id)
+    return noise, noise_ids
 
 
 def _normalize_digest_triage_severity(value: Any) -> str:
@@ -3592,7 +3713,12 @@ def disposition_digest_path(state_dir: Optional[Path] = None) -> Path:
     return base / "disposition_digest.json"
 
 
-def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
+def _normalize_digest(
+    payload: dict[str, Any],
+    *,
+    now: int,
+    noise_candidates: Iterable[dict[str, Any]] = (),
+) -> dict[str, Any]:
     """Validate + normalize the Sonnet-supplied clustering decision into the
     persisted digest schema. Raises ``ValueError`` on a malformed contract so a
     bad LLM payload fails loud (CLI exits 2) instead of writing garbage.
@@ -3607,6 +3733,7 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("digest payload must be a JSON object")
 
+    noise, noise_ids = _normalize_digest_noise(noise_candidates)
     raw_clusters = payload.get("clusters", [])
     if not isinstance(raw_clusters, list):
         raise ValueError("digest 'clusters' must be a list")
@@ -3628,7 +3755,9 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         raw_ids = cluster.get("item_ids", [])
         if not isinstance(raw_ids, list):
             raise ValueError(f"cluster[{idx}] 'item_ids' must be a list")
-        item_ids = [str(i) for i in raw_ids]
+        item_ids = [str(i) for i in raw_ids if str(i) not in noise_ids]
+        if not item_ids:
+            continue
         seen_items.update(item_ids)
         if recommendation == "drop":
             reaped_derived += len(item_ids)
@@ -3648,7 +3777,12 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         if isinstance(age_days, int) and not isinstance(age_days, bool) and age_days >= 0:
             norm["age_days"] = age_days
         planspec_key = cluster.get("planspec_key")
-        if planspec_key:
+        if planspec_key and str(planspec_key).strip() in noise_ids:
+            # A stale/manual digest may still name a quarantined candidate as
+            # the cluster key.  Keep any actionable peers visible, but force a
+            # fresh collection pass rather than drafting the noise candidate.
+            norm["recommendation"] = "collect"
+        elif planspec_key:
             norm["planspec_key"] = str(planspec_key).strip()
         clusters.append(norm)
 
@@ -3662,6 +3796,8 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         item_id = str(entry.get("item_id") or "").strip()
         if not item_id:
             raise ValueError(f"left[{idx}] has an empty 'item_id'")
+        if item_id in noise_ids:
+            continue
         seen_items.add(item_id)
         triage_severity = _normalize_digest_triage_severity(
             entry.get("triage_severity", entry.get("severity"))
@@ -3682,9 +3818,12 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
             norm_left["disposition"] = str(disposition).strip()
         left.append(norm_left)
 
+    seen_items.update(noise_ids)
     total_open = payload.get("total_open")
     if not isinstance(total_open, int) or isinstance(total_open, bool) or total_open < 0:
         total_open = len(seen_items)
+    else:
+        total_open = max(total_open, len(seen_items))
     reaped = payload.get("reaped")
     if not isinstance(reaped, int) or isinstance(reaped, bool) or reaped < 0:
         reaped = reaped_derived
@@ -3695,6 +3834,7 @@ def _normalize_digest(payload: dict[str, Any], *, now: int) -> dict[str, Any]:
         "reaped": reaped,
         "clusters": clusters,
         "left": left,
+        "noise": noise,
     }
 
 
@@ -3703,7 +3843,11 @@ def write_disposition_digest(
 ) -> Path:
     """Validate + persist the harvest clustering decision atomically. Returns
     the digest path. See :func:`_normalize_digest` for the contract."""
-    digest = _normalize_digest(payload, now=now)
+    digest = _normalize_digest(
+        payload,
+        now=now,
+        noise_candidates=_read_harvest_noise_candidates(state_dir),
+    )
     path = disposition_digest_path(state_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -3735,6 +3879,7 @@ def run_digest(args) -> dict[str, Any]:
             "total_open": digest["total_open"],
             "reaped": digest["reaped"],
             "left": len(digest["left"]),
+            "noise": len(digest["noise"]),
         },
     )
     return {
@@ -3744,6 +3889,7 @@ def run_digest(args) -> dict[str, Any]:
         "total_open": digest["total_open"],
         "reaped": digest["reaped"],
         "left": len(digest["left"]),
+        "noise": len(digest["noise"]),
     }
 
 
@@ -3914,17 +4060,20 @@ def run_persistent_red_triage(args) -> dict[str, Any]:
     GREEN-GATE-PERSISTENT-RED-TRIAGE-S1 — the N-of-M changing-cause trigger,
     orthogonal to :func:`run_gate_fix` (same-cause). When the head is red AND
     >=N reds in the last M nights, ingests a single HELD Triage-PlanSpec
-    listing the currently-red test files; idempotent on the file-set fingerprint.
-    """
+    listing the currently-red test files; idempotent on the gate topic."""
     state_dir = default_state_dir()
     out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
-    return propose_persistent_red_triage(
-        board=getattr(args, "board", None),
-        out_dir=out_dir,
-        min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
-        window=getattr(args, "window", GATE_TRIAGE_WINDOW),
-        do_ingest=not getattr(args, "dry_run", False),
-    )
+    # Both the nightly script and the propose cron may enter here. Serialize
+    # across processes so the topic-level existence check and ingest form one
+    # single-flight section rather than racing into two held roots.
+    with outcomes.shared_state_lock(out_dir / ".triage-check"):
+        return propose_persistent_red_triage(
+            board=getattr(args, "board", None),
+            out_dir=out_dir,
+            min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
+            window=getattr(args, "window", GATE_TRIAGE_WINDOW),
+            do_ingest=not getattr(args, "dry_run", False),
+        )
 
 
 def run_deflake_check(args) -> dict[str, Any]:
@@ -4162,6 +4311,90 @@ def _read_harvest_since(marker_path: Path, *, now: int) -> int:
         return now - HARVEST_WINDOW_FALLBACK_SECONDS
 
 
+_TRANSIENT_DISPOSITION_PATTERNS = (
+    re.compile(r"\b(?:nicht|not) reproduzierbar\b", re.IGNORECASE),
+    re.compile(r"\bnon[- ]reproducible\b", re.IGNORECASE),
+    re.compile(r"\bbei (?:der )?n[aä]chsten\b.*\b(?:pr[uü]fen|beobachten|check)", re.IGNORECASE),
+    re.compile(
+        r"\bbei erneutem\b.*\b(?:auftreten|vorkommen)\b.*\b(?:pr[uü]fen|beobachten|check)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bfalls\b.*\b(?:erneut|wieder)\b.*\b(?:pr[uü]fen|beobachten|check)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bif\b.*\bagain\b.*\b(?:check|observe|watch)\b", re.IGNORECASE),
+)
+_CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS = (
+    re.compile(r"\b(?:noch )?nicht (?:in|auf) main\b", re.IGNORECASE),
+    re.compile(r"\bnot (?:yet )?in main\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:binary|binaries|browser|chrom(?:e|ium)|auth|token|credential)s?\b.*"
+        r"\b(?:missing|absent|unavailable|fehlt|fehlen)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:missing|absent|unavailable|fehlt|fehlen)\b.*"
+        r"\b(?:binary|binaries|browser|chrom(?:e|ium)|auth|token|credential)s?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:deploy|restart|live[- ]smoke|dashboard)\b.*"
+        r"\b(?:verboten|forbidden|cannot|can't|kann kein)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:verboten|forbidden|cannot|can't|kann kein)\b.*"
+        r"\b(?:deploy|restart|live[- ]smoke|dashboard)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _disposition_noise(candidate: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    """Classify ledger-only, evidence-bounded run noise.
+
+    The rules deliberately require an explicit non-reproduction/recurrence
+    marker or an external verification dependency.  Generic ``risk`` and
+    ``scope-note`` rows stay actionable; their severity is not a noise signal.
+    """
+    if candidate.get("source") != "ledger":
+        return None
+    text = str(candidate.get("excerpt") or "")
+    if any(pattern.search(text) for pattern in _TRANSIENT_DISPOSITION_PATTERNS):
+        return (
+            "transient",
+            "one-off outcome is not reproduced or is only watched for recurrence",
+        )
+    _next_action, separator, evidence = text.partition(" — ")
+    if separator and any(
+        pattern.search(evidence) for pattern in _CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS
+    ):
+        return (
+            "confounded",
+            "verification depends on merge/restart/deploy/live acceptance",
+        )
+    return None
+
+
+def _partition_disposition_noise(
+    candidates: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    actionable: list[dict[str, Any]] = []
+    noise: list[dict[str, Any]] = []
+    for candidate in candidates:
+        classification = _disposition_noise(candidate)
+        if classification is None:
+            actionable.append(candidate)
+            continue
+        noise_class, noise_reason = classification
+        classified = dict(candidate)
+        classified["noise_class"] = noise_class
+        classified["noise_reason"] = noise_reason
+        noise.append(classified)
+    return actionable, noise
+
+
 def run_harvest(args) -> dict[str, Any]:
     """CLI-Adapter: Receipts sammeln + vorfiltern → Kandidaten-Datei + Marker.
 
@@ -4212,7 +4445,9 @@ def run_harvest(args) -> dict[str, Any]:
     # nicht kennt (Übergangs-Fallback für Alt-Receipts ohne Ledger-Item).
     ledger_task_ids: set[str] = {c["task_id"] for c in ledger_cands}
     keyword_only = [c for c in keyword_cands if c["task_id"] not in ledger_task_ids]
-    candidates = ledger_cands + keyword_only
+    candidates, noise_candidates = _partition_disposition_noise(
+        ledger_cands + keyword_only
+    )
 
     cand_path = state_dir / "harvest_candidates.json"
     cand_path.write_text(
@@ -4223,6 +4458,7 @@ def run_harvest(args) -> dict[str, Any]:
                 "ledger_candidates": len(ledger_cands),
                 "keyword_candidates": len(keyword_cands),
                 "reaped_dispositions": reaped_dispositions,
+                "noise_candidates": noise_candidates,
                 "candidates": candidates,
             },
             ensure_ascii=False,
@@ -4240,6 +4476,7 @@ def run_harvest(args) -> dict[str, Any]:
             "ledger_candidates": len(ledger_cands),
             "keyword_candidates": len(keyword_cands),
             "reaped_dispositions": reaped_dispositions,
+            "noise_candidates": len(noise_candidates),
             "candidates": len(candidates),
         },
     )
@@ -4250,6 +4487,7 @@ def run_harvest(args) -> dict[str, Any]:
         "ledger_candidates": len(ledger_cands),
         "keyword_candidates": len(keyword_cands),
         "reaped_dispositions": reaped_dispositions,
+        "noise_candidates": len(noise_candidates),
         "candidates": len(candidates),
         "candidates_path": str(cand_path),
     }
