@@ -675,10 +675,11 @@ def _queue_projection(
                    MAX(CASE WHEN event_kind='claimed' THEN observed_at_ms END)
                        AS claimed_at
               FROM worker_run_timeline_events
+             WHERE observed_at_ms >= ?
              GROUP BY task_run_id
             HAVING queued_at >= ?
             """,
-            (cutoff_ms,),
+            (cutoff_ms, cutoff_ms),
         ).fetchall()
         queued_runs = len(rows)
         waits = [
