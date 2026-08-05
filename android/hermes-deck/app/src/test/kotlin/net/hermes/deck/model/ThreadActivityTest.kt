@@ -4,6 +4,7 @@ import net.hermes.deck.nostr.Kind
 import net.hermes.deck.nostr.NostrEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -143,9 +144,37 @@ class ThreadActivityTest {
     }
 
     @Test
-    fun `a reply whose root is not a known task is dropped, not guessed at`() {
+    fun `a plain Buzz thread is active too, titled by its root message`() {
+        // The whole band was structurally empty because of this: measured
+        // against the real workspace there were five deck-task roots in total
+        // and fourteen ordinary threads spoken in that day.
+        // Markdown on purpose: on the device both lines showed their raw wire
+        // text, asterisks and backticks included. Both go through Preview.
         val entries = ThreadActivity.of(
-            events = listOf(event("r1", claude, now - 60, root = "unbekannt")),
+            events = listOf(
+                event("root-1", me, now - 900, content = "**Relay 500 bei Sende-Interval**\nDetails"),
+                event("r1", claude, now - 60, root = "root-1", content = "Schaue ich `an`."),
+            ),
+            tasks = emptyList(),
+            channels = channels,
+            profiles = profiles,
+            me = me,
+            now = now,
+        )
+
+        assertEquals(1, entries.size)
+        assertEquals("Relay 500 bei Sende-Interval", entries[0].title)
+        assertEquals("Schaue ich an.", entries[0].lastText)
+        assertEquals("root-1", entries[0].rootId)
+        // No task behind it, so the row must not offer to open one.
+        assertNull(entries[0].taskId)
+        assertEquals("agent-lab", entries[0].channelName)
+    }
+
+    @Test
+    fun `a thread whose root fell out of the window says so instead of borrowing a title`() {
+        val entries = ThreadActivity.of(
+            events = listOf(event("r1", claude, now - 60, root = "lange-her", content = "Antwort")),
             tasks = listOf(task("t1", "T")),
             channels = channels,
             profiles = profiles,
@@ -153,7 +182,44 @@ class ThreadActivityTest {
             now = now,
         )
 
-        assertTrue(entries.isEmpty())
+        assertEquals(1, entries.size)
+        assertEquals(ThreadActivity.UNTITLED, entries[0].title)
+        // The reply's own text is the last line, never the subject.
+        assertEquals("Antwort", entries[0].lastText)
+        assertNull(entries[0].taskId)
+    }
+
+    @Test
+    fun `a deck task still wins the title over its own root message`() {
+        val entries = ThreadActivity.of(
+            events = listOf(
+                event("t1", me, now - 900, content = "Roher Wire-Text mit Tags"),
+                event("r1", claude, now - 60, root = "t1"),
+            ),
+            tasks = listOf(task("t1", "Deck bauen")),
+            channels = channels,
+            profiles = profiles,
+            me = me,
+            now = now,
+        )
+
+        assertEquals("Deck bauen", entries[0].title)
+        assertEquals("t1", entries[0].taskId)
+    }
+
+    @Test
+    fun `the default window is six hours, because one hour was shorter than the rhythm`() {
+        val fourHoursAgo = event("r1", claude, now - 4 * 3600, root = "t1")
+        val entries = ThreadActivity.of(
+            events = listOf(fourHoursAgo),
+            tasks = listOf(task("t1", "T")),
+            channels = channels,
+            profiles = profiles,
+            me = me,
+            now = now,
+        )
+
+        assertEquals(1, entries.size)
     }
 
     @Test
@@ -227,6 +293,46 @@ class ThreadActivityTest {
         )
 
         assertTrue(entries.isEmpty())
+    }
+
+    @Test
+    fun `a mention older than my own last word in that channel is answered`() {
+        val count = ThreadActivity.unansweredMentions(
+            listOf(
+                event("m1", claude, now - 500, mentions = listOf(me)),
+                event("mine", me, now - 200),
+            ),
+            me,
+        )
+
+        // Counting every mention in the window instead reported 63 on the real
+        // workspace, the oldest 133 hours old, and could never fall.
+        assertEquals(0, count)
+    }
+
+    @Test
+    fun `a mention after my last word still waits, and only in its own channel`() {
+        val count = ThreadActivity.unansweredMentions(
+            listOf(
+                event("mine", me, now - 400, channel = "chan-1"),
+                event("m1", claude, now - 100, channel = "chan-1", mentions = listOf(me)),
+                // Speaking in chan-1 says nothing about chan-2.
+                event("m2", claude, now - 900, channel = "chan-2", mentions = listOf(me)),
+            ),
+            me,
+        )
+
+        assertEquals(2, count)
+    }
+
+    @Test
+    fun `my own mention of myself is not something waiting on me`() {
+        val count = ThreadActivity.unansweredMentions(
+            listOf(event("m1", me, now - 100, mentions = listOf(me))),
+            me,
+        )
+
+        assertEquals(0, count)
     }
 
     @Test

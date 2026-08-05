@@ -179,10 +179,11 @@ fun HomeScreen(
             item {
                 SectionHeader(title = "Gerade im Gespräch", action = "${activeThreads.size}")
             }
-            items(activeThreads, key = { "thread-${it.taskId}" }) { entry ->
-                ActiveThreadRow(entry) {
-                    snapshot.tasks.firstOrNull { it.id == entry.taskId }?.let(onOpenTask)
-                }
+            items(activeThreads, key = { "thread-${it.rootId}" }) { entry ->
+                // Only a thread that is a deck task can be opened here; the rest
+                // are Buzz conversations this app deliberately does not render.
+                val task = entry.taskId?.let { id -> snapshot.tasks.firstOrNull { it.id == id } }
+                ActiveThreadRow(entry, onClick = task?.let { { onOpenTask(it) } })
                 Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
             }
             item { Spacer(Modifier.height(DeckMetrics.gap)) }
