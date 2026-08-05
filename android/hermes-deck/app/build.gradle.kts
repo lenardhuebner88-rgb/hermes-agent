@@ -8,6 +8,14 @@ plugins {
 }
 
 android {
+
+    // One fixture, two test runners. `deck-pulse-live.json` is a real dashboard
+    // response and the JVM tests already pin the parser against it; the
+    // instrumented screenshot test renders the same bytes on a device. Copying
+    // the file would let the two drift, and a screenshot of stale data is worse
+    // than no screenshot.
+    sourceSets.getByName("androidTest").resources.srcDir("src/test/resources")
+
     namespace = "net.hermes.deck"
     compileSdk = 37
 
