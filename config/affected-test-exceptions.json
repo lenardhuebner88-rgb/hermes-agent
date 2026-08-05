@@ -1,4 +1,14 @@
 {
   "schema_version": 1,
-  "exceptions": []
+  "exceptions": [
+    {
+      "path": "hermes_cli/observability/shared_metrics_subscriber.py",
+      "disposition": "covered_by_other_gate",
+      "reason": "No test imports this module directly; it is only imported by hermes_cli/observability/relay_shared_metrics.py, which tests/hermes_cli/test_relay_shared_metrics_runtime.py covers. The direct-import mapper cannot see that transitive edge, and the tests/hermes_cli/ package fallback (773 files) exceeds the worker cap (200), so it stays unmapped without this exception.",
+      "owner": "hermes-agent",
+      "area": "observability",
+      "review_by": "2026-11-05",
+      "covered_by": "tests/hermes_cli/test_relay_shared_metrics_runtime.py"
+    }
+  ]
 }

@@ -35,9 +35,10 @@ WEB_PATH = "hermes_cli/web_server.py"
 # Zahl der Testdateien, die hermes_cli.web_server importieren. Bewusst hart:
 # sie ist der Kanarienvogel dafuer, dass Narrowing die breite Fan-out-Menge
 # wirklich sieht. Kommt ein Test dazu, der web_server importiert, wird sie
-# hier nachgezogen (zuletzt 66 -> 67 durch tests/hermes_cli/test_fleet_agent_history.py,
-# gelandet in e6662bfe40).
-WEB_MODULE_IMPORTER_COUNT = 67
+# hier nachgezogen (zuletzt 67 -> 69 durch tests/hermes_cli/test_normalize_main_model_assignment.py
+# und tests/hermes_cli/test_setup_hidden_env.py, die web_server transitiv importieren, gelandet mit T1).
+# Neu ermitteln statt schaetzen: build_test_index(REPO_ROOT).imports["hermes_cli.web_server"] |> len().
+WEB_MODULE_IMPORTER_COUNT = 69
 
 
 def _git(repo: Path, *args: str) -> str:

@@ -30,6 +30,14 @@ def _make_ended_session(home: Path, session_id: str, days_old: int) -> None:
             "UPDATE sessions SET started_at = ?, ended_at = ? WHERE id = ?",
             (old, old + 1, session_id),
         )
+        # Prune cutoff now uses last_active (MAX(messages.timestamp) or
+        # started_at as fallback), not started_at alone — backdate the
+        # message row too, or the session reads as "just active" and
+        # survives prune despite the backdated started_at/ended_at.
+        db._conn.execute(
+            "UPDATE messages SET timestamp = ? WHERE session_id = ?",
+            (old, session_id),
+        )
         db._conn.commit()
     finally:
         db.close()

@@ -426,7 +426,6 @@ def test_unblock_scheduled_rechecks_parent_gate(kanban_home):
 
 
 def test_stale_claim_reclaimed(kanban_home, monkeypatch):
-    import signal
     import hermes_cli.kanban_db as _kb
 
     with kb.connect() as conn:
@@ -450,7 +449,11 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
         reclaimed = kb.release_stale_claims(conn, signal_fn=_signal)
         assert reclaimed == 1
         assert kb.get_task(conn, t).status == "ready"
-        assert killed == [signal.SIGTERM]
+        # Fork deviation (0e3459e420): ``_terminate_reclaimed_worker`` probes
+        # ``group_alive()`` before signalling. With ``_pid_alive`` mocked
+        # dead the probe already reports the worker absent, so no
+        # SIGTERM/SIGKILL is ever sent — upstream signals unconditionally.
+        assert killed == []
 
 
 def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
@@ -470,9 +473,14 @@ def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
         kb._set_worker_pid(conn, t, 12345)
 
         old_expires = int(time.time()) - 60
+        # Fork deviation (0e3459e420): extension additionally requires a
+        # fresh heartbeat (the heartbeat-staleness backstop). Without one,
+        # an absent-but-not-yet-expired heartbeat is "no observable
+        # progress" and falls into the terminate/reclaim path instead.
         conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (old_expires, t),
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? "
+            "WHERE id = ?",
+            (old_expires, int(time.time()), t),
         )
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
@@ -508,9 +516,13 @@ def test_stale_claim_with_live_pid_uses_env_ttl_override(
         host = _kb._claimer_id().split(":", 1)[0]
         kb.claim_task(conn, t, claimer=f"{host}:worker")
         kb._set_worker_pid(conn, t, 12345)
+        # Fork deviation (0e3459e420): a fresh heartbeat is required for the
+        # live-pid extension branch — see
+        # test_stale_claim_with_live_pid_extends_instead_of_reclaiming.
         conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (int(time.time()) - 60, t),
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? "
+            "WHERE id = ?",
+            (int(time.time()) - 60, int(time.time()), t),
         )
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
@@ -613,10 +625,18 @@ def test_stale_claim_reclaimed_when_termination_succeeds(
 def test_stale_claim_released_when_worker_not_host_local(
     kanban_home, monkeypatch,
 ):
-    """The defer guard only holds OUR own surviving workers.
+    """Fork deviation (0e3459e420): unconfirmed foreign-host exit is NOT
+    proof of death, so the claim is retained (not released).
 
-    A claim we cannot manage (different host, or no kill attempted) must still
-    be released, otherwise a foreign-host claim could strand a task forever.
+    Upstream released a foreign-host claim unconditionally once its own
+    kill attempt was skipped. The fork instead treats
+    ``_worker_survived_termination`` (i.e. ``terminated`` not confirmed
+    True) as authoritative regardless of ``host_local`` — see
+    ``test_stale_claim_retained_when_worker_exit_not_confirmed`` in
+    ``tests/hermes_cli/test_kanban_db_claims.py``, which pins the same
+    setup to the opposite (retain) outcome. Releasing on an unconfirmed
+    exit risks spawning a duplicate beside a worker that is actually still
+    alive; the claim is held and retried instead.
     """
     import hermes_cli.kanban_db as _kb
 
@@ -640,8 +660,10 @@ def test_stale_claim_released_when_worker_not_host_local(
             },
         )
         reclaimed = kb.release_stale_claims(conn, signal_fn=lambda _p, _s: None)
-        assert reclaimed == 1
-        assert kb.get_task(conn, t).status == "ready"
+        assert reclaimed == 0
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
 
 
 def test_detect_stale_defers_when_live_worker_survives(kanban_home, monkeypatch):
@@ -3933,7 +3955,15 @@ def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
 def test_dispatch_review_spawns_with_correct_skills(
     kanban_home, all_assignees_spawnable,
 ):
-    """Review tasks get sdlc-review skill set before spawning."""
+    """Review tasks spawn the resolved verifier profile with no skills.
+
+    Fork deviation (89d0bed488): the ``sdlc-review`` skill does not exist
+    in this tree — review logic lives in the ``verifier`` profile's own
+    ``SOUL.md`` instead of a skill injected onto the task. dispatch_once
+    reassigns the claimed task to the resolved stage profile
+    (verifier -> reviewer -> critic, see ``_review_spawn_profile_for``) and
+    clears ``skills`` rather than setting ``["sdlc-review"]``.
+    """
     spawned_tasks = []
 
     def capture_spawn(task, workspace, board=None):
@@ -3946,7 +3976,8 @@ def test_dispatch_review_spawns_with_correct_skills(
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
     assert len(res.spawned) == 1
     assert len(spawned_tasks) == 1
-    assert spawned_tasks[0].skills == ["sdlc-review"]
+    assert spawned_tasks[0].assignee == "verifier"
+    assert spawned_tasks[0].skills == []
 
 
 def test_dispatch_review_skips_unassigned(kanban_home):
@@ -4000,11 +4031,25 @@ def test_dispatch_review_spawns_when_ready_empty(
 
 
 def test_has_spawnable_review_true(kanban_home):
-    """has_spawnable_review returns True when review tasks exist with real profiles."""
+    """has_spawnable_review returns True when review tasks exist with real profiles.
+
+    Fork deviation (89d0bed488): stage resolution runs through
+    ``_review_spawn_profile_for`` (verifier -> reviewer -> critic), with NO
+    fallback to the original assignee — a missing stage target is a
+    retryable hold, not a spawnable review. Without a resolvable
+    ``submitted_for_review`` target the bare ``verifier`` fallback profile
+    doesn't exist in the test env, so the task correctly holds. Stamp a
+    ``submitted_for_review`` event pointing at the always-present
+    ``default`` profile so the test exercises stage resolution instead of
+    the hold path.
+    """
     with kb.connect() as conn:
-        t = kb.create_task(conn, title="review me", assignee="default")
+        t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
-        # default profile should exist in the test env
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, t, "submitted_for_review", {"target_profile": "default"},
+            )
         assert kb.has_spawnable_review(conn) is True
 
 
@@ -4057,13 +4102,20 @@ def test_dispatch_review_does_not_claim_ready_tasks(
 # ---------------------------------------------------------------------------
 
 def test_detect_stale_returns_running_task_with_no_heartbeat(kanban_home, monkeypatch):
-    """A task running > timeout with zero heartbeats gets reclaimed as stale."""
+    """A task running > timeout with zero heartbeats gets reclaimed as stale.
+
+    Fork note (0e3459e420): the worker pid must be a fake value, not
+    ``os.getpid()`` — ``_terminate_reclaimed_worker`` rejects a pid equal
+    to the caller's own process-group id (``dispatcher_group_rejected``)
+    as a safety net against the dispatcher killing its own group, and the
+    test process is its own session/group leader here.
+    """
     import hermes_cli.kanban_db as _kb
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="stale-no-hb", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 12345)
 
         # Rewind started_at so the task appears to have been running for 5 hours.
         five_hours_ago = int(time.time()) - (5 * 3600)
@@ -4089,13 +4141,17 @@ def test_detect_stale_returns_running_task_with_no_heartbeat(kanban_home, monkey
 
 
 def test_detect_stale_returns_task_with_stale_heartbeat(kanban_home, monkeypatch):
-    """A task running > timeout with a heartbeat older than 1h gets reclaimed."""
+    """A task running > timeout with a heartbeat older than 1h gets reclaimed.
+
+    Fork note (0e3459e420): fake worker pid, see
+    ``test_detect_stale_returns_running_task_with_no_heartbeat``.
+    """
     import hermes_cli.kanban_db as _kb
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="stale-hb", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 12345)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         heartbeat_2h_ago = int(time.time()) - (2 * 3600)
@@ -4247,13 +4303,16 @@ def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
     even though no worker actually failed. The 'stale' event in
     task_events is the right audit surface; the consecutive_failures
     counter is reserved for spawn_failed / timed_out / crashed.
+
+    Fork note (0e3459e420): fake worker pid, see
+    ``test_detect_stale_returns_running_task_with_no_heartbeat``.
     """
     import hermes_cli.kanban_db as _kb
 
     with kb.connect() as conn:
         t = kb.create_task(conn, title="stale-no-counter-tick", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 12345)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         with kb.write_txn(conn):

@@ -7301,7 +7301,7 @@ _HANDOFF_IMMUTABLE_MODE = 0o600
 # Schnittstelle und ersetzt sie nicht. Wiederhergestellt, damit kein
 # Upstream-Code fehlt.
 # ---------------------------------------------------------------------------
-# Attachments
+# Attachments (upstream storage helpers)
 # ---------------------------------------------------------------------------
 
 # The attachment size cap is the module-level ``KANBAN_ATTACHMENT_MAX_BYTES``

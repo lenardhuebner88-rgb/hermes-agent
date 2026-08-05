@@ -513,7 +513,7 @@ def test_real_uncovered_symbol_selects_curated_tests_and_warns(
     assert set(record.tests) == expected_tests
     assert record.warnings == (
         "symbol coverage gap for hermes_cli/kanban_db.py: changed symbol without "
-        "test references: _run_evidence_freshness_preflight; the 29 curated/direct "
+        "test references: _run_evidence_freshness_preflight; the 30 curated/direct "
         "test files for this path ran instead of the module-level import set and "
         "the affected-test gate intentionally remains non-red",
     )

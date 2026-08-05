@@ -8302,6 +8302,14 @@ def call_llm(
                         retry_kwargs,
                         provider=resolved_provider,
                         api_mode=resolved_api_mode,
+                        create=lambda request: _create_with_progress(
+                            client,
+                            request,
+                            task,
+                            force_stream=_provider_requires_stream(
+                                resolved_provider, _base_info or resolved_base_url,
+                            ),
+                        ),
                     ), task)
             except Exception as retry_err:
                 retry_err_str = str(retry_err)
@@ -8345,6 +8353,14 @@ def call_llm(
                         kwargs,
                         provider=resolved_provider,
                         api_mode=resolved_api_mode,
+                        create=lambda request: _create_with_progress(
+                            client,
+                            request,
+                            task,
+                            force_stream=_provider_requires_stream(
+                                resolved_provider, _base_info or resolved_base_url,
+                            ),
+                        ),
                     ), task)
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment or connection
@@ -8380,6 +8396,15 @@ def call_llm(
                             kwargs,
                             provider=resolved_provider,
                             api_mode=resolved_api_mode,
+                            create=lambda request: _create_with_progress(
+                                client,
+                                request,
+                                task,
+                                force_stream=_provider_requires_stream(
+                                    resolved_provider,
+                                    _base_info or resolved_base_url,
+                                ),
+                            ),
                         ), task)
                 except Exception as retry_err:
                     first_err = retry_err
@@ -8418,6 +8443,15 @@ def call_llm(
                             kwargs,
                             provider=resolved_provider,
                             api_mode=resolved_api_mode,
+                            create=lambda request: _create_with_progress(
+                                refreshed_client,
+                                request,
+                                task,
+                                force_stream=_provider_requires_stream(
+                                    resolved_provider,
+                                    _base_info or resolved_base_url,
+                                ),
+                            ),
                         ), task)
                 except Exception as retry_err:
                     if not (
@@ -8451,6 +8485,14 @@ def call_llm(
                         kwargs,
                         provider=resolved_provider,
                         api_mode=resolved_api_mode,
+                        create=lambda request: _create_with_progress(
+                            refreshed_client,
+                            request,
+                            task,
+                            force_stream=_provider_requires_stream(
+                                resolved_provider, _base_info or resolved_base_url,
+                            ),
+                        ),
                     ), task)
 
         # ── Auth refresh retry ───────────────────────────────────────
@@ -8506,6 +8548,15 @@ def call_llm(
                             kwargs,
                             provider=resolved_provider,
                             api_mode=resolved_api_mode,
+                            create=lambda request: _create_with_progress(
+                                client,
+                                request,
+                                task,
+                                force_stream=_provider_requires_stream(
+                                    resolved_provider,
+                                    _base_info or resolved_base_url,
+                                ),
+                            ),
                         ), task)
                 except Exception as retry_err:
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
