@@ -27,12 +27,7 @@ def _write_heartbeat(path: Path, *, last_tick_at: float, tick_health: str = "ok"
         "last_tick_at": int(last_tick_at),
         "tick_health": tick_health,
         "last_green_gate_at": int(last_tick_at) if tick_health == "ok" else None,
-        "counts": {
-            "self_healed_today": 0,
-            "parked_open": 0,
-            "open_escalations": 0,
-            "decision_queue": 0,
-        },
+        "counts": {"self_healed_today": 0, "parked_open": 0, "open_escalations": 0, "stranded": 0},
         "boards": [],
     }
     path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")

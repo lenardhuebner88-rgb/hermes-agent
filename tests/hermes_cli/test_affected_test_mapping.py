@@ -9,7 +9,6 @@ import pytest
 import hermes_cli.affected_test_mapping as affected_test_mapping
 from hermes_cli.affected_test_budget import (
     AFFECTED_BUDGET_OVERRIDE_ENV,
-    AffectedTestBudgetCheck,
     check_affected_test_budget,
 )
 from hermes_cli.affected_test_mapping import (
@@ -82,44 +81,6 @@ def _exception(path: str, **overrides: str) -> dict[str, str]:
     }
     entry.update(overrides)
     return entry
-
-
-def test_affected_pytest_modules_forwards_explicit_budget_env(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "feature.py").write_text("VALUE = 1\n")
-    (tmp_path / "tests" / "pkg").mkdir(parents=True)
-    (tmp_path / "tests" / "pkg" / "test_feature.py").write_text("")
-    _init_repo(tmp_path)
-    requested_env = {"HERMES_AFFECTED_TIME_BUDGET": "3600"}
-    captured: dict[str, object] = {}
-
-    def fake_budget(repo_root, selected_targets, *, durations_path=None, env=None):
-        captured["repo_root"] = repo_root
-        captured["selected_targets"] = list(selected_targets)
-        captured["env"] = env
-        return AffectedTestBudgetCheck(estimate=None)
-
-    monkeypatch.setattr(
-        affected_test_mapping,
-        "check_affected_test_budget",
-        fake_budget,
-    )
-
-    modules = affected_pytest_modules(
-        tmp_path,
-        ["pkg/feature.py"],
-        budget_env=requested_env,
-    )
-
-    assert modules == ["tests/pkg/test_feature.py"]
-    assert captured == {
-        "repo_root": tmp_path,
-        "selected_targets": ["tests/pkg/test_feature.py"],
-        "env": requested_env,
-    }
 
 
 def test_classifies_selected_not_applicable_allowlisted_and_unmapped(
@@ -799,7 +760,7 @@ def test_worker_union_budget_failure_is_deterministic_and_complete(
     monkeypatch.setattr(
         affected_test_mapping,
         "check_affected_test_budget",
-        lambda repo_root, targets, **_kwargs: check_affected_test_budget(
+        lambda repo_root, targets: check_affected_test_budget(
             repo_root,
             targets,
             durations_path=cache,

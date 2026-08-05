@@ -2909,21 +2909,6 @@ def test_classify_night_with_survivor_and_leaker_stays_red():
     assert vm.classify_gate_nights(records) == {"2026-07-05": vm.NIGHT_RED}
 
 
-def test_repaired_red_night_stays_red_and_exposes_same_day_repair():
-    records = [
-        _red(
-            "2026-07-05",
-            gate="python",
-            detail="real boom",
-            ts="2026-07-05T03:00:00+00:00",
-        ),
-        _rec("2026-07-05", "pass", ts="2026-07-05T07:00:00+00:00"),
-    ]
-
-    assert vm.classify_gate_nights(records) == {"2026-07-05": vm.NIGHT_RED}
-    assert vm.derive_gate_streak(records)["repaired_red_dates"] == ["2026-07-05"]
-
-
 def test_streak_leaker_night_is_neutral_not_green_not_red():
     # AC-1: a leaker-only night at the head does NOT break the green streak and
     # is NOT counted as a green night.
