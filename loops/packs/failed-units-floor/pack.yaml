@@ -1,0 +1,11 @@
+name: failed-units-floor
+type: deterministic
+description: Meldet neue, nicht ausgenommene systemd-User-Unit-Failures genau einmal
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  run:
+    command: bash scripts/loop_failed_units_floor.sh
+    timeout: 60
+notify: {}
+autoland: false
