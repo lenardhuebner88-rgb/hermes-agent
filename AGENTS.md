@@ -262,6 +262,18 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   `scripts/smoke_health_status_auth.py`), and keep a nonexistent path in the same probe
   as the control.
 
+- **Counting through a pipe silently truncates here.** Measured 2026-08-05 in this repo:
+  `grep -v … | wc -l` returned **28** where the answer was **1871**, and
+  `git log --oneline <range> -- <path> | wc -l` returned **50** where `git rev-list --count`
+  returned **829**. Both wrong answers look plausible — no error, no empty output. Redirect to
+  a file first and count with `awk`/`wc -l < file`, or use a counting subcommand
+  (`git rev-list --count`). Never build a measurement out of a long pipe.
+- **`git merge-tree` conflict lines are not one format.** `CONFLICT (content): Merge conflict in
+  <path>` ends with the path, but `CONFLICT (modify/delete): … Version X of <path> left in tree.`
+  ends with `tree.` — a generic `awk '{print $NF}'` extractor invents a file called `tree.` and
+  loses the real one. The *count* of CONFLICT lines stays right, so the error hides in the
+  mapping, not the total. Parse per conflict type.
+
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 
