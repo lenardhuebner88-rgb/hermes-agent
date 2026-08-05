@@ -10,7 +10,7 @@ tick (``gateway/kanban_watchers.py`` →
     last_tick_at        unix seconds of the last completed dispatcher tick
     tick_health         "ok" when the tick finished cleanly, else a reason
     last_green_gate_at  unix seconds of the last green gate (or null)
-    counts              aggregate self-heal / parked / escalation / stranded
+    counts              aggregate self-heal / parked / escalation / decision queue
     boards              per-board breakdown
 
 This watchdog runs on a fast cadence (systemd timer, ~5 min). When the heartbeat

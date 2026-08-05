@@ -17,6 +17,7 @@ win without that risk.)
 """
 
 import asyncio
+import logging
 
 from unittest.mock import patch
 
@@ -66,7 +67,7 @@ def _create_completed_task(*, subscribe: bool) -> str:
         conn.close()
 
 
-def test_zero_sub_board_is_never_opened_writable(tmp_path, monkeypatch):
+def test_zero_sub_board_is_never_opened_writable(tmp_path, monkeypatch, caplog):
     """A board with zero subscriptions must be skipped BEFORE `_kb.connect`."""
     db_path = tmp_path / "zero-subs.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
@@ -82,11 +83,18 @@ def test_zero_sub_board_is_never_opened_writable(tmp_path, monkeypatch):
     adapter = RecordingAdapter()
     runner = _make_runner(adapter)
 
-    with patch.object(kb, "connect", wraps=kb.connect) as spy_connect:
+    with caplog.at_level(logging.DEBUG, logger="gateway.run"), patch.object(
+        kb, "connect", wraps=kb.connect
+    ) as spy_connect:
         asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
 
     spy_connect.assert_not_called()
     assert adapter.sent == []
+    assert any(
+        "stall-flush sweep board default has no subscriptions; skipping open"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_subscribed_board_still_delivers_through_the_gate(tmp_path, monkeypatch):
