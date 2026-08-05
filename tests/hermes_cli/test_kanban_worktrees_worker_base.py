@@ -1640,3 +1640,101 @@ def test_prepare_worker_base_refuses_reset_when_patch_equivalent_content_absent(
     assert _git(worktree, "rev-parse", "HEAD") == recorded_head
     assert (worktree / "a.txt").read_text() == "branch version\n"
     assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_reverted_merge_recovery_moves_branch_ref(repo):
+    """B1: the recovery must rebase the BRANCH, not detach HEAD at the sha."""
+    info, recorded_head, _merge = _make_merged_then_reverted_chain(
+        repo, "t_branch_ref"
+    )
+
+    result = kwt.prepare_worker_base(
+        info["path"],
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_branch_ref",
+    )
+
+    assert result["action"] == "rebased"
+    assert _git(info["path"], "symbolic-ref", "-q", "--short", "HEAD") == info["branch"]
+    assert _git(info["path"], "rev-parse", info["branch"]) == result["head"]
+    # Work committed after the preparation lands on the branch ref.
+    (info["path"] / "worker.txt").write_text("worker output\n")
+    _git(info["path"], "add", "worker.txt")
+    _git(info["path"], "commit", "-m", "worker follow-up")
+    assert (
+        _git(info["path"], "rev-parse", f"{info['branch']}:worker.txt")
+        == _git(info["path"], "rev-parse", "HEAD:worker.txt")
+    )
+
+
+def test_prepare_worker_base_rebase_through_shared_file_keeps_both_sides(repo):
+    """B2: a clean rebase over a file BOTH sides changed is not a loss.
+
+    The result blob is a third state (target change + branch change); the
+    guard must read that as preserved, not as a drop.
+    """
+    (repo / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "add shared")
+
+    info = kwt.ensure_worktree(repo, "t_shared_file")
+    worktree = info["path"]
+    (worktree / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "shared.txt")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "shared.txt").write_text(
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "main touches line two")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_shared_file",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "shared.txt").read_text() == (
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+
+
+def test_prepare_worker_base_recovers_two_revert_cycles(repo):
+    """B3: with two merge+revert cycles the OLDEST reverted merge sets the base."""
+    info, recorded_head, _m1 = _make_merged_then_reverted_chain(
+        repo, "t_two_cycles"
+    )
+    worktree = info["path"]
+    # Fixer slice on the branch, then a second merge+revert cycle.
+    (worktree / "s3.txt").write_text("slice three\n")
+    _git(worktree, "add", "s3.txt")
+    _git(worktree, "commit", "-m", "chain: fixer slice 3")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", "merge t_two_cycles (2nd)", info["branch"],
+    )
+    _git(repo, "revert", "-m", "1", "--no-edit", "HEAD")
+    assert not (repo / "s1.txt").exists()
+    assert not (repo / "s3.txt").exists()
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_two_cycles",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "s1.txt").read_text() == "slice one\n"
+    assert (worktree / "s2.txt").read_text() == "slice two\n"
+    assert (worktree / "s3.txt").read_text() == "slice three\n"

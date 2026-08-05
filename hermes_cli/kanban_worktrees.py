@@ -867,30 +867,30 @@ def _tree_blob_at(repo: Path, ref: str, path: str) -> str:
 
 
 def _silent_branch_content_loss(
-    repo: Path, target: str, old_head: str, new_head: str
+    repo: Path, target: str, old_head: str, new_head: str, base: str
 ) -> list[str]:
-    """Branch-side paths whose content a base update silently dropped.
+    """Branch-side paths whose contribution a base update silently dropped.
 
-    A commit skipped as patch-equivalent is only safe when its content truly
-    lives in *target*.  After a merge+revert cycle the patch-ids stay
-    reachable from the target while the revert removes the content, so the
-    skip discards the branch's work without a trace (live incident
-    t_903e7b7c, 2026-08-05: ``worker_base_prepared`` left the chain branch
-    exactly at main with an empty diff).  Returns the changed paths whose
-    resulting blob is present in NEITHER *new_head* NOR *target*; empty
-    means every branch change either survived or genuinely landed.
-    Deletions carry no blob to preserve and are never reported.
+    *base* is the divergence point the branch's changes are measured against
+    (the fork point for an ordinary rebase, the reverted merge's first
+    parent for a recovery replay).  A path counts as lost only when its
+    content is absent from the target (`target_blob != branch_blob` — never
+    landed) AND the replayed result matches the target exactly
+    (`new_blob == target_blob` — the branch delta did not survive).  Blob
+    identity between old and new head is deliberately NOT required: a clean
+    rebase of a shared file produces merged content, a third blob that
+    carries both sides.  Deletions carry no blob and are never reported.
     """
-    merge_base = _git(repo, "merge-base", old_head, target)
     lost: list[str] = []
-    for path in _changed_files_between(repo, merge_base, old_head):
+    for path in _changed_files_between(repo, base, old_head):
         branch_blob = _tree_blob_at(repo, old_head, path)
         if not branch_blob:
             continue
-        if _tree_blob_at(repo, new_head, path) == branch_blob:
-            continue
-        if _tree_blob_at(repo, target, path) == branch_blob:
-            continue
+        target_blob = _tree_blob_at(repo, target, path)
+        if target_blob == branch_blob:
+            continue  # genuinely landed in the target
+        if _tree_blob_at(repo, new_head, path) != target_blob:
+            continue  # branch delta (possibly merged) present in the result
         lost.append(path)
     return lost
 
@@ -954,6 +954,13 @@ def _reverted_merge_for_branch(repo: Path, branch: str, target: str) -> Optional
     parent instead replays only commits after it and silently loses every
     earlier chain commit (live incident t_903e7b7c, 2026-08-05; a two-commit
     toy repro loses the first commit with the merged-parent base).
+
+    With several merge+revert cycles against the same branch the OLDEST
+    still-unreconciled reverted merge wins: ``rev-list`` walks newest-first,
+    but the newest merge's first parent already contains the earlier cycles,
+    so replaying from there drops every older slice.  A reverted merge stops
+    qualifying once its revert commit is itself part of *branch* (the worker
+    has already reconciled that cycle).
     """
     # Merges at or before the branch/target merge-base cannot need recovery:
     # their matching reverts (if any) are already part of the worker branch.
@@ -967,6 +974,7 @@ def _reverted_merge_for_branch(repo: Path, branch: str, target: str) -> Optional
         "--merges",
         f"{merge_base}..{target}",
     )
+    oldest: Optional[str] = None
     for merge_commit in merges.splitlines():
         parents = _git(repo, "show", "-s", "--format=%P", merge_commit).split()
         if len(parents) < 2:
@@ -985,8 +993,8 @@ def _reverted_merge_for_branch(repo: Path, branch: str, target: str) -> Optional
             != _git(repo, "rev-parse", f"{merged_parent}:{path}", check=False)
             for path in changed
         ):
-            return merge_commit
-    return None
+            oldest = merge_commit
+    return oldest
 
 
 def _changed_files_between(repo: Path, left: str, right: str) -> list[str]:
@@ -1481,7 +1489,21 @@ def _prepare_worker_base_reverted_merge_replay(
     merge's FIRST parent covers the whole branch; ``--reapply-cherry-picks``
     disables the poisoned skip.  Commits that independently landed on the
     target in the meantime apply as empty and are dropped by the rebase.
+
+    The rebase must name the BRANCH, not the HEAD sha: rebasing a sha
+    detaches HEAD, the branch ref never moves, and every later worker
+    commit lands on no ref — the same silent loss one level later.
+
+    A branch-side merge that recorded a conflict resolution is linearized
+    away by this replay; the resulting conflict raises and keeps the S10
+    conflict-fixer route (fail-safe, no silent loss).
     """
+    branch_ref = _git(wt, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch_ref == "HEAD":
+        raise WorktreeError(
+            "reverted-merge recovery requires the branch checked out, "
+            f"but the worktree is on a detached HEAD ({actual_head})"
+        )
     replay_base = _git(wt, "rev-parse", f"{reverted_merge}^1")
     try:
         _git(
@@ -1491,7 +1513,7 @@ def _prepare_worker_base_reverted_merge_replay(
             "--onto",
             target_head,
             replay_base,
-            actual_head,
+            branch_ref,
         )
     except WorktreeError as exc:
         _git(wt, "rebase", "--abort", check=False)
@@ -1502,7 +1524,14 @@ def _prepare_worker_base_reverted_merge_replay(
             f"(reverted-merge recovery for {reverted_merge}): {exc}"
         ) from exc
     new_head = _git(wt, "rev-parse", "HEAD")
-    lost = _silent_branch_content_loss(wt, target, actual_head, new_head)
+    if _git(wt, "rev-parse", branch_ref) != new_head:
+        raise WorktreeError(
+            f"reverted-merge recovery left branch {branch_ref} behind "
+            f"(branch={_git(wt, 'rev-parse', branch_ref)}, HEAD={new_head})"
+        )
+    lost = _silent_branch_content_loss(
+        wt, target, actual_head, new_head, replay_base
+    )
     if lost:
         _git(wt, "reset", "--hard", actual_head)
         raise WorktreeError(
@@ -1684,7 +1713,13 @@ def prepare_worker_base(
         )
     landed, pending = _branch_landing_groups(wt, target, actual_head)
     if landed and not pending:
-        lost = _silent_branch_content_loss(wt, target, actual_head, target_head)
+        lost = _silent_branch_content_loss(
+            wt,
+            target,
+            actual_head,
+            target_head,
+            _git(wt, "merge-base", actual_head, target_head),
+        )
         if lost:
             raise WorktreeError(
                 "worker branch commits are patch-equivalent to target "
@@ -1760,7 +1795,13 @@ def prepare_worker_base(
         action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
     if action == "rebased":
-        lost = _silent_branch_content_loss(wt, target, actual_head, new_head)
+        lost = _silent_branch_content_loss(
+            wt,
+            target,
+            actual_head,
+            new_head,
+            _git(wt, "merge-base", actual_head, target_head),
+        )
         if lost:
             _git(wt, "reset", "--hard", actual_head)
             raise WorktreeError(
