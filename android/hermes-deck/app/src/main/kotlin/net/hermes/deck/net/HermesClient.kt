@@ -85,45 +85,17 @@ class HermesClient(
         return (0 until array.length()).map { BuzzAgent.fromJson(array.getJSONObject(it)) }
     }
 
-    fun availableModels(stem: String): ModelChoices {
-        val json = getJson("/api/buzz/agents/$stem/models")
-        val list = json.optJSONArray("models")
-        val models = if (list == null) emptyList() else (0 until list.length()).map { list.getString(it) }
-        return ModelChoices(
-            models = models,
-            current = json.optString("model", "").ifBlank { null },
-            error = json.optString("error", "").ifBlank { null },
-        )
-    }
+    fun availableModels(stem: String): HermesPayloads.ModelChoices =
+        HermesPayloads.modelChoices(getJson("/api/buzz/agents/$stem/models"))
 
-    fun setModel(stem: String, model: String): ModelChange {
+    fun setModel(stem: String, model: String): HermesPayloads.ModelChange {
         val payload = JSONObject().put("model", model)
         val request = Request.Builder()
             .url("${baseUrl.trimEnd('/')}/api/buzz/agents/$stem/model")
             .post(payload.toString().toRequestBody(JSON))
             .build()
-        val json = executeJson(request, retryOnUnauthorised = true)
-        val restart = json.optJSONObject("restart")
-        return ModelChange(
-            previous = json.optString("previous_model", json.optString("previous", "")),
-            current = json.optString("model", model),
-            restarted = restart?.optBoolean("restarted", false) ?: json.optBoolean("restarted", false),
-            ready = restart?.optBoolean("ready", false) ?: json.optBoolean("ready", false),
-            unverified = json.optBoolean("unverified", false),
-            error = (restart?.optString("error", "") ?: "").ifBlank { null },
-        )
+        return HermesPayloads.modelChange(executeJson(request, retryOnUnauthorised = true), model)
     }
-
-    data class ModelChoices(val models: List<String>, val current: String?, val error: String?)
-
-    data class ModelChange(
-        val previous: String,
-        val current: String,
-        val restarted: Boolean,
-        val ready: Boolean,
-        val unverified: Boolean,
-        val error: String?,
-    )
 
     private fun getJson(path: String): JSONObject {
         val request = Request.Builder().url("${baseUrl.trimEnd('/')}$path").get().build()

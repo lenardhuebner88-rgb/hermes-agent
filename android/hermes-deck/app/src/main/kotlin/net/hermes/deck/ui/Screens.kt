@@ -191,6 +191,7 @@ fun AgentsScreen(viewModel: DeckViewModel) {
                 expanded = expanded == agent.stem,
                 models = if (expanded == agent.stem) state.models else emptyList(),
                 modelsError = if (expanded == agent.stem) state.modelsError else null,
+                modelsLoading = expanded == agent.stem && state.modelsLoading,
                 busy = state.busyStem == agent.stem,
                 onToggle = {
                     expanded = if (expanded == agent.stem) null else agent.stem
@@ -211,6 +212,7 @@ private fun AgentCard(
     expanded: Boolean,
     models: List<String>,
     modelsError: String?,
+    modelsLoading: Boolean,
     busy: Boolean,
     onToggle: () -> Unit,
     onPick: (String) -> Unit,
@@ -256,6 +258,10 @@ private fun AgentCard(
                 Spacer(Modifier.height(DeckMetrics.gap))
                 if (busy) {
                     Text("Wird gesetzt und neu gestartet …", color = deck.warning, fontSize = 12.sp)
+                } else if (modelsLoading) {
+                    // The probe starts a real agent to ask it — several seconds
+                    // in which the card would otherwise look like a dud tap.
+                    Text("Modelle werden abgefragt …", color = deck.textSecondary, fontSize = 12.sp)
                 } else {
                     modelsError?.let {
                         Text(it, color = deck.warning, fontSize = 11.sp)
