@@ -1119,3 +1119,38 @@ describe("Folge-Slice — Karten-×N (F8), aria-Zusammenfassung (F10), Notiz-Kap
     expect(screen.getByText("+3 weitere")).toBeTruthy();
   });
 });
+
+// ─── fl-20260805-worker-chain-position-cap: Ketten-Position nennt den Rest ───
+
+describe("Ketten-Position — gekappte Kette weist die Restzahl sichtbar aus", () => {
+  const chainTask = (i: number, status: BoardTask["status"]): BoardTask => ({
+    ...BOARD_TASK,
+    id: i === 0 ? "t_abc123" : `t_chain${i}`,
+    title: i === 0 ? "Fix flaky test" : `Kettenglied ${i}`,
+    status,
+    root_id: "root_abc123",
+  });
+
+  function chainBoard(n: number): BoardResponse {
+    const tasks = Array.from({ length: n }, (_, i) =>
+      chainTask(i, i === 0 ? "running" : i <= n / 2 ? "done" : "ready"),
+    );
+    return { ...BOARD_WITH_CHAIN, columns: [{ name: "mixed", tasks }] };
+  }
+
+  it("9-gliedrige Kette: genau 4 Ketten-Zeilen plus sichtbarer Hinweis auf die 5 restlichen", () => {
+    renderDrawer([FIXTURE_WORKER], chainBoard(9));
+    expect(document.querySelectorAll(".fleet-mini").length).toBe(4);
+    expect(screen.getByText(/5 weitere/)).toBeTruthy();
+    // Die gekappten Glieder 5-9 bleiben einzeln unsichtbar.
+    expect(screen.queryByText("Kettenglied 5")).toBeNull();
+    expect(screen.queryByText("Kettenglied 8")).toBeNull();
+  });
+
+  it("4-gliedrige Kette: alle Zeilen sichtbar, kein weitere-Hinweis", () => {
+    renderDrawer([FIXTURE_WORKER], chainBoard(4));
+    expect(document.querySelectorAll(".fleet-mini").length).toBe(4);
+    expect(screen.getByText("Kettenglied 3")).toBeTruthy();
+    expect(screen.queryByText(/weitere/)).toBeNull();
+  });
+});

@@ -427,6 +427,9 @@ function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string |
 
 const TIMELINE_DISPLAY_LIMIT = 12;
 const NOTES_DISPLAY_LIMIT = 12;
+// Ketten-Position im Worker-Drawer: so viele Glieder sind direkt sichtbar,
+// der Rest wird als „… und N weitere" ausgewiesen (nie still gekappt).
+const CHAIN_PREVIEW_CAP = 4;
 
 function timelineItemText(item: RunTimelineItem): string {
   const label = eventKindLabel(item.kind, de.fleet.eventKindLabels);
@@ -771,7 +774,7 @@ function WorkerDrawer({
         {/* Ketten-Position */}
         {chainMembers.length > 0 ? (
           <div>
-            {chainMembers.slice(0, 4).map((t) => {
+            {chainMembers.slice(0, CHAIN_PREVIEW_CAP).map((t) => {
               const isActive = t.id === w.task_id;
               const isDone = t.status === "done";
               return (
@@ -786,6 +789,11 @@ function WorkerDrawer({
                 </div>
               );
             })}
+            {chainMembers.length > CHAIN_PREVIEW_CAP ? (
+              <div className="fleet-fx-note fleet-fx-note-empty">
+                {de.fleet.detailListMore(chainMembers.length - CHAIN_PREVIEW_CAP)}
+              </div>
+            ) : null}
           </div>
         ) : null}
 
