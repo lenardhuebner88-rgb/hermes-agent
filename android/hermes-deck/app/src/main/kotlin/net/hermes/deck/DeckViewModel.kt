@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import java.io.File
 import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +16,7 @@ import net.hermes.deck.data.DeckRepository
 import net.hermes.deck.data.DeckSettings
 import net.hermes.deck.data.DeckStore
 import net.hermes.deck.data.SetupLink
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
@@ -46,6 +48,13 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         val heartbeatRecentSeconds: Int = 300,
         /** Set when the journal could not be read at all — never rendered as calm. */
         val heartbeatError: String? = null,
+        val usage: List<AccountUsage> = emptyList(),
+        /**
+         * Usage failing must not blank the agents. The two come from separate
+         * endpoints and one being down says nothing about the other, so this
+         * error is held apart from [error] instead of replacing the screen.
+         */
+        val usageError: String? = null,
     )
 
     private val _agents = MutableStateFlow(AgentsState())
@@ -324,6 +333,11 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
             return@launch
         }
         _agents.value = _agents.value.copy(loading = true, error = null)
+        // Both calls go out at once, but the agents render as soon as they
+        // land. `/api/account-usage` fans out to five provider APIs on a cache
+        // miss, and awaiting it first would hold the whole tab hostage to the
+        // slowest subscription endpoint.
+        val usageCall = async(Dispatchers.IO) { runCatching { client.accountUsage() } }
         val result = withContext(Dispatchers.IO) { runCatching { client.agents() } }
         _agents.value = result.fold(
             onSuccess = {
@@ -336,6 +350,14 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
                 )
             },
             onFailure = { _agents.value.copy(loading = false, error = it.message ?: "Abruf fehlgeschlagen") },
+        )
+
+        val usage = usageCall.await()
+        // Copied onto whatever the agents left behind, so a usage failure never
+        // blanks the agent list and an agent failure never hides the budgets.
+        _agents.value = _agents.value.copy(
+            usage = usage.getOrDefault(emptyList()),
+            usageError = usage.exceptionOrNull()?.let { it.message ?: "Verbrauch nicht abrufbar" },
         )
     }
 

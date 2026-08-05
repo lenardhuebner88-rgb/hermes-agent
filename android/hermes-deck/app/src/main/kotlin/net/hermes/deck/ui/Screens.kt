@@ -56,6 +56,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.hermes.deck.DeckViewModel
+import kotlin.math.roundToInt
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.AgentActivity
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.DeckTask
@@ -193,6 +195,40 @@ fun AgentsScreen(viewModel: DeckViewModel) {
             }
         }
 
+        if (state.usage.isNotEmpty() || state.usageError != null) {
+            item {
+                Text(
+                    "Verbrauch",
+                    color = deck.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            state.usageError?.let { error ->
+                item {
+                    GlassCard(Modifier.fillMaxWidth()) {
+                        Text(error, color = deck.warning, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(DeckMetrics.gap))
+                }
+            }
+            items(state.usage, key = { "usage-${it.provider}" }) { usage ->
+                UsageCard(usage)
+                Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
+            }
+            item {
+                Spacer(Modifier.height(DeckMetrics.gap))
+                Text(
+                    "Agenten",
+                    color = deck.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+
         // Shown above the cards, not inside them: when the journal is
         // unreadable every dot below is uninformative, and a per-card hint
         // would repeat eight times while still looking like eight verdicts.
@@ -229,6 +265,108 @@ fun AgentsScreen(viewModel: DeckViewModel) {
         }
 
         item { Spacer(Modifier.height(bottomBarSpace)) }
+    }
+}
+
+/** Green below 60 %, amber to 85 %, red above — the point where a run dies. */
+@Composable
+private fun usageTint(percent: Double?): Color {
+    val deck = LocalDeck.current
+    return when {
+        percent == null -> deck.textFaint
+        percent >= 85 -> deck.danger
+        percent >= 60 -> deck.warning
+        else -> deck.success
+    }
+}
+
+@Composable
+private fun UsageCard(usage: AccountUsage) {
+    val deck = LocalDeck.current
+    GlassCard(Modifier.fillMaxWidth()) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    usage.displayName,
+                    color = deck.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                usage.plan?.let {
+                    Text(it, color = deck.textFaint, fontSize = 11.sp)
+                }
+            }
+
+            if (!usage.available) {
+                Spacer(Modifier.height(6.dp))
+                // No bar and no zero: an unavailable budget is unknown, and a
+                // 0 % bar would read as "plenty left".
+                Text(
+                    usage.unavailableReason ?: "Verbrauch nicht gemeldet",
+                    color = deck.warning,
+                    fontSize = 11.sp,
+                )
+            }
+
+            usage.windows.forEach { window ->
+                Spacer(Modifier.height(8.dp))
+                val tint = usageTint(window.usedPercent)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        window.label,
+                        color = deck.textSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        window.usedPercent?.let { "${it.roundToInt()} %" } ?: "unbekannt",
+                        color = tint,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(deck.accentSoft),
+                ) {
+                    window.usedPercent?.let { percent ->
+                        Box(
+                            Modifier
+                                .fillMaxWidth((percent / 100.0).toFloat().coerceIn(0f, 1f))
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(tint),
+                        )
+                    }
+                }
+            }
+
+            if (usage.details.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    usage.details.joinToString(" · "),
+                    color = deck.textFaint,
+                    fontSize = 11.sp,
+                )
+            }
+
+            if (usage.isStale) {
+                Spacer(Modifier.height(6.dp))
+                // The endpoint served a persisted or cached value because the
+                // live fetch did not land. Saying so is the whole difference
+                // between a number and a believable number.
+                Text(
+                    "Zwischenspeicher — nicht frisch gemessen",
+                    color = deck.warning,
+                    fontSize = 10.sp,
+                )
+            }
+        }
     }
 }
 

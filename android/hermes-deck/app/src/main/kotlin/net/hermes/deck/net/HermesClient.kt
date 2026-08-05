@@ -2,6 +2,7 @@ package net.hermes.deck.net
 
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.BuzzAgent
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -94,6 +95,10 @@ class HermesClient(
         }
         return HermesPayloads.agentsSnapshot(json)
     }
+
+    /** Subscription budgets per provider; empty when the dashboard reports none. */
+    fun accountUsage(): List<AccountUsage> =
+        AccountUsage.listFromJson(getJson("/api/account-usage"))
 
     fun availableModels(stem: String): HermesPayloads.ModelChoices =
         HermesPayloads.modelChoices(getJson("/api/buzz/agents/$stem/models"))
