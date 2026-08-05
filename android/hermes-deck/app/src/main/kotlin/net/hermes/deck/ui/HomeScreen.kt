@@ -72,7 +72,7 @@ fun HomeScreen(
 
     val channels = snapshot.channels
     val byId = channels.associateBy { it.id }
-    val visible = viewModel.visibleTasks(snapshot.tasks)
+    val visible = viewModel.visibleTasks(snapshot.tasks, filter, search)
     val open = snapshot.tasks.count { !it.status.isClosed }
     val urgent = snapshot.tasks.count { !it.status.isClosed && it.priority.ordinal >= 2 }
     val doneToday = snapshot.tasks.count { it.status == TaskStatus.DONE }

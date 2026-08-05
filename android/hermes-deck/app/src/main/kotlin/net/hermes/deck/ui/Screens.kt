@@ -55,7 +55,7 @@ import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.TaskStatus
 
 @Composable
-fun ProjectsScreen(viewModel: DeckViewModel, onOpenTask: (DeckTask) -> Unit) {
+fun ProjectsScreen(viewModel: DeckViewModel, onOpenProject: (String) -> Unit) {
     val deck = LocalDeck.current
     val snapshot by viewModel.snapshot.collectAsState()
 
@@ -85,7 +85,10 @@ fun ProjectsScreen(viewModel: DeckViewModel, onOpenTask: (DeckTask) -> Unit) {
             val open = tasks.count { !it.status.isClosed }
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                onClick = { viewModel.setFilterChannel(channel.id) },
+                // Setting the filter alone left the user right here, on an
+                // unchanged list: the filtered result lives on the deck tab,
+                // so the tap has to go there too or it reads as a dead card.
+                onClick = { onOpenProject(channel.id) },
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(

@@ -18,6 +18,7 @@ import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
 import net.hermes.deck.net.HermesClient
@@ -141,19 +142,18 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         repository.sync()?.let { _message.value = it }
     }
 
-    /** The list the deck screen shows, after the channel filter and search. */
-    fun visibleTasks(tasks: List<DeckTask>): List<DeckTask> {
-        val channel = _filterChannel.value
-        val needle = _search.value.trim().lowercase()
-        return tasks.asSequence()
-            .filter { channel == null || it.channelId == channel }
-            .filter {
-                needle.isEmpty() ||
-                    it.title.lowercase().contains(needle) ||
-                    it.body.lowercase().contains(needle)
-            }
-            .toList()
-    }
+    /**
+     * The list the deck screen shows, after the channel filter and search.
+     *
+     * Filter and needle are parameters, not reads of [_filterChannel] and
+     * [_search]. Reading the flows in here made the function invisible to
+     * Compose: the screen recomposed — the approvals section correctly
+     * disappeared as soon as the field held text — while this list kept its
+     * pre-search contents. Typing looked like it did nothing, and no test
+     * could see it, because called directly the function filtered fine.
+     */
+    fun visibleTasks(tasks: List<DeckTask>, channel: String?, search: String): List<DeckTask> =
+        TaskFilter.apply(tasks, channel, search)
 
     fun capture(
         channelId: String,
