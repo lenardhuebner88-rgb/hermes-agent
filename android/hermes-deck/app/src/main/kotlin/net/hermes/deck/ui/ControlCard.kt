@@ -292,9 +292,12 @@ private fun DeliveryBand(delivery: ControlSummary.Delivery, onSync: () -> Unit) 
  * per screen, so "where is something happening" means opening each channel in
  * turn. The row deliberately carries only enough to decide whether to switch to
  * Buzz — who spoke, in which project, how long ago, and the first line.
+ *
+ * Most rows are ordinary Buzz threads with no task behind them; those get no
+ * [onClick] at all rather than a tap that visibly does nothing.
  */
 @Composable
-fun ActiveThreadRow(entry: ThreadActivity.Entry, onClick: () -> Unit) {
+fun ActiveThreadRow(entry: ThreadActivity.Entry, onClick: (() -> Unit)? = null) {
     val deck = LocalDeck.current
     GlassCard(Modifier.fillMaxWidth(), onClick = onClick) {
         Column {

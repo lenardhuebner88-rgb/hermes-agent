@@ -1,11 +1,13 @@
 package net.hermes.deck.ui
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.ControlSummary
 import net.hermes.deck.model.ThreadActivity
@@ -162,22 +164,26 @@ class ControlCardTest {
         compose.onNodeWithText("4 wartet auf Verbindung zu Buzz").assertIsDisplayed()
     }
 
+    private fun threadEntry(taskId: String?, title: String = "Deck bauen") = ThreadActivity.Entry(
+        rootId = "root-1",
+        taskId = taskId,
+        title = title,
+        channelId = "c",
+        channelName = "agent-lab",
+        replyCount = 3,
+        lastAt = System.currentTimeMillis() / 1000 - 120,
+        lastAuthorPubkey = "b".repeat(64),
+        lastAuthorLabel = "Claude",
+        lastText = "Bin dran, Gate läuft.",
+        awaitingMe = true,
+    )
+
     @Test
     fun anActiveThreadRowShowsWhoSpokeWhereAndWhat() {
-        val entry = ThreadActivity.Entry(
-            taskId = "t1",
-            title = "Deck bauen",
-            channelId = "c",
-            channelName = "agent-lab",
-            replyCount = 3,
-            lastAt = System.currentTimeMillis() / 1000 - 120,
-            lastAuthorPubkey = "b".repeat(64),
-            lastAuthorLabel = "Claude",
-            lastText = "Bin dran, Gate läuft.",
-            awaitingMe = true,
-        )
         var opened = false
-        compose.setContent { HermesDeckTheme { ActiveThreadRow(entry) { opened = true } } }
+        compose.setContent {
+            HermesDeckTheme { ActiveThreadRow(threadEntry(taskId = "t1")) { opened = true } }
+        }
 
         compose.onNodeWithText("Claude").assertIsDisplayed()
         compose.onNodeWithText("· agent-lab").assertIsDisplayed()
@@ -186,6 +192,90 @@ class ControlCardTest {
 
         compose.onNodeWithText("Deck bauen").performClick()
         assertTrue(opened)
+    }
+
+    @Test
+    fun aPlainBuzzThreadStillRendersButOffersNoTap() {
+        // Most rows are ordinary Buzz threads — measured, five deck tasks
+        // against fourteen live threads. They must show, and they must not look
+        // tappable, because there is nothing here to open.
+        //
+        // Asserted on the click action itself, not on a callback: a first
+        // version passed no callback and checked that it stayed uncalled, which
+        // is true however the row is built. The RED probe caught that by
+        // staying green.
+        compose.setContent {
+            HermesDeckTheme {
+                ActiveThreadRow(threadEntry(taskId = null, title = "Relay 500 bei Sende-Interval"))
+            }
+        }
+
+        compose.onNodeWithText("Relay 500 bei Sende-Interval").assertIsDisplayed()
+        assertEquals(
+            "Eine Zeile ohne Aufgabe darf keine Tap-Fläche anbieten",
+            0,
+            compose.onAllNodes(hasClickAction()).fetchSemanticsNodes().size,
+        )
+    }
+
+    @Test
+    fun aThreadRowWithATaskDoesOfferATap() {
+        // The counterpart, so the assertion above cannot pass by the row simply
+        // never being clickable at all.
+        compose.setContent { HermesDeckTheme { ActiveThreadRow(threadEntry(taskId = "t1")) {} } }
+
+        assertTrue(compose.onAllNodes(hasClickAction()).fetchSemanticsNodes().isNotEmpty())
+    }
+
+    @Test
+    fun theFullFourBandCardStaysWithinItsHeightBudget() {
+        // "Höhe ist eine Vorgabe, kein Ergebnis." This screen has pushed its own
+        // content below the fold twice, both times found by a human looking at a
+        // device. Until now the card had never been rendered with all four bands
+        // at once — on the real workspace two of them stay empty because the
+        // dashboard is unreachable — so the worst case was never seen at all.
+        //
+        // A third of the screen is the budget: above the card sit the header and
+        // the search field, below it the counters and the first thread row, and
+        // those have to remain visible on the same screen.
+        show(
+            summary(
+                working = listOf("Claude", "Qwen", "Hermes"),
+                idle = 5,
+                decisions = 2,
+                overdue = 3,
+                dueToday = 1,
+                mentions = 10,
+                capacity = ControlSummary.Capacity("Kimi (Moonshot)", 74.0, stale = true, others = 4),
+                pending = 4,
+            ),
+        )
+
+        // Every band must actually be on screen — a card that fits by dropping
+        // one would sail through a pure height check.
+        compose.onNodeWithText("3 arbeiten").assertIsDisplayed()
+        compose.onNodeWithText("Wartet auf dich").assertIsDisplayed()
+        compose.onNodeWithText("Knappstes Budget · Kimi (Moonshot)").assertIsDisplayed()
+        compose.onNodeWithText("4 wartet auf Verbindung zu Buzz").assertIsDisplayed()
+
+        // Measured in dp against a fixed ceiling, not against the test host's
+        // own window: `createComposeRule` hosts the content in a window of its
+        // own — 820 px where the device reports 2400 — so a ratio taken from
+        // `onRoot()` would be a claim about the harness, not about the phone.
+        //
+        // 320 dp is roughly a third of a 914 dp phone screen (1080x2400 at
+        // 420 dpi, the emulator this gate runs on). The full card measured
+        // 296 dp on 2026-08-05, so the ceiling holds about 8 % of headroom:
+        // enough for a longer provider name, not enough to add a fifth band
+        // without deciding to.
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val cardHeightDp = compose.onNodeWithText("4 wartet auf Verbindung zu Buzz")
+            .fetchSemanticsNode().boundsInRoot.bottom / density
+        assertTrue(
+            "Die volle Karte misst ${cardHeightDp.toInt()} dp und sprengt die Vorgabe von 320 dp",
+            cardHeightDp <= 320f,
+        )
     }
 
     @Test

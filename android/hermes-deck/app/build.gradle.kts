@@ -15,8 +15,10 @@ android {
         applicationId = "net.hermes.deck"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1"
+        // The version had lived only in the APK's filename: six releases had
+        // shipped while the app kept telling anyone who asked that it was 0.1.
+        versionCode = 7
+        versionName = "0.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
