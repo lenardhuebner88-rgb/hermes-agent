@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Gate for android/hermes-deck — the layer that had none.
+# Gate for the Android apps — the layer that had none.
 #
 # Four of the six defects found on 2026-08-05 lived in the Compose/Activity
 # layer, and every one of them was caught by a human looking at an emulator.
@@ -13,20 +13,29 @@
 #
 # By default lint+unit run. `--ui` adds the emulator leg.
 #
+# The emulator itself belongs to `scripts/android-emulator.sh`, which pins one
+# AVD and one port per app. Until 2026-08-05 this script picked its AVD with
+# `emulator -list-avds | head -1` — and since exactly one AVD existed, the deck
+# gate silently booted the dictate AVD, the same one the dictate scripts boot.
+# Two boots of one AVD is not two emulators.
+#
 # Like gate-frontend.sh this pipes nothing: the exit code is the truth. Never
 # call it through `| tail` — without pipefail that swallows the failure.
 
 set -euo pipefail
 
-MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/android/hermes-deck"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+EMULATOR="$REPO/scripts/android-emulator.sh"
+APP="hermes-deck"
 RUN_UI=0
 RUN_LINT=1
 RUN_UNIT=1
 
 usage() {
     cat <<'EOF'
-Usage: scripts/gate-android.sh [--ui] [--only-ui] [--skip-lint]
+Usage: scripts/gate-android.sh [<app>] [--ui] [--only-ui] [--skip-lint]
 
+  <app>        hermes-deck (Vorgabe) | hermes-dictate | hermes-voice
   --ui         also run instrumented Compose tests on an emulator
   --only-ui    run only the emulator leg
   --skip-lint  skip Android Lint (it is the slowest of the two cheap legs)
@@ -39,10 +48,15 @@ while [ $# -gt 0 ]; do
         --only-ui) RUN_UI=1; RUN_LINT=0; RUN_UNIT=0 ;;
         --skip-lint) RUN_LINT=0 ;;
         -h|--help) usage; exit 0 ;;
+        hermes-deck|hermes-dictate|hermes-voice) APP="$1" ;;
+        deck|dictate|voice) APP="hermes-$1" ;;
         *) echo "unbekannte Option: $1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
+
+MODULE_DIR="$REPO/android/$APP"
+[ -d "$MODULE_DIR" ] || { echo "FEHLER: $MODULE_DIR gibt es nicht." >&2; exit 2; }
 
 # The harness shell reads neither ~/.bashrc nor ~/.profile, so none of this can
 # be assumed to be set. Without JAVA_HOME/bin on PATH Gradle dies as
@@ -61,7 +75,7 @@ if [ ! -f local.properties ]; then
     echo "→ local.properties angelegt (sdk.dir=$ANDROID_HOME)"
 fi
 
-step() { printf '\n=== %s ===\n' "$1"; }
+step() { printf '\n=== %s (%s) ===\n' "$1" "$APP"; }
 
 if [ "$RUN_LINT" = 1 ]; then
     step "Android Lint"
@@ -76,85 +90,36 @@ fi
 if [ "$RUN_UI" = 1 ]; then
     step "Instrumentierte Compose-Tests"
 
-    # Piet is in group kvm, but a shell started before that change was made does
-    # not carry the supplementary group — measured: direct access to /dev/kvm is
-    # denied while `sg kvm` succeeds. So re-exec through sg rather than assume.
-    if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-        if ! sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm' 2>/dev/null; then
-            echo "FEHLER: kein Zugriff auf /dev/kvm, auch nicht über 'sg kvm'." >&2
-            echo "        Ohne KVM startet der Emulator nicht (oder braucht Stunden)." >&2
-            exit 1
-        fi
-        echo "→ /dev/kvm nur über 'sg kvm' erreichbar; starte den Emulator so."
-        SG_PREFIX=(sg kvm -c)
+    if find "$MODULE_DIR/app/src/androidTest" -name '*.kt' -print -quit 2>/dev/null | rg -q .; then
+        :
     else
-        SG_PREFIX=()
-    fi
-
-    AVD="${DECK_AVD:-$(emulator -list-avds | head -1)}"
-    if [ -z "$AVD" ]; then
-        echo "FEHLER: keine AVD vorhanden. Anlegen z.B. mit:" >&2
-        echo "  \$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager create avd \\" >&2
-        echo "      -n hermes-deck -k 'system-images;android-36;google_apis;x86_64'" >&2
+        echo "FEHLER: $APP hat keine instrumentierten Tests — --ui würde einen" >&2
+        echo "        Emulator booten und nichts messen, und das grüne Gate" >&2
+        echo "        läse sich wie Abdeckung." >&2
         exit 1
-    fi
-    echo "→ AVD: $AVD"
-
-    # "Is a device there" is not the same question as "can it run a test".
-    #
-    # `adb devices` keeps listing an emulator that is still tearing down, so a
-    # run started right after a previous one saw a device, skipped booting, and
-    # then died in Gradle as "No connected devices!" — measured, not imagined.
-    # A device only counts once it reports sys.boot_completed.
-    usable_device() {
-        local serial
-        for serial in $(adb devices | awk 'NR>1 && $2=="device" {print $1}'); do
-            if [ "$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
-                echo "$serial"
-                return 0
-            fi
-        done
-        return 1
-    }
-
-    BOOTED_BY_US=0
-    if ! usable_device >/dev/null; then
-        echo "→ starte Emulator headless …"
-        LOG=$(mktemp -t deck-emulator-XXXXXX.log)
-        EMU_CMD="emulator -avd $AVD -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect"
-        if [ ${#SG_PREFIX[@]} -gt 0 ]; then
-            "${SG_PREFIX[@]}" "$EMU_CMD" > "$LOG" 2>&1 &
-        else
-            $EMU_CMD > "$LOG" 2>&1 &
-        fi
-        BOOTED_BY_US=1
-
-        echo "→ warte auf Boot (Log: $LOG) …"
-        adb wait-for-device
-        for _ in $(seq 1 180); do
-            usable_device >/dev/null && break
-            sleep 2
-        done
-        if ! usable_device >/dev/null; then
-            echo "FEHLER: Emulator ist nicht durchgebootet. Log: $LOG" >&2
-            exit 1
-        fi
-        echo "→ gebootet: $(usable_device)"
-    else
-        echo "→ vorhandenes, durchgebootetes Gerät wird benutzt: $(usable_device)"
     fi
 
     # Shut down only what we started: a device that was already attached may be
     # Piet's phone or another session's emulator.
+    BOOTED_BY_US=0
+    if SERIAL="$("$EMULATOR" serial "$APP" 2>/dev/null)"; then
+        echo "→ vorhandenes, durchgebootetes Gerät wird benutzt: $SERIAL"
+    else
+        SERIAL="$("$EMULATOR" start "$APP")"
+        BOOTED_BY_US=1
+    fi
+
     cleanup() {
         if [ "$BOOTED_BY_US" = 1 ]; then
-            echo "→ fahre den selbst gestarteten Emulator herunter."
-            adb emu kill >/dev/null 2>&1 || true
+            "$EMULATOR" stop "$APP"
         fi
     }
     trap cleanup EXIT
 
-    ./gradlew --console=plain connectedDebugAndroidTest
+    # Pin the target: with two apps' emulators possibly up at once, Gradle's
+    # "all connected devices" default would run this app's tests on the other
+    # app's emulator too.
+    ANDROID_SERIAL="$SERIAL" ./gradlew --console=plain connectedDebugAndroidTest
 fi
 
-printf '\n=== Gate grün ===\n'
+printf '\n=== Gate grün (%s) ===\n' "$APP"
