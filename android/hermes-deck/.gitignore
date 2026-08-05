@@ -1,0 +1,7 @@
+*.apk
+build/
+.gradle/
+*.keystore
+.kotlin/
+local.properties
+# Staged debug APK for durable auth-download delivery (reports/by-task artifact, not a tracked binary)
