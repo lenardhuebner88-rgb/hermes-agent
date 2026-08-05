@@ -4315,25 +4315,39 @@ _TRANSIENT_DISPOSITION_PATTERNS = (
     re.compile(r"\b(?:nicht|not) reproduzierbar\b", re.IGNORECASE),
     re.compile(r"\bnon[- ]reproducible\b", re.IGNORECASE),
     re.compile(r"\bbei (?:der )?n[aä]chsten\b.*\b(?:pr[uü]fen|beobachten|check)", re.IGNORECASE),
-    re.compile(r"\bbei erneutem\b", re.IGNORECASE),
-    re.compile(r"\bfalls\b.*\b(?:erneut|wieder)\b", re.IGNORECASE),
-    re.compile(r"\bif\b.*\bagain\b", re.IGNORECASE),
+    re.compile(
+        r"\bbei erneutem\b.*\b(?:auftreten|vorkommen)\b.*\b(?:pr[uü]fen|beobachten|check)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bfalls\b.*\b(?:erneut|wieder)\b.*\b(?:pr[uü]fen|beobachten|check)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bif\b.*\bagain\b.*\b(?:check|observe|watch)\b", re.IGNORECASE),
 )
-_CONFOUNDED_DISPOSITION_TEXT_PATTERNS = (
+_CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS = (
     re.compile(r"\b(?:noch )?nicht (?:in|auf) main\b", re.IGNORECASE),
     re.compile(r"\bnot (?:yet )?in main\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:integrator|operator|chain-end)\b.*\b(?:post[- ]merge|nach (?:dem )?merge|live[- ]smoke|visuell)",
+        r"\b(?:binary|binaries|browser|chrom(?:e|ium)|auth|token|credential)s?\b.*"
+        r"\b(?:missing|absent|unavailable|fehlt|fehlen)\b",
         re.IGNORECASE,
     ),
-)
-_CONFOUNDED_DISPOSITION_ACTION_PATTERNS = (
     re.compile(
-        r"^\s*(?:nach|after|post[- ])(?: dem | the )?(?:merge|deployment|deploy|restart|gateway-restart)\b",
+        r"\b(?:missing|absent|unavailable|fehlt|fehlen)\b.*"
+        r"\b(?:binary|binaries|browser|chrom(?:e|ium)|auth|token|credential)s?\b",
         re.IGNORECASE,
     ),
-    re.compile(r"\blive[- ]smoke\b", re.IGNORECASE),
-    re.compile(r"\bvisuell(?:e|en|er|es)? (?:abnahme|abnehmen|pr[uü]fen)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:deploy|restart|live[- ]smoke|dashboard)\b.*"
+        r"\b(?:verboten|forbidden|cannot|can't|kann kein)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:verboten|forbidden|cannot|can't|kann kein)\b.*"
+        r"\b(?:deploy|restart|live[- ]smoke|dashboard)\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -4347,17 +4361,14 @@ def _disposition_noise(candidate: Mapping[str, Any]) -> Optional[tuple[str, str]
     if candidate.get("source") != "ledger":
         return None
     text = str(candidate.get("excerpt") or "")
-    next_action = text.split(" — ", 1)[0]
     if any(pattern.search(text) for pattern in _TRANSIENT_DISPOSITION_PATTERNS):
         return (
             "transient",
             "one-off outcome is not reproduced or is only watched for recurrence",
         )
-    if any(
-        pattern.search(next_action)
-        for pattern in _CONFOUNDED_DISPOSITION_ACTION_PATTERNS
-    ) or any(
-        pattern.search(text) for pattern in _CONFOUNDED_DISPOSITION_TEXT_PATTERNS
+    _next_action, separator, evidence = text.partition(" — ")
+    if separator and any(
+        pattern.search(evidence) for pattern in _CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS
     ):
         return (
             "confounded",

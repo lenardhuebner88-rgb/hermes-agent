@@ -306,6 +306,63 @@ def test_run_harvest_separates_transient_and_confounded_noise(kanban_home):
     assert noise[confounded_id]["noise_class"] == "confounded"
 
 
+@pytest.mark.parametrize(
+    ("next_action", "evidence"),
+    [
+        (
+            "Integrator: Branch kanban/t_9b559e26 auf main rebasen und den "
+            "Post-Merge-Gate-Lauf wiederholen",
+            "Attempt-1-Metadata: skipped_stale_rebase, Branch b5d80c1fe1 vs "
+            "main 88377432aa",
+        ),
+        (
+            "Integrator muss das Post-Merge-Gate nach dem Merge auf main-HEAD "
+            "wiederholen; mein Lauf konnte nur gegen den Branch-Stand gaten",
+            "Event worker_base_prepared action=skipped_stale_rebase, "
+            "head=b5d80c1fe1, merge_target_head=88377432aa (t_c8adf037)",
+        ),
+        (
+            "Integrator should run the post-merge control gate targeted/affected-only "
+            "or with higher async timeout under load, so an unrelated flaky test "
+            "does not re-park this chain",
+            "park log: TerminalHandoffPanel.test.tsx Test timed out in 30000ms; "
+            "kanban: disk i/o error",
+        ),
+        (
+            "Integrator: sicherstellen, dass der Post-Merge-Gate über "
+            "scripts/run_tests.sh (df271efad) läuft; bei erneutem 'No module named "
+            "pytest' hält das Gateway stalen kanban_worktrees.py und muss den "
+            "gefixten Code frisch laden, bevor der Merge retryt wird.",
+            "hermes_cli/kanban_worktrees.py _default_quick_gate_pytest (df271efad); "
+            "Park-Attempt-4 merge_commit ed52521fd",
+        ),
+        (
+            "Integrator soll nach dem Fast-Forward-Merge das post-merge visual-gate "
+            "laufen lassen und bei erneutem transienten 405 EINMAL retryen statt "
+            "sofort zu parken/reverten",
+            "Loop-Historie: reland ea5675bdc/3b54dcaa2 -> merge cbcf65606 -> "
+            "revert 7f08e39cb binnen ~12min",
+        ),
+    ],
+    ids=[
+        "stale-rebase-first-card",
+        "stale-rebase-recurrence",
+        "loaded-gate-timeout",
+        "stale-gateway-code",
+        "reland-merge-revert-loop",
+    ],
+)
+def test_disposition_noise_keeps_real_ledger_defects_actionable(next_action, evidence):
+    """Real recurring defects must survive actor and remedy wording in the ledger."""
+    candidate = {
+        "source": "ledger",
+        "source_severity": "real-risk",
+        "excerpt": f"{next_action} — {evidence}",
+    }
+
+    assert strategist._disposition_noise(candidate) is None
+
+
 def test_run_harvest_since_uses_marker(kanban_home):
     import json
 
