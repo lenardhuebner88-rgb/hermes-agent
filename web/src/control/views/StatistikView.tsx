@@ -1448,6 +1448,16 @@ function ImportActivityChart({
   );
 }
 
+/** Sum a nullable token column the way the read model does: null stays null
+ *  when no row knows the value, instead of collapsing "unbekannt" into 0. */
+function sumKnownTokens(
+  rows: ObservabilityUsageOrigin[],
+  key: "context_input_tokens" | "output_tokens" | "cache_read_tokens" | "cache_write_tokens",
+): number | null {
+  const known = rows.map((row) => row[key]).filter((value): value is number => value != null);
+  return known.length > 0 ? known.reduce((sum, value) => sum + value, 0) : null;
+}
+
 function OriginDistribution({
   rows,
   total,
@@ -1462,10 +1472,10 @@ function OriginDistribution({
       {
         name: "weitere",
         fact_rows: rows.slice(6).reduce((sum, row) => sum + row.fact_rows, 0),
-        context_input_tokens: rows.slice(6).reduce((sum, row) => sum + row.context_input_tokens, 0),
-        output_tokens: rows.slice(6).reduce((sum, row) => sum + row.output_tokens, 0),
-        cache_read_tokens: rows.slice(6).reduce((sum, row) => sum + row.cache_read_tokens, 0),
-        cache_write_tokens: rows.slice(6).reduce((sum, row) => sum + row.cache_write_tokens, 0),
+        context_input_tokens: sumKnownTokens(rows.slice(6), "context_input_tokens"),
+        output_tokens: sumKnownTokens(rows.slice(6), "output_tokens"),
+        cache_read_tokens: sumKnownTokens(rows.slice(6), "cache_read_tokens"),
+        cache_write_tokens: sumKnownTokens(rows.slice(6), "cache_write_tokens"),
         model_count: rows.slice(6).reduce((sum, row) => sum + row.model_count, 0),
       },
     ]
@@ -1611,9 +1621,11 @@ export function ObservabilityDeck({
         />
         <KpiTile
           label="Context Tokens"
-          value={usageKnown ? fmtTokens(summary.context_input_tokens) : "—"}
+          value={usageKnown && summary.context_input_tokens != null
+            ? fmtTokens(summary.context_input_tokens)
+            : "—"}
           delta={usageKnown
-            ? `${fmtTokens(summary.cache_read_tokens)} Cache Read`
+            ? `${summary.cache_read_tokens == null ? "—" : fmtTokens(summary.cache_read_tokens)} Cache Read`
             : `unbekannt · ${data.usage.reason ?? "Ledger nicht lesbar"}`}
         />
         <KpiTile

@@ -1038,6 +1038,27 @@ def get_board(
             chain_groups: dict[str, list[Any]] = {}
             for task in summary_tasks:
                 chain_groups.setdefault(_resolve_root(task.id), []).append(task)
+            # A chain root can sit OUTSIDE the filtered task set: task_links are
+            # board-wide, while ``summary_tasks`` is narrowed by tenant/workflow
+            # template. The grouping stays exactly as-is (the sink is still the
+            # sink — see _resolve_root), but the title must then come from the
+            # real root row instead of an arbitrary member. Measured on the live
+            # board 2026-08-05: 20 of 363 ``tenant=planspec`` chain summaries
+            # named a member, because their root carries a different tenant.
+            summary_ids = set(all_task_ids)
+            external_root_titles: dict[str, str] = {}
+            external_root_ids = [
+                root_id for root_id in chain_groups if root_id not in summary_ids
+            ]
+            if external_root_ids:
+                placeholders = ",".join("?" for _ in external_root_ids)
+                external_root_titles = {
+                    row["id"]: row["title"]
+                    for row in conn.execute(
+                        f"SELECT id, title FROM tasks WHERE id IN ({placeholders})",
+                        external_root_ids,
+                    ).fetchall()
+                }
             chain_summaries = []
             for root_id, members in chain_groups.items():
                 if len(members) <= 1 and not any(
@@ -1046,7 +1067,12 @@ def get_board(
                     continue
                 root = next(
                     (member for member in members if member.id == root_id),
-                    members[0],
+                    None,
+                )
+                root_title = (
+                    root.title
+                    if root is not None
+                    else external_root_titles.get(root_id) or members[0].title
                 )
                 status_counts: dict[str, int] = {}
                 for member in members:
@@ -1125,7 +1151,7 @@ def get_board(
                 chain_summaries.append(
                     {
                         "root_id": root_id,
-                        "root_title": root.title,
+                        "root_title": root_title,
                         "total": len(members),
                         "station_limit": station_limit,
                         "stations": stations,
