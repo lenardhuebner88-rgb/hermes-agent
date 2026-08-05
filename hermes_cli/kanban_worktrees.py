@@ -852,6 +852,20 @@ def _branch_landing_groups(
     return landed, pending
 
 
+def _tree_blob_at(repo: Path, ref: str, path: str) -> str:
+    """Blob sha of *path* in *ref*'s tree, or "" when the path is absent.
+
+    ``rev-parse <ref>:<path>`` is unusable for this: for a missing path it
+    echoes the argument to stdout, so an absent file looks like a real,
+    distinct blob and every deletion reads as lost content.
+    """
+    out = _git(repo, "ls-tree", ref, "--", path, check=False)
+    if not out:
+        return ""
+    parts = out.split()
+    return parts[2] if len(parts) >= 3 else ""
+
+
 def _silent_branch_content_loss(
     repo: Path, target: str, old_head: str, new_head: str
 ) -> list[str]:
@@ -870,12 +884,12 @@ def _silent_branch_content_loss(
     merge_base = _git(repo, "merge-base", old_head, target)
     lost: list[str] = []
     for path in _changed_files_between(repo, merge_base, old_head):
-        branch_blob = _git(repo, "rev-parse", f"{old_head}:{path}", check=False)
+        branch_blob = _tree_blob_at(repo, old_head, path)
         if not branch_blob:
             continue
-        if _git(repo, "rev-parse", f"{new_head}:{path}", check=False) == branch_blob:
+        if _tree_blob_at(repo, new_head, path) == branch_blob:
             continue
-        if _git(repo, "rev-parse", f"{target}:{path}", check=False) == branch_blob:
+        if _tree_blob_at(repo, target, path) == branch_blob:
             continue
         lost.append(path)
     return lost
