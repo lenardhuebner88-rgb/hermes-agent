@@ -162,6 +162,10 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
             return super().execute(sql, *args, **kwargs)
 
     def wal_blocking_connect(*args, **kwargs):
+        # connect_tracked (Upstream T1) reicht eine tracking-augmentierte factory
+        # durch; ohne pop kollidiert sie mit unserer Test-Doppelung und sqlite3
+        # meldet "got multiple values for keyword argument 'factory'".
+        kwargs.pop("factory", None)
         return real_connect(
             *args, factory=_WalBlockingConnection, **kwargs
         )

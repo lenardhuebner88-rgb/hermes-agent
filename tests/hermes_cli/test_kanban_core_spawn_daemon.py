@@ -679,9 +679,21 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
             chat_id="123",
             kinds=["completed", "blocked"],
         )
-        assert old_cursor == 0
+        # Upstream-Vollmerge 2026-08-04: this used to assert `old_cursor == 0`.
+        # Upstream's #29905 fix makes add_notify_sub snap last_event_id to the
+        # task's current MAX(task_events.id), so a subscription added to an
+        # already-existing task starts CAUGHT UP: the pre-claim cursor is that
+        # snapped id, never 0. Asserting > 0 keeps the test sharp — revert the
+        # snap and this fails.
+        assert old_cursor > 0, (
+            "a subscription added to an existing task must start caught up, "
+            f"not at cursor 0 (got {old_cursor})"
+        )
         assert claimed_cursor > old_cursor
-        assert [ev.kind for ev in events] == ["completed"]
+        assert [ev.kind for ev in events] == ["completed"], (
+            "only the post-subscription terminal event may be claimed — "
+            "the task's pre-subscription history must not replay"
+        )
 
         # A concurrent notifier instance sees the advanced cursor and cannot
         # claim/send the same event range.

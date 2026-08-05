@@ -41,7 +41,7 @@ lost forever, and the cursor commits then too. ``send_fn``/``backstop_fn``
 default to ``None``/the file writer; a caller that omits ``send_fn`` keeps
 the PRE-fix eager-advance-before-send behavior unchanged (the production
 watcher DOES pass it since the A2 wiring, 2026-07-06 — see
-``gateway/kanban_watchers.py::_kanban_notifications_watcher``).
+``gateway/kanban_watchers.py::_kanban_notifier_watcher``).
 """
 
 from __future__ import annotations
@@ -662,7 +662,7 @@ def evaluate_alerts(
     cursor eagerly. ``error_rate``/``daily_cost`` stay ungated (no cursor —
     window-based, the condition re-fires after cooldown, so a dropped send
     is bounded, not permanent). The production watcher
-    (``gateway.kanban_watchers._kanban_notifications_watcher``) DOES pass
+    (``gateway.kanban_watchers._kanban_notifier_watcher``) DOES pass
     ``send_fn`` and filters ``SEND_GATED_RULES`` out of its post-hoc send
     loop; a caller that omits ``send_fn`` keeps the pre-fix
     eager-advance-before-send behavior.

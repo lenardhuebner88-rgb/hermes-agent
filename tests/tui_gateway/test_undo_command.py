@@ -46,7 +46,12 @@ def server(hermes_home):
         get_plugin_command_handler=lambda _name: None,
         resolve_plugin_command_result=_resolve_plugin_command_result,
     )
+    # Die echte Implementierung, nicht nachgebaut: tui_gateway/server.py importiert
+    # sie seit Upstream-Tranche T1, und ein None-Stub liefert ein leeres `display`
+    # statt der Skill-Zeile.
+    from agent.skill_commands import describe_skill_invocation as _real_describe
     fake_skill_commands = types.SimpleNamespace(
+        describe_skill_invocation=_real_describe,
         scan_skill_commands=lambda: {},
         build_skill_invocation_message=lambda *_args, **_kwargs: None,
     )
@@ -192,6 +197,56 @@ def test_undo_refuses_when_session_busy(server, session_with_history):
     resp = _call(server, "command.dispatch", session_id=sid, name="undo", arg="")
     assert "error" in resp
     assert "busy" in resp["error"]["message"].lower()
+
+
+def test_undo_skips_display_kind_timeline_rows(server, db):
+    """/undo must target real user turns, not durable timeline bookkeeping.
+
+    async_delegation_complete / model_switch / auto_continue rows are stored
+    as role=user with display_kind set. Clients never count them as user turns.
+    Without the list_recent_user_messages filter, /undo 1 soft-deleted only
+    the trailing marker and left the last real exchange intact.
+    """
+    sid = "sid-undo-timeline"
+    session_key = "tui-undo-timeline"
+    db.create_session(session_key, source="tui")
+    db.append_message(session_key, "user", "question 1")
+    db.append_message(session_key, "assistant", "answer 1")
+    db.append_message(session_key, "user", "question 2")
+    db.append_message(session_key, "assistant", "answer 2")
+    db.append_message(
+        session_key,
+        "user",
+        "background agent work finished",
+        display_kind="async_delegation_complete",
+    )
+    history = db.get_messages_as_conversation(session_key)
+    agent = MagicMock()
+    agent._memory_manager = MagicMock()
+    agent._last_flushed_db_idx = len(history)
+    s = {
+        "session_key": session_key,
+        "history": list(history),
+        "history_lock": threading.Lock(),
+        "history_version": 0,
+        "running": False,
+        "agent": agent,
+        "attached_images": [],
+        "cols": 120,
+    }
+    server._sessions[sid] = s
+    server._db = db
+
+    resp = _call(server, "command.dispatch", session_id=sid, name="undo", arg="")
+    result = resp["result"]
+    assert result["type"] == "prefill"
+    # Must prefill the last *real* user turn, not the marker text.
+    assert result["message"] == "question 2"
+    # Active history: only q1/a1 remain (q2+a2+marker soft-deleted).
+    assert len(s["history"]) == 2
+    assert [m.get("content") for m in s["history"]] == ["question 1", "answer 1"]
+    active = db.get_messages(session_key, include_inactive=False)
+    assert [r["content"] for r in active] == ["question 1", "answer 1"]
 
 
 def test_undo_errors_when_no_active_session(server):

@@ -504,7 +504,11 @@ def test_real_uncovered_symbol_selects_curated_tests_and_warns(
         if path.is_file()
     }
 
-    assert len(expected_tests) == 29
+    # 30 seit dem Upstream-Vollmerge 2026-08-04: die 8 fork-eigenen Run-Metric-
+    # Tests zogen aus der upstream-eigenen tests/hermes_cli/test_kanban_db.py in
+    # tests/hermes_cli/test_kanban_db_run_metrics_fork.py, damit Upstreams 230
+    # Tests dort wieder vollstaendig stehen koennen.
+    assert len(expected_tests) == 30
     assert record.state == "selected"
     assert set(record.tests) == expected_tests
     assert record.warnings == (

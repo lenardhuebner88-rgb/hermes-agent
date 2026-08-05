@@ -76,10 +76,8 @@ import { ProfileSwitcher } from "@/components/ProfileSwitcher";
 import { ProfileScopeBanner } from "@/components/ProfileScopeBanner";
 import { useSystemActions } from "@/contexts/useSystemActions";
 import type { SystemAction } from "@/contexts/system-actions-context";
-// Route pages are lazy-loaded (code-split): the initial bundle for any landing
-// — including /control — ships only the shell + shared vendor, and each page
-// downloads as its own chunk on first navigation. Previously all ~18 pages were
-// imported statically into one ~2.4 MB bundle, paid for on every page load.
+// Route pages are lazy-loaded so the initial dashboard shell does not pay for
+// every admin surface (and heavy deps like xterm) up front.
 const ConfigPage = lazy(() => import("@/pages/ConfigPage"));
 const DocsPage = lazy(() => import("@/pages/DocsPage"));
 const EnvPage = lazy(() => import("@/pages/EnvPage"));
@@ -99,6 +97,7 @@ const ChannelsPage = lazy(() => import("@/pages/ChannelsPage"));
 const WebhooksPage = lazy(() => import("@/pages/WebhooksPage"));
 const SystemPage = lazy(() => import("@/pages/SystemPage"));
 const ChatPage = lazy(() => import("@/pages/ChatPage"));
+// Fork-only route: the whole /control SPA hangs off this lazy import.
 const ControlPage = lazy(() => import("@/control/ControlPage"));
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
@@ -108,8 +107,24 @@ import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { latchChatActivation } from "@/lib/chat-activation";
 import { api } from "@/lib/api";
 import type { StatusResponse, UpdateCheckResponse } from "@/lib/api";
+
+function RouteFallback({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div
+      className="flex min-h-[12rem] flex-1 items-center justify-center"
+      aria-busy="true"
+      aria-live="polite"
+    >
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Spinner />
+        <span>{label}</span>
+      </div>
+    </div>
+  );
+}
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
@@ -125,18 +140,6 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
 
 // Suspense fallback while a lazy-loaded route chunk downloads (first visit only;
 // browser caches the chunk afterwards).
-function RouteLoadingFallback() {
-  return (
-    <div
-      className="flex min-h-0 min-w-0 flex-1 items-center justify-center py-16"
-      aria-busy="true"
-      aria-live="polite"
-    >
-      <Spinner />
-    </div>
-  );
-}
-
 const CHAT_NAV_ITEM: NavItem = {
   path: "/chat",
   labelKey: "chat",
@@ -150,8 +153,10 @@ const CHAT_NAV_ITEM: NavItem = {
  * inline near the bottom of this file — so the PTY child, WebSocket,
  * and xterm instance survive when the user visits another tab and comes
  * back.  A `display:none` toggle hides the terminal without unmounting.
- * Routing still owns the URL so /chat deep-links, browser back/forward,
- * and nav highlight keep working.
+ * The host itself is still deferred until the first /chat visit so the
+ * xterm chunk is not downloaded on unrelated pages.  Routing still owns
+ * the URL so /chat deep-links, browser back/forward, and nav highlight
+ * keep working.
  */
 // Built-in route components are a mix of eager local components (RootRedirect,
 // ChatRouteSink) and lazy-loaded pages — both are valid JSX element types.
@@ -414,6 +419,13 @@ export default function App() {
   // fork: /control owns its full shell — hide the upstream nav chrome on this route
   const isControlRoute = pathname.startsWith("/control");
   const embeddedChat = isDashboardEmbeddedChatEnabled();
+  // Defer mounting the persistent chat host (and its xterm chunk) until the
+  // user has actually opened /chat at least once. Sticky after that so the
+  // PTY survives later tab switches.
+  const [chatHostMounted, setChatHostMounted] = useState(isChatRoute);
+  useEffect(() => {
+    setChatHostMounted((prev) => latchChatActivation(prev, isChatRoute));
+  }, [isChatRoute]);
 
   // Keep the heavy embedded terminal (xterm + WebGL + 4 addons) out of the
   // initial load: only mount ChatPage once the user has actually opened /chat
@@ -781,39 +793,30 @@ export default function App() {
                     "min-h-0 flex flex-1 flex-col",
                 )}
               >
-                <Suspense fallback={<RouteLoadingFallback />}>
-                  <ProfileKeyedRoutes>
-                  <Routes>
-                    {routes.map(({ key, path, element }) => (
-                      <Route key={key} path={path} element={element} />
-                    ))}
-                    <Route
-                      path="*"
-                      element={
-                        <UnknownRouteFallback pluginsLoading={pluginsLoading} />
-                      }
-                    />
-                  </Routes>
-                  </ProfileKeyedRoutes>
-                </Suspense>
+                <ProfileKeyedRoutes>
+                  <Suspense fallback={<RouteFallback />}>
+                    <Routes>
+                      {routes.map(({ key, path, element }) => (
+                        <Route key={key} path={path} element={element} />
+                      ))}
+                      <Route
+                        path="*"
+                        element={
+                          <UnknownRouteFallback pluginsLoading={pluginsLoading} />
+                        }
+                      />
+                    </Routes>
+                  </Suspense>
+                </ProfileKeyedRoutes>
 
                 {embeddedChat &&
                   !chatOverriddenByPlugin &&
                   hasVisitedChat &&
                   (pluginsLoading ? (
                     isChatRoute ? (
-                      <div
-                        className="flex min-h-0 min-w-0 flex-1 items-center justify-center"
-                        aria-busy="true"
-                        aria-live="polite"
-                      >
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Spinner />
-                          <span>Loading chat…</span>
-                        </div>
-                      </div>
+                      <RouteFallback label="Loading chat…" />
                     ) : null
-                  ) : (
+                  ) : chatHostMounted ? (
                     <div
                       data-chat-active={isChatRoute ? "true" : "false"}
                       className={cn(
@@ -825,23 +828,16 @@ export default function App() {
                       <Suspense
                         fallback={
                           isChatRoute ? (
-                            <div
-                              className="flex min-h-0 min-w-0 flex-1 items-center justify-center"
-                              aria-busy="true"
-                              aria-live="polite"
-                            >
-                              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                                <Spinner />
-                                <span>Loading chat…</span>
-                              </div>
-                            </div>
+                            <RouteFallback label="Loading chat…" />
                           ) : null
                         }
                       >
                         <ChatPage isActive={isChatRoute} />
                       </Suspense>
                     </div>
-                  ))}
+                  ) : isChatRoute ? (
+                    <RouteFallback label="Loading chat…" />
+                  ) : null)}
               </div>
               <PluginSlot name="post-main" />
             </div>
