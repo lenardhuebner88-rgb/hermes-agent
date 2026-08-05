@@ -38,7 +38,6 @@ Module layout (section order)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import difflib
 import errno
 import hashlib
 import inspect
@@ -858,78 +857,13 @@ def _tree_blob_at(repo: Path, ref: str, path: str) -> str:
 
     ``rev-parse <ref>:<path>`` is unusable for this: for a missing path it
     echoes the argument to stdout, so an absent file looks like a real,
-    distinct blob and every deletion reads as lost content.
+    distinct blob and every deletion reads as a content difference.
     """
     out = _git(repo, "ls-tree", "-z", ref, "--", path, strip=False)
     if not out:
         return ""
     parts = out.split()
     return parts[2] if len(parts) >= 3 else ""
-
-
-def _blob_text(repo: Path, blob: str) -> Optional[str]:
-    """Blob content as text; ``None`` for binary/undecodable blobs.
-
-    ``strip=False`` keeps leading indentation and trailing whitespace intact
-    for the comparison; a strict UTF-8 failure marks the blob as opaque so
-    the caller can fail closed instead of crashing on a ``UnicodeDecodeError``.
-    """
-    if not blob:
-        return ""
-    try:
-        return _git(repo, "cat-file", "blob", blob, check=False, strip=False)
-    except UnicodeDecodeError:
-        return None
-
-
-def _added_lines(base_text: str, branch_text: str) -> list[str]:
-    """Lines the branch side inserts or replaces relative to *base_text*."""
-    base_lines = base_text.splitlines()
-    branch_lines = branch_text.splitlines()
-    matcher = difflib.SequenceMatcher(None, base_lines, branch_lines, autojunk=False)
-    added: list[str] = []
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        if tag in ("insert", "replace"):
-            added.extend(branch_lines[j1:j2])
-    return added
-
-
-def _silent_branch_content_loss(
-    repo: Path, target: str, old_head: str, new_head: str, base: str
-) -> list[str]:
-    """Branch-side paths a recovery replay silently dropped.
-
-    Only meaningful on the reverted-merge recovery path, where *base* is
-    the reverted merge's first parent and the replay is expected to
-    reproduce the branch's content: a path is lost when the replayed
-    result matches the target exactly (`new_blob == target_blob`) while
-    the branch's added lines are not all present in the target version.
-    Binary blobs cannot be line-compared; reaching this point with one
-    means its distinct branch version vanished, which reads as a loss.
-    Branch-side pure line deletions carry no added lines and are never
-    reported.
-    """
-    lost: list[str] = []
-    for path in _changed_files_between(repo, base, old_head):
-        branch_blob = _tree_blob_at(repo, old_head, path)
-        if not branch_blob:
-            continue
-        target_blob = _tree_blob_at(repo, target, path)
-        if target_blob == branch_blob:
-            continue  # genuinely landed in the target
-        if _tree_blob_at(repo, new_head, path) != target_blob:
-            continue  # branch delta (possibly merged) present in the result
-        branch_text = _blob_text(repo, branch_blob)
-        target_text = _blob_text(repo, target_blob)
-        if branch_text is None or target_text is None:
-            lost.append(path)  # opaque binary branch version did not survive
-            continue
-        base_text = _blob_text(repo, _tree_blob_at(repo, base, path)) or ""
-        added = _added_lines(base_text, branch_text)
-        target_lines = set(target_text.splitlines())
-        if any(line not in target_lines for line in added):
-            lost.append(path)
-    return lost
 
 
 def _first_parent_merges_reaching_branch(
@@ -1575,16 +1509,6 @@ def _prepare_worker_base_reverted_merge_replay(
         raise WorktreeError(
             f"reverted-merge recovery left branch {branch_ref} behind "
             f"(branch={_git(wt, 'rev-parse', branch_ref)}, HEAD={new_head})"
-        )
-    lost = _silent_branch_content_loss(
-        wt, target, actual_head, new_head, replay_base
-    )
-    if lost:
-        _git(wt, "reset", "--hard", actual_head)
-        raise WorktreeError(
-            f"reverted-merge replay onto {target} still dropped branch "
-            f"content absent from the target ({', '.join(lost[:8])}); "
-            "branch restored to pre-rebase HEAD"
         )
     post_dirty = dirty_files(wt)
     unexpected_dirty = [path for path in post_dirty if path not in skipped_wip_files]

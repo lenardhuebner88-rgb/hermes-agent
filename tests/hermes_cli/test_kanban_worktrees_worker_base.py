@@ -1675,22 +1675,43 @@ def test_prepare_worker_base_rebase_through_target_rename(repo):
     assert "l9 branch" in (worktree / "new.py").read_text()
 
 
-def test_silent_branch_content_loss_treats_binary_blob_as_loss_not_crash(repo):
-    """B9: an opaque (binary) blob must fail closed, not raise UnicodeDecodeError."""
-    _git(repo, "checkout", "-b", "binchain")
-    (repo / "pix.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01branchpixels")
-    _git(repo, "add", "pix.png")
-    _git(repo, "commit", "-m", "branch adds png")
-    old_head = _git(repo, "rev-parse", "HEAD")
-    base = _git(repo, "rev-parse", "HEAD^")
-    _git(repo, "checkout", "main")
-    # Target holds a DIFFERENT binary version (landed, then re-encoded) and
-    # the replay result equals the target — the branch's variant vanished.
-    (repo / "pix.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00mainpixels")
-    _git(repo, "add", "pix.png")
-    _git(repo, "commit", "-m", "main has its own png")
-    lost = kwt._silent_branch_content_loss(repo, "main", old_head, "main", base)
-    assert lost == ["pix.png"]
+def test_prepare_worker_base_recovers_reverted_merge_despite_target_rename(repo):
+    """Runde-4-Befund: a rename on the target must not trip the recovery.
+
+    Git's rename detection rides the branch change into the renamed file
+    during the replay; the old path is gone from BOTH target and result.
+    Any content-comparison guard reads that as a loss — the replay itself
+    is correct, so the recovery trusts the rebase (full reapplication,
+    loud conflicts) and no post-hoc blob guard.
+    """
+    (repo / "old.py").write_text("l1\nl2\nl3\nl4\nl5\n")
+    _git(repo, "add", "old.py")
+    _git(repo, "commit", "-m", "add old.py")
+
+    info = kwt.ensure_worktree(repo, "t_recovery_rename")
+    worktree = info["path"]
+    (worktree / "old.py").write_text("l1\nl2\nl3 branch\nl4\nl5\n")
+    _git(worktree, "add", "old.py")
+    _git(worktree, "commit", "-m", "chain touches line three")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", "merge t_recovery_rename", info["branch"],
+    )
+    _git(repo, "revert", "-m", "1", "--no-edit", "HEAD")
+    _git(repo, "mv", "old.py", "new.py")
+    _git(repo, "commit", "-m", "main renames old.py to new.py after the revert")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_recovery_rename",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "old.py").exists()
+    assert "l3 branch" in (worktree / "new.py").read_text()
 
 
 def test_prepare_worker_base_reverted_merge_recovery_moves_branch_ref(repo):
