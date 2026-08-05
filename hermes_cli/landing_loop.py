@@ -1011,6 +1011,7 @@ class LandingLoop:
         pack = branch.removeprefix("loop/")
         queue = self.loops_root / pack / "queue"
         verified, landed = queue / "20-verified", queue / "30-landed"
+        moved = 0
         try:
             plans = sorted(verified.glob("*.md"))
             if not plans:
@@ -1018,9 +1019,16 @@ class LandingLoop:
             landed.mkdir(parents=True, exist_ok=True)
             for plan in plans:
                 plan.rename(landed / plan.name)
+                moved += 1
         except OSError as exc:
-            return f" · Queue-Nachzug fehlgeschlagen: {_one_line(str(exc))}"
-        return f" · {len(plans)} Pläne nach 30-landed archiviert"
+            # Say how far it got: a break mid-loop leaves a split queue, and
+            # a bare "failed" would send the reader looking for zero moved
+            # plans.
+            return (
+                f" · Queue-Nachzug nach {moved}/{len(plans)} Plänen "
+                f"abgebrochen: {_one_line(str(exc))}"
+            )
+        return f" · {moved} Pläne nach 30-landed archiviert"
 
     def _freshen_completed(
         self,
