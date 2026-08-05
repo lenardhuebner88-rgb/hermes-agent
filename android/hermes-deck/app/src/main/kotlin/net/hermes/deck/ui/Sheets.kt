@@ -25,6 +25,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
@@ -46,11 +47,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.LocalDate
 import kotlinx.coroutines.launch
 import net.hermes.deck.DeckViewModel
 import net.hermes.deck.data.displayNameOf
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.DueDates
 import net.hermes.deck.model.TaskPriority
 
 @Composable
@@ -73,6 +76,8 @@ fun CaptureSheet(
     var attachments by remember { mutableStateOf(initialAttachments) }
     var uploading by remember { mutableStateOf(false) }
     var submitting by remember { mutableStateOf(false) }
+    val today = LocalDate.now()
+    var due by remember { mutableStateOf<LocalDate?>(null) }
     var channelId by remember {
         mutableStateOf(
             filter
@@ -176,6 +181,11 @@ fun CaptureSheet(
             }
 
             Spacer(Modifier.height(DeckMetrics.gap + 4.dp))
+            Text("FÄLLIG", color = deck.textFaint, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            DueChips(selected = due, today = today) { due = it }
+
+            Spacer(Modifier.height(DeckMetrics.gap + 4.dp))
             AttachmentRow(attachments, uploading) { picker.launch("*/*") }
 
             Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
@@ -193,7 +203,14 @@ fun CaptureSheet(
                 // away before it was ever written — silently, because the
                 // sheet closed exactly as it does on success.
                 submitting = true
-                viewModel.capture(channelId, title, body, priority, attachments) {
+                viewModel.capture(
+                    channelId = channelId,
+                    title = title,
+                    body = body,
+                    priority = priority,
+                    attachments = attachments,
+                    due = due?.let { DueDates.format(it) },
+                ) {
                     submitting = false
                     onDismiss()
                 }
@@ -232,6 +249,16 @@ fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> U
                 Text(task.body, color = deck.textSecondary, fontSize = 14.sp)
             }
 
+            DueDates.label(task.due, LocalDate.now())?.let { label ->
+                Spacer(Modifier.height(10.dp))
+                val late = !task.status.isClosed && DueDates.isOverdue(task.due, LocalDate.now())
+                MetricLine(
+                    Icons.Filled.DateRange,
+                    if (late) "Überfällig — war $label fällig" else "Fällig $label",
+                    tint = if (late) deck.danger else deck.accent,
+                )
+            }
+
             Spacer(Modifier.height(DeckMetrics.gap + 4.dp))
             StatusChooser(task.status) { viewModel.setStatus(task, it) }
 
@@ -254,6 +281,12 @@ fun TaskDetailSheet(viewModel: DeckViewModel, task: DeckTask, onDismiss: () -> U
                     }
                 }
             }
+
+            Spacer(Modifier.height(DeckMetrics.gap))
+            DueChips(
+                selected = DueDates.parse(task.due),
+                today = LocalDate.now(),
+            ) { viewModel.setDue(task, it) }
 
             if (task.attachments.isNotEmpty()) {
                 Spacer(Modifier.height(DeckMetrics.gap + 4.dp))
@@ -395,21 +428,7 @@ private fun AttachmentRow(attachments: List<Attachment>, uploading: Boolean, onA
                     Modifier.width(64.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Box(
-                        Modifier
-                            .size(64.dp)
-                            .clip(RoundedCornerShape(16.dp))
-                            .background(deck.surfaceRaised)
-                            .border(1.dp, deck.outline, RoundedCornerShape(16.dp)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            Icons.Filled.Share,
-                            contentDescription = null,
-                            tint = deck.textSecondary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
+                    AttachmentTile(attachment)
                     Spacer(Modifier.height(4.dp))
                     Text(
                         attachment.name,

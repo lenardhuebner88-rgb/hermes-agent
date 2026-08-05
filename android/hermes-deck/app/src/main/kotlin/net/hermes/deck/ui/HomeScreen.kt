@@ -45,10 +45,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 import net.hermes.deck.DeckViewModel
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskStatus
 
 @Composable
@@ -62,6 +65,7 @@ fun HomeScreen(
     val syncState by viewModel.syncState.collectAsState()
     val search by viewModel.search.collectAsState()
     val filter by viewModel.filterChannel.collectAsState()
+    val dueFilter by viewModel.filterDue.collectAsState()
     val decisions by viewModel.decisions.collectAsState()
 
     // Decisions live in ordinary channel chatter, so they can only be found by
@@ -72,10 +76,18 @@ fun HomeScreen(
 
     val channels = snapshot.channels
     val byId = channels.associateBy { it.id }
-    val visible = viewModel.visibleTasks(snapshot.tasks, filter, search)
+    val visible = viewModel.visibleTasks(snapshot.tasks, filter, search, dueFilter)
     val open = snapshot.tasks.count { !it.status.isClosed }
     val urgent = snapshot.tasks.count { !it.status.isClosed && it.priority.ordinal >= 2 }
     val doneToday = snapshot.tasks.count { it.status == TaskStatus.DONE }
+
+    // Recomputed per composition on purpose: "today" must not be captured for
+    // the life of the screen, or a deck left open overnight keeps highlighting
+    // yesterday and files new tasks under it.
+    val today = LocalDate.now()
+    val week = DueDates.week(today)
+    val dueCounts = TaskFilter.openCountsByDay(snapshot.tasks, week)
+    val overdue = TaskFilter.overdue(snapshot.tasks, today)
 
     LazyColumn(
         Modifier
@@ -131,6 +143,21 @@ fun HomeScreen(
             Spacer(Modifier.height(DeckMetrics.gap + 12.dp))
         }
 
+        item {
+            DueStrip(
+                days = week,
+                counts = dueCounts,
+                selected = dueFilter,
+                today = today,
+                onSelect = { viewModel.setFilterDue(it) },
+            )
+            if (overdue.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                OverdueBanner(overdue.size) { viewModel.setFilterDue(null) }
+            }
+            Spacer(Modifier.height(DeckMetrics.gap + 12.dp))
+        }
+
         // Hidden while searching or filtering: the decisions block is tall, and
         // it pushed the actual search result off the screen — seen on device.
         val showDecisions = decisions.isNotEmpty() && search.isBlank() && filter == null
@@ -138,51 +165,60 @@ fun HomeScreen(
             item {
                 SectionHeader(title = "Warten auf dich", action = "${decisions.size}")
             }
+            // Two lines and two cards. Clamping each card was not enough: three
+            // clamped approvals still pushed the project row and the whole task
+            // list below the fold, so the deck's own content was invisible until
+            // you scrolled. The rest stay one tap away behind the count.
             items(decisions.take(MAX_DECISIONS), key = { it.eventId }) { decision ->
                 GlassCard(Modifier.fillMaxWidth()) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .width(3.dp)
-                                    .height(20.dp)
-                                    .clip(RoundedCornerShape(2.dp))
-                                    .background(deck.warning),
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Text(
-                                decision.channelName,
-                                color = deck.textFaint,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            decision.text,
-                            color = deck.textPrimary,
-                            fontSize = 14.sp,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis,
+                    Row(verticalAlignment = Alignment.Top) {
+                        Box(
+                            Modifier
+                                .width(3.dp)
+                                .height(34.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(deck.warning),
                         )
-                        Spacer(Modifier.height(10.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                Modifier
-                                    .clip(RoundedCornerShape(DeckMetrics.chipRadius))
-                                    .background(deck.success.copy(alpha = 0.16f))
-                                    .clickable { viewModel.approve(decision) }
-                                    .padding(horizontal = 14.dp, vertical = 7.dp),
-                            ) {
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    "Freigeben",
-                                    color = deck.success,
-                                    fontSize = 12.sp,
+                                    decision.channelName,
+                                    color = deck.textFaint,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
                                 )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    relativeTime(decision.askedAt),
+                                    color = deck.textFaint,
+                                    fontSize = 11.sp,
+                                )
                             }
-                            Spacer(Modifier.width(10.dp))
-                            Text(relativeTime(decision.askedAt), color = deck.textFaint, fontSize = 11.sp)
+                            Spacer(Modifier.height(5.dp))
+                            Text(
+                                decision.text,
+                                color = deck.textPrimary,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(DeckMetrics.chipRadius))
+                                .background(deck.success.copy(alpha = 0.16f))
+                                .clickable { viewModel.approve(decision) }
+                                .padding(horizontal = 12.dp, vertical = 7.dp),
+                        ) {
+                            Text(
+                                "Freigeben",
+                                color = deck.success,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
                         }
                     }
                 }
@@ -230,18 +266,23 @@ fun HomeScreen(
 
         item {
             SectionHeader(
-                title = filter?.let { byId[it]?.displayName } ?: "Alle Aufgaben",
-                action = "${visible.size}",
+                title = when {
+                    dueFilter != null -> dueTitle(dueFilter, today)
+                    filter != null -> byId[filter]?.displayName ?: "Alle Aufgaben"
+                    else -> "Alle Aufgaben"
+                },
+                action = if (dueFilter == null) "${visible.size}" else "Tag aufheben",
+                onAction = { viewModel.setFilterDue(dueFilter) },
             )
         }
 
         if (visible.isEmpty()) {
             item {
                 EmptyHint(
-                    if (snapshot.tasks.isEmpty()) {
-                        "Noch nichts erfasst — tipp auf +"
-                    } else {
-                        "Nichts gefunden"
+                    when {
+                        dueFilter != null -> "An diesem Tag ist nichts fällig"
+                        snapshot.tasks.isEmpty() -> "Noch nichts erfasst — tipp auf +"
+                        else -> "Nichts gefunden"
                     },
                 )
             }
@@ -251,6 +292,7 @@ fun HomeScreen(
             TaskRow(
                 task = task,
                 channel = byId[task.channelId],
+                today = today,
                 onClick = { onOpenTask(task) },
                 onToggleDone = {
                     viewModel.setStatus(
@@ -420,6 +462,7 @@ private fun ProjectCard(channel: Channel, openCount: Int, selected: Boolean, onC
 fun TaskRow(
     task: DeckTask,
     channel: Channel?,
+    today: LocalDate,
     onClick: () -> Unit,
     onToggleDone: () -> Unit,
 ) {
@@ -455,16 +498,26 @@ fun TaskRow(
                         Text(channel.displayName, color = deck.textFaint, fontSize = 11.sp)
                     }
                 }
-                if (task.replyCount > 0 || task.hasAttachments || task.due != null) {
+                val dueLabel = DueDates.label(task.due, today)
+                if (task.replyCount > 0 || task.hasAttachments || dueLabel != null) {
                     Spacer(Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        // The date leads: it is the only metric that can make a
+                        // task urgent on its own.
+                        if (dueLabel != null) {
+                            val late = !task.status.isClosed && DueDates.isOverdue(task.due, today)
+                            MetricLine(
+                                Icons.Filled.DateRange,
+                                dueLabel,
+                                tint = if (late) deck.danger else null,
+                            )
+                        }
                         if (task.replyCount > 0) {
                             MetricLine(Icons.Filled.Share, "${task.replyCount} Antworten")
                         }
                         if (task.hasAttachments) {
                             MetricLine(Icons.Filled.Share, "${task.attachments.size} Anhänge")
                         }
-                        task.due?.let { MetricLine(Icons.Filled.DateRange, it) }
                     }
                 }
             }
@@ -493,6 +546,16 @@ fun TaskRow(
     }
 }
 
+/** "Heute", "Morgen", or the weekday with its date — never a bare ISO string. */
+private fun dueTitle(day: LocalDate?, today: LocalDate): String {
+    if (day == null) return "Alle Aufgaben"
+    val label = DueDates.label(DueDates.format(day), today) ?: DueDates.dayMonth(day)
+    return when (label) {
+        "Heute", "Morgen", "Gestern" -> label
+        else -> "${DueDates.weekdayShort(day)}, ${DueDates.dayMonth(day)}"
+    }
+}
+
 private fun greeting(): String {
     val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
     return when {
@@ -515,4 +578,38 @@ fun relativeTime(epochSeconds: Long): String {
 }
 
 /** Keeps the deck readable: the rest stay one tap away behind the count. */
-private const val MAX_DECISIONS = 3
+private const val MAX_DECISIONS = 2
+
+/**
+ * Overdue work cannot appear in the day strip — the strip starts today. Without
+ * this line a task whose date has passed simply stops being counted anywhere.
+ */
+@Composable
+private fun OverdueBanner(count: Int, onClear: () -> Unit) {
+    val deck = LocalDeck.current
+    val shape = RoundedCornerShape(DeckMetrics.chipRadius)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(deck.danger.copy(alpha = 0.12f))
+            .border(1.dp, deck.danger.copy(alpha = 0.35f), shape)
+            .clickable(onClick = onClear)
+            .padding(horizontal = 14.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.DateRange,
+            contentDescription = null,
+            tint = deck.danger,
+            modifier = Modifier.size(15.dp),
+        )
+        Spacer(Modifier.width(9.dp))
+        Text(
+            if (count == 1) "1 Aufgabe ist überfällig" else "$count Aufgaben sind überfällig",
+            color = deck.danger,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}

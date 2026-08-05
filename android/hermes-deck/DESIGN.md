@@ -41,6 +41,11 @@ Two brushes, both in `DeckColors`:
   draft dominated the screen on-device and flattened everything below it.
 - `accentBrush` (`#8B5CF6 → #A855F7`) — the primary button and the centre FAB.
 
+The day strip is the one place `accent` fills a whole surface: the selected day
+is solid `accent`, today carries an `accent` hairline, everything else is
+`surface`. A tile's slot for its load keeps its height when empty — otherwise
+only the days that carry a number grow and the strip comes out ragged.
+
 `projectEdges` is a fixed list of eight; `edgeFor(key)` hashes a channel id
 into it so a project keeps its colour across launches without storing
 anything. The edge is a 3 dp bar on the leading side of a card — it is the
@@ -139,25 +144,29 @@ walls, and it lists nodes that are merely below the fold, so present sections
 look missing. A `screencap` corrected every one of them. Judge layout from the
 picture; the dump is for coordinates.
 
-1. **No date strip, and no due-date UI at all.** The reference has a week of
-   day tiles with the current day in `accent`. `DeckTask.due` exists in the
-   data model and in the wire tags and can neither be set nor seen. This is
-   the largest single gap and the natural start of the task-board work.
-2. **The approvals section owns the whole first screen.** Cards are correctly
-   clamped (4 lines) — but three of them, stacked under a section header,
-   push the project row *and* the entire task list below the fold. The deck's
-   own content is invisible until you scroll. Either the cards get shorter
-   (2 lines and a "mehr"), or the section collapses to a single summary row.
-3. **No sense of progress anywhere.** The reference's project cards carry a
+1. **No sense of progress anywhere.** The reference's project cards carry a
    completion figure and member avatars; ours carry an open count and nothing
-   else. There are no members in Buzz channels to show, so this needs its own
-   answer rather than a copy.
-4. **Attachments are placeholders.** A share icon and a filename; no thumbnail
-   and no way to open one.
-5. **Everything is one flat list.** No sorting, no grouping, no board columns,
+   else. There are no members in a Buzz channel to show, so this needs its own
+   answer rather than a copy of the reference.
+2. **Everything is one flat list.** No sorting, no grouping, no board columns,
    no bulk status change. All of it must stay expressible in `kind:9` plus
    tags, without touching a Buzz rule.
+3. **A tapped attachment does nothing.** It has a thumbnail now but no full
+   view.
+4. **Agent names are short pubkeys.** `kind:0` profiles are never fetched.
 
 Two earlier entries were **checked and removed**: the horizontal project row
 exists (`HomeScreen`, below the approvals), and an empty search does render
 "Nichts gefunden".
+
+Closed on 2026-08-05, each verified on a device against real Buzz:
+
+- **The day strip and due dates.** `DueStrip` carries the week with each day's
+  open load; `DueChips` sets a date in two taps without a calendar modal; a
+  passed date turns the card's metric `danger` and raises an overdue banner,
+  because the strip starts today and cannot show what is already late.
+- **The approvals section.** Two cards, two lines, action on the right — the
+  project row and the task list are back above the fold.
+- **Attachment previews.** Images render from Blossom through Coil, degrading
+  to the icon when the tailnet is out of reach, which is the normal case off
+  the network.
