@@ -667,6 +667,12 @@ function taskTimestamp(value: unknown, now: number): { dateTime: string | null; 
   };
 }
 
+// Sicht-Caps der Detail-Listen — der Rest wird als "… und N weitere" benannt,
+// nicht still abgeschnitten (Vorbild: PlanSpecTransitionPanel / KettenTab).
+const DIAGNOSTICS_CAP = 4;
+const ACCEPTANCE_CAP = 8;
+const ACTIVITY_EVENTS_CAP = 20;
+
 export function UebersichtTab({
   task,
   now,
@@ -869,12 +875,15 @@ export function UebersichtTab({
       {task.diagnostics?.length ? (
         <section className="fleet-detail-instrument">
           <Eyebrow className="mb-1.5">Diagnostik</Eyebrow>
-          {task.diagnostics.slice(0, 4).map((diagnostic, index) => (
+          {task.diagnostics.slice(0, DIAGNOSTICS_CAP).map((diagnostic, index) => (
             <div key={`${diagnostic.kind ?? "diagnostic"}:${index}`} className="fleet-detail-hairline">
               <strong>{diagnostic.title || diagnostic.kind || "Befund"}</strong>
               {diagnostic.detail ? <span>{diagnostic.detail}</span> : null}
             </div>
           ))}
+          {task.diagnostics.length > DIAGNOSTICS_CAP ? (
+            <p className="m-0 pt-1 text-sec text-ink-3">{de.fleet.detailListMore(task.diagnostics.length - DIAGNOSTICS_CAP)}</p>
+          ) : null}
         </section>
       ) : null}
 
@@ -893,12 +902,15 @@ export function UebersichtTab({
         <div>
           <Eyebrow className="mb-1.5">{de.fleet.detailAcceptanceLabel}</Eyebrow>
           <ul className="m-0 flex flex-col gap-1 pl-4">
-            {acList.slice(0, 8).map((item, i) => (
+            {acList.slice(0, ACCEPTANCE_CAP).map((item, i) => (
               <li key={i} className="text-sec text-ink-2">
                 {item}
               </li>
             ))}
           </ul>
+          {acList.length > ACCEPTANCE_CAP ? (
+            <p className="m-0 pt-1 text-sec text-ink-3">{de.fleet.detailListMore(acList.length - ACCEPTANCE_CAP)}</p>
+          ) : null}
         </div>
       ) : null}
 
@@ -939,7 +951,7 @@ export function AktivitaetTab({
   }
   return (
     <div className="flex flex-col gap-0.5">
-      {events.slice(0, 20).map((ev) => {
+      {events.slice(0, ACTIVITY_EVENTS_CAP).map((ev) => {
         const age = elapsedSeconds(ev.at, now);
         const ageLabel = age != null ? fmtSeconds(age) : "Zeit ungültig";
         const kindMeta = REVIEW_ECONOMY_KIND_META[ev.kind];
@@ -959,6 +971,9 @@ export function AktivitaetTab({
           </div>
         );
       })}
+      {events.length > ACTIVITY_EVENTS_CAP ? (
+        <p className="m-0 pt-1 text-sec text-ink-3">{de.fleet.detailListMore(events.length - ACTIVITY_EVENTS_CAP)}</p>
+      ) : null}
     </div>
   );
 }

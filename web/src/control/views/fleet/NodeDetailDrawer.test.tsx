@@ -662,3 +662,82 @@ describe("LK-3 Ketten-Kontext in der Detailansicht", () => {
     expect(screen.getByText("Kriterium zwei")).toBeTruthy();
   });
 });
+
+// ─── Silent caps: gekappte Listen benennen ihren Rest sichtbar ───────────
+
+describe("Silent caps zeigen einen sichtbaren Rest-Hinweis", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function renderUebersichtMit(task: Record<string, unknown>) {
+    return render(
+      <UebersichtTab
+        now={1_783_800_300}
+        task={task as never}
+        latestRun={null}
+        elapsedSec={null}
+        deliverables={[]}
+      />,
+    );
+  }
+
+  it("kappt 12 Acceptance-Criteria bei 8 und nennt die restlichen 4", () => {
+    renderUebersichtMit({
+      id: "t_caps", title: "Caps", status: "running", body: null,
+      acceptance_criteria: Array.from({ length: 12 }, (_, i) => `Kriterium ${i + 1}`),
+    });
+
+    const section = screen.getByText("Acceptance-Criteria").parentElement!;
+    expect(within(section).getAllByRole("listitem")).toHaveLength(8);
+    expect(within(section).getByText(/4 weitere/)).toBeTruthy();
+    expect(screen.queryByText("Kriterium 9")).toBeNull();
+  });
+
+  it("kappt 7 Diagnostik-Einträge bei 4 und nennt die restlichen 3", () => {
+    renderUebersichtMit({
+      id: "t_caps", title: "Caps", status: "running", body: null,
+      diagnostics: Array.from({ length: 7 }, (_, i) => ({ kind: "warn", title: `Befund ${i + 1}`, detail: null })),
+    });
+
+    const section = screen.getByText("Diagnostik").closest("section")!;
+    expect(section.querySelectorAll(".fleet-detail-hairline")).toHaveLength(4);
+    expect(within(section as HTMLElement).getByText(/3 weitere/)).toBeTruthy();
+    expect(screen.queryByText("Befund 5")).toBeNull();
+  });
+
+  it("kappt 25 Aktivitäts-Events bei 20 und nennt die restlichen 5", () => {
+    const { container } = render(
+      <AktivitaetTab
+        events={Array.from({ length: 25 }, (_, i) => ({ id: i + 1, kind: "claimed", note: `Notiz ${i + 1}`, at: 1782508000 - i }))}
+        now={1782508100}
+        loading={false}
+      />,
+    );
+
+    expect(container.querySelectorAll(".fleet-activity-row")).toHaveLength(20);
+    expect(screen.getByText(/5 weitere/)).toBeTruthy();
+    expect(screen.queryByText("Notiz 21")).toBeNull();
+  });
+
+  it("zeigt am Cap (8 AC / 4 Diagnostik / 20 Events) keinen Rest-Hinweis", () => {
+    const view = renderUebersichtMit({
+      id: "t_exact", title: "Exakt am Cap", status: "running", body: null,
+      acceptance_criteria: Array.from({ length: 8 }, (_, i) => `Kriterium ${i + 1}`),
+      diagnostics: Array.from({ length: 4 }, (_, i) => ({ kind: "warn", title: `Befund ${i + 1}`, detail: null })),
+    });
+    expect(view.container.querySelectorAll(".fleet-detail-hairline")).toHaveLength(4);
+    expect(screen.queryByText(/weitere/)).toBeNull();
+    view.unmount();
+
+    render(
+      <AktivitaetTab
+        events={Array.from({ length: 20 }, (_, i) => ({ id: i + 1, kind: "claimed", note: null, at: 1782508000 - i }))}
+        now={1782508100}
+        loading={false}
+      />,
+    );
+    expect(screen.queryByText(/weitere/)).toBeNull();
+  });
+});
