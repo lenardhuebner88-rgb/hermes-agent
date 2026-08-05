@@ -24,8 +24,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _git(repo: Path, *args: str) -> str:
+    # commit.gpgsign=false: this checkout signs commits through a helper that
+    # needs a key from the environment, and the test env scrubs *_KEY vars.
+    # Without the override the fixture dies at `git commit` with exit 128 —
+    # a red that says nothing about the script under test.
     return subprocess.run(
-        ["git", *args], cwd=repo,
+        ["git", "-c", "commit.gpgsign=false", *args], cwd=repo,
         check=True, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     ).stdout.strip()
@@ -61,6 +65,9 @@ def _find_ruff() -> str | None:
 RUFF_PATH = _find_ruff()
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "worker-gate-ruff.sh"
+# Helper scripts worker-gate-ruff.sh invokes via "$SCRIPT_DIR/<name>"; they must
+# travel with it into the fixture worktree or the script runs degraded.
+SCRIPT_HELPERS = (SCRIPT.parent / "gate_diff_base.py",)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +84,16 @@ def main_repo(tmp_path):
     _git(r, "config", "user.name", "tester")
     # Seed a clean base file so HEAD~0 has something committed
     (r / "base.py").write_text("x = 1\n", encoding="utf-8")
-    _git(r, "add", "base.py")
+    # The helpers worker-gate-ruff.sh shells out to must exist next to it, and
+    # they must be COMMITTED: dropping them in untracked would make them part
+    # of the very diff the script lints. Without them the script fell back to
+    # an empty base and printed its own "No such file or directory", which the
+    # crash guard in contract 4 mistook for ruff choking on the deleted path —
+    # a green-gate red on 2026-08-05 with no code defect behind it.
+    (r / "scripts").mkdir(exist_ok=True)
+    for helper in SCRIPT_HELPERS:
+        shutil.copy2(str(helper), str(r / "scripts" / helper.name))
+    _git(r, "add", "base.py", "scripts")
     _git(r, "commit", "-m", "base")
     return r
 
