@@ -3573,9 +3573,9 @@ def connect(
                 # threads from racing through the additive ALTER TABLE pass with
                 # stale PRAGMA snapshots during gateway startup.
                 conn.executescript(SCHEMA_SQL)
+                _runtime_facts.init_schema(conn)
                 _migrate_add_optional_columns(conn)
                 _migrate_refresh_review_gate_trigger(conn)
-                _runtime_facts.init_schema(conn)
                 # Persist the cross-process stamp LAST: a stamp is only ever
                 # written over a schema that completed the full pass.
                 conn.execute(f"PRAGMA user_version={_SCHEMA_STAMP}")
@@ -4308,12 +4308,18 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                     (cur.lastrowid, row["id"]),
                 )
                 if upd.rowcount != 1:
-                    conn.execute(
+                    reclaimed = conn.execute(
                         "UPDATE task_runs SET status = 'reclaimed', "
                         "    outcome = 'reclaimed', ended_at = ? "
                         "WHERE id = ?",
                         (int(time.time()), cur.lastrowid),
                     )
+                    if reclaimed.rowcount == 1:
+                        _runtime_facts.record_reclaimed_terminal_facts(
+                            conn,
+                            task_run_id=int(cur.lastrowid),
+                            board=board_slug_for_conn(conn),
+                        )
 
     # One-shot event-kind rename pass. The old names ("ready", "priority",
     # "spawn_auto_blocked") still worked but were awkward on the wire;
@@ -12510,7 +12516,7 @@ def claim_task(
             (task_id,),
         ).fetchone()
         if stale and stale["current_run_id"]:
-            conn.execute(
+            reclaimed = conn.execute(
                 """
                 UPDATE task_runs
                    SET status = 'reclaimed', outcome = 'reclaimed',
@@ -12521,6 +12527,12 @@ def claim_task(
                 """,
                 (now, int(stale["current_run_id"])),
             )
+            if reclaimed.rowcount == 1:
+                _runtime_facts.record_reclaimed_terminal_facts(
+                    conn,
+                    task_run_id=int(stale["current_run_id"]),
+                    board=board_slug_for_conn(conn),
+                )
         # Reset last_heartbeat_at so each run starts with a clean slate and a
         # re-claimed task can't carry a stale beat from a prior run (see the
         # fuller rationale in claim_review_task, where this matters most).
@@ -19823,7 +19835,7 @@ def unblock_task(
             (task_id, 1 if released_wait else 0),
         ).fetchone()
         if stale and stale["current_run_id"]:
-            conn.execute(
+            reclaimed = conn.execute(
                 """
                 UPDATE task_runs
                    SET status = 'reclaimed', outcome = 'reclaimed',
@@ -19834,6 +19846,12 @@ def unblock_task(
                 """,
                 (now, int(stale["current_run_id"])),
             )
+            if reclaimed.rowcount == 1:
+                _runtime_facts.record_reclaimed_terminal_facts(
+                    conn,
+                    task_run_id=int(stale["current_run_id"]),
+                    board=board_slug_for_conn(conn),
+                )
         # Re-gate on parent completion before flipping 'blocked' back to
         # 'ready'. Unconditionally setting status='ready' here bypasses the
         # parent-completion invariant (the dispatcher trusts that column);
@@ -30589,7 +30607,7 @@ def answer_operator_question(
             return None
 
         if task.current_run_id:
-            conn.execute(
+            reclaimed = conn.execute(
                 """
                 UPDATE task_runs
                    SET status = 'reclaimed', outcome = 'reclaimed',
@@ -30600,6 +30618,12 @@ def answer_operator_question(
                 """,
                 (now, int(task.current_run_id)),
             )
+            if reclaimed.rowcount == 1:
+                _runtime_facts.record_reclaimed_terminal_facts(
+                    conn,
+                    task_run_id=int(task.current_run_id),
+                    board=board_slug_for_conn(conn),
+                )
 
         undone_parent = conn.execute(
             "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "

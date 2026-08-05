@@ -273,6 +273,24 @@ def record_terminal_facts(
     )
 
 
+def record_reclaimed_terminal_facts(
+    conn: sqlite3.Connection,
+    *,
+    task_run_id: int,
+    board: str | None = None,
+) -> None:
+    """Record an invariant-recovery close without inventing observations."""
+    record_terminal_facts(
+        conn,
+        task_run_id=task_run_id,
+        worker_exit_kind="unobserved",
+        worker_exit_code=None,
+        worker_protocol_state="unobserved",
+        end_reason="reclaimed",
+        board=board,
+    )
+
+
 def get_terminal_facts(
     conn: sqlite3.Connection, *, task_run_id: int
 ) -> dict[str, Any] | None:
