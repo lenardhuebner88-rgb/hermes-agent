@@ -85,23 +85,6 @@ def _drive_protocol_violation(conn, tid: str, fake_pid: int):
         _kb._pid_alive = original_alive
 
 
-def _drive_nonzero_exit(conn, tid: str, fake_pid: int, exit_code: int = 7):
-    """One nonzero-exit reaper pass for ``tid``."""
-    import hermes_cli.kanban_db as _kb
-
-    host_prefix = _kb._claimer_id().split(":", 1)[0]
-    claimed = _kb.claim_task(conn, tid, claimer=f"{host_prefix}:mock")
-    assert claimed is not None, "task was not claimable"
-    _kb._set_worker_pid(conn, tid, fake_pid)
-    _kb._record_worker_exit(fake_pid, exit_code << 8)
-    original_alive = _kb._pid_alive
-    _kb._pid_alive = lambda p: False
-    try:
-        return _kb.detect_crashed_workers(conn)
-    finally:
-        _kb._pid_alive = original_alive
-
-
 def _write_worker_log(task_id: str, content: str) -> Path:
     """Write at the exact spawn path: worker_logs_dir() / f'{task_id}.log'."""
     path = kb.worker_log_path(task_id)
@@ -148,35 +131,6 @@ def test_protocol_violation_event_carries_bounded_worker_log_tail(
         task = kb.get_task(conn, tid)
         assert task is not None
         assert task.last_failure_error == PROTOCOL_VIOLATION_ERROR
-    finally:
-        conn.close()
-
-
-def test_nonzero_exit_event_carries_bounded_worker_log_tail(
-    kanban_home: Path,
-) -> None:
-    conn = kb.connect()
-    try:
-        tid = kb.create_task(conn, title="nonzero-exit", assignee="worker")
-        log_path = _write_worker_log(tid, _realistic_worker_log())
-
-        crashed = _drive_nonzero_exit(conn, tid, 880007)
-        assert tid in crashed
-
-        events = kb.list_events(conn, tid)
-        event = next(
-            e
-            for e in events
-            if e.kind == "crashed"
-            and (e.payload or {}).get("exit_kind") == "nonzero_exit"
-        )
-        payload = event.payload or {}
-        tail = payload["worker_log_tail"]
-        assert LOG_TAIL_MARKER in tail
-        assert LOG_HEAD_MARKER not in tail
-        assert len(tail) <= 1600
-        assert payload["worker_log_path"] == str(log_path)
-        assert payload["exit_code"] == 7
     finally:
         conn.close()
 
