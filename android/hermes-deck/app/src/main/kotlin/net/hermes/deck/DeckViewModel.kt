@@ -161,25 +161,33 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         body: String,
         priority: TaskPriority,
         attachments: List<Attachment>,
-        onDone: (DeckTask) -> Unit = {},
+        /**
+         * Runs once the note is signed, stored and pushed — success or not.
+         * Callers that tear down their host (the share activity) must wait for
+         * this before finishing, otherwise the cancelled scope drops the note.
+         */
+        onSettled: () -> Unit = {},
     ) = viewModelScope.launch {
-        runCatching {
-            repository.capture(
-                channelId = channelId,
-                title = title,
-                body = body,
-                priority = priority,
-                attachments = attachments,
-            )
-        }.onSuccess { task ->
-            onDone(task)
-            val pending = repository.pushPending()
-            _message.value = if (pending == 0) {
-                "In Buzz abgelegt."
-            } else {
-                "Lokal gesichert — $pending wartet auf Verbindung."
-            }
-        }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+        try {
+            runCatching {
+                repository.capture(
+                    channelId = channelId,
+                    title = title,
+                    body = body,
+                    priority = priority,
+                    attachments = attachments,
+                )
+            }.onSuccess {
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) {
+                    "In Buzz abgelegt."
+                } else {
+                    "Lokal gesichert — $pending wartet auf Verbindung."
+                }
+            }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+        } finally {
+            onSettled()
+        }
     }
 
     fun setStatus(task: DeckTask, status: TaskStatus) = viewModelScope.launch {

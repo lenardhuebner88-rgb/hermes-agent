@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -523,6 +525,13 @@ fun SheetScaffold(title: String, onDismiss: () -> Unit, content: @Composable () 
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                // Without these the sheet keeps its full height behind the
+                // keyboard: project, priority, attachments and the submit
+                // button all sit underneath it and scrolling does not help,
+                // because there is nothing to scroll — the content fits the
+                // sheet, the sheet just is not on screen.
+                .navigationBarsPadding()
+                .imePadding()
                 .heightIn(max = 620.dp)
                 .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                 .background(deck.background)

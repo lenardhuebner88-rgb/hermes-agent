@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import net.hermes.deck.DeckViewModel
+import net.hermes.deck.data.displayNameOf
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.TaskPriority
@@ -71,6 +72,7 @@ fun CaptureSheet(
     var priority by remember { mutableStateOf(TaskPriority.NORMAL) }
     var attachments by remember { mutableStateOf(initialAttachments) }
     var uploading by remember { mutableStateOf(false) }
+    var submitting by remember { mutableStateOf(false) }
     var channelId by remember {
         mutableStateOf(
             filter
@@ -78,6 +80,18 @@ fun CaptureSheet(
                 ?: snapshot.channels.firstOrNull()?.id
                 ?: "",
         )
+    }
+
+    // The share activity builds its own view model, so at first composition the
+    // channels are still loading from disk and the initial pick above lands on
+    // "". Without this the sheet opens with no project selected and a dead
+    // "Ablegen" button, and nothing ever says why.
+    LaunchedEffect(snapshot.channels) {
+        if (channelId.isBlank()) {
+            channelId = viewModel.settings.inboxChannelId.ifBlank { null }
+                ?: snapshot.channels.firstOrNull()?.id
+                ?: ""
+        }
     }
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -94,7 +108,7 @@ fun CaptureSheet(
                 viewModel.say("Datei konnte nicht gelesen werden.")
                 return@launch
             }
-            viewModel.uploadAttachment(bytes, mime, uri.lastPathSegment ?: "anhang")
+            viewModel.uploadAttachment(bytes, mime, resolver.displayNameOf(uri))
                 .onSuccess { attachments = attachments + it }
                 .onFailure { viewModel.say(it.message ?: "Upload fehlgeschlagen") }
             uploading = false
@@ -166,11 +180,23 @@ fun CaptureSheet(
 
             Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
             PrimaryButton(
-                text = if (uploading) "Anhang lädt …" else "Ablegen",
-                enabled = title.isNotBlank() && channelId.isNotBlank() && !uploading,
+                text = when {
+                    submitting -> "Wird abgelegt …"
+                    uploading -> "Anhang lädt …"
+                    else -> "Ablegen"
+                },
+                enabled = title.isNotBlank() && channelId.isNotBlank() && !uploading && !submitting,
             ) {
-                viewModel.capture(channelId, title, body, priority, attachments)
-                onDismiss()
+                // Dismiss only once the capture has signed, stored and pushed.
+                // The share path finishes its activity in onDismiss, and that
+                // cancels the viewModelScope: dismissing first threw the note
+                // away before it was ever written — silently, because the
+                // sheet closed exactly as it does on success.
+                submitting = true
+                viewModel.capture(channelId, title, body, priority, attachments) {
+                    submitting = false
+                    onDismiss()
+                }
             }
             if (channelId.isBlank()) {
                 Spacer(Modifier.height(8.dp))
