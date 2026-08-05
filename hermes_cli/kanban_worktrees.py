@@ -8346,10 +8346,13 @@ def maybe_integrate_on_complete(
     sibling commits and spawn phantom fixers (Opus R2-1).
     """
     row = conn.execute(
-        "SELECT workspace_path, skills FROM tasks WHERE id = ?", (task_id,)
+        "SELECT workspace_path, skills, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
     ).fetchone()
     if not row:
         return None
+    from hermes_cli import kanban_db as kb
+
     try:
         task_skills = json.loads(row["skills"]) if row["skills"] else []
     except (TypeError, json.JSONDecodeError):
@@ -8358,6 +8361,16 @@ def maybe_integrate_on_complete(
     # lives. Their chain worktree is worker isolation only, not an integration
     # target; the pinned repair skill is the durable card-level discriminator.
     if isinstance(task_skills, list) and "loop-branch-repair" in task_skills:
+        kb._append_event(
+            conn,
+            task_id,
+            "integration_skipped",
+            {
+                "reason": "loop_branch_repair",
+                "skills": task_skills,
+            },
+            run_id=row["current_run_id"],
+        )
         return None
     if not row["workspace_path"]:
         return None
@@ -8365,8 +8378,6 @@ def maybe_integrate_on_complete(
     if provisioned is None:
         return None
     repo_root, root_id, wt = provisioned
-
-    from hermes_cli import kanban_db as kb
 
     # Ensure lane-scope fixer lifecycle consumer is registered (no kanban_db
     # edit — self-register via the public hook API whenever a provisioned
