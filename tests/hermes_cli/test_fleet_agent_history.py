@@ -207,31 +207,6 @@ def test_agent_history_route_uses_hermes_home_and_clamps_query(
     }
 
 
-@pytest.mark.parametrize("database_contents", [None, b"kaputt"])
-def test_agent_history_route_degrades_when_database_is_unreadable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    database_contents: bytes | None,
-) -> None:
-    if database_contents is not None:
-        (tmp_path / "kanban.db").write_bytes(database_contents)
-    monkeypatch.setattr(fleet_history, "get_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(fleet_history.time, "time", lambda: NOW)
-    app = FastAPI()
-    fleet_history.register_fleet_history_routes(app)
-
-    response = TestClient(app, raise_server_exceptions=False).get(
-        "/api/fleet/agent-history?days=120"
-    )
-
-    assert response.status_code == 200
-    assert response.json()["days"] == 90
-    assert response.json()["generated_at"] == NOW
-    assert response.json()["agents"] == []
-    assert isinstance(response.json()["error"], str)
-    assert response.json()["error"]
-
-
 def test_web_server_registers_agent_history_route() -> None:
     from hermes_cli import web_server
 

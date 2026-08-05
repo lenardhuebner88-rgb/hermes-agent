@@ -139,12 +139,4 @@ def register_fleet_history_routes(app: FastAPI) -> None:
 
     @app.get("/api/fleet/agent-history")
     def get_fleet_agent_history(days: int = 30) -> dict[str, Any]:
-        try:
-            return build_agent_history(days=days)
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            return {
-                "days": _clamp_days(days),
-                "generated_at": int(time.time()),
-                "agents": [],
-                "error": str(exc),
-            }
+        return build_agent_history(days=days)
