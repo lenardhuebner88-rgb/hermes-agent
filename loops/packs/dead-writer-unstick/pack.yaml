@@ -1,0 +1,23 @@
+name: dead-writer-unstick
+type: sweep
+description: Bereitet den belegten dead-writer-Fix als Patch plus roten Repro vor, ohne ihn zu landen
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: codex
+    model: gpt-5.6-terra
+    effort: high
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 1
+  max_hours: 7
+  fail_streak: 1
+  dry_rounds: 1
+params:
+  warning_search_text: "dead writer recovery failed"
+  required_artifacts: "dead-writer-unstick.patch,test_dead_writer_unstick.py"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

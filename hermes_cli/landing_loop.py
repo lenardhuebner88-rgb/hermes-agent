@@ -57,6 +57,13 @@ _COLLECTION_RELEVANT_NAMES = {
     "pyproject.toml",
     "uv.lock",
 }
+# Preparation-only packs may emit patch/test artifacts into their state, but
+# their loop branch must never become an implicit delivery path for that patch.
+_POLICY_PARKED_BRANCHES = {
+    "loop/dead-writer-unstick": (
+        "eingecheckte Landing-Policy: Vorbereitungspack darf nicht automatisch mergen"
+    ),
+}
 
 
 class FailureClass(str, Enum):
@@ -694,6 +701,9 @@ class LandingLoop:
                 item,
                 f"Branch-Head seit Inventur geändert ({item.head[:9]}→{current_head[:9]})",
             )
+        policy_reason = _POLICY_PARKED_BRANCHES.get(item.branch)
+        if policy_reason:
+            return self._park(item, policy_reason)
         status = self._worktree_status(item.worktree)
         if status is None:
             return self._park(item, f"Loop-Worktree fehlt: {item.worktree}")

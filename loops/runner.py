@@ -47,6 +47,7 @@ from typing import Literal, Mapping, NoReturn
 
 import yaml
 
+from hermes_cli.gate_leaker import build_runner, isolate_from_logs
 from hermes_constants import get_hermes_home
 from loops import engines
 
@@ -91,6 +92,17 @@ DEFAULT_STOP = {
 def _utc_iso() -> str:
     """Unambiguous wire timestamp for dashboard/state consumers."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _disable_user_timer(unit: str) -> subprocess.CompletedProcess[str]:
+    """Systemd control boundary kept mockable for retirement tests."""
+    return subprocess.run(
+        ["systemctl", "--user", "disable", "--now", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
 
 # Operator-Entscheid 2026-07-18: dieselbe deterministische Drei-Phasen-
 # Landungsleiter wird pro Pack vertraglich vorbereitet. hermes-hardening folgt
@@ -155,6 +167,10 @@ def _autoland_safety_hash(raw: dict) -> str:
         "land_push": raw.get("land_push", True),
         "land_gates": raw.get("land_gates"),
     }
+    if "goal" in raw:
+        # A retirement target grants authority to disable a timer, so an
+        # autoland pack must bind it. Omitting the key preserves legacy hashes.
+        projection["goal"] = raw.get("goal")
     canonical = json.dumps(
         projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
@@ -310,6 +326,12 @@ class DeterministicPhaseCfg:
         return None
 
 
+@dataclass(frozen=True)
+class GoalCfg:
+    reached_status: str
+    reason: str
+
+
 @dataclass
 class Pack:
     name: str
@@ -328,6 +350,7 @@ class Pack:
     land_remote: str = "piet-fork"
     land_gates: list[str] | None = None
     land_push: bool = True
+    goal: GoalCfg | None = None
 
     @property
     def branch(self) -> str:
@@ -466,7 +489,7 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
             effort=phase_effort,
         )
 
-    for section in ("stop", "params", "notify"):
+    for section in ("stop", "params", "notify", "goal"):
         if raw.get(section) is not None and not isinstance(raw[section], dict):
             raise ManifestError(f"Pack {name!r}: {section} muss ein Mapping sein")
     stop = dict(DEFAULT_STOP)
@@ -573,6 +596,25 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
             )
     land_gates = list(land_gates_raw) if land_gates_raw is not None else None
 
+    goal_raw = raw.get("goal")
+    goal = None
+    if goal_raw is not None:
+        expected_goal_keys = {"reached_status", "reason"}
+        if set(goal_raw) != expected_goal_keys:
+            raise ManifestError(
+                f"Pack {name!r}: goal braucht genau {sorted(expected_goal_keys)}"
+            )
+        for key in expected_goal_keys:
+            value = goal_raw[key]
+            if not isinstance(value, str) or not value.strip() or "\n" in value:
+                raise ManifestError(
+                    f"Pack {name!r}: goal.{key} muss ein nicht-leerer Einzeiler sein"
+                )
+        goal = GoalCfg(
+            reached_status=goal_raw["reached_status"].strip(),
+            reason=goal_raw["reason"].strip(),
+        )
+
     params = {str(k): str(v) for k, v in (raw.get("params") or {}).items()}
     notify = {str(k): str(v) for k, v in (raw.get("notify") or {}).items()}
 
@@ -583,7 +625,7 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         params=params, autoland=autoland,
         plan_skip_when_queue_full=plan_skip_raw,
         base_branch=base_branch, land_remote=land_remote,
-        land_gates=land_gates, land_push=land_push,
+        land_gates=land_gates, land_push=land_push, goal=goal,
     )
 
 
@@ -760,6 +802,41 @@ def _land_gate_env() -> dict[str, str]:
         "HERMES_LOOP_TEST_WORKERS", "4")}
 
 
+def _isolatable_gate(command: list[str], label: str = "") -> str | None:
+    """Return the per-file gate kind, or ``None`` when rerunning is unsafe."""
+    if label == "affected":
+        return "python"
+    if label == "vitest":
+        return "vitest"
+    command_text = " ".join(command).lower()
+    if "vitest" in command_text:
+        return "vitest"
+    if any(token in command_text for token in ("run-affected.sh", "run_tests.sh", "pytest")):
+        return "python"
+    return None
+
+
+def _is_load_artifact(repo: Path, gate: str | None, output: str) -> tuple[bool, str]:
+    """Prove a red per-file gate harmless by rerunning every red file alone.
+
+    ``isolate_from_logs`` deliberately fails closed for an empty/unparseable
+    failed-file list, capped reruns, timeouts, and reproduced failures.
+    """
+    if gate is None:
+        return False, ""
+    result = isolate_from_logs(
+        [(gate, output)],
+        runner_factory=lambda name: build_runner(name, repo),
+    )
+    if not result["leaker_only"]:
+        return False, ""
+    files = [entry.removeprefix(f"{gate}: ") for entry in result["leakers"]]
+    return (
+        True,
+        f"Lastartefakt: {gate} rot unter Last; isoliert grün: {', '.join(files)}",
+    )
+
+
 def _land_gates(
     repo: Path,
     base: str,
@@ -774,6 +851,7 @@ def _land_gates(
     proven gate sequence reusable without constructing a model-driven runner.
     """
     if land_gates is not None:
+        load_artifacts: list[str] = []
         for command in land_gates:
             argv = shlex.split(command)
             try:
@@ -790,11 +868,20 @@ def _land_gates(
             except (subprocess.TimeoutExpired, OSError) as exc:
                 return False, f"{command}: {exc}"
             if res.returncode != 0:
-                tail = "\n".join(
-                    ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
-                )
+                output = (res.stdout or "") + (res.stderr or "")
+                if res.returncode == 1:
+                    is_artifact, detail = _is_load_artifact(
+                        repo, _isolatable_gate(argv), output
+                    )
+                    if is_artifact:
+                        load_artifacts.append(detail)
+                        continue
+                tail = "\n".join(output.splitlines()[-15:])
                 return False, f"{command} rot (rc={res.returncode}):\n{tail}"
-        return True, "land_gates grün (" + ", ".join(land_gates) + ")"
+        report = "land_gates grün (" + ", ".join(land_gates) + ")"
+        if load_artifacts:
+            report += "\n" + "\n".join(load_artifacts)
+        return True, report
 
     steps: list[tuple[str, list[str], Path]] = []
     if include_collection:
@@ -855,6 +942,7 @@ def _land_gates(
             ("tsc", ["npx", "tsc", "-b", "--noEmit"], repo / "web"),
             ("vitest", ["npx", "vitest", "run"], repo / "web"),
         ]
+    load_artifacts: list[str] = []
     for label, command, cwd in steps:
         try:
             res = subprocess.run(
@@ -870,18 +958,27 @@ def _land_gates(
         except (subprocess.TimeoutExpired, OSError) as exc:
             return False, f"{label}: {exc}"
         if res.returncode != 0:
-            tail = "\n".join(
-                ((res.stdout or "") + (res.stderr or "")).splitlines()[-15:]
-            )
+            output = (res.stdout or "") + (res.stderr or "")
+            tail = "\n".join(output.splitlines()[-15:])
             if label == "affected" and res.returncode == 3:
                 return False, f"affected nicht gelaufen (rc=3):\n{tail}"
             if label == "affected" and res.returncode == 4:
                 return False, f"affected unmapped (rc=4):\n{tail}"
+            if res.returncode == 1:
+                is_artifact, detail = _is_load_artifact(
+                    repo, _isolatable_gate(command, label), output
+                )
+                if is_artifact:
+                    load_artifacts.append(detail)
+                    continue
             return False, f"{label} rot (rc={res.returncode}):\n{tail}"
     suffix = " + frontend" if touched_web else ""
     prefix = "collection + affected" if include_collection else "affected"
     batched = " (Collection im Lauf bereits bewiesen)" if not include_collection else ""
-    return True, f"{prefix}{suffix} grün{batched}"
+    report = f"{prefix}{suffix} grün{batched}"
+    if load_artifacts:
+        report += "\n" + "\n".join(load_artifacts)
+    return True, report
 
 
 # Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL|EFFORT). Persistent (nicht
@@ -1655,6 +1752,35 @@ class LoopRunner:
         except (FileNotFoundError, IndexError):
             return ""
 
+    def _goal_reached(self, status: str | None = None) -> bool:
+        goal = self.pack.goal
+        return goal is not None and (status or self.last_status()) == goal.reached_status
+
+    def _retire_if_goal_reached(self) -> bool:
+        goal = self.pack.goal
+        if goal is None or not self._goal_reached():
+            return False
+        timer = f"hermes-loop@{self.pack.name}.timer"
+        retired_at = _utc_iso()
+        result = _disable_user_timer(timer)
+        if result.returncode != 0:
+            detail = " ".join(
+                (result.stderr or result.stdout or "kein systemctl-Detail").splitlines()
+            )
+            self.ledger(
+                f"PACK-RETIREMENT-FAILED timer={timer} reason={goal.reason} "
+                f"attempted_at={retired_at} detail={detail}"
+            )
+            raise RuntimeError(
+                f"Pack-Ziel erreicht, aber Timer {timer} konnte nicht deaktiviert werden: "
+                f"{detail}"
+            )
+        self.ledger(
+            f"PACK-RETIREMENT timer={timer} reason={goal.reason} retired_at={retired_at}; "
+            "Reaktivierung ist Operator-Handlung"
+        )
+        return True
+
     @property
     def dry_streak_path(self) -> Path:
         """Persistent DRY-night counter for this pack (not LEDGER.md)."""
@@ -2327,12 +2453,21 @@ class LoopRunner:
         self.stop_path.unlink(missing_ok=True)
         self.ensure_dirs()
         self.ensure_wt(fresh=fresh)
+        if self._goal_reached():
+            self._retire_if_goal_reached()
+            if self.pack.type != "deterministic":
+                self.report()
+            return 0
         if self.pack.type == "deterministic":
-            return self._run_deterministic()
+            rc = self._run_deterministic()
+            if rc == 0:
+                self._retire_if_goal_reached()
+            return rc
         if self.pack.type == "pipeline":
             self._run_pipeline()
         else:
             self._run_sweep()
+        self._retire_if_goal_reached()
         self.report()
         return 0
 
@@ -2774,12 +2909,45 @@ class LoopRunner:
                 self.ledger_event(round=rnd, phase="sweep", verdict="blocked", fail_kind="usage_limit")
                 break
             status = "TIMEOUT" if result.timed_out else self.last_status()
+            required_artifacts = tuple(
+                name.strip()
+                for name in str(self.pack.params.get("required_artifacts", "")).split(",")
+                if name.strip()
+            )
+            if status.startswith("PREPARED") and required_artifacts:
+                unsafe = [
+                    name
+                    for name in required_artifacts
+                    if Path(name).is_absolute() or Path(name).name != name or name in {".", ".."}
+                ]
+                if unsafe:
+                    status = f"BLOCKED PREPARED-Artefaktnamen ungültig: {', '.join(unsafe)}"
+                    self.status_path.write_text(status + "\n", encoding="utf-8")
+                else:
+                    missing = [
+                        name
+                        for name in required_artifacts
+                        if not (self.state / name).is_file()
+                        or (self.state / name).stat().st_size == 0
+                    ]
+                    if missing:
+                        status = f"BLOCKED PREPARED-Artefakte fehlen: {', '.join(missing)}"
+                        self.status_path.write_text(status + "\n", encoding="utf-8")
+                    else:
+                        artifacts = ", ".join(required_artifacts)
+                        self.ledger(f"PREPARED: Artefakte {artifacts}")
+                        self.notify(f"{self.pack.name}: PREPARED — {artifacts}")
             # "?" las sich als "Status unbekannt, vermutlich ok". Der Grund ist
             # bekannt: die Runde hat den Statuskontrakt nicht erfüllt.
             self.ledger(
                 f"R{rnd} sweep status={status or 'kein Status (Kontrakt verletzt)'} "
                 f"[{self._secs('round')}]"
             )
+            if self._goal_reached(status):
+                self.ledger_event(
+                    round=rnd, phase="stop", verdict="stopped", reason="goal_reached"
+                )
+                break
             if status.startswith("DRY"):
                 dry, blocked = dry + 1, 0
                 self.ledger_event(round=rnd, phase="sweep", verdict="ok", reason=status)
@@ -3001,6 +3169,10 @@ class LoopRunner:
             fresh = False  # Worktree steht jetzt
             if self.qcount("00-planned") == 0:
                 status = self.last_status()
+                if self._goal_reached(status):
+                    self._retire_if_goal_reached()
+                    self.report()
+                    return True
                 if status.startswith("DRY"):
                     # Echter DRY-Kontrakt: nichts zu bauen, still-ok Ende.
                     # Zählt für die DRY-Streak-Eskalation (Serie = toter Loop).
@@ -3015,6 +3187,10 @@ class LoopRunner:
                     return False
                 if self.qcount("00-planned") == 0:
                     status2 = self.last_status()
+                    if self._goal_reached(status2):
+                        self._retire_if_goal_reached()
+                        self.report()
+                        return True
                     if status2.startswith("DRY"):
                         # Auch der Plan-Retry-DRY-Ausgang zählt (beide DRY-Exits).
                         self.say("Keine Pläne — nichts zu bauen.")
@@ -3286,6 +3462,9 @@ class LoopRunner:
                 self.ledger_event(phase="land", verdict="blocked", fail_kind="land_gates_fail",
                                    reason=f"{rollback_report}; {report.splitlines()[0]}")
             return False
+        for line in report.splitlines():
+            if line.startswith("Lastartefakt:"):
+                self.ledger(f"LAND {line}")
         pushed = ""
         if push and self.pack.land_push:
             current = self.git("rev-parse", self.pack.base_branch, cwd=repo).stdout.strip()
