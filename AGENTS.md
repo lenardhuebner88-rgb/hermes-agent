@@ -217,9 +217,18 @@ the competing PRs into plugins against that interface.
 source .venv/bin/activate   # or: source venv/bin/activate
 ```
 
-`scripts/run_tests.sh` probes `.venv` first, then `venv`, then
-`$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
-main checkout).
+Interpreter selection lives in the fork-owned helper
+`scripts/lib/select_test_python.sh`; `scripts/run_tests.sh` and
+`scripts/collect_check.sh` both source it, so they can no longer drift apart.
+It probes, in order: `.venv`, `venv`, `$HOME/.hermes/hermes-agent/venv`, and —
+only when the repo root is *not* the live checkout — `$HOME/.hermes/hermes-agent/.venv`
+(the candidate a worktree without its own venv actually lands on). A candidate
+must be *usable*, not merely present: a Hermes-managed release venv (its
+`pyvenv.cfg` `home =` points into `.hermes-runtime/python/generation-`) is
+skipped because it carries no pytest, and so is an empty/partial venv where
+`import pytest` fails. If none qualifies, an executable `$HERMES_PYTHON` with
+pytest importable is the last fallback (Nix devShell); otherwise the helper
+exits 1 and prints the exact `uv sync` repair command.
 
 ## Project Structure
 
