@@ -1986,7 +1986,7 @@ def test_review_revision_recurrence_hits_review_loop_breaker(kanban_home):
     assert task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
 
 
-def test_4a_dispatcher_heartbeat_file_written(kanban_home):
+def test_4a_dispatcher_heartbeat_file_written(kanban_home, monkeypatch):
     now = 1_900_000_000
     with kb.connect_closing() as conn:
         tid = kb.create_task(conn, title="needs operator", assignee="coder")
@@ -2005,6 +2005,7 @@ def test_4a_dispatcher_heartbeat_file_written(kanban_home):
                 },
             )
 
+    monkeypatch.setattr(kb, "decision_queue", lambda *_args, **_kwargs: {"count": 3})
     payload = kb.write_kanban_dispatcher_heartbeat(now=now, tick_health="ok")
     path = kb.kanban_dispatcher_heartbeat_path()
     written = json.loads(path.read_text(encoding="utf-8"))
@@ -2013,4 +2014,6 @@ def test_4a_dispatcher_heartbeat_file_written(kanban_home):
     assert payload["last_tick_at"] == now
     assert payload["last_green_gate_at"] == now
     assert written["counts"]["open_escalations"] == 1
+    assert written["counts"]["decision_queue"] == 3
+    assert "stranded" not in written["counts"]
 
