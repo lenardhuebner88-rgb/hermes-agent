@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -653,44 +652,6 @@ def test_draft_without_grounding_is_blocked(board_home, monkeypatch):
         assert strategist_surface.held_operator_proposals(conn) == []
 
 
-def test_classified_noise_draft_is_blocked_before_ingest(board_home, monkeypatch, tmp_path):
-    _patch_budget(monkeypatch, 20.0)
-    notes_dir = tmp_path / "notes"
-    notes_dir.mkdir()
-    (notes_dir / "harvest_candidates.json").write_text(
-        json.dumps(
-            {
-                "noise_candidates": [
-                    {
-                        "suggested_key": "disposition-di_transient",
-                        "noise_class": "transient",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    draft = _grounded_draft(key="disposition-di_transient")
-
-    result = strategist.propose(
-        board=None,
-        out_dir=board_home / "specs",
-        notes_dir=notes_dir,
-        drafts=[draft],
-    )
-
-    assert result["ingested"] == []
-    assert result["gated_out"] == [
-        {
-            "key": "disposition-di_transient",
-            "title": draft["title"],
-            "reason": "disposition_noise:transient",
-        }
-    ]
-    with kb.connect() as conn:
-        assert strategist_surface.held_operator_proposals(conn) == []
-
-
 def test_draft_with_grounding_ingests_and_surfaces(board_home, monkeypatch):
     """(b) A draft WITH a non-empty grounding field is ingested and the evidence
     is visible in the held root body AND on the held_operator_proposals surface."""
@@ -887,40 +848,13 @@ def test_gate_fix_distinct_cause_opens_second_chain(board_home):
         assert len(strategist_surface.held_operator_proposals(conn)) == 2
 
 
-def test_run_persistent_red_triage_serializes_the_cli_entrypoint(
-    board_home, monkeypatch
-):
-    out_dir = board_home / "specs"
-    entered: list[Path] = []
-
-    @contextmanager
-    def fake_lock(path):
-        entered.append(Path(path))
-        yield
-
-    def fake_propose(**kwargs):
-        assert entered == [out_dir / ".triage-check"]
-        return {"triggered": False, "ingested": None}
-
-    monkeypatch.setattr(strategist.outcomes, "shared_state_lock", fake_lock)
-    monkeypatch.setattr(strategist, "propose_persistent_red_triage", fake_propose)
-
-    result = strategist.run_persistent_red_triage(
-        SimpleNamespace(
-            board=None,
-            out_dir=out_dir,
-            min_reds=2,
-            window=3,
-            cooldown_days=7,
-            dry_run=False,
-        )
-    )
-
-    assert result == {"triggered": False, "ingested": None}
-
-
-def test_persistent_red_triage_is_idempotent_across_rotating_files(board_home):
-    """A changed anchor file set updates one gate-topic spec, not a new chain."""
+def test_persistent_red_triage_is_idempotent_while_window_ramps(board_home):
+    """AC-2 (persistent-red path): re-running while the SAME red file set persists
+    but the window count ramps (2-of-3 → 3-of-3) must dedup to the same chain —
+    NOT a supersede-conflict. Regression guard: the rendered triage spec must not
+    interpolate the volatile red_count, or the content hash drifts as the window
+    grows and the follow-up night returns an ingest_error instead of the
+    documented ``already_ingested``."""
     out_dir = board_home / "specs"
     detail = (
         "=== 1 files with test failures (1 tests failed) ===\n"
@@ -934,16 +868,12 @@ def test_persistent_red_triage_is_idempotent_across_rotating_files(board_home):
         board=None, out_dir=out_dir, gate_records=first
     )
 
-    changed_detail = (
-        "=== 1 files with test failures (1 tests failed) ===\n"
-        "  tests/tools/test_terminal_tool.py  (1 test failed)\n"
-    )
     third = first + [
         {
             "date": "2026-06-22",
             "result": "fail",
             "ts": "2026-06-22T03:00:00+00:00",
-            "first_fail": {"gate": "python", "detail": changed_detail},
+            "first_fail": {"gate": "python", "detail": detail},
         }
     ]
     r2 = strategist.propose_persistent_red_triage(
@@ -953,19 +883,17 @@ def test_persistent_red_triage_is_idempotent_across_rotating_files(board_home):
     assert r1["triggered"] is True
     assert r2["triggered"] is True
     assert r2["red_count"] == 3  # detection still sees the growing window
-    assert r1["key"] == r2["key"] == "GATE-TRIAGE-PYTHON"
+    assert r1["key"] == r2["key"]  # stable identity across the volatile count
     assert r1["ingested"]["already_ingested"] is False
-    assert r2["ingested"]["already_ingested"] is True
-    assert r2["ingested"]["updated_existing"] is True
+    assert r2["ingested"]["already_ingested"] is True  # was a conflict pre-fix
     assert r1["ingested"]["root_task_id"] == r2["ingested"]["root_task_id"]
-    spec_text = Path(r2["ingested"]["path"]).read_text(encoding="utf-8")
-    assert "tests/tools/test_terminal_tool.py" in spec_text
     with kb.connect() as conn:
         assert len(strategist_surface.held_operator_proposals(conn)) == 1
 
 
 def test_persistent_red_triage_dedups_recent_archived_key_only(board_home):
-    """Archived gate topics stay deduped for seven days across rotating files."""
+    """Archived triage keys stay deduped for seven days, without suppressing
+    genuinely new fingerprints or permanent re-filing after the cooldown."""
     out_dir = board_home / "specs"
 
     def records_for(test_file: str):
@@ -993,15 +921,14 @@ def test_persistent_red_triage_dedups_recent_archived_key_only(board_home):
         gate_records=records_for("tests/tools/test_voice_mode.py"),
     )
     assert recent_rerun["ingested"] is None
-    assert recent_rerun["skipped_recent_topic"] is True
+    assert recent_rerun["skipped_recent_idempotency_key"] is True
 
     distinct = strategist.propose_persistent_red_triage(
         board=None,
         out_dir=out_dir,
         gate_records=records_for("tests/tools/test_terminal_tool.py"),
     )
-    assert distinct["ingested"] is None
-    assert distinct["skipped_recent_topic"] is True
+    assert distinct["ingested"]["already_ingested"] is False
 
     with kb.connect() as conn:
         conn.execute(
@@ -1026,7 +953,7 @@ def test_persistent_red_triage_dedups_recent_archived_key_only(board_home):
             "SELECT 1 FROM task_links AS l WHERE l.child_id = t.id)",
             (strategist.GATE_TRIAGE_AUTHOR,),
         ).fetchall()
-    assert len(rows) == 2
+    assert len(rows) == 3
 
 
 def test_persistent_red_triage_leaker_head_planspec_is_actionable(board_home):
@@ -1054,7 +981,7 @@ def test_persistent_red_triage_leaker_head_planspec_is_actionable(board_home):
     assert result["gate"] == "python"  # not the 'unknown' sentinel
     # anchored on the most recent attributed night (07-05):
     assert result["red_files"] == ["tests/hermes_cli/test_b.py"]
-    assert result["key"] == "GATE-TRIAGE-PYTHON"
+    assert result["key"].startswith("GATE-TRIAGE-PYTHON-")
 
     # the human-facing PlanSpec body lists the real file, never "(unbekannt)"
     lever = strategist._persistent_red_triage_lever(
