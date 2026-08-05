@@ -1,0 +1,28 @@
+name: dead-code-scout
+type: sweep
+description: Meldet doppelt belegte Dead-Code-Kandidaten nur im fork-eigenen Revier
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: codex
+    model: gpt-5.6-terra
+    effort: high
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 1
+  max_hours: 7
+  fail_streak: 1
+  dry_rounds: 1
+params:
+  scanner: scripts/dead_code_candidates.py
+  allowlist: scripts/dead_code_revier_allowlist.txt
+  report: dead-code-candidates.json
+  static_tool: vulture==2.14
+  tombstone_tool: scripts/dead_code_tombstone.py
+  tombstone_silent_nights: 14
+  tombstone_limit: "Selten laufende Pfade koennen auch nach zwei Wochen tot wirken; Stille ist kein Todesbeweis."
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

@@ -281,7 +281,7 @@ private fun usageTint(percent: Double?): Color {
 }
 
 @Composable
-private fun UsageCard(usage: AccountUsage) {
+internal fun UsageCard(usage: AccountUsage) {
     val deck = LocalDeck.current
     GlassCard(Modifier.fillMaxWidth()) {
         Column {

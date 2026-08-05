@@ -344,6 +344,89 @@ run_agent.py, cli.py, batch_runner.py, environments/
   search was accepted as filtering because, with a single matching task, filtered and
   unfiltered looked identical — it had never filtered at all.
 
+
+Aus dem Fork (Stand main c012da15a0):
+
+- **`android/` has a gate now — use it, do not rebuild one.**
+  `scripts/gate-android.sh` runs Android Lint + JVM unit tests; `--ui` adds
+  instrumented Compose tests on an emulator it boots and shuts down itself.
+  It pipes nothing, the exit code is the truth. Three things it encodes that
+  cost a session each to find: `/dev/kvm` needs `sg kvm -c` from any shell older
+  than the group change (Piet *is* in `kvm`; only stale sessions are not);
+  `adb devices` keeps listing an emulator that is still tearing down, so a
+  device only counts once `sys.boot_completed` is `1`; and `local.properties`
+  is git-ignored, so a fresh worktree needs it written before Gradle runs.
+- **`pgrep -c <name>` never matches a name longer than 15 characters.**
+  `pgrep -c qemu-system-x86_64` returns 0 with exit 1 whether or not an emulator
+  is running — a session used exactly that to "prove" it had stopped one. `-f`
+  matches but also matches your own command line. Use `ps -eo comm,args | rg …`.
+- **`journalctl -g` greps the rendered line, ANSI escapes and all.** Rust
+  `tracing` colours output even under systemd, so `acp::tool: tool_call` does not
+  exist as a literal and matching it returns zero lines with exit 0 —
+  indistinguishable from an idle service. Anchor patterns inside the uncoloured
+  message body, never across the `target: ` boundary. For `--user` units the
+  agent unit is `_SYSTEMD_USER_UNIT`; `_SYSTEMD_UNIT` is `user@1000.service` on
+  every line and silently merges all units into one bucket.
+- **A RED probe that does not bite indicts the test, not the probe.** A guard in
+  `ThreadActivity` looked covered; the test's event was discarded one line
+  earlier, so it asserted nothing. If breaking the code leaves tests green, fix
+  the test before trusting the suite.
+- If auto-release rollback leaves the live checkout detached, triage and restore
+  `main` before any build. Never build on the detached state.
+- Tests must not write to a real `~/.hermes/`. Mocked profiles must set
+  `HERMES_HOME` as well as `Path.home()`.
+- Do not use ANSI erase-to-EOL under prompt_toolkit; pad with spaces.
+- Wiring dead code into a live path requires an end-to-end resolution test with
+  real imports and temporary `HERMES_HOME`.
+- Inspect merge diffs for silent deletion/reversion when integrating stale work.
+- **`scripts/run-affected.sh HEAD` against a CLEAN worktree runs zero tests and
+  exits 0** ("no applicable Python production paths"). The worker-gate stamp then
+  carries only `exit_codes: [0]` / `passed: True` — bit-identical to a run over a
+  thousand tests. After committing, gate with `HEAD~1` and confirm with
+  `git diff --name-only HEAD~1 HEAD` that the expected files are in the diff.
+- **`hermes kanban list --status blocked` does not show PlanSpec chains.** They
+  run under `tenant: planspec`, so the list reports "no matching tasks" while a
+  slice is blocked. Check chains with `hermes kanban show <task_id>`, never by
+  the list alone.
+- **New fork code never goes into an upstream-owned file.** Put it in a
+  fork-owned module and call it from one line. `hermes_cli/kanban_db.py` is the
+  cautionary tale: ~29k fork lines interleaved into upstream's ~9.8k forced the
+  2026-07-24 sync to resolve it as *ours*, which silently discarded 12 upstream
+  commits while keeping upstream's tests — 42 tests red on arrival. Before
+  touching that file, upstream syncs, or the refactor:
+  **`docs/refactor/UPSTREAM-STRATEGY.md`**.
+- Treat load-sensitive `waitFor` flakes as scoped test-timeout problems only
+  after reproducing in the relevant loaded gate.
+- **A lane-scope park names files; verify them before believing it.** Five
+  consecutive parks on 2026-07-27/28 were false positives that named paths the
+  card never touched. A card's real contribution is
+  `git diff --name-only $(git merge-base main <branch>)..<branch>`, and
+  `branch_name` for a chain slice is the *chain* branch (`kanban/<root>`), not
+  `kanban/<task-id>` — guessing it yields an empty diff and a wrong conclusion.
+  Four distinct causes existed by 2026-07-28; the 2026-08-02 guards additionally
+  hardened fixer-scope inheritance, stale review-base clamping, zero-test gates,
+  and merge-receipt attribution. **Read the code path in the wrong order and you
+  will fix the wrong one — measure this first:**
+  `_lane_scope_review_snapshot_diff_spec(conn, task_id, repo_root)`. When it
+  returns non-`None`, a review snapshot pins the upper-bound diff. Task-local
+  receipts may narrow that bound only when attributable single-parent commits
+  yield paths; merge commits and empty/unusable receipts mean *unknown*, so the
+  full snapshot remains. For a chain slice the snapshot candidate is the shared
+  chain **tip**, so explicit `scope_files` plus the bounded fixer allowlist are
+  still required to distinguish the slice from sibling commits. The old
+  snapshot-short-circuit produced seven consecutive false parks while three
+  earlier fixes looked correct and never ran.
+  Never answer a park with another lane-scope fixer before measuring; the second
+  bounce means diagnose, not retry.
+- **`done` + `MERGED_GREEN` does not prove the code is on `main`.** Verified
+  2026-07-28: a card carried `INTEGRATOR_VERIFIED` with a green gate while its
+  four files were absent from `main` — the stamp named the *sibling's* branch and
+  file list, because `chain_root_id` walks `task_links` upward and resolved a
+  foreign, already-finished card as the chain root. Confirm with
+  `git merge-base --is-ancestor <card branch> main` (and `git patch-id --stable`
+  if a rebase may have reminted it). A `done` card is never revisited by the
+  board, so unlanded work there is silent and permanent.
+
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 

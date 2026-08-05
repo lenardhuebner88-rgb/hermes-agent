@@ -1,0 +1,27 @@
+# narrow-except-closure — einmaliger siteweiter Closure-Sweep für eine belegte
+# Fehlerklasse: Datei-Lesepfade fangen OSError, lassen aber UnicodeDecodeError
+# entweichen. Anders als ein Fund-pro-Nacht-Sweep schließt dieser Pack die
+# vollständige anwendbare Restmenge in genau einer Runde.
+name: narrow-except-closure
+type: sweep
+description: Schliesst alle engen OSError-Handler an echten Lesepfaden in einer Runde
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  round:
+    engine: codex
+    model: gpt-5.6-terra
+    effort: medium
+    timeout: 2700
+    prompt: ROUND-PROMPT.md
+stop:
+  max_rounds: 1
+  max_hours: 7
+  fail_streak: 1
+  dry_rounds: 1
+params:
+  zielklasse: "except OSError an einem echten Text-Lesepfad, das UnicodeDecodeError nicht wie OSError behandelt"
+  closure: "gesamte anwendbare Restmenge in einem Commit; kein Einzelfund"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false

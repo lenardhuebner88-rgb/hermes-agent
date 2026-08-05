@@ -25,6 +25,15 @@ from hermes_cli.control_loops import (
     get_landing_automation_enabled,
     write_landing_runtime_status,
 )
+from hermes_cli.green_gate_quarantine import (
+    DEFAULT_ALLOWLIST_RELATIVE_PATH,
+    QuarantinePolicy,
+    QuarantinePolicyError,
+    accepted_quarantined_files,
+    load_quarantine_policy,
+    parse_quarantine_policy,
+    parse_quarantine_policy_text,
+)
 from hermes_cli.vision_metrics import (
     read_gate_records,
     read_landing_gate_records,
@@ -47,6 +56,13 @@ _COLLECTION_RELEVANT_NAMES = {
     "conftest.py",
     "pyproject.toml",
     "uv.lock",
+}
+# Preparation-only packs may emit patch/test artifacts into their state, but
+# their loop branch must never become an implicit delivery path for that patch.
+_POLICY_PARKED_BRANCHES = {
+    "loop/dead-writer-unstick": (
+        "eingecheckte Landing-Policy: Vorbereitungspack darf nicht automatisch mergen"
+    ),
 }
 
 
@@ -94,6 +110,7 @@ class BaselineProbe:
     failure_class: FailureClass
     reason: str
     source: Literal["nightly", "landing", "none"] = "none"
+    quarantined_files: tuple[str, ...] = ()
 
     @staticmethod
     def sha_matches(record_sha: str, baseline_sha: str) -> bool:
@@ -117,10 +134,11 @@ class BaselineProbe:
         baseline_sha: str,
         nightly_records: list[dict[str, object]],
         landing_records: list[dict[str, object]] | None = None,
+        quarantine_policy: QuarantinePolicy | None = None,
     ) -> BaselineProbe:
         latest_nightly = next(
             (
-                str(record.get("result", "")).lower()
+                record
                 for record in reversed(nightly_records)
                 if cls.sha_matches(
                     str(record.get("head_sha", "")), baseline_sha
@@ -129,7 +147,12 @@ class BaselineProbe:
             ),
             None,
         )
-        if latest_nightly == "pass":
+        latest_result = (
+            str(latest_nightly.get("result", "")).lower()
+            if latest_nightly is not None
+            else None
+        )
+        if latest_result == "pass":
             return cls(
                 baseline_sha,
                 True,
@@ -137,7 +160,22 @@ class BaselineProbe:
                 "Nightly-Full-Gate-Nachweis (präfix-eindeutig) für aktuellen main-SHA",
                 "nightly",
             )
-        if latest_nightly == "fail":
+        if latest_result == "fail":
+            quarantined = (
+                accepted_quarantined_files(latest_nightly, quarantine_policy)
+                if quarantine_policy is not None
+                else None
+            )
+            if quarantined is not None:
+                return cls(
+                    baseline_sha,
+                    True,
+                    FailureClass.CLEAN_LAND,
+                    "Nightly-Full-Gate nur mit namentlich quarantänisierten "
+                    "Umgebungsdefekten",
+                    "nightly",
+                    quarantined,
+                )
             return cls(
                 baseline_sha,
                 False,
@@ -321,6 +359,7 @@ class LandingLoop:
         excluded_branches: Iterable[str] = (),
         state_dir: Path | None = None,
         stop_path: Path | None = None,
+        quarantine_allowlist_path: Path | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.repo = repo.resolve()
@@ -343,8 +382,25 @@ class LandingLoop:
         self.excluded_branches = frozenset(excluded_branches)
         self.state_dir = state_dir
         self.stop_path = stop_path
+        self._quarantine_policy_from_base = quarantine_allowlist_path is None
+        policy_path = quarantine_allowlist_path or (
+            self.repo / DEFAULT_ALLOWLIST_RELATIVE_PATH
+        )
+        self.quarantine_allowlist_path = policy_path.expanduser().resolve()
         self.now = now or (lambda: datetime.now(timezone.utc))
         self._collection_proven = False
+
+    def _load_quarantine_policy(self, baseline_sha: str) -> QuarantinePolicy:
+        if not self._quarantine_policy_from_base:
+            return load_quarantine_policy(self.quarantine_allowlist_path)
+        policy_ref = f"{baseline_sha}:{DEFAULT_ALLOWLIST_RELATIVE_PATH.as_posix()}"
+        result = self._git("show", policy_ref)
+        if result.returncode != 0:
+            return parse_quarantine_policy([])
+        return parse_quarantine_policy_text(
+            result.stdout,
+            source=f"checked-in {policy_ref}",
+        )
 
     def _automation_checkpoint(self) -> str | None:
         if self.dry_run:
@@ -645,6 +701,9 @@ class LandingLoop:
                 item,
                 f"Branch-Head seit Inventur geändert ({item.head[:9]}→{current_head[:9]})",
             )
+        policy_reason = _POLICY_PARKED_BRANCHES.get(item.branch)
+        if policy_reason:
+            return self._park(item, policy_reason)
         status = self._worktree_status(item.worktree)
         if status is None:
             return self._park(item, f"Loop-Worktree fehlt: {item.worktree}")
@@ -1025,10 +1084,17 @@ class LandingLoop:
         started_at = self.now()
         inventory = self.inventory()
         baseline_sha = self._git("rev-parse", self.base, check=True).stdout.strip()
+        try:
+            quarantine_policy = self._load_quarantine_policy(baseline_sha)
+        except QuarantinePolicyError as exc:
+            raise LandingLoopError(
+                f"Green-Gate-Quarantäne ungültig: {exc}"
+            ) from exc
         baseline = BaselineProbe.from_records(
             baseline_sha,
             self.baseline_records(),
             self.landing_baseline_records(),
+            quarantine_policy,
         )
         candidates = tuple(LL2Candidate(item.branch, item.head) for item in inventory)
         plan = plan_queue(candidates, baseline)
@@ -1214,6 +1280,13 @@ def render_receipt(run: LandingRun) -> str:
         f"**{'green' if run.plan.baseline.green else 'main_red'}** — "
         f"{run.plan.baseline.reason}"
     )
+    if run.plan.baseline.quarantined_files:
+        lines.append(
+            "- Quarantänisierte Umgebungsdefekte: "
+            + ", ".join(
+                f"`{name}`" for name in run.plan.baseline.quarantined_files
+            )
+        )
     lines.append(
         "- Gate-Matrix: "
         + " → ".join(stage.value for stage in run.plan.gate_stages)

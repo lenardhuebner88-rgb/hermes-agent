@@ -1664,6 +1664,93 @@ def test_land_gates_custom_all_green(tmp_path, fake_engine):
     assert ok is True
 
 
+def test_land_gates_continues_after_vitest_failure_passes_alone(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    (repo / "web").mkdir()
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir,
+        "loaded-gate",
+        "pipeline",
+        repo,
+        land_gates=["npm exec vitest -- run", "true"],
+    )
+    pack = load_pack(packs_dir, "loaded-gate")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((list(command), kwargs.get("cwd")))
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                (
+                    " FAIL  src/TerminalHandoffPanel.test.tsx > retries\n"
+                    " FAIL  src/OtherPanel.test.tsx > renders\n"
+                ),
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is True
+    assert "Lastartefakt: vitest" in report
+    assert "src/TerminalHandoffPanel.test.tsx" in report
+    assert "src/OtherPanel.test.tsx" in report
+    assert [call[0] for call in calls] == [
+        ["npm", "exec", "vitest", "--", "run"],
+        [
+            "node_modules/.bin/vitest",
+            "run",
+            "src/TerminalHandoffPanel.test.tsx",
+        ],
+        ["node_modules/.bin/vitest", "run", "src/OtherPanel.test.tsx"],
+        ["true"],
+    ]
+    assert calls[1][1] == str(repo / "web")
+
+
+def test_land_gates_empty_failed_file_list_stays_red(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_pack(
+        packs_dir,
+        "poisoned-gate",
+        "pipeline",
+        repo,
+        land_gates=["npm exec vitest -- run"],
+    )
+    pack = load_pack(packs_dir, "poisoned-gate")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(
+            command,
+            1,
+            "================ fixture payload ================\n",
+            "",
+        )
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is False
+    assert "Lastartefakt" not in report
+    assert "rot (rc=1)" in report
+    assert calls == [["npm", "exec", "vitest", "--", "run"]]
+
+
 def test_shared_land_gates_can_reuse_collection_proof(
     tmp_path, monkeypatch
 ):
@@ -2654,6 +2741,78 @@ def test_sweep_stops_on_blocked_streak(tmp_path, fake_engine):
     assert calls == ["round", "round"]  # fail_streak=2
 
 
+def test_sweep_prepared_requires_artifacts_and_notifies(tmp_path, fake_engine, monkeypatch):
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs",
+        "prepared",
+        "sweep",
+        repo,
+        params={
+            "required_artifacts": "dead-writer-unstick.patch,test_dead_writer_unstick.py"
+        },
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "prepared")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def prepare(values, _cwd):
+        state_dir = Path(values["STATE"])
+        (state_dir / "dead-writer-unstick.patch").write_text("patch\n", encoding="utf-8")
+        (state_dir / "test_dead_writer_unstick.py").write_text("test\n", encoding="utf-8")
+        (state_dir / "last-status").write_text(
+            "PREPARED dead-writer-unstick\n", encoding="utf-8"
+        )
+        return engines.EngineResult(
+            rc=0, output="PREPARED dead-writer-unstick", usage_limit=False
+        )
+
+    behaviors["round"] = prepare
+    notices: list[str] = []
+    monkeypatch.setattr(runner, "notify", notices.append)
+
+    assert runner.cmd_run() == 0
+    assert (
+        "prepared: PREPARED — dead-writer-unstick.patch, test_dead_writer_unstick.py"
+        in notices
+    )
+    assert "PREPARED: Artefakte dead-writer-unstick.patch, test_dead_writer_unstick.py" in (
+        runner.ledger_path.read_text(encoding="utf-8")
+    )
+
+
+def test_sweep_prepared_without_required_artifact_becomes_blocked(
+    tmp_path, fake_engine, monkeypatch
+):
+    behaviors, _calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs",
+        "prepared-missing",
+        "sweep",
+        repo,
+        params={"required_artifacts": "patch.diff,repro.py"},
+        stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", "prepared-missing")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def incomplete(values, _cwd):
+        state_dir = Path(values["STATE"])
+        (state_dir / "patch.diff").write_text("patch\n", encoding="utf-8")
+        (state_dir / "last-status").write_text("PREPARED incomplete\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="PREPARED incomplete", usage_limit=False)
+
+    behaviors["round"] = incomplete
+    notices: list[str] = []
+    monkeypatch.setattr(runner, "notify", notices.append)
+
+    assert runner.cmd_run() == 0
+    assert runner.last_status() == "BLOCKED PREPARED-Artefakte fehlen: repro.py"
+    assert not any("PREPARED —" in notice for notice in notices)
+
+
 def test_sweep_writes_heartbeat_current_and_history(tmp_path, fake_engine):
     import json
 
@@ -2858,6 +3017,19 @@ def test_land_happy_path_merges_tags_archives_and_freshens(tmp_path, fake_engine
     # FRESH: Branch neu von neuem main gezogen → nichts mehr ahead
     assert g(repo, "rev-list", "--count", f"main..{runner.pack.branch}").stdout.strip() == "0"
     assert "LAND ✅" in runner.ledger_path.read_text(encoding="utf-8")
+
+
+def test_land_records_isolated_green_failure_as_load_artifact(tmp_path, fake_engine):
+    repo, runner, _pushes = make_landable(tmp_path)
+    runner._land_gates = lambda repo, base: (
+        True,
+        "land_gates grün\nLastartefakt: vitest rot unter Last; isoliert grün: Foo.test.tsx",
+    )
+
+    assert runner.cmd_land(push=False) is True
+
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "LAND Lastartefakt: vitest rot unter Last" in ledger
 
 
 def test_land_push_false_skips_push(tmp_path, fake_engine, monkeypatch):
@@ -3669,7 +3841,11 @@ def test_autoland_resume_drains_pending_queue_instead_of_deadlocking(
 
     runner.cmd_night()
 
-    assert calls == ["plan", "build", "verify"], (
+    # Seit dem Plan-Skip bei voller Queue (2026-08-05) entfaellt der plan-Call
+    # hier: 1 wartender Plan bei max_rounds=1 ist genau der Skip-Fall. Das
+    # Deadlock-Kriterium des Tests bleibt unveraendert belegt: die Queue wird
+    # erreicht und abgearbeitet (build+verify laufen, 00-planned leert sich).
+    assert calls == ["build", "verify"], (
         "Resume-Kurzschluss haette die wartende Retry-Queue nie erreicht (Deadlock)"
     )
     assert runner.qcount("00-planned") == 0
@@ -4736,6 +4912,109 @@ def test_cmd_night_planned_one_reaches_build(tmp_path, fake_engine):
     assert "PLAN-RETRY" not in ledger
 
 
+# ── Plan-Skip bei voller Queue (Nachtbetrieb-Audit 2026-08-05) ────────────────
+# Befund: 16 DRY-Plan-Phasen in 25 Tagen (~2 h Modellzeit ohne Ertrag), weil
+# cmd_night unbedingt plante, obwohl 00-planned laengst voll war.
+
+def _runner_with_queued_plans(tmp_path, name, n_plans, **pack_overrides):
+    """Pipeline-Pack mit `n_plans` vorbefuellten Plaenen in 00-planned."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", name, "pipeline", repo, **pack_overrides)
+    pack = load_pack(tmp_path / "packs", name)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    for i in range(1, n_plans + 1):
+        body = PLAN_BODY.replace(
+            "id: fl-20260702-beispiel\n", f"id: fl-20260702-beispiel-{i}\n", 1
+        )
+        (runner.queue / "00-planned" / f"P{i}-beispiel.md").write_text(
+            body, encoding="utf-8"
+        )
+    return runner
+
+
+def _build_and_verify_ok(behaviors):
+    def build_phase(kv, cwd):
+        commit_in(cwd, "q")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel-1\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel-1")
+
+
+def test_cmd_night_skips_plan_when_queue_full(tmp_path, fake_engine):
+    """Queue voll (n >= max_rounds) → keine Plan-Phase, genau eine Skip-Zeile."""
+    behaviors, calls = fake_engine
+    runner = _runner_with_queued_plans(
+        tmp_path, "skip-full", 2,
+        stop={"max_rounds": 2, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
+    )
+    behaviors["plan"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("Plan darf bei voller Queue nicht starten")
+    )
+    _build_and_verify_ok(behaviors)
+
+    assert runner.cmd_night() is True
+
+    assert "plan" not in calls
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert " PLAN: " not in ledger
+    assert ledger.count("PLAN übersprungen: Queue voll (2 ≥ max_rounds=2)") == 1
+
+
+def test_cmd_night_plans_when_queue_below_max_rounds(tmp_path, fake_engine):
+    """Gegenprobe: Queue unter max_rounds → Plan-Phase laeuft unveraendert."""
+    behaviors, calls = fake_engine
+    runner = _runner_with_queued_plans(
+        tmp_path, "skip-below", 1,
+        stop={"max_rounds": 2, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
+    )
+    behaviors["plan"] = ok("PLANNED 1")
+    _build_and_verify_ok(behaviors)
+
+    assert runner.cmd_night() is True
+
+    assert "plan" in calls
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "PLAN übersprungen" not in ledger
+    assert " PLAN: " in ledger
+
+
+def test_cmd_night_plan_skip_opt_out_plans_even_when_queue_full(tmp_path, fake_engine):
+    """Opt-out im Manifest: Pack mit plan_skip_when_queue_full=false plant immer."""
+    behaviors, calls = fake_engine
+    runner = _runner_with_queued_plans(
+        tmp_path, "skip-optout", 2,
+        stop={"max_rounds": 2, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
+        plan_skip_when_queue_full=False,
+    )
+    behaviors["plan"] = ok("PLANNED 2")
+    _build_and_verify_ok(behaviors)
+
+    assert runner.cmd_night() is True
+
+    assert "plan" in calls
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "PLAN übersprungen" not in ledger
+
+
+def test_load_pack_plan_skip_when_queue_full_default_and_type(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "skip-default", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "skip-default")
+    assert pack.plan_skip_when_queue_full is True
+
+    write_pack(
+        tmp_path / "packs2", "skip-badtype", "pipeline", repo,
+        plan_skip_when_queue_full="ja",
+    )
+    with pytest.raises(runner_module.ManifestError, match="plan_skip_when_queue_full"):
+        load_pack(tmp_path / "packs2", "skip-badtype")
+
+
 # ── Verify-Phase Statuskontrakt-Backstop (Incident 2026-07-17 empty last-status) ─
 
 def _verify_backstop_setup(tmp_path, fake_engine, name: str):
@@ -5560,3 +5839,74 @@ def test_operator_can_raise_the_turn_load_cap(tmp_path, fake_engine, monkeypatch
     with runner._worker_environment("round"):
         assert os.environ["HERMES_TEST_WORKERS"] == "6"
         assert os.environ["GATE_FRONTEND_MAX_WORKERS"] == "3"
+
+
+def test_goal_reached_retires_exact_pack_timer_once(tmp_path, fake_engine, monkeypatch):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    pack_name = "retirement-fixture"
+    timer_name = f"hermes-loop@{pack_name}.timer"
+    write_pack(
+        tmp_path / "packs",
+        pack_name,
+        "sweep",
+        repo,
+        goal={"reached_status": "GOAL_REACHED", "reason": "fixture target closed"},
+        stop={"max_rounds": 3, "max_hours": 1, "dry_rounds": 2, "fail_streak": 2},
+    )
+    runner = LoopRunner(
+        load_pack(tmp_path / "packs", pack_name), state_root=tmp_path / "state"
+    )
+    behaviors["round"] = ok("GOAL_REACHED")
+    disabled: list[str] = []
+
+    def disable_timer(unit: str):
+        disabled.append(unit)
+        return subprocess.CompletedProcess(
+            ["systemctl", "--user", "disable", "--now", unit], 0
+        )
+
+    monkeypatch.setattr(runner_module, "_disable_user_timer", disable_timer)
+    monkeypatch.setattr(runner_module, "_utc_iso", lambda: "2026-08-05T12:34:56Z")
+
+    assert runner.cmd_run() == 0
+
+    assert calls == ["round"]
+    assert disabled == [timer_name]
+    retirement_lines = [
+        line
+        for line in runner.ledger_path.read_text(encoding="utf-8").splitlines()
+        if "PACK-RETIREMENT" in line
+    ]
+    assert len(retirement_lines) == 1
+    assert "reason=fixture target closed" in retirement_lines[0]
+    assert "retired_at=2026-08-05T12:34:56Z" in retirement_lines[0]
+
+
+def test_goal_not_reached_does_not_retire_pack(tmp_path, fake_engine, monkeypatch):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    pack_name = "retirement-control"
+    write_pack(
+        tmp_path / "packs",
+        pack_name,
+        "sweep",
+        repo,
+        goal={"reached_status": "GOAL_REACHED", "reason": "fixture target closed"},
+        stop={"max_rounds": 1, "max_hours": 1, "dry_rounds": 2, "fail_streak": 2},
+    )
+    runner = LoopRunner(
+        load_pack(tmp_path / "packs", pack_name), state_root=tmp_path / "state"
+    )
+    behaviors["round"] = ok("WORKED")
+    disabled: list[str] = []
+    monkeypatch.setattr(
+        runner_module,
+        "_disable_user_timer",
+        lambda unit: disabled.append(unit),
+    )
+
+    assert runner.cmd_run() == 0
+
+    assert disabled == []
+    assert "PACK-RETIREMENT" not in runner.ledger_path.read_text(encoding="utf-8")
