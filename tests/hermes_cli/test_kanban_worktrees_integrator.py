@@ -72,6 +72,45 @@ def _claim_and_provision(conn, task_id, repo):
     return kwt.provision_for_task(conn, task, str(repo))
 
 
+def test_loop_branch_repair_completion_skips_chain_integration(kanban_home, repo):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="repair loop branch",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            skills=["loop-branch-repair"],
+        )
+        _claim_and_provision(conn, task_id, repo)
+
+        loop_worktree = repo.parent / "loop-worktree"
+        _git(repo, "branch", "loop/demo", "main")
+        _git(repo, "worktree", "add", str(loop_worktree), "loop/demo")
+        _commit_in(
+            loop_worktree,
+            "loop-repair.py",
+            "REPAIRED = True\n",
+            msg="repair loop branch",
+        )
+        loop_commit = _git(loop_worktree, "rev-parse", "HEAD")
+
+        outcome = kwt.maybe_integrate_on_complete(
+            conn,
+            task_id,
+            completion_metadata={
+                "commit": loop_commit,
+                "workspace_path": str(loop_worktree),
+            },
+            gate_runner=lambda *_args, **_kwargs: pytest.fail(
+                "loop repair must not run the chain integration gate"
+            ),
+        )
+
+        assert outcome is None
+        assert not kwt._branch_is_ancestor(repo, loop_commit, "main")
+
+
 def _acquire_writer_lease(conn, task_id, worktree):
     task = kb.get_task(conn, task_id)
     assert task is not None
