@@ -203,10 +203,20 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         now = now,
     )
 
-    /** Messages that name me, in the window the chatter covers. */
+    /**
+     * Mentions still waiting on an answer — those newer than my own last word
+     * in that same channel.
+     *
+     * Counting every mention in the chatter window instead reported 63 against
+     * the real workspace on 2026-08-05, reaching back 133 hours, and could only
+     * ever grow: a chip under the heading "Wartet auf dich" that never falls is
+     * not a claim about waiting, it is a claim about history. Speaking in the
+     * channel clears it, which is the one signal available here without
+     * inventing a read-state Buzz already owns.
+     */
     fun mentionCount(snapshot: DeckRepository.Snapshot): Int {
         val me = settings.pubkeyHex ?: return 0
-        return snapshot.chatter.count { it.pubkey != me && it.tagValues("p").contains(me) }
+        return ThreadActivity.unansweredMentions(snapshot.chatter, me)
     }
 
     fun capture(

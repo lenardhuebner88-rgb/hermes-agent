@@ -58,7 +58,7 @@ class ControlSummaryTest {
         heartbeatRecentSeconds = 300,
         usage = usage,
         activeThreads = List(activeThreads) {
-            ThreadActivity.Entry("t$it", "T", "c", "chan", 1, 0, "p", "P", "x", true)
+            ThreadActivity.Entry("root$it", "t$it", "T", "c", "chan", 1, 0, "p", "P", "x", true)
         },
         decisions = decisions,
         mentions = mentions,
