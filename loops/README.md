@@ -115,9 +115,12 @@ Custom-Packs leben in `~/.hermes/loops/packs-custom/` (nie im Repo; Namens-Kolli
 mit Repo-Packs = Fehler). Erstellen: im Dashboard „Duplizieren" oder
 `cp -r loops/packs/_blank ~/.hermes/loops/packs-custom/<name>` — Manifest-Schema und
 Pflicht-Konventionen (Platzhalter, last-status, Verbote) erzwingt der Server-Lint bzw.
-`tests/loops` Pack-Lint. Die Meta-Packs **loop-schmiede** (schmiedet neue Packs aus
-eigener Evidenz) und **loop-tuner** (härtet bestehende Prompts evidenzbasiert; Verbote
-dürfen nur schärfer werden) pflegen das System selbst.
+`tests/loops` Pack-Lint. Das Meta-Pack **loop-schmiede** (schmiedet neue Packs aus
+eigener Evidenz) pflegt das System selbst. `loop-tuner` (Prompt-Härtung) ist seit
+2026-07-28 stillgelegt: es liegt als `loops/packs/_retired-loop-tuner/` und ist damit
+weder im Loops-Tab sichtbar (`hermes_cli/control_loops.py:115` überspringt
+`_`-Präfix-Verzeichnisse) noch per `--pack loop-tuner` ladbar (`load_pack` findet
+keine `pack.yaml`). Reaktivieren = zurückbenennen.
 
 ## Teuer gelernte Fallen (nicht wieder einbauen)
 
