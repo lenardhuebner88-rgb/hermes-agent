@@ -765,6 +765,35 @@ async def test_create_cron_job_without_profile_uses_backend_own_profile(
 
 
 @pytest.mark.asyncio
+async def test_create_cron_job_without_profile_surfaces_profile_resolution_error(
+    isolated_profiles, monkeypatch
+):
+    """A broken active-profile lookup must not write a job into ``default``."""
+    from hermes_cli import profiles, web_server
+
+    monkeypatch.setenv("HERMES_HOME", str(isolated_profiles["worker_alpha"]))
+
+    def _boom():
+        raise RuntimeError("active profile lookup failed")
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", _boom)
+
+    with pytest.raises(HTTPException) as failure:
+        await web_server.create_cron_job(
+            web_server.CronJobCreate(
+                prompt="must not be silently misrouted",
+                schedule="every 1h",
+                name="profile-resolution-error",
+            ),
+            profile=None,
+        )
+
+    assert failure.value.status_code == 400
+    assert failure.value.detail == "active profile lookup failed"
+    assert not (isolated_profiles["default"] / "cron" / "jobs.json").exists()
+
+
+@pytest.mark.asyncio
 async def test_create_cron_job_without_profile_defaults_when_unscoped(
     isolated_profiles, monkeypatch
 ):

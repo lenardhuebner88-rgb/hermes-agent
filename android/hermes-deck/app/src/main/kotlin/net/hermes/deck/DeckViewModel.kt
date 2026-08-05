@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
+import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,10 +16,14 @@ import net.hermes.deck.data.DeckRepository
 import net.hermes.deck.data.DeckSettings
 import net.hermes.deck.data.DeckStore
 import net.hermes.deck.data.SetupLink
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.ThreadActivity
+import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
 import net.hermes.deck.net.HermesClient
@@ -38,6 +44,18 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         /** The probe boots a real agent and takes seconds — say so meanwhile. */
         val modelsLoading: Boolean = false,
         val busyStem: String? = null,
+        /** Windows the server measured over, so the labels quote its numbers. */
+        val heartbeatWindowSeconds: Int = 3600,
+        val heartbeatRecentSeconds: Int = 300,
+        /** Set when the journal could not be read at all — never rendered as calm. */
+        val heartbeatError: String? = null,
+        val usage: List<AccountUsage> = emptyList(),
+        /**
+         * Usage failing must not blank the agents. The two come from separate
+         * endpoints and one being down says nothing about the other, so this
+         * error is held apart from [error] instead of replacing the screen.
+         */
+        val usageError: String? = null,
     )
 
     private val _agents = MutableStateFlow(AgentsState())
@@ -48,6 +66,9 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _search = MutableStateFlow("")
     val search: StateFlow<String> = _search.asStateFlow()
+
+    private val _filterDue = MutableStateFlow<LocalDate?>(null)
+    val filterDue: StateFlow<LocalDate?> = _filterDue.asStateFlow()
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -129,6 +150,11 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         _search.value = text
     }
 
+    /** Tapping the selected day again clears it — a day tile is a toggle. */
+    fun setFilterDue(date: LocalDate?) {
+        _filterDue.value = if (_filterDue.value == date) null else date
+    }
+
     fun dismissMessage() {
         _message.value = null
     }
@@ -141,18 +167,46 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         repository.sync()?.let { _message.value = it }
     }
 
-    /** The list the deck screen shows, after the channel filter and search. */
-    fun visibleTasks(tasks: List<DeckTask>): List<DeckTask> {
-        val channel = _filterChannel.value
-        val needle = _search.value.trim().lowercase()
-        return tasks.asSequence()
-            .filter { channel == null || it.channelId == channel }
-            .filter {
-                needle.isEmpty() ||
-                    it.title.lowercase().contains(needle) ||
-                    it.body.lowercase().contains(needle)
-            }
-            .toList()
+    /**
+     * The list the deck screen shows, after the channel filter and search.
+     *
+     * Filter and needle are parameters, not reads of [_filterChannel] and
+     * [_search]. Reading the flows in here made the function invisible to
+     * Compose: the screen recomposed — the approvals section correctly
+     * disappeared as soon as the field held text — while this list kept its
+     * pre-search contents. Typing looked like it did nothing, and no test
+     * could see it, because called directly the function filtered fine.
+     */
+    fun visibleTasks(
+        tasks: List<DeckTask>,
+        channel: String?,
+        search: String,
+        due: LocalDate?,
+    ): List<DeckTask> = TaskFilter.apply(tasks, channel, search, due)
+
+    /**
+     * Threads with recent words in them.
+     *
+     * Takes `now` rather than reading the clock so the window advances with the
+     * screen instead of freezing at whatever second the last sync happened —
+     * and so the whole thing is testable with a fixed instant.
+     */
+    fun activeThreads(
+        snapshot: DeckRepository.Snapshot,
+        now: Long,
+    ): List<ThreadActivity.Entry> = ThreadActivity.of(
+        events = snapshot.chatter,
+        tasks = snapshot.tasks,
+        channels = snapshot.channels,
+        profiles = snapshot.profiles,
+        me = settings.pubkeyHex,
+        now = now,
+    )
+
+    /** Messages that name me, in the window the chatter covers. */
+    fun mentionCount(snapshot: DeckRepository.Snapshot): Int {
+        val me = settings.pubkeyHex ?: return 0
+        return snapshot.chatter.count { it.pubkey != me && it.tagValues("p").contains(me) }
     }
 
     fun capture(
@@ -161,25 +215,45 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         body: String,
         priority: TaskPriority,
         attachments: List<Attachment>,
-        onDone: (DeckTask) -> Unit = {},
+        due: String? = null,
+        /**
+         * Runs once the note is signed, stored and pushed — success or not.
+         * Callers that tear down their host (the share activity) must wait for
+         * this before finishing, otherwise the cancelled scope drops the note.
+         */
+        onSettled: () -> Unit = {},
     ) = viewModelScope.launch {
-        runCatching {
-            repository.capture(
-                channelId = channelId,
-                title = title,
-                body = body,
-                priority = priority,
-                attachments = attachments,
-            )
-        }.onSuccess { task ->
-            onDone(task)
-            val pending = repository.pushPending()
-            _message.value = if (pending == 0) {
-                "In Buzz abgelegt."
-            } else {
-                "Lokal gesichert — $pending wartet auf Verbindung."
+        try {
+            runCatching {
+                repository.capture(
+                    channelId = channelId,
+                    title = title,
+                    body = body,
+                    priority = priority,
+                    attachments = attachments,
+                    due = due,
+                )
+            }.onSuccess {
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) {
+                    "In Buzz abgelegt."
+                } else {
+                    "Lokal gesichert — $pending wartet auf Verbindung."
+                }
+            }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+        } finally {
+            onSettled()
+        }
+    }
+
+    /** `null` clears the date; the edit goes out as a `kind:40003` like any other. */
+    fun setDue(task: DeckTask, date: LocalDate?) = viewModelScope.launch {
+        runCatching { repository.update(task.copy(due = date?.let { DueDates.format(it) })) }
+            .onSuccess {
+                repository.pushPending()
+                _message.value = if (date == null) "Termin entfernt." else "Fällig ${DueDates.format(date)}."
             }
-        }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+            .onFailure { _message.value = it.message ?: "Termin nicht gesetzt." }
     }
 
     fun setStatus(task: DeckTask, status: TaskStatus) = viewModelScope.launch {
@@ -285,10 +359,31 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
             return@launch
         }
         _agents.value = _agents.value.copy(loading = true, error = null)
+        // Both calls go out at once, but the agents render as soon as they
+        // land. `/api/account-usage` fans out to five provider APIs on a cache
+        // miss, and awaiting it first would hold the whole tab hostage to the
+        // slowest subscription endpoint.
+        val usageCall = async(Dispatchers.IO) { runCatching { client.accountUsage() } }
         val result = withContext(Dispatchers.IO) { runCatching { client.agents() } }
         _agents.value = result.fold(
-            onSuccess = { AgentsState(agents = it, loading = false) },
+            onSuccess = {
+                AgentsState(
+                    agents = it.agents,
+                    loading = false,
+                    heartbeatWindowSeconds = it.windowSeconds,
+                    heartbeatRecentSeconds = it.recentSeconds,
+                    heartbeatError = it.heartbeatError,
+                )
+            },
             onFailure = { _agents.value.copy(loading = false, error = it.message ?: "Abruf fehlgeschlagen") },
+        )
+
+        val usage = usageCall.await()
+        // Copied onto whatever the agents left behind, so a usage failure never
+        // blanks the agent list and an agent failure never hides the budgets.
+        _agents.value = _agents.value.copy(
+            usage = usage.getOrDefault(emptyList()),
+            usageError = usage.exceptionOrNull()?.let { it.message ?: "Verbrauch nicht abrufbar" },
         )
     }
 

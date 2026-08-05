@@ -335,6 +335,14 @@ run_agent.py, cli.py, batch_runner.py, environments/
   ends with `tree.` — a generic `awk '{print $NF}'` extractor invents a file called `tree.` and
   loses the real one. The *count* of CONFLICT lines stays right, so the error hides in the
   mapping, not the total. Parse per conflict type.
+- **For the `android/` apps, `uiautomator dump` is for coordinates, never for a verdict on
+  layout.** The dump carries a card's *full* semantic text even where it renders clamped, it
+  lists nodes below the fold, and taken too early it shows the state before recomposition —
+  on 2026-08-05 three design findings in a row were wrong for exactly these reasons and
+  `adb exec-out screencap -p` corrected every one. Judge appearance from the picture. The
+  same run also shows why a control probe has to be able to *separate* the hypotheses: a
+  search was accepted as filtering because, with a single matching task, filtered and
+  unfiltered looked identical — it had never filtered at all.
 
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.

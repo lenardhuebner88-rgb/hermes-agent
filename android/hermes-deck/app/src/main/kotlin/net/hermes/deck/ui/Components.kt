@@ -8,13 +8,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,9 +29,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import java.time.LocalDate
+import net.hermes.deck.model.Attachment
+import net.hermes.deck.model.DueDates
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
 
@@ -35,6 +46,158 @@ import net.hermes.deck.model.TaskStatus
  * accent — repeated everywhere, so the app reads as a single surface rather
  * than a stack of Material defaults.
  */
+
+/**
+ * The week as tiles: the deck's calendar, and the only place a date is picked.
+ *
+ * A tile carries its own load — the number of open tasks due that day — so the
+ * strip answers "when is it busy" before anything is tapped. Selecting a day is
+ * a toggle; tapping the selected one again clears the filter.
+ */
+@Composable
+fun DueStrip(
+    days: List<LocalDate>,
+    counts: Map<LocalDate, Int>,
+    selected: LocalDate?,
+    today: LocalDate,
+    onSelect: (LocalDate) -> Unit,
+) {
+    val deck = LocalDeck.current
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(days, key = { it.toString() }) { day ->
+            val isSelected = day == selected
+            val isToday = day == today
+            val load = counts[day] ?: 0
+            val shape = RoundedCornerShape(18.dp)
+            Column(
+                Modifier
+                    .width(54.dp)
+                    .clip(shape)
+                    .background(if (isSelected) deck.accent else deck.surface)
+                    .border(
+                        1.dp,
+                        when {
+                            isSelected -> Color.Transparent
+                            isToday -> deck.accent.copy(alpha = 0.55f)
+                            else -> deck.outline
+                        },
+                        shape,
+                    )
+                    .clickable { onSelect(day) }
+                    .padding(vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    DueDates.weekdayShort(day).uppercase(),
+                    color = if (isSelected) Color.White.copy(alpha = 0.85f) else deck.textFaint,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    day.dayOfMonth.toString(),
+                    color = when {
+                        isSelected -> Color.White
+                        isToday -> deck.accent
+                        else -> deck.textPrimary
+                    },
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(5.dp))
+                // A load indicator, not a badge: the count matters up to a
+                // glanceable few, beyond that only "a lot" does. The slot keeps
+                // its height when empty — otherwise only the tiles that carry a
+                // number grow, and the strip comes out ragged.
+                Box(Modifier.height(14.dp), contentAlignment = Alignment.Center) {
+                    if (load > 0) {
+                        Text(
+                            if (load > 9) "9+" else load.toString(),
+                            color = if (isSelected) Color.White else deck.accent,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Picking a date without a calendar dialog.
+ *
+ * A deck task is due today, tomorrow, or later this week — almost never on a
+ * date worth two taps and a modal. The four chips cover that, and clearing is
+ * one of them rather than a hidden gesture.
+ */
+@Composable
+fun DueChips(selected: LocalDate?, today: LocalDate, onPick: (LocalDate?) -> Unit) {
+    val options = listOf<Pair<String, LocalDate?>>(
+        "Heute" to today,
+        "Morgen" to today.plusDays(1),
+        "Diese Woche" to today.plusDays((7 - today.dayOfWeek.value).coerceAtLeast(1).toLong()),
+        "Kein Termin" to null,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.forEach { (label, date) ->
+            val isSelected = selected == date
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(DeckMetrics.chipRadius))
+                    .background(if (isSelected) LocalDeck.current.accentSoft else LocalDeck.current.surfaceRaised)
+                    .clickable { onPick(date) }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            ) {
+                Text(
+                    label,
+                    color = if (isSelected) LocalDeck.current.accent else LocalDeck.current.textFaint,
+                    fontSize = 12.sp,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * An attachment as it actually looks.
+ *
+ * Images carry their own preview; anything else keeps the icon. The URL points
+ * at Buzz's Blossom store, which is only reachable inside the tailnet — a
+ * failed load therefore has to degrade to the icon rather than to a broken
+ * image, because "not on the network right now" is the normal case.
+ */
+@Composable
+fun AttachmentTile(attachment: Attachment, size: Int = 64) {
+    val deck = LocalDeck.current
+    val shape = RoundedCornerShape(16.dp)
+    Box(
+        Modifier
+            .size(size.dp)
+            .clip(shape)
+            .background(deck.surfaceRaised)
+            .border(1.dp, deck.outline, shape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (attachment.isImage) {
+            AsyncImage(
+                model = attachment.url,
+                contentDescription = attachment.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+                error = rememberVectorPainter(Icons.Filled.Share),
+                placeholder = rememberVectorPainter(Icons.Filled.Share),
+            )
+        } else {
+            Icon(
+                Icons.Filled.Share,
+                contentDescription = null,
+                tint = deck.textSecondary,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
 
 /** A raised panel: slightly lighter than the ground, hairline edge, big radius. */
 @Composable

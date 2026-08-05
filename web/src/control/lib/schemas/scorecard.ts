@@ -2,8 +2,11 @@ import { z } from "zod";
 import { epochSeconds, nullableNumber } from "./common";
 
 const ScoreRateSchema = z.object({
-  runs: z.coerce.number().catch(0),
-  approved: z.coerce.number().catch(0),
+  // The scorecard's decision counters come from one aggregate.  A malformed
+  // value must fail the response parse (and render the loader error), not
+  // impersonate a real zero-count scorecard; see costsUsage.ts counters.
+  runs: z.coerce.number(),
+  approved: z.coerce.number(),
   approval_rate: z.coerce.number().nullable().catch(null),
 });
 const ScoreGroupSchema = ScoreRateSchema.extend({ name: z.string().catch("unknown") });

@@ -2,6 +2,7 @@ package net.hermes.deck.net
 
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.BuzzAgent
 import okhttp3.Cookie
 import okhttp3.CookieJar
@@ -76,14 +77,28 @@ class HermesClient(
         }
     }
 
-    fun agents(): List<BuzzAgent> {
+    fun agents(): HermesPayloads.AgentsSnapshot {
         val json = getJson("/api/buzz/agents")
-        val array = when {
-            json.has("agents") -> json.getJSONArray("agents")
-            else -> JSONArray(json.optString("_raw", "[]"))
+        if (!json.has("agents")) {
+            // Older dashboards answered with a bare array, which `getJson`
+            // parks under `_raw`; it carries no heartbeat, and saying so beats
+            // rendering every agent as quiet.
+            val array = JSONArray(json.optString("_raw", "[]"))
+            return HermesPayloads.AgentsSnapshot(
+                agents = (0 until array.length()).mapNotNull {
+                    array.optJSONObject(it)?.let(BuzzAgent::fromJson)
+                },
+                windowSeconds = 3600,
+                recentSeconds = 300,
+                heartbeatError = "Das Dashboard meldet noch keine Aktivität.",
+            )
         }
-        return (0 until array.length()).map { BuzzAgent.fromJson(array.getJSONObject(it)) }
+        return HermesPayloads.agentsSnapshot(json)
     }
+
+    /** Subscription budgets per provider; empty when the dashboard reports none. */
+    fun accountUsage(): List<AccountUsage> =
+        AccountUsage.listFromJson(getJson("/api/account-usage"))
 
     fun availableModels(stem: String): HermesPayloads.ModelChoices =
         HermesPayloads.modelChoices(getJson("/api/buzz/agents/$stem/models"))

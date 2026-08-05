@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import net.hermes.deck.data.displayNameOf
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.ui.CaptureSheet
 import net.hermes.deck.ui.HermesDeckTheme
@@ -72,7 +73,7 @@ class ShareCaptureActivity : ComponentActivity() {
                                 uploadError = "Eine geteilte Datei war nicht lesbar."
                                 continue
                             }
-                            viewModel.uploadAttachment(bytes, mime, fileNameOf(uri))
+                            viewModel.uploadAttachment(bytes, mime, contentResolver.displayNameOf(uri, "geteilt"))
                                 .onSuccess { collected.add(it) }
                                 .onFailure { uploadError = it.message ?: "Upload fehlgeschlagen" }
                         }
@@ -142,7 +143,4 @@ class ShareCaptureActivity : ComponentActivity() {
         } else {
             intent.getParcelableArrayListExtra<Uri>(name).orEmpty()
         }
-
-    private fun fileNameOf(uri: Uri): String =
-        uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "geteilt"
 }

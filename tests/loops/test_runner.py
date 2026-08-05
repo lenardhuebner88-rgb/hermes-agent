@@ -4237,6 +4237,21 @@ def test_read_ledger_stats_tolerates_malformed_lines(tmp_path):
     assert stats["fails_by_kind"] == {"build_fail": 1}
 
 
+def test_read_ledger_stats_logs_malformed_lines_before_skipping(tmp_path, caplog):
+    """A torn append must not masquerade as a clean, smaller ledger."""
+    state_dir = tmp_path / "torn-ledger"
+    state_dir.mkdir()
+    (state_dir / "ledger.jsonl").write_text(
+        '{"round": 7, "verdict": "fail"\n', encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=runner_module.__name__):
+        stats = read_ledger_stats(state_dir)
+
+    assert stats["rounds"] == 0
+    assert any("malformed ledger event" in record.message for record in caplog.records)
+
+
 def test_read_ledger_stats_missing_file_returns_zeroed(tmp_path):
     stats = read_ledger_stats(tmp_path / "nicht-vorhanden")
     assert stats == {
@@ -4553,6 +4568,102 @@ def test_plan_stop_reaches_the_unit_as_nonzero_exit(tmp_path, fake_engine, monke
     assert rc != 0, "Plan-Abbruch muss die Unit rot machen, nicht gruen"
     assert rc == 3, f"ABBRUCH-Pfad liefert 3, got {rc}"
     assert calls.count("plan") == 2, f"erwartet 2x plan (1 Retry), got {calls}"
+
+
+def test_guard_clean_failure_is_loud_for_non_autoland(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Ein fehlender Worktree muss Ledger, Notify und roten Unit-Exit liefern.
+
+    ``ensure_wt`` wird nur an der Prozessgrenze ausgeschaltet, damit die echte
+    ``guard_clean``-Fehlerform (Worktree fehlt) durch ``cmd_night`` und ``main``
+    läuft. Das Pack hat bewusst kein Autoland: genau dort wurde der Fehler bis
+    2026-08-05 als erfolgreicher systemd-Lauf gemeldet.
+    """
+    _, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "guard-stop-rc", "pipeline", repo)
+    pack = runner_module.load_pack(tmp_path / "packs", "guard-stop-rc")
+    assert pack.autoland is False, "Fixture muss den Mehrheitsfall abbilden"
+
+    notifies: list[str] = []
+    monkeypatch.setattr(
+        runner_module.LoopRunner, "ensure_wt", lambda self, fresh=False: None
+    )
+    monkeypatch.setattr(
+        runner_module.LoopRunner, "notify", lambda self, msg: notifies.append(msg)
+    )
+
+    rc = runner_module.main([
+        "--pack", "guard-stop-rc",
+        "--cmd", "night",
+        "--skip-plan",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == 3, f"guard_clean-Abbruch muss den RuntimeError-Pfad liefern, got {rc}"
+    assert calls == [], "Vor dem Guard-Abbruch darf keine Engine-Phase starten"
+    ledger_lines = (
+        tmp_path / "state" / "guard-stop-rc" / "LEDGER.md"
+    ).read_text(encoding="utf-8").splitlines()
+    assert len(ledger_lines) == 1, ledger_lines
+    assert "GUARD-CLEAN" in ledger_lines[0]
+    assert "Worktree fehlt" in ledger_lines[0]
+    assert len(notifies) == 1, notifies
+    assert "GUARD-CLEAN" in notifies[0]
+    assert "Worktree fehlt" in notifies[0]
+
+
+@pytest.mark.parametrize(
+    ("night_ok", "expected_rc"),
+    [(True, 0), (False, 4)],
+)
+def test_non_autoland_night_exit_follows_result(
+    tmp_path, fake_engine, monkeypatch, night_ok, expected_rc
+):
+    """Review-Packs bleiben bei Erfolg grün, verschlucken aber kein False mehr."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "review-exit", "pipeline", repo)
+    monkeypatch.setattr(
+        runner_module.LoopRunner,
+        "cmd_night",
+        lambda self, fresh=False, skip_plan=False: night_ok,
+    )
+
+    rc = runner_module.main([
+        "--pack", "review-exit",
+        "--cmd", "night",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == expected_rc
+
+
+@pytest.mark.parametrize(
+    ("night_ok", "expected_rc"),
+    [(True, 0), (False, 4)],
+)
+def test_autoland_night_exit_contract_is_unchanged(
+    tmp_path, fake_engine, monkeypatch, night_ok, expected_rc
+):
+    """Der vorhandene Autoland-Vertrag bleibt Erfolg=0, Fehlausgang=4."""
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner_module.LoopRunner,
+        "cmd_night",
+        lambda self, fresh=False, skip_plan=False: night_ok,
+    )
+
+    rc = runner_module.main([
+        "--pack", pack.name,
+        "--cmd", "night",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+
+    assert rc == expected_rc
 
 
 def test_cmd_night_dry_zero_plans_no_retry(tmp_path, fake_engine, monkeypatch):
@@ -4882,6 +4993,22 @@ def test_dry_streak_escalates_from_third_night(tmp_path, fake_engine, monkeypatc
     assert runner.ledger_path.read_text(encoding="utf-8").count("DRY-STREAK:") == 2
     assert calls.count("plan") == 4
     assert "build" not in calls
+
+
+def test_dry_streak_malformed_state_is_logged_before_zeroing(
+    tmp_path, fake_engine, monkeypatch, caplog
+):
+    """A truncated persistent counter must not masquerade as a first DRY night."""
+    _behaviors, _calls, runner, _notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-streak-malformed"
+    )
+    runner.state.mkdir(parents=True, exist_ok=True)
+    runner.dry_streak_path.write_text('{"streak":', encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert runner._read_dry_streak() == 0
+
+    assert any("dry-streak read failed" in record.message for record in caplog.records)
 
 
 def test_dry_streak_resets_on_non_dry_end(tmp_path, fake_engine, monkeypatch):

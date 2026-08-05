@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
@@ -41,6 +43,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -48,12 +56,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import net.hermes.deck.DeckViewModel
+import kotlin.math.roundToInt
+import net.hermes.deck.model.AccountUsage
+import net.hermes.deck.model.AgentActivity
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.TaskStatus
 
 @Composable
-fun ProjectsScreen(viewModel: DeckViewModel, onOpenTask: (DeckTask) -> Unit) {
+fun ProjectsScreen(viewModel: DeckViewModel, onOpenProject: (String) -> Unit) {
     val deck = LocalDeck.current
     val snapshot by viewModel.snapshot.collectAsState()
 
@@ -83,7 +94,10 @@ fun ProjectsScreen(viewModel: DeckViewModel, onOpenTask: (DeckTask) -> Unit) {
             val open = tasks.count { !it.status.isClosed }
             GlassCard(
                 modifier = Modifier.fillMaxWidth(),
-                onClick = { viewModel.setFilterChannel(channel.id) },
+                // Setting the filter alone left the user right here, on an
+                // unchanged list: the filtered result lives on the deck tab,
+                // so the tap has to go there too or it reads as a dead card.
+                onClick = { onOpenProject(channel.id) },
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -181,6 +195,52 @@ fun AgentsScreen(viewModel: DeckViewModel) {
             }
         }
 
+        if (state.usage.isNotEmpty() || state.usageError != null) {
+            item {
+                Text(
+                    "Verbrauch",
+                    color = deck.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            state.usageError?.let { error ->
+                item {
+                    GlassCard(Modifier.fillMaxWidth()) {
+                        Text(error, color = deck.warning, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.height(DeckMetrics.gap))
+                }
+            }
+            items(state.usage, key = { "usage-${it.provider}" }) { usage ->
+                UsageCard(usage)
+                Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
+            }
+            item {
+                Spacer(Modifier.height(DeckMetrics.gap))
+                Text(
+                    "Agenten",
+                    color = deck.textSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+        }
+
+        // Shown above the cards, not inside them: when the journal is
+        // unreadable every dot below is uninformative, and a per-card hint
+        // would repeat eight times while still looking like eight verdicts.
+        state.heartbeatError?.let { error ->
+            item {
+                GlassCard(Modifier.fillMaxWidth()) {
+                    Text(error, color = deck.warning, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(DeckMetrics.gap))
+            }
+        }
+
         if (state.agents.isEmpty() && state.error == null) {
             item { EmptyHint(if (state.loading) "Lädt …" else "Keine Agenten gemeldet") }
         }
@@ -193,6 +253,8 @@ fun AgentsScreen(viewModel: DeckViewModel) {
                 modelsError = if (expanded == agent.stem) state.modelsError else null,
                 modelsLoading = expanded == agent.stem && state.modelsLoading,
                 busy = state.busyStem == agent.stem,
+                windowSeconds = state.heartbeatWindowSeconds,
+                recentSeconds = state.heartbeatRecentSeconds,
                 onToggle = {
                     expanded = if (expanded == agent.stem) null else agent.stem
                     if (expanded == agent.stem) viewModel.loadModels(agent.stem)
@@ -206,6 +268,138 @@ fun AgentsScreen(viewModel: DeckViewModel) {
     }
 }
 
+/** Green below 60 %, amber to 85 %, red above — the point where a run dies. */
+@Composable
+private fun usageTint(percent: Double?): Color {
+    val deck = LocalDeck.current
+    return when {
+        percent == null -> deck.textFaint
+        percent >= 85 -> deck.danger
+        percent >= 60 -> deck.warning
+        else -> deck.success
+    }
+}
+
+@Composable
+private fun UsageCard(usage: AccountUsage) {
+    val deck = LocalDeck.current
+    GlassCard(Modifier.fillMaxWidth()) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    usage.displayName,
+                    color = deck.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                usage.plan?.let {
+                    Text(it, color = deck.textFaint, fontSize = 11.sp)
+                }
+            }
+
+            if (!usage.available) {
+                Spacer(Modifier.height(6.dp))
+                // No bar and no zero: an unavailable budget is unknown, and a
+                // 0 % bar would read as "plenty left".
+                Text(
+                    usage.unavailableReason ?: "Verbrauch nicht gemeldet",
+                    color = deck.warning,
+                    fontSize = 11.sp,
+                )
+            }
+
+            usage.windows.forEach { window ->
+                Spacer(Modifier.height(8.dp))
+                val tint = usageTint(window.usedPercent)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        window.label,
+                        color = deck.textSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        window.usedPercent?.let { "${it.roundToInt()} %" } ?: "unbekannt",
+                        color = tint,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(deck.accentSoft),
+                ) {
+                    window.usedPercent?.let { percent ->
+                        Box(
+                            Modifier
+                                .fillMaxWidth((percent / 100.0).toFloat().coerceIn(0f, 1f))
+                                .height(5.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(tint),
+                        )
+                    }
+                }
+            }
+
+            if (usage.details.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    usage.details.joinToString(" · "),
+                    color = deck.textFaint,
+                    fontSize = 11.sp,
+                )
+            }
+
+            if (usage.isStale) {
+                Spacer(Modifier.height(6.dp))
+                // The endpoint served a persisted or cached value because the
+                // live fetch did not land. Saying so is the whole difference
+                // between a number and a believable number.
+                Text(
+                    "Zwischenspeicher — nicht frisch gemessen",
+                    color = deck.warning,
+                    fontSize = 10.sp,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The status dot, which pulses only while the agent is actually making tool
+ * calls. Motion is reserved for that one state on purpose: it is the only
+ * claim on the card that is worth an eye-catch, and a dot that always pulsed
+ * would be the old always-green dot with extra steps.
+ */
+@Composable
+private fun HeartbeatDot(tint: Color, beating: Boolean) {
+    val alpha = if (beating) {
+        val transition = rememberInfiniteTransition(label = "heartbeat")
+        transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.25f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "heartbeatAlpha",
+        ).value
+    } else {
+        1f
+    }
+    Box(
+        Modifier
+            .size(9.dp)
+            .clip(CircleShape)
+            .background(tint.copy(alpha = alpha)),
+    )
+}
+
 @Composable
 private fun AgentCard(
     agent: BuzzAgent,
@@ -214,14 +408,21 @@ private fun AgentCard(
     modelsError: String?,
     modelsLoading: Boolean,
     busy: Boolean,
+    windowSeconds: Int,
+    recentSeconds: Int,
     onToggle: () -> Unit,
     onPick: (String) -> Unit,
 ) {
     val deck = LocalDeck.current
-    val stateTint = when {
-        agent.isRunning -> deck.success
-        agent.isFailed -> deck.danger
-        else -> deck.textFaint
+    val activity = AgentActivity.of(agent, windowSeconds, recentSeconds)
+    // The dot used to be green whenever systemd held the unit up, which made
+    // eight green dots out of four working agents. It now follows the work.
+    val stateTint = when (activity.state) {
+        AgentActivity.State.WORKING -> deck.success
+        AgentActivity.State.RECENT -> deck.accent
+        AgentActivity.State.QUIET -> deck.textFaint
+        AgentActivity.State.FAILED -> deck.danger
+        AgentActivity.State.UNKNOWN -> deck.warning
     }
     GlassCard(Modifier.fillMaxWidth(), onClick = onToggle) {
         Column {
@@ -238,14 +439,16 @@ private fun AgentCard(
                     Spacer(Modifier.height(2.dp))
                     Text(agent.model, color = deck.accent, fontSize = 12.sp)
                 }
-                Box(
-                    Modifier
-                        .size(9.dp)
-                        .clip(CircleShape)
-                        .background(stateTint),
-                )
+                HeartbeatDot(stateTint, beating = activity.state == AgentActivity.State.WORKING)
             }
             Spacer(Modifier.height(8.dp))
+            Text(
+                activity.label,
+                color = stateTint,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.height(3.dp))
             Text(
                 // The start time is the honest part: a changed model only takes
                 // effect from the next start, so both are shown together.
@@ -523,6 +726,13 @@ fun SheetScaffold(title: String, onDismiss: () -> Unit, content: @Composable () 
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                // Without these the sheet keeps its full height behind the
+                // keyboard: project, priority, attachments and the submit
+                // button all sit underneath it and scrolling does not help,
+                // because there is nothing to scroll — the content fits the
+                // sheet, the sheet just is not on screen.
+                .navigationBarsPadding()
+                .imePadding()
                 .heightIn(max = 620.dp)
                 .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
                 .background(deck.background)

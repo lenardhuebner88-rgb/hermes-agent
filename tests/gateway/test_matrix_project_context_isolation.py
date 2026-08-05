@@ -383,6 +383,20 @@ async def test_matrix_status_reports_current_matrix_room_scope():
 
 
 @pytest.mark.asyncio
+async def test_matrix_status_marks_malformed_persisted_token_totals_unavailable():
+    """A malformed SessionDB token value must not be reported as zero usage."""
+    source = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
+    entry = _entry(source, "session-b", "Project B Plan")
+    runner = _make_runner(source, [entry])
+    runner._session_db.get_session = AsyncMock(return_value={"input_tokens": "unknown"})
+
+    result = await runner._handle_status_command(_event("/status", source))
+
+    assert "**Cumulative API tokens (re-sent each call):** unavailable" in result
+    assert "**Cumulative API tokens (re-sent each call):** 0" not in result
+
+
+@pytest.mark.asyncio
 async def test_matrix_resume_does_not_cross_rooms_by_default():
     source_a = _make_matrix_source(PROJECT_A_ROOM_ID, PROJECT_A_NAME, PROJECT_A_TOPIC)
     source_b = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)

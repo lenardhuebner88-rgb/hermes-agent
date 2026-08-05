@@ -754,6 +754,21 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers).toHaveLength(1);
     expect(parsed.workers[0].liveness_state).toBeUndefined();
   });
+
+  it("marks an unknown worker task state as unknown instead of claiming it is running", () => {
+    const parsed = parseOrThrow(WorkersResponseSchema, {
+      count: 1,
+      checked_at: 10,
+      workers: [{
+        run_id: 382, task_id: "t_new_state", task_title: "future state", task_status: "waiting_for_operator",
+        task_assignee: "coder", profile: "coder", worker_pid: 123, started_at: 1,
+        claim_lock: "l", claim_expires: 20, last_heartbeat_at: 2, max_runtime_seconds: 3600,
+        run_status: "running", run_outcome: null, block_reason: null,
+      }],
+    }, "workers/active");
+
+    expect(parsed.workers[0].task_status).toBe("unknown");
+  });
 });
 
 

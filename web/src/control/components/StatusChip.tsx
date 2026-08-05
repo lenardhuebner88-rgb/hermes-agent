@@ -47,7 +47,7 @@ function dotColor(tone: ToneName): string {
     case "emerald":
       return "var(--color-status-ok)";
     case "cyan":
-      return "var(--color-live)";
+      return "var(--color-brand)";
     default:
       return "var(--color-ink-3)";
   }
@@ -79,8 +79,8 @@ function chipTint(tone: ToneName): { className: string; style?: React.CSSPropert
       };
     case "cyan":
       return {
-        className: "border-live/25",
-        style: { backgroundColor: "color-mix(in srgb, var(--color-live) 12%, var(--color-surface-2))" },
+        className: "border-brand/25",
+        style: { backgroundColor: "color-mix(in srgb, var(--color-brand) 12%, var(--color-surface-2))" },
       };
     default:
       return { className: "border-line bg-surface-2" };

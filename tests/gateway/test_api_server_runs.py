@@ -882,8 +882,8 @@ class TestStopRun:
                 assert stop_resp.status == 404
 
     @pytest.mark.asyncio
-    async def test_stop_interrupt_exception_does_not_crash(self, adapter):
-        """If agent.interrupt() raises, stop should still succeed."""
+    async def test_stop_interrupt_exception_is_reported(self, adapter):
+        """A failed stop must not claim that the run is stopping."""
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(adapter, "_create_agent") as mock_create:
@@ -909,9 +909,10 @@ class TestStopRun:
                 await asyncio.sleep(0.1)
 
                 stop_resp = await cli.post(f"/v1/runs/{run_id}/stop")
-                assert stop_resp.status == 200
+                assert stop_resp.status == 500
                 stop_data = await stop_resp.json()
-                assert stop_data["status"] == "stopping"
+                assert stop_data["error"]["code"] == "run_stop_failed"
+                assert stop_data["error"]["message"] == "interrupt failed"
 
     @pytest.mark.asyncio
     async def test_stop_sends_sentinel_to_events_stream(self, adapter):
