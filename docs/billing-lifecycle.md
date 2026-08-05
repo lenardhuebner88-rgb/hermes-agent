@@ -62,11 +62,20 @@ Source: `renderBillingError` in `ui-tui/src/app/slash/commands/topup.ts:37-149`.
 
 ## 3. Charge settlement outcomes (`pollCharge` / `renderChargeFailed`)
 
-Source: `pollCharge` (`ui-tui/src/app/slash/commands/topup.ts:170-258`) and
-`renderChargeFailed` (`:260-290`). Poll cadence: 2s interval, 5-minute cap
-(`POLL_INTERVAL_MS=2000`, `POLL_CAP_MS=5*60*1000`), applied on **every**
-non-terminal path (pending *and* throttled), so a sustained 429/503 can't
-keep the poll alive forever.
+Source: the polling loop itself is **not** in `topup.ts` any more — it lives in
+the shared, UI-agnostic `driveChargeSettlement` in
+`apps/shared/src/charge-settlement.ts`, which returns a `SettlementOutcome`
+(`settled` / `failed` / `refused` / `ambiguous` / `timed_out` / `cancelled`).
+`pollCharge` and `renderChargeFailed` in
+`ui-tui/src/app/slash/commands/topup.ts` only *render* that outcome.
+
+Poll cadence: 2s interval, 5-minute cap — the constants are
+`SETTLEMENT_POLL_INTERVAL_MS = 2000` and `SETTLEMENT_POLL_CAP_MS = 5 * 60 * 1000`
+(exported from `charge-settlement.ts`; there is no `POLL_INTERVAL_MS` /
+`POLL_CAP_MS`). The cap is checked on **every** non-terminal path (pending
+*and* throttled), so a sustained 429/503 can't keep the poll alive forever.
+The throttle back-off is `min((retry_after ?? 5) * 1000,
+SETTLEMENT_MAX_RETRY_AFTER_MS = 30000)`.
 
 | Outcome | Copy | Notes |
 |---|---|---|
