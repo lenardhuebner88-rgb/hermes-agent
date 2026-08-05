@@ -9,7 +9,9 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import net.hermes.deck.model.AccountUsage
+import net.hermes.deck.model.BuzzLink
 import net.hermes.deck.model.ControlSummary
+import net.hermes.deck.model.Mention
 import net.hermes.deck.model.ThreadActivity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -54,7 +56,11 @@ class ControlCardTest {
         delivery = ControlSummary.Delivery(pending, lastSyncAt, failure, syncing),
     )
 
-    private fun show(summary: ControlSummary, onOverdue: () -> Unit = {}) {
+    private fun show(
+        summary: ControlSummary,
+        onOverdue: () -> Unit = {},
+        onMentions: () -> Unit = {},
+    ) {
         compose.setContent {
             HermesDeckTheme {
                 ControlCard(
@@ -62,6 +68,7 @@ class ControlCardTest {
                     onShowDecisions = {},
                     onShowOverdue = onOverdue,
                     onShowToday = {},
+                    onShowMentions = onMentions,
                     onSync = {},
                 )
             }
@@ -276,6 +283,63 @@ class ControlCardTest {
             "Die volle Karte misst ${cardHeightDp.toInt()} dp und sprengt die Vorgabe von 320 dp",
             cardHeightDp <= 320f,
         )
+    }
+
+    @Test
+    fun theMentionChipOpensTheListInsteadOfSittingThereDead() {
+        var opened = 0
+        show(summary(mentions = 10), onMentions = { opened++ })
+
+        compose.onNodeWithText("Erwähnt").assertIsDisplayed()
+        compose.onNodeWithText("Erwähnt").performClick()
+        assertEquals("Der Chip muss die Liste öffnen", 1, opened)
+    }
+
+    @Test
+    fun theMentionsSheetShowsEachMentionAndHandsOutTheRightLink() {
+        // Asserted on the link STRING, not on "a callback fired": the latter is
+        // green for any link at all, including one that sends Buzz to the wrong
+        // place. The reply-only e-tag case is the one that was wrong in review.
+        val root = "r".repeat(64)
+        val entry = Mention.Entry(
+            eventId = "e".repeat(64),
+            channelId = "57005de3-cc8d-47fb-a799-cb0cfbd01e2e",
+            threadRootId = root,
+            channelName = "hermes-control",
+            authorPubkey = "b".repeat(64),
+            authorLabel = "Dirigent",
+            text = "Kannst du das freigeben?",
+            at = System.currentTimeMillis() / 1000 - 300,
+        )
+        var link: String? = null
+        compose.setContent {
+            HermesDeckTheme {
+                MentionsSheet(
+                    mentions = listOf(entry),
+                    onOpen = { link = BuzzLink.message(it.channelId, it.eventId, it.threadRootId) },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Dirigent").assertIsDisplayed()
+        compose.onNodeWithText("· hermes-control").assertIsDisplayed()
+        compose.onNodeWithText("Kannst du das freigeben?").assertIsDisplayed()
+
+        compose.onNodeWithText("Kannst du das freigeben?").performClick()
+        assertEquals(
+            "buzz://message?channel=${entry.channelId}&id=${entry.eventId}&thread=$root",
+            link,
+        )
+    }
+
+    @Test
+    fun anEmptyMentionsSheetSaysSoRatherThanRenderingBlank() {
+        compose.setContent {
+            HermesDeckTheme { MentionsSheet(mentions = emptyList(), onOpen = {}, onDismiss = {}) }
+        }
+
+        compose.onNodeWithText("Nichts Unbeantwortetes mehr.").assertIsDisplayed()
     }
 
     @Test

@@ -54,6 +54,7 @@ import net.hermes.deck.data.displayNameOf
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.DeckTask
 import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.Mention
 import net.hermes.deck.model.TaskPriority
 
 @Composable
@@ -475,5 +476,80 @@ private fun MultilineField(
             cursorBrush = deck.accentBrush,
             modifier = Modifier.fillMaxWidth().heightIn(min = minHeight.dp),
         )
+    }
+}
+
+/**
+ * The mentions still waiting, each one a doorway into Buzz.
+ *
+ * The chip above this sheet carries a *count*, and a count cannot jump to one
+ * message — so the choice has to be visible. Each row hands its message to Buzz
+ * and nothing more: reading the conversation is Buzz's job and it is better at
+ * it, which is the same line every feature in this app is drawn along.
+ */
+@Composable
+fun MentionsSheet(
+    mentions: List<Mention.Entry>,
+    onOpen: (Mention.Entry) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val deck = LocalDeck.current
+    SheetScaffold(title = "Erwähnt", onDismiss = onDismiss) {
+        if (mentions.isEmpty()) {
+            // Reachable: the chip renders off a snapshot, and a sync in between
+            // can empty the list. Saying so beats an empty sheet that reads like
+            // a broken one.
+            Text(
+                "Nichts Unbeantwortetes mehr.",
+                color = deck.textSecondary,
+                fontSize = 13.sp,
+            )
+            return@SheetScaffold
+        }
+        Text(
+            "Antippen öffnet die Stelle in Buzz.",
+            color = deck.textFaint,
+            fontSize = 11.sp,
+        )
+        Spacer(Modifier.height(10.dp))
+        mentions.forEach { entry ->
+            GlassCard(Modifier.fillMaxWidth(), onClick = { onOpen(entry) }) {
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        InitialBadge(entry.authorLabel, entry.authorPubkey, size = 24)
+                        Spacer(Modifier.width(9.dp))
+                        Text(
+                            entry.authorLabel,
+                            color = deck.textPrimary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            "· ${entry.channelName}",
+                            color = deck.textFaint,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(relativeTime(entry.at), color = deck.textFaint, fontSize = 11.sp)
+                    }
+                    if (entry.text.isNotBlank()) {
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            entry.text,
+                            color = deck.textSecondary,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(DeckMetrics.gap - 2.dp))
+        }
     }
 }

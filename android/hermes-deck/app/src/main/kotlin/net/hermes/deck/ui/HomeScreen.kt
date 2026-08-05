@@ -36,8 +36,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -48,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 import net.hermes.deck.DeckViewModel
+import net.hermes.deck.model.BuzzLink
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.ControlSummary
 import net.hermes.deck.model.DeckTask
@@ -69,6 +74,8 @@ fun HomeScreen(
     val dueFilter by viewModel.filterDue.collectAsState()
     val decisions by viewModel.decisions.collectAsState()
     val agentsState by viewModel.agents.collectAsState()
+    val context = LocalContext.current
+    var showMentions by remember { mutableStateOf(false) }
 
     // Decisions live in ordinary channel chatter, so they can only be found by
     // scanning; do it once per screen entry rather than on every recomposition.
@@ -100,6 +107,9 @@ fun HomeScreen(
     // not freeze at whatever second the last sync ran.
     val now = System.currentTimeMillis() / 1000
     val activeThreads = viewModel.activeThreads(snapshot, now)
+    // One derivation for the chip and the sheet behind it: a chip that says 10
+    // over a list of 8 is a defect nobody notices until it matters.
+    val mentions = viewModel.mentions(snapshot)
     val syncFailure = (syncState as? net.hermes.deck.data.DeckRepository.SyncState.Failed)?.reason
     val summary = ControlSummary.of(
         tasks = snapshot.tasks,
@@ -109,7 +119,7 @@ fun HomeScreen(
         usage = agentsState.usage,
         activeThreads = activeThreads,
         decisions = decisions.size,
-        mentions = viewModel.mentionCount(snapshot),
+        mentions = mentions.size,
         today = today,
         pending = snapshot.pendingCount,
         lastSyncAt = snapshot.lastSyncAt,
@@ -153,6 +163,7 @@ fun HomeScreen(
                     viewModel.setFilterChannel(null)
                     viewModel.setFilterDue(today)
                 },
+                onShowMentions = { showMentions = true },
                 onSync = { viewModel.sync() },
             )
             Spacer(Modifier.height(DeckMetrics.gap + 8.dp))
@@ -351,6 +362,18 @@ fun HomeScreen(
         }
 
         item { Spacer(Modifier.height(bottomBarSpace)) }
+    }
+
+    if (showMentions) {
+        MentionsSheet(
+            mentions = mentions,
+            onOpen = { entry ->
+                val link = BuzzLink.message(entry.channelId, entry.eventId, entry.threadRootId)
+                openInBuzz(context, link)?.let { viewModel.say(it) }
+                showMentions = false
+            },
+            onDismiss = { showMentions = false },
+        )
     }
 }
 
