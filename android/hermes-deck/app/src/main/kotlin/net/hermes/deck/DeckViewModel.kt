@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
+import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +19,8 @@ import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
 import net.hermes.deck.model.DeckTask
+import net.hermes.deck.model.DueDates
+import net.hermes.deck.model.TaskFilter
 import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
 import net.hermes.deck.net.HermesClient
@@ -48,6 +51,9 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _search = MutableStateFlow("")
     val search: StateFlow<String> = _search.asStateFlow()
+
+    private val _filterDue = MutableStateFlow<LocalDate?>(null)
+    val filterDue: StateFlow<LocalDate?> = _filterDue.asStateFlow()
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -129,6 +135,11 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         _search.value = text
     }
 
+    /** Tapping the selected day again clears it — a day tile is a toggle. */
+    fun setFilterDue(date: LocalDate?) {
+        _filterDue.value = if (_filterDue.value == date) null else date
+    }
+
     fun dismissMessage() {
         _message.value = null
     }
@@ -141,19 +152,22 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         repository.sync()?.let { _message.value = it }
     }
 
-    /** The list the deck screen shows, after the channel filter and search. */
-    fun visibleTasks(tasks: List<DeckTask>): List<DeckTask> {
-        val channel = _filterChannel.value
-        val needle = _search.value.trim().lowercase()
-        return tasks.asSequence()
-            .filter { channel == null || it.channelId == channel }
-            .filter {
-                needle.isEmpty() ||
-                    it.title.lowercase().contains(needle) ||
-                    it.body.lowercase().contains(needle)
-            }
-            .toList()
-    }
+    /**
+     * The list the deck screen shows, after the channel filter and search.
+     *
+     * Filter and needle are parameters, not reads of [_filterChannel] and
+     * [_search]. Reading the flows in here made the function invisible to
+     * Compose: the screen recomposed — the approvals section correctly
+     * disappeared as soon as the field held text — while this list kept its
+     * pre-search contents. Typing looked like it did nothing, and no test
+     * could see it, because called directly the function filtered fine.
+     */
+    fun visibleTasks(
+        tasks: List<DeckTask>,
+        channel: String?,
+        search: String,
+        due: LocalDate?,
+    ): List<DeckTask> = TaskFilter.apply(tasks, channel, search, due)
 
     fun capture(
         channelId: String,
@@ -161,25 +175,45 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         body: String,
         priority: TaskPriority,
         attachments: List<Attachment>,
-        onDone: (DeckTask) -> Unit = {},
+        due: String? = null,
+        /**
+         * Runs once the note is signed, stored and pushed — success or not.
+         * Callers that tear down their host (the share activity) must wait for
+         * this before finishing, otherwise the cancelled scope drops the note.
+         */
+        onSettled: () -> Unit = {},
     ) = viewModelScope.launch {
-        runCatching {
-            repository.capture(
-                channelId = channelId,
-                title = title,
-                body = body,
-                priority = priority,
-                attachments = attachments,
-            )
-        }.onSuccess { task ->
-            onDone(task)
-            val pending = repository.pushPending()
-            _message.value = if (pending == 0) {
-                "In Buzz abgelegt."
-            } else {
-                "Lokal gesichert — $pending wartet auf Verbindung."
+        try {
+            runCatching {
+                repository.capture(
+                    channelId = channelId,
+                    title = title,
+                    body = body,
+                    priority = priority,
+                    attachments = attachments,
+                    due = due,
+                )
+            }.onSuccess {
+                val pending = repository.pushPending()
+                _message.value = if (pending == 0) {
+                    "In Buzz abgelegt."
+                } else {
+                    "Lokal gesichert — $pending wartet auf Verbindung."
+                }
+            }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+        } finally {
+            onSettled()
+        }
+    }
+
+    /** `null` clears the date; the edit goes out as a `kind:40003` like any other. */
+    fun setDue(task: DeckTask, date: LocalDate?) = viewModelScope.launch {
+        runCatching { repository.update(task.copy(due = date?.let { DueDates.format(it) })) }
+            .onSuccess {
+                repository.pushPending()
+                _message.value = if (date == null) "Termin entfernt." else "Fällig ${DueDates.format(date)}."
             }
-        }.onFailure { _message.value = it.message ?: "Konnte nicht gespeichert werden." }
+            .onFailure { _message.value = it.message ?: "Termin nicht gesetzt." }
     }
 
     fun setStatus(task: DeckTask, status: TaskStatus) = viewModelScope.launch {

@@ -95,7 +95,10 @@ fun DeckApp(viewModel: DeckViewModel) {
                 onOpenTask = { openTask = it },
                 onOpenSettings = { tab = DeckTab.SETTINGS },
             )
-            DeckTab.PROJECTS -> ProjectsScreen(viewModel) { openTask = it }
+            DeckTab.PROJECTS -> ProjectsScreen(viewModel) { channelId ->
+                viewModel.setFilterChannel(channelId)
+                tab = DeckTab.DECK
+            }
             DeckTab.AGENTS -> AgentsScreen(viewModel)
             DeckTab.SETTINGS -> SettingsScreen(viewModel)
         }
