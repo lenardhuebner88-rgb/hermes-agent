@@ -217,13 +217,20 @@ def test_component_shares_carry_tokens_and_cost(tmp_path: Path) -> None:
 
 
 def test_daily_and_trend_respect_window(tmp_path: Path) -> None:
+    # The aggregate refresh restamps captured_at to the REAL write time
+    # (documented semantics), so the second day is whatever calendar day
+    # this test runs on — never a literal. Bracketing the build call keeps
+    # the assertion honest across a midnight rollover mid-test.
+    before_utc = datetime.now(timezone.utc).date().isoformat()
     payload = build_consumption_payload(
         _fact_db(tmp_path), days=30, breakdown="origin", now=NOW
     )
+    after_utc = datetime.now(timezone.utc).date().isoformat()
     days = {entry["day"] for entry in payload["daily"]}
-    # RECENT day + today: the aggregate refresh restamps captured_at to
-    # the real write time (documented semantics), and it is in-window.
-    assert days == {"2026-08-03", "2026-08-04"}
+    # RECENT day + the restamped "today"; OLD is outside every window.
+    assert "2026-08-03" in days
+    assert days - {"2026-08-03"} in ({before_utc}, {after_utc})
+    assert OLD[:10] not in days
     assert payload["trend"]["equivalent_usd_per_day_full"] > 0
     # Same single data day in both windows: the 7d average is 30/7 of the
     # 30d average (denominator convention, documented).
