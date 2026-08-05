@@ -1738,3 +1738,78 @@ def test_prepare_worker_base_recovers_two_revert_cycles(repo):
     assert (worktree / "s1.txt").read_text() == "slice one\n"
     assert (worktree / "s2.txt").read_text() == "slice two\n"
     assert (worktree / "s3.txt").read_text() == "slice three\n"
+
+
+def test_prepare_worker_base_already_landed_when_target_extended_afterwards(repo):
+    """B5: patch-equivalent landing + later target edits must still reset cleanly.
+
+    Blob equality cannot express 'landed': the target moved on, so the blobs
+    differ while every branch-added line is present in the target version.
+    """
+    info = kwt.ensure_worktree(repo, "t_landed_extended")
+    worktree = info["path"]
+    (worktree / "f.txt").write_text("one\ntwo\n")
+    _git(worktree, "add", "f.txt")
+    _git(worktree, "commit", "-m", "branch adds f.txt")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Unrelated commit first: prevents a cherry-pick fast-forward, so the
+    # landing is patch-equivalent (different sha), not literal ancestry.
+    (repo / "unrelated.txt").write_text("u\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "unrelated main work")
+    _git(repo, "cherry-pick", recorded_head)
+    (repo / "f.txt").write_text("one\ntwo\nthree\n")
+    _git(repo, "add", "f.txt")
+    _git(repo, "commit", "-m", "main extends f.txt after the landing")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_landed_extended",
+    )
+
+    assert result["action"] == "already_landed"
+    assert _git(worktree, "rev-parse", "HEAD") == _git(repo, "rev-parse", "main")
+
+
+def test_prepare_worker_base_rebase_absorbed_subset_is_not_a_loss(repo):
+    """B6: a branch commit absorbed as a subset of a target commit is landed.
+
+    The rebase drops the branch commit (its patch becomes empty), so the
+    result blob equals the target blob — containment, not loss.
+    """
+    (repo / "shared.txt").write_text("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n")
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "add shared")
+
+    info = kwt.ensure_worktree(repo, "t_absorbed_subset")
+    worktree = info["path"]
+    (worktree / "shared.txt").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "shared.txt")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Main lands the branch's change PLUS an independent one in ONE commit
+    # (not patch-equivalent, so the branch commit is replayed and becomes
+    # empty — the absorption shape).
+    (repo / "shared.txt").write_text(
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(repo, "add", "shared.txt")
+    _git(repo, "commit", "-m", "main lands both line edits")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_absorbed_subset",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "shared.txt").read_text() == (
+        "l1\nl2 main\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )

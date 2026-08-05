@@ -38,6 +38,7 @@ Module layout (section order)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import difflib
 import errno
 import hashlib
 import inspect
@@ -866,6 +867,24 @@ def _tree_blob_at(repo: Path, ref: str, path: str) -> str:
     return parts[2] if len(parts) >= 3 else ""
 
 
+def _blob_text(repo: Path, blob: str) -> str:
+    if not blob:
+        return ""
+    return _git(repo, "cat-file", "blob", blob, check=False)
+
+
+def _added_lines(base_text: str, branch_text: str) -> list[str]:
+    """Lines the branch side inserts or replaces relative to *base_text*."""
+    base_lines = base_text.splitlines()
+    branch_lines = branch_text.splitlines()
+    matcher = difflib.SequenceMatcher(None, base_lines, branch_lines, autojunk=False)
+    added: list[str] = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "replace"):
+            added.extend(branch_lines[j1:j2])
+    return added
+
+
 def _silent_branch_content_loss(
     repo: Path, target: str, old_head: str, new_head: str, base: str
 ) -> list[str]:
@@ -873,13 +892,16 @@ def _silent_branch_content_loss(
 
     *base* is the divergence point the branch's changes are measured against
     (the fork point for an ordinary rebase, the reverted merge's first
-    parent for a recovery replay).  A path counts as lost only when its
-    content is absent from the target (`target_blob != branch_blob` — never
-    landed) AND the replayed result matches the target exactly
-    (`new_blob == target_blob` — the branch delta did not survive).  Blob
-    identity between old and new head is deliberately NOT required: a clean
-    rebase of a shared file produces merged content, a third blob that
-    carries both sides.  Deletions carry no blob and are never reported.
+    parent for a recovery replay).  A path counts as lost only when the
+    replayed result matches the target exactly (`new_blob == target_blob`)
+    AND the branch's added lines are not all present in the target version.
+    Blob identity is deliberately NOT the criterion: a target that landed
+    the change and then kept editing the file (or absorbed it as a subset
+    of a larger commit) must read as landed, and a clean shared-file rebase
+    produces a third, merged blob.  The real incident shape — the path
+    EXISTS in the target but without the chain's content (merge+revert) —
+    fails the line-containment test and is reported.  Branch-side pure
+    line deletions carry no added lines and are never reported.
     """
     lost: list[str] = []
     for path in _changed_files_between(repo, base, old_head):
@@ -891,7 +913,16 @@ def _silent_branch_content_loss(
             continue  # genuinely landed in the target
         if _tree_blob_at(repo, new_head, path) != target_blob:
             continue  # branch delta (possibly merged) present in the result
-        lost.append(path)
+        if not target_blob:
+            lost.append(path)  # the target lacks the path entirely
+            continue
+        base_blob = _tree_blob_at(repo, base, path)
+        added = _added_lines(
+            _blob_text(repo, base_blob), _blob_text(repo, branch_blob)
+        )
+        target_lines = set(_blob_text(repo, target_blob).splitlines())
+        if any(line not in target_lines for line in added):
+            lost.append(path)
     return lost
 
 
@@ -989,8 +1020,8 @@ def _reverted_merge_for_branch(repo: Path, branch: str, target: str) -> Optional
             continue
         changed = _changed_files_between(repo, parents[0], merged_parent)
         if changed and any(
-            _git(repo, "rev-parse", f"{target}:{path}", check=False)
-            != _git(repo, "rev-parse", f"{merged_parent}:{path}", check=False)
+            _tree_blob_at(repo, target, path)
+            != _tree_blob_at(repo, merged_parent, path)
             for path in changed
         ):
             oldest = merge_commit
@@ -1505,6 +1536,15 @@ def _prepare_worker_base_reverted_merge_replay(
             f"but the worktree is on a detached HEAD ({actual_head})"
         )
     replay_base = _git(wt, "rev-parse", f"{reverted_merge}^1")
+    _log.warning(
+        "worker base prep: reverted-merge recovery for %s — replaying branch "
+        "%s from %s onto %s (%s)",
+        reverted_merge,
+        branch_ref,
+        replay_base,
+        target_head,
+        target,
+    )
     try:
         _git(
             wt,
@@ -1514,6 +1554,7 @@ def _prepare_worker_base_reverted_merge_replay(
             target_head,
             replay_base,
             branch_ref,
+            timeout=MERGE_TIMEOUT_SECONDS,
         )
     except WorktreeError as exc:
         _git(wt, "rebase", "--abort", check=False)
