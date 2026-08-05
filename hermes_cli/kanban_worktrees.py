@@ -353,6 +353,16 @@ LOCK_TIMEOUT_SECONDS = (
     POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS + 300 + 600 + 300
 )
 
+# Per-file wall-clock cap for the post-merge gate's isolated test runner
+# (scripts/run_tests_parallel.py, runner default 300s).  The integrator runs
+# up to 8 heavy per-file pytest subprocesses in parallel; measured on this
+# host 2026-08-05 (t_5e27f4a2 integration parks): the heaviest file
+# (tests/hermes_cli/test_kanban_db.py) takes ~103s idle but exceeded even
+# the 600s retry under gate load — a load-dilation problem, not a slow test.
+# 900s covers the observed dilation without masking a genuinely hung file.
+# An operator-set HERMES_TEST_FILE_TIMEOUT in the environment still wins.
+POST_MERGE_TEST_FILE_TIMEOUT_SECONDS = 900
+
 # S6: Disk-Preflight vor Merge-Gate — klare Meldung statt kryptischem ENOSPC.
 # Default 2 GiB: Validation-Worktree + Vitest/tsc-Scratch unter Last.
 INTEGRATION_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
@@ -842,6 +852,35 @@ def _branch_landing_groups(
     return landed, pending
 
 
+def _silent_branch_content_loss(
+    repo: Path, target: str, old_head: str, new_head: str
+) -> list[str]:
+    """Branch-side paths whose content a base update silently dropped.
+
+    A commit skipped as patch-equivalent is only safe when its content truly
+    lives in *target*.  After a merge+revert cycle the patch-ids stay
+    reachable from the target while the revert removes the content, so the
+    skip discards the branch's work without a trace (live incident
+    t_903e7b7c, 2026-08-05: ``worker_base_prepared`` left the chain branch
+    exactly at main with an empty diff).  Returns the changed paths whose
+    resulting blob is present in NEITHER *new_head* NOR *target*; empty
+    means every branch change either survived or genuinely landed.
+    Deletions carry no blob to preserve and are never reported.
+    """
+    merge_base = _git(repo, "merge-base", old_head, target)
+    lost: list[str] = []
+    for path in _changed_files_between(repo, merge_base, old_head):
+        branch_blob = _git(repo, "rev-parse", f"{old_head}:{path}", check=False)
+        if not branch_blob:
+            continue
+        if _git(repo, "rev-parse", f"{new_head}:{path}", check=False) == branch_blob:
+            continue
+        if _git(repo, "rev-parse", f"{target}:{path}", check=False) == branch_blob:
+            continue
+        lost.append(path)
+    return lost
+
+
 def _first_parent_merges_reaching_branch(
     repo: Path, branch: str, target: str
 ) -> list[str]:
@@ -891,8 +930,17 @@ def _revert_commits_for_merge(repo: Path, merge_commit: str, target: str) -> lis
     ]
 
 
-def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[str]:
-    """Find a reverted merge parent whose reviewed patch is in *branch*."""
+def _reverted_merge_for_branch(repo: Path, branch: str, target: str) -> Optional[str]:
+    """Find a reverted target merge whose reviewed patch is in *branch*.
+
+    Returns the reverted MERGE commit (not its second parent).  Callers that
+    replay the branch onto *target* must use ``<merge>^1`` as the replay base:
+    that is the target-side commit the branch content diverged from, so the
+    replay range covers the whole branch.  Using the merged parent's own first
+    parent instead replays only commits after it and silently loses every
+    earlier chain commit (live incident t_903e7b7c, 2026-08-05; a two-commit
+    toy repro loses the first commit with the merged-parent base).
+    """
     # Merges at or before the branch/target merge-base cannot need recovery:
     # their matching reverts (if any) are already part of the worker branch.
     # Restricting the scan also avoids an O(history²) sequence of full-log
@@ -923,7 +971,7 @@ def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[
             != _git(repo, "rev-parse", f"{merged_parent}:{path}", check=False)
             for path in changed
         ):
-            return merged_parent
+            return merge_commit
     return None
 
 
@@ -1398,6 +1446,77 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
             "created": True}
 
 
+def _prepare_worker_base_reverted_merge_replay(
+    wt: Path,
+    target: str,
+    target_head: str,
+    actual_head: str,
+    reverted_merge: str,
+    *,
+    adopted_wip_files: list[str] | None,
+    skipped_wip_files: list[str],
+) -> dict[str, Any]:
+    """Replay a branch whose merge into *target* was reverted.
+
+    Patch-ID-based classification is poisoned in this topology: the reverted
+    merge keeps the chain's patch-ids reachable from *target*, so
+    ``git cherry`` reports the commits as landed and a plain rebase skips
+    them as already-upstream (or replays an empty range when the branch is
+    an ancestor of the target) — leaving the branch exactly at the target
+    with the chain content silently gone.  Replaying from the reverted
+    merge's FIRST parent covers the whole branch; ``--reapply-cherry-picks``
+    disables the poisoned skip.  Commits that independently landed on the
+    target in the meantime apply as empty and are dropped by the rebase.
+    """
+    replay_base = _git(wt, "rev-parse", f"{reverted_merge}^1")
+    try:
+        _git(
+            wt,
+            "rebase",
+            "--reapply-cherry-picks",
+            "--onto",
+            target_head,
+            replay_base,
+            actual_head,
+        )
+    except WorktreeError as exc:
+        _git(wt, "rebase", "--abort", check=False)
+        # Same "could not rebase onto" wording as the ordinary path so the
+        # dispatcher's conflict-fixer routing (S10) applies unchanged.
+        raise WorktreeError(
+            f"clean stale worktree could not rebase onto {target} "
+            f"(reverted-merge recovery for {reverted_merge}): {exc}"
+        ) from exc
+    new_head = _git(wt, "rev-parse", "HEAD")
+    lost = _silent_branch_content_loss(wt, target, actual_head, new_head)
+    if lost:
+        _git(wt, "reset", "--hard", actual_head)
+        raise WorktreeError(
+            f"reverted-merge replay onto {target} still dropped branch "
+            f"content absent from the target ({', '.join(lost[:8])}); "
+            "branch restored to pre-rebase HEAD"
+        )
+    post_dirty = dirty_files(wt)
+    unexpected_dirty = [path for path in post_dirty if path not in skipped_wip_files]
+    if unexpected_dirty:
+        raise WorktreeError(
+            "worktree became dirty while preparing the worker base "
+            f"({', '.join(unexpected_dirty[:8])})"
+        )
+    result: dict[str, Any] = {
+        "action": "rebased",
+        "reverted_merge_recovery": reverted_merge,
+        "previous_head": actual_head,
+        "head": new_head,
+        "merge_target": target,
+        "merge_target_head": target_head,
+    }
+    if adopted_wip_files is not None:
+        result["adopted_wip_files"] = adopted_wip_files
+        result["skipped_wip_files"] = skipped_wip_files
+    return result
+
+
 def prepare_worker_base(
     worktree: Path | str,
     *,
@@ -1538,8 +1657,27 @@ def prepare_worker_base(
             result["adopted_wip_files"] = adopted_wip_files
             result["skipped_wip_files"] = skipped_wip_files
         return result
+    reverted_merge = _reverted_merge_for_branch(wt, actual_head, target_head)
+    if reverted_merge is not None:
+        return _prepare_worker_base_reverted_merge_replay(
+            wt,
+            target,
+            target_head,
+            actual_head,
+            reverted_merge,
+            adopted_wip_files=adopted_wip_files,
+            skipped_wip_files=skipped_wip_files,
+        )
     landed, pending = _branch_landing_groups(wt, target, actual_head)
     if landed and not pending:
+        lost = _silent_branch_content_loss(wt, target, actual_head, target_head)
+        if lost:
+            raise WorktreeError(
+                "worker branch commits are patch-equivalent to target "
+                f"history, but their content is absent from {target} "
+                f"({', '.join(lost[:8])}); refusing to reset the branch "
+                "away — reconcile the landing divergence explicitly"
+            )
         _git(wt, "reset", "--hard", target)
         new_head = _git(wt, "rev-parse", "HEAD")
         post_dirty = dirty_files(wt)
@@ -1607,6 +1745,15 @@ def prepare_worker_base(
             raise WorktreeError(mixed_diagnosis)
         action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
+    if action == "rebased":
+        lost = _silent_branch_content_loss(wt, target, actual_head, new_head)
+        if lost:
+            _git(wt, "reset", "--hard", actual_head)
+            raise WorktreeError(
+                f"rebase onto {target} silently dropped branch content that "
+                f"is not present in the target ({', '.join(lost[:8])}); "
+                "branch restored to pre-rebase HEAD"
+            )
     post_dirty = dirty_files(wt)
     unexpected_dirty = [path for path in post_dirty if path not in skipped_wip_files]
     if unexpected_dirty:
@@ -5985,11 +6132,14 @@ def _run_gate_in_validation_worktree(
 
 def _quick_gate_run_cmd(
     label: str, cmd: list[str], cwd: Path, timeout: int, notes: list[str],
+    extra_env: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """Run one quick-gate subprocess; append success note or return error."""
+    env = {**os.environ, **extra_env} if extra_env else None
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv
             cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return f"{label}: TIMEOUT after {timeout}s"
@@ -6114,10 +6264,21 @@ def _default_quick_gate_pytest(
         # other half of the t_c4ff7329 park. ``.pytest_cache`` is gitignored,
         # so dropping the flag does not dirty the post-merge tree.
         runner = str(repo_root / "scripts" / "run_tests.sh")
+        # Raise the per-file cap for this gate: the integrator's parallel
+        # file load dilates the heaviest files far past the runner default
+        # (see POST_MERGE_TEST_FILE_TIMEOUT_SECONDS).  An operator-set
+        # HERMES_TEST_FILE_TIMEOUT in the environment takes precedence.
+        gate_env = {
+            "HERMES_TEST_FILE_TIMEOUT": os.environ.get(
+                "HERMES_TEST_FILE_TIMEOUT",
+                str(POST_MERGE_TEST_FILE_TIMEOUT_SECONDS),
+            )
+        }
         return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
             [runner, *modules],
             repo_root, POST_MERGE_AFFECTED_TEST_TIMEOUT_SECONDS, notes,
+            extra_env=gate_env,
         )
     notes.append("pytest skipped (no applicable Python production paths)")
     return None
@@ -6569,16 +6730,22 @@ def _integrate_rebase_branch(
     if not (wt_path.exists() and (wt_path / ".git").exists()):
         return _integrate_parked(branch, "chain worktree missing before rebase"), None
     target_head = _git(repo_root, "rev-parse", cur)
-    reverted_ancestor = _reverted_merged_ancestor(
+    reverted_merge = _reverted_merge_for_branch(
         repo_root, branch, target_head,
     )
     rebase_args = ["rebase", target_head]
-    if reverted_ancestor:
+    if reverted_merge:
+        # Replay from the reverted merge's FIRST parent (the target-side
+        # commit the chain diverged from): the range then covers the whole
+        # chain, not just commits after the merged tip.  Plain rebase patch-ID
+        # skipping is poisoned here — the reverted merge keeps the chain's
+        # patch-ids reachable from the target — so force reapplication.
         replay_base = _git(
-            repo_root, "rev-parse", f"{reverted_ancestor}^1",
+            repo_root, "rev-parse", f"{reverted_merge}^1",
         )
         rebase_args = [
-            "rebase", "--onto", target_head, replay_base, branch,
+            "rebase", "--reapply-cherry-picks",
+            "--onto", target_head, replay_base, branch,
         ]
     try:
         _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)

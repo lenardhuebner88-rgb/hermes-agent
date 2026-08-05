@@ -1556,3 +1556,87 @@ def test_prepare_reused_task_worktree_keeps_current_run_guard(
             match="current task run is missing before worker base preparation",
         ):
             kwt.prepare_reused_task_worktree(conn, task, workspace)
+
+
+# ---------------------------------------------------------------------------
+# Revert-aware worker-base preparation (live incident t_903e7b7c, 2026-08-05):
+# a merge+revert cycle poisons patch-ID classification — cherry reports the
+# chain commits as landed while the revert removed their content, and a plain
+# rebase skips them or replays an empty range, leaving the branch exactly at
+# the target with the chain silently gone.
+# ---------------------------------------------------------------------------
+
+
+def _make_merged_then_reverted_chain(repo, task_id):
+    """Two-commit chain branch, merged into main, merge then reverted."""
+    info = kwt.ensure_worktree(repo, task_id)
+    worktree = info["path"]
+    (worktree / "s1.txt").write_text("slice one\n")
+    _git(worktree, "add", "s1.txt")
+    _git(worktree, "commit", "-m", "chain: slice 1")
+    (worktree / "s2.txt").write_text("slice two\n")
+    _git(worktree, "add", "s2.txt")
+    _git(worktree, "commit", "-m", "chain: slice 2")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    _git(
+        repo, "merge", "--no-ff", "--no-edit",
+        "-m", f"merge {task_id}", info["branch"],
+    )
+    merge_commit = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "revert", "-m", "1", "--no-edit", merge_commit)
+    assert not (repo / "s1.txt").exists()
+    return info, recorded_head, merge_commit
+
+
+def test_prepare_worker_base_recovers_multi_commit_reverted_merge(repo):
+    """After a merge+revert, base-prep must replay the whole chain, not empty it."""
+    info, recorded_head, merge_commit = _make_merged_then_reverted_chain(
+        repo, "t_revert_recovery"
+    )
+
+    result = kwt.prepare_worker_base(
+        info["path"],
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_revert_recovery",
+    )
+
+    assert result["action"] == "rebased"
+    assert result["reverted_merge_recovery"] == merge_commit
+    assert (info["path"] / "s1.txt").read_text() == "slice one\n"
+    assert (info["path"] / "s2.txt").read_text() == "slice two\n"
+    assert _git(info["path"], "rev-parse", "HEAD") != _git(repo, "rev-parse", "main")
+    assert kwt.dirty_files(info["path"]) == []
+
+
+def test_prepare_worker_base_refuses_reset_when_patch_equivalent_content_absent(repo):
+    """Patch-ID equivalence without the tree content must fail closed, not reset."""
+    info = kwt.ensure_worktree(repo, "t_patch_lie")
+    worktree = info["path"]
+    (worktree / "a.txt").write_text("branch version\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "branch change")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Patch-equivalent landing via cherry-pick, then main supersedes the content.
+    # The unrelated commit first prevents a cherry-pick fast-forward, which
+    # would put the branch commit itself (not a patch twin) into main history.
+    (repo / "unrelated.txt").write_text("unrelated main work\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "unrelated main work")
+    _git(repo, "cherry-pick", recorded_head)
+    (repo / "a.txt").write_text("main follow-up\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "main supersedes the change")
+
+    with pytest.raises(kwt.WorktreeError, match="refusing to reset"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            task_id="t_patch_lie",
+        )
+
+    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
+    assert (worktree / "a.txt").read_text() == "branch version\n"
+    assert kwt.dirty_files(worktree) == []

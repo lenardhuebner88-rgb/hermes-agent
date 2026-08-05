@@ -1396,7 +1396,7 @@ def test_reverted_ancestor_scan_ignores_history_already_in_branch(repo, monkeypa
 
     monkeypatch.setattr(kwt, "_git", recording_git)
 
-    assert kwt._reverted_merged_ancestor(repo, info["branch"], "main") is None
+    assert kwt._reverted_merge_for_branch(repo, info["branch"], "main") is None
     assert not any(any(str(arg).startswith("--grep=") for arg in call) for call in calls)
     assert any(
         call[:3] == ("rev-list", "--first-parent", "--merges")
@@ -1887,3 +1887,39 @@ def test_drop_writer_lease_for_removed_worktree_fail_soft(kanban_home, tmp_path,
     assert any(
         "writer lease cleanup failed" in rec.message for rec in caplog.records
     )
+
+
+def test_reverted_merge_recovery_replays_full_multi_commit_chain(repo):
+    """The replay base must be the reverted merge's first parent.
+
+    With the merged tip's own parent as the replay base, every commit before
+    the tip is dropped from the replay — a two-commit chain loses its first
+    commit (toy repro 2026-08-05, and the live t_903e7b7c incident shape).
+    """
+    info = kwt.ensure_worktree(repo, "t_multi_revert")
+    _commit_in(
+        info["path"], "first.py", "FIRST = True\n", "kanban(t_multi_revert): first",
+    )
+    _commit_in(
+        info["path"], "second.py", "SECOND = True\n", "kanban(t_multi_revert): second",
+    )
+    branch_tip = _git(info["path"], "rev-parse", "HEAD")
+    first = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate,
+    )
+    assert first["action"] == "merged"
+
+    _git(repo, "revert", "-m", "1", "--no-edit", first["merge_commit"])
+    assert not (repo / "first.py").exists()
+    _git(repo, "branch", "-f", info["branch"], branch_tip)
+    _git(repo, "worktree", "add", str(info["path"]), info["branch"])
+    _commit_in(info["path"], "hardening.py", "HARDENED = True\n", "hardening")
+
+    out = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate,
+    )
+
+    assert out["action"] == "merged"
+    assert (repo / "first.py").read_text() == "FIRST = True\n"
+    assert (repo / "second.py").read_text() == "SECOND = True\n"
+    assert (repo / "hardening.py").read_text() == "HARDENED = True\n"
