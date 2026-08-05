@@ -165,6 +165,30 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 
 ## Hard pitfalls
 
+- **`android/` has a gate now — use it, do not rebuild one.**
+  `scripts/gate-android.sh` runs Android Lint + JVM unit tests; `--ui` adds
+  instrumented Compose tests on an emulator it boots and shuts down itself.
+  It pipes nothing, the exit code is the truth. Three things it encodes that
+  cost a session each to find: `/dev/kvm` needs `sg kvm -c` from any shell older
+  than the group change (Piet *is* in `kvm`; only stale sessions are not);
+  `adb devices` keeps listing an emulator that is still tearing down, so a
+  device only counts once `sys.boot_completed` is `1`; and `local.properties`
+  is git-ignored, so a fresh worktree needs it written before Gradle runs.
+- **`pgrep -c <name>` never matches a name longer than 15 characters.**
+  `pgrep -c qemu-system-x86_64` returns 0 with exit 1 whether or not an emulator
+  is running — a session used exactly that to "prove" it had stopped one. `-f`
+  matches but also matches your own command line. Use `ps -eo comm,args | rg …`.
+- **`journalctl -g` greps the rendered line, ANSI escapes and all.** Rust
+  `tracing` colours output even under systemd, so `acp::tool: tool_call` does not
+  exist as a literal and matching it returns zero lines with exit 0 —
+  indistinguishable from an idle service. Anchor patterns inside the uncoloured
+  message body, never across the `target: ` boundary. For `--user` units the
+  agent unit is `_SYSTEMD_USER_UNIT`; `_SYSTEMD_UNIT` is `user@1000.service` on
+  every line and silently merges all units into one bucket.
+- **A RED probe that does not bite indicts the test, not the probe.** A guard in
+  `ThreadActivity` looked covered; the test's event was discarded one line
+  earlier, so it asserted nothing. If breaking the code leaves tests green, fix
+  the test before trusting the suite.
 - Never `git reset --hard origin/main`; `origin` is upstream and `main` tracks
   Piet's fork.
 - If auto-release rollback leaves the live checkout detached, triage and restore
