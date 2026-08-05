@@ -360,6 +360,19 @@ run_agent.py, cli.py, batch_runner.py, environments/
 
 Aus dem Fork (Stand main c012da15a0):
 
+- **Do not screenshot a Compose screen with `captureToImage()` on the deck AVD.**
+  Measured 2026-08-05: calling it over the whole root takes the emulator down
+  mid-run — `adb` then reports `no devices/emulators found` and the tests
+  "fail", which sends you hunting a phantom test bug while the render itself was
+  fine. Four output paths were ruled out first (`getExternalFilesDir`,
+  `filesDir`, `getDir`, `/data/local/tmp`); the path was never the problem. Two
+  side-traps found on the way, both real: since Android 11 the shell user cannot
+  list `/sdcard/Android/data/<pkg>`, and `run-as net.hermes.deck` fails with
+  `unknown package` because `createComposeRule` needs no target activity, so the
+  app APK may not be installed at all — the instrumentation package is
+  `net.hermes.deck.test`. If you need a picture of a Compose screen, render it on
+  the JVM (Paparazzi/Roborazzi), not on this emulator.
+
 - **`android/` has a gate now — use it, do not rebuild one.**
   `scripts/gate-android.sh <app> [--ui]` where `<app>` is `deck` (default),
   `dictate` or `voice`: Android Lint + JVM unit tests, and `--ui` adds
