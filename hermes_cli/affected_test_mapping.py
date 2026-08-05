@@ -808,6 +808,7 @@ def _classify_changed_paths(
     index: TestIndex | None = None,
     diff_spec: SymbolDiffSpec | None = None,
     enforce_time_budget: bool,
+    budget_env: Mapping[str, str] | None = None,
 ) -> AffectedTestPlan:
     if mode not in {"worker", "integration"}:
         raise MappingError(f"unknown affected-test mode: {mode}")
@@ -1082,7 +1083,12 @@ def _classify_changed_paths(
     if not enforce_time_budget:
         return plan
     try:
-        budget_check = check_affected_test_budget(repo_root, plan.selected_tests)
+        budget_kwargs = {"env": budget_env} if budget_env is not None else {}
+        budget_check = check_affected_test_budget(
+            repo_root,
+            plan.selected_tests,
+            **budget_kwargs,
+        )
     except AffectedTestBudgetConfigError as exc:
         raise MappingError(str(exc)) from exc
     if budget_check.note:
@@ -1103,6 +1109,7 @@ def classify_changed_paths(
     exceptions_path: Path | None = None,
     index: TestIndex | None = None,
     diff_spec: SymbolDiffSpec | None = None,
+    budget_env: Mapping[str, str] | None = None,
 ) -> AffectedTestPlan:
     return _classify_changed_paths(
         repo_root,
@@ -1112,6 +1119,7 @@ def classify_changed_paths(
         index=index,
         diff_spec=diff_spec,
         enforce_time_budget=True,
+        budget_env=budget_env,
     )
 
 
@@ -1120,9 +1128,15 @@ def affected_pytest_modules(
     changed_files: Sequence[str],
     *,
     mode: str = "integration",
+    budget_env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Compatibility wrapper that preserves the classifier's fail-closed state."""
-    plan = classify_changed_paths(repo_root, changed_files, mode=mode)
+    plan = classify_changed_paths(
+        repo_root,
+        changed_files,
+        mode=mode,
+        budget_env=budget_env,
+    )
     if plan.unmapped_paths:
         raise MappingError(
             "unmapped production paths: " + ", ".join(plan.unmapped_paths)
