@@ -4311,9 +4311,14 @@ def _read_harvest_since(marker_path: Path, *, now: int) -> int:
         return now - HARVEST_WINDOW_FALLBACK_SECONDS
 
 
+# Transient heisst: die *Handlung* selbst ist ein reiner Wiederholungs-Watch
+# (Konditional + Beobachtungsverb). Muster ohne diesen doppelten Anker wurden
+# am 2026-08-05 am Voll-Ledger (1008 Items) falsifiziert: die nackten
+# Nicht-Reproduktions-Marker (`nicht reproduzierbar`, `non-reproducible`)
+# hatten null wahre Positivtreffer und genau einen Fehltreffer (di_1d9f8e0e,
+# Evidenz spricht ehrlich von Nicht-Reproduktion, die Handlung ist ein
+# konkreter Fix) — deshalb gestrichen, nicht verengt.
 _TRANSIENT_DISPOSITION_PATTERNS = (
-    re.compile(r"\b(?:nicht|not) reproduzierbar\b", re.IGNORECASE),
-    re.compile(r"\bnon[- ]reproducible\b", re.IGNORECASE),
     re.compile(r"\bbei (?:der )?n[aä]chsten\b.*\b(?:pr[uü]fen|beobachten|check)", re.IGNORECASE),
     re.compile(
         r"\bbei erneutem\b.*\b(?:auftreten|vorkommen)\b.*\b(?:pr[uü]fen|beobachten|check)",
@@ -4354,19 +4359,22 @@ _CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS = (
 def _disposition_noise(candidate: Mapping[str, Any]) -> Optional[tuple[str, str]]:
     """Classify ledger-only, evidence-bounded run noise.
 
-    The rules deliberately require an explicit non-reproduction/recurrence
-    marker or an external verification dependency.  Generic ``risk`` and
-    ``scope-note`` rows stay actionable; their severity is not a noise signal.
+    Both classes key on disjoint excerpt halves: ``transient`` only on the
+    ``next_action`` half (a remedy in the action text stays actionable no
+    matter how honestly the evidence reports a non-reproduction),
+    ``confounded`` only on the ``evidence`` half behind the ``" — "``
+    separator.  Generic ``risk`` and ``scope-note`` rows stay actionable;
+    their severity is not a noise signal.
     """
     if candidate.get("source") != "ledger":
         return None
     text = str(candidate.get("excerpt") or "")
-    if any(pattern.search(text) for pattern in _TRANSIENT_DISPOSITION_PATTERNS):
+    next_action, separator, evidence = text.partition(" — ")
+    if any(pattern.search(next_action) for pattern in _TRANSIENT_DISPOSITION_PATTERNS):
         return (
             "transient",
-            "one-off outcome is not reproduced or is only watched for recurrence",
+            "action is a pure recurrence watch without a remedy",
         )
-    _next_action, separator, evidence = text.partition(" — ")
     if separator and any(
         pattern.search(evidence) for pattern in _CONFOUNDED_DISPOSITION_EVIDENCE_PATTERNS
     ):

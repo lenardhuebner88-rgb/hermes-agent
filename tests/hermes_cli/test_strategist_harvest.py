@@ -268,9 +268,9 @@ def test_run_harvest_separates_transient_and_confounded_noise(kanban_home):
             source_task_id=task_ids["transient"],
             typ="risk",
             disposition="defer",
-            next_action="Bei nächster realer Fixer-Episode erneut prüfen",
+            next_action="Bei der nächsten realen Fixer-Episode erneut prüfen",
             severity="real-risk",
-            evidence="Der einmalige Lauf war danach 3/3 grün und nicht reproduzierbar.",
+            evidence="Der einmalige Lauf war danach 3/3 grün.",
         )
         confounded_id = kb.insert_disposition_item(
             conn,
@@ -343,6 +343,16 @@ def test_run_harvest_separates_transient_and_confounded_noise(kanban_home):
             "Loop-Historie: reland ea5675bdc/3b54dcaa2 -> merge cbcf65606 -> "
             "revert 7f08e39cb binnen ~12min",
         ),
+        # di_1d9f8e0e (wortlaut): die Evidenz meldet ehrlich die Nicht-
+        # Reproduktion, die Handlung ist ein konkreter Fix an file:line —
+        # die Zeile muss actionable bleiben.
+        (
+            "visual_check_mobile.mjs gegen transiente Nicht-App-console-errors "
+            "härten (1x Retry oder resource-405-Allowlist) ODER post-merge-Gate "
+            "1x retryen bevor Park/Revert — bricht den re-land<->revert-Loop",
+            "scripts/visual_check_mobile.mjs:121-123 (Null-Toleranz "
+            "console-errors); Park-Payload 405 nicht reproduzierbar (3/3 grün)",
+        ),
     ],
     ids=[
         "stale-rebase-first-card",
@@ -350,6 +360,7 @@ def test_run_harvest_separates_transient_and_confounded_noise(kanban_home):
         "loaded-gate-timeout",
         "stale-gateway-code",
         "reland-merge-revert-loop",
+        "nonrepro-evidence-with-concrete-fix",
     ],
 )
 def test_disposition_noise_keeps_real_ledger_defects_actionable(next_action, evidence):
