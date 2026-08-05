@@ -172,10 +172,10 @@ def _autoland_safety_hash(raw: dict) -> str:
         # autoland pack must bind it. Omitting the key preserves legacy hashes.
         projection["goal"] = raw.get("goal")
     if "plan_skip_when_queue_full" in raw:
-        # Gleiche Bauart wie `goal`, gleicher Grund: dashboard-experience ist
-        # das einzige Vertrags-Autoland-Pack UND (max_plans==max_rounds==1) das
-        # einzige, in dem der Plan-Skip ueberhaupt feuert — ein Flip auf false
-        # aendert unbeaufsichtigtes Nachtverhalten und muss den Hash drehen.
+        # Gleiche Bauart wie `goal`, gleicher Grund: der Schalter entscheidet,
+        # ob im UNBEAUFSICHTIGTEN Nachtlauf ueberhaupt geplant wird. Ein Flip
+        # auf false in einem Vertrags-Autoland-Pack aendert dessen Verhalten
+        # ohne Zuschauer und muss deshalb den Hash drehen.
         # Nur bei GESETZTEM Key aufnehmen: ein zusaetzlicher Projektions-Key
         # dreht den Hash sonst auch mit Default (json.dumps sieht ihn), und
         # genau das haette die kuratierten SHAs gebrochen. Das war die reale
@@ -2041,43 +2041,6 @@ class LoopRunner:
         stage_dir = self.queue / stage
         return len(list(stage_dir.glob("*.md"))) if stage_dir.is_dir() else 0
 
-    def plan_queue_threshold(self) -> tuple[int, str]:
-        """Ab wie vielen wartenden Plänen lohnt die Plan-Phase nicht mehr?
-
-        `max_rounds` allein ist die falsche Schranke: sie deckelt die Runden,
-        aber der Planner deckelt sich selbst an `params.max_plans` (nur ein
-        {{PARAMS}}-Platzhalter im Prompt, im Runner nirgends durchgesetzt). Wo
-        `max_plans < max_rounds` ist, erreicht `00-planned` die Rundenschranke
-        also nie und der Skip wäre tote Logik — gemessen 2026-08-05 in 4 von 5
-        Pipeline-Packs (builder-reviewer 8<12, dashboard-polish 5<12,
-        hermes-feature-forge 3<4, hermes-hardening 2<3); die einzige je
-        protokollierte Queue-Tiefe über alle Ledger ist `planned=1`.
-
-        Bindend ist deshalb die KLEINERE der beiden Schranken. `max_plans` ist
-        im Manifest ein String und optional — fehlt es oder ist es nicht
-        numerisch, bleibt `max_rounds` allein maßgeblich (nie strenger raten,
-        als das Manifest hergibt).
-
-        `10-building` wird bewusst NICHT mitgezählt: was dort zum
-        Entscheidungszeitpunkt liegt, stammt laut `_expire_stale_building` per
-        Vertrag aus einem früheren Lauf und wird gebounct — es belegt keinen
-        Round-Slot. Mitzählen hieße, die Planung an verwaistem Zustand
-        aufzuhängen.
-        """
-        max_rounds = self.stop_cfg("max_rounds")
-        raw = self.overrides.get("MAX_PLANS", self.pack.params.get("max_plans"))
-        if raw is None:
-            return max_rounds, f"max_rounds={max_rounds}"
-        try:
-            max_plans = int(str(raw).strip())
-        except ValueError:
-            return max_rounds, f"max_rounds={max_rounds}"
-        if max_plans < 1:
-            return max_rounds, f"max_rounds={max_rounds}"
-        if max_plans < max_rounds:
-            return max_plans, f"max_plans={max_plans}"
-        return max_rounds, f"max_rounds={max_rounds}"
-
     def pick_plan(self) -> Path | None:
         """Frische Pläne (retry 0) vor geretryten — sonst verbraucht ein einzelner
         schlechter Plan den `fail_streak`-Stop allein, während frische Pläne nie
@@ -3186,47 +3149,49 @@ class LoopRunner:
                 self.ledger(f"BASE-REFRESH übersprungen: {first_line}")
         # Plan-Phase sparen, wenn die Queue ohnehin voll ist: cmd_plan wuerde
         # nur Modellzeit (Rate-Limit-Kontingent) fuer Plaene verbrennen, fuer
-        # die kein Slot frei ist. Schranke ist die kleinere aus max_rounds und
-        # max_plans (siehe plan_queue_threshold) — gegen max_rounds allein war
-        # der Skip in 4 von 5 Pipeline-Packs tote Logik.
+        # die kein Round-Slot frei ist. Opt-out per Manifest fuer Packs, deren
+        # Vertrag jede Nacht frische Plaene verlangt. fresh bleibt unberuehrt:
+        # ohne cmd_plan steht der Worktree noch nicht, cmd_run uebernimmt.
+        #
+        # `max_rounds` ist hier die RICHTIGE und einzige Schranke. Die
+        # naheliegende Verschaerfung auf min(max_rounds, params.max_plans) ist
+        # am 2026-08-05 geprueft und VERWORFEN worden: `max_plans` deckelt, was
+        # der Planner PRO TURN neu schreiben darf, nicht den Queue-Bestand.
+        # Beleg gegen die eigene Annahme — builder-reviewer (max_plans=8,
+        # max_rounds=12) stand real bei 8 und 9 wartenden Plaenen
+        # ("PLAN: 9 Pläne (status=PLANNED 4)", LEDGER 05.07.); eine Schwelle
+        # bei 8 haette dort geplant, obwohl 3-4 der 12 Rundenslots frei waren.
+        # Wer das nachmisst: die Queue-Tiefe steht in "PLAN: N Pläne", NICHT im
+        # "planned=N" der Autoland-Resume-Zeile (die emittiert nur
+        # dashboard-experience, max_rounds=1 — daher sieht sie nie mehr als 1
+        # und liest sich faelschlich wie die globale Obergrenze).
         #
         # Nachgemessen 2026-08-05 gegen ~/.hermes/loops/*/LEDGER.md (die
-        # urspruengliche Commit-Message von 2b3f0d3fbc nannte 16 DRY-Laeufe /
-        # ~2 h; das war der Topf ALLER ertraglosen Plan-Phasen): wegen belegtem
-        # Slot liefen 5 Naechte ertraglos (dashboard-experience, 16./30./31.07.,
-        # 01./05.08.), bei Ø 479 s Plan-Phase ~40 min Modellzeit. Der groessere
-        # Block — 13 Naechte dashboard-polish — war NICHT die Queue, sondern
+        # Commit-Message von 2b3f0d3fbc nannte 16 DRY-Laeufe / ~2 h; das war der
+        # Topf ALLER ertraglosen Plan-Phasen): wegen belegtem Slot liefen 5
+        # Naechte ertraglos (dashboard-experience, 16./30./31.07., 01./05.08.),
+        # bei Ø ~484 s Plan-Phase rund 40 min Modellzeit. Der groessere Block —
+        # 12 Naechte dashboard-polish — war NICHT die Queue, sondern
         # "DRY web fehlt" und ist seit 0e92dc7f58 (ensure_frontend_deps, 04.08.)
         # geheilt: in der Nacht darauf 3 verifizierte Runden statt DRY.
-        #
-        # Opt-out per Manifest fuer Packs, deren Vertrag jede Nacht frische
-        # Plaene verlangt. fresh bleibt unberuehrt: ohne cmd_plan steht der
-        # Worktree noch nicht, cmd_run uebernimmt.
-        # Schwelle NUR fuer den Pfad ausrechnen, der sie braucht: stop_cfg
-        # greift auf pack.stop zu, und ein sweep/deterministic-Pack soll hier
-        # nicht an einer Schranke scheitern, die es nie hatte.
-        queue_full_plan_skip = False
-        planned = threshold = 0
-        threshold_label = ""
-        if (
+        queue_full_plan_skip = (
             self.pack.type == "pipeline"
             and not skip_plan
             and self.pack.plan_skip_when_queue_full
-        ):
-            planned = self.qcount("00-planned")
-            threshold, threshold_label = self.plan_queue_threshold()
-            queue_full_plan_skip = planned >= threshold
+            and self.qcount("00-planned") >= self.stop_cfg("max_rounds")
+        )
         if queue_full_plan_skip:
+            planned = self.qcount("00-planned")
+            max_rounds = self.stop_cfg("max_rounds")
             self.ledger(
-                f"PLAN übersprungen: Queue voll ({planned} ≥ {threshold_label})"
+                f"PLAN übersprungen: Queue voll ({planned} ≥ max_rounds={max_rounds})"
             )
             self.ledger_event(
                 phase="plan", verdict="skipped", reason="queue_full",
-                planned=planned, max_rounds=self.stop_cfg("max_rounds"),
-                threshold=threshold, threshold_source=threshold_label.split("=")[0],
+                planned=planned, max_rounds=max_rounds,
             )
             self.say(
-                f"Queue voll ({planned} ≥ {threshold_label}) — "
+                f"Queue voll ({planned} ≥ max_rounds={max_rounds}) — "
                 "Planung übersprungen."
             )
         if (

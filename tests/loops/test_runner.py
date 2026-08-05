@@ -5040,103 +5040,18 @@ def test_load_pack_plan_skip_when_queue_full_default_and_type(tmp_path, fake_eng
         load_pack(tmp_path / "packs2", "skip-badtype")
 
 
-# ── Skip-Schwelle: min(max_rounds, max_plans) ────────────────────────────────
-# Nachmessung 2026-08-05: gegen max_rounds ALLEIN war der Skip in 4 von 5
-# echten Pipeline-Packs tote Logik, weil der Planner sich an params.max_plans
-# selbst unter die Rundenschranke deckelt (max_plans wird im Runner nirgends
-# durchgesetzt, es ist nur ein {{PARAMS}}-Platzhalter).
-
-def _threshold_runner(tmp_path, name, **pack_overrides):
-    repo = init_repo(tmp_path / "repo")
-    write_pack(tmp_path / "packs", name, "pipeline", repo, **pack_overrides)
-    return LoopRunner(load_pack(tmp_path / "packs", name), state_root=tmp_path / "st")
-
-
-@pytest.mark.parametrize(
-    "max_rounds,max_plans,expected,label",
-    [
-        (12, "5", 5, "max_plans=5"),      # der reale dashboard-polish-Fall
-        (3, "2", 2, "max_plans=2"),       # hermes-hardening
-        (1, "1", 1, "max_rounds=1"),      # dashboard-experience: gleich → Runden
-        (2, "9", 2, "max_rounds=2"),      # max_plans groesser → Runden binden
-        (4, None, 4, "max_rounds=4"),     # kein max_plans → unveraendert
-        (4, "keine", 4, "max_rounds=4"),  # nicht numerisch → nie strenger raten
-        (4, "0", 4, "max_rounds=4"),      # unsinnig klein → nicht binden
-    ],
-)
-def test_plan_queue_threshold_takes_the_smaller_bound(
-    tmp_path, fake_engine, max_rounds, max_plans, expected, label
-):
-    overrides = {
-        "stop": {
-            "max_rounds": max_rounds, "max_hours": 1,
-            "fail_streak": 2, "dry_rounds": 2,
-        }
-    }
-    if max_plans is not None:
-        overrides["params"] = {"max_plans": max_plans}
-    runner = _threshold_runner(tmp_path, f"thr-{max_rounds}-{max_plans}", **overrides)
-    assert runner.plan_queue_threshold() == (expected, label)
-
-
-def test_plan_queue_threshold_honours_runtime_override(tmp_path, fake_engine):
-    """MAX_PLANS aus overrides.env schlaegt das Manifest — wie in render_prompt."""
-    runner = _threshold_runner(
-        tmp_path, "thr-override",
-        stop={"max_rounds": 12, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
-        params={"max_plans": "5"},
-    )
-    assert runner.plan_queue_threshold() == (5, "max_plans=5")
-    runner.overrides["MAX_PLANS"] = "2"
-    assert runner.plan_queue_threshold() == (2, "max_plans=2")
-
-
-def test_cmd_night_skips_plan_at_max_plans_below_max_rounds(tmp_path, fake_engine):
-    """Der Fall, der vorher NIE griff: 5 Plaene, max_plans=5, max_rounds=12."""
-    behaviors, calls = fake_engine
-    runner = _runner_with_queued_plans(
-        tmp_path, "skip-maxplans", 5,
-        stop={"max_rounds": 12, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
-        params={"max_plans": "5"},
-    )
-    behaviors["plan"] = lambda kv, cwd: (_ for _ in ()).throw(
-        AssertionError("Plan darf bei erreichtem max_plans nicht starten")
-    )
-    _build_and_verify_ok(behaviors)
-
-    assert runner.cmd_night() is True
-
-    assert "plan" not in calls
-    ledger = runner.ledger_path.read_text(encoding="utf-8")
-    assert ledger.count("PLAN übersprungen: Queue voll (5 ≥ max_plans=5)") == 1
-
-
-def test_cmd_night_plans_when_below_max_plans(tmp_path, fake_engine):
-    """Gegenprobe zum selben Pack: 4 < max_plans=5 → Plan-Phase laeuft."""
-    behaviors, calls = fake_engine
-    runner = _runner_with_queued_plans(
-        tmp_path, "skip-maxplans-below", 4,
-        stop={"max_rounds": 12, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
-        params={"max_plans": "5"},
-    )
-    behaviors["plan"] = ok("PLANNED 1")
-    _build_and_verify_ok(behaviors)
-
-    assert runner.cmd_night() is True
-
-    assert "plan" in calls
-    assert "PLAN übersprungen" not in runner.ledger_path.read_text(encoding="utf-8")
-
+# ── Plan-Skip: Regressionen rund um die Queue-Schranke ──────────────────────
 
 def test_plan_skip_ignores_stale_10_building(tmp_path, fake_engine):
     """10-building darf die Planung NICHT blocken: was dort liegt, ist laut
-    _expire_stale_building verwaist und wird gebounct — es belegt keinen Slot.
-    (Live 31.07. dashboard-experience: Slot 'in 10-building blockiert'.)"""
+    _expire_stale_building verwaist und wird beim Pipeline-Start gebounct — es
+    belegt keinen Round-Slot dieses Laufs. Der Skip zaehlt deshalb nur
+    00-planned. (Live 31.07. dashboard-experience: Slot 'in 10-building
+    blockiert'.)"""
     behaviors, calls = fake_engine
     runner = _runner_with_queued_plans(
         tmp_path, "skip-stale-building", 0,
         stop={"max_rounds": 1, "max_hours": 1, "fail_streak": 2, "dry_rounds": 2},
-        params={"max_plans": "1"},
     )
     (runner.queue / "10-building" / "P9-verwaist.md").write_text(
         PLAN_BODY, encoding="utf-8"
@@ -5156,56 +5071,14 @@ def test_plan_skip_ignores_stale_10_building(tmp_path, fake_engine):
 
     assert runner.cmd_night() is True
 
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
     assert "plan" in calls, "verwaister 10-building-Eintrag hat die Planung erstickt"
-    assert "PLAN übersprungen" not in runner.ledger_path.read_text(encoding="utf-8")
-
-
-def _real_pipeline_knobs():
-    """(name, max_rounds, max_plans) aus den AUSGELIEFERTEN Pipeline-Manifesten."""
-    packs_dir = Path(runner_module.__file__).resolve().parent / "packs"
-    out = []
-    for pack_yaml in sorted(packs_dir.glob("*/pack.yaml")):
-        name = pack_yaml.parent.name
-        if name.startswith("_"):  # _retired-*, _blank
-            continue
-        raw = yaml.safe_load(pack_yaml.read_text(encoding="utf-8")) or {}
-        if raw.get("type") != "pipeline":
-            continue
-        max_plans = (raw.get("params") or {}).get("max_plans")
-        out.append((name, int(raw["stop"]["max_rounds"]), max_plans))
-    return out
-
-
-def test_plan_skip_threshold_is_reachable_for_every_real_pipeline_pack(
-    tmp_path, fake_engine
-):
-    """Echtdaten-Regression gegen die ECHTE Funktion, nicht gegen nachgebautes
-    min(): fuer jedes ausgelieferte Pipeline-Pack muss die Schwelle vom Planner
-    ueberhaupt erreichbar sein (threshold <= max_plans). Gegen `max_rounds`
-    allein liefert plan_queue_threshold() hier 12/12/4/3 gegen max_plans
-    8/5/3/2 — vier unerreichbare Schwellen, der Skip war tote Logik. Faellt
-    jemand auf max_rounds zurueck, wird dieser Test rot."""
-    knobs = _real_pipeline_knobs()
-    assert knobs, "keine Pipeline-Packs gefunden — Testkontrolle blind"
-    unreachable = []
-    for name, max_rounds, max_plans in knobs:
-        if max_plans is None:
-            continue  # kein Planner-Deckel: max_rounds ist die einzige Schranke
-        runner = _threshold_runner(
-            tmp_path, f"real-{name}",
-            stop={
-                "max_rounds": max_rounds, "max_hours": 1,
-                "fail_streak": 2, "dry_rounds": 2,
-            },
-            params={"max_plans": str(max_plans)},
-        )
-        threshold, label = runner.plan_queue_threshold()
-        if threshold > int(max_plans):
-            unreachable.append(
-                f"{name}: Schwelle {label} > max_plans={max_plans} "
-                "— Planner erreicht sie nie, Skip ist tote Logik"
-            )
-    assert not unreachable, "\n".join(unreachable)
+    assert "PLAN übersprungen" not in ledger
+    # Die Begruendung fuers Nicht-Mitzaehlen muss auch eingeloest werden: der
+    # verwaiste Eintrag ist danach wirklich weg, nicht bloss ignoriert.
+    assert not (runner.queue / "10-building" / "P9-verwaist.md").exists()
+    assert (runner.queue / "90-bounced" / "P9-verwaist.md").exists()
+    assert "building-expired: P9-verwaist.md" in ledger
 
 
 # ── Verify-Phase Statuskontrakt-Backstop (Incident 2026-07-17 empty last-status) ─
