@@ -54,3 +54,15 @@ scripts/gate-frontend.sh --skip-build           # bei web/src/control-Anteil
 
 Du fixt nichts. NIE push, merge, deploy, Service-Restart oder
 Live-Dashboard-Zugriff. Die Landung gehört dem Runner/Morgen-Gate.
+
+## Woran du NICHT scheiterst
+
+`done_when` beschreibt seit 2026-08-05 das beobachtbare Ergebnis, nicht den Lösungsweg.
+Der Builder wählt Testdatei, Assertions und Umsetzung selbst.
+
+- Ein anderer Testpfad oder eine andere Assertion als im Plan skizziert ist KEIN FAIL,
+  solange der Test das `done_when` über den echten Produktions-Aufrufpfad belegt und der
+  Tautologie-Check (rot auf altem Code) hält.
+- Ein anderer Lösungsweg als im `## Ansatz` skizziert ist KEIN FAIL — `## Ansatz` ist
+  Skizze, `done_when` und `anti_scope` sind der Vertrag.
+- Du urteilst über Ergebnis und Beweis, nicht über Stiltreue zum Plan.

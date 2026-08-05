@@ -70,3 +70,22 @@ listen — löschen übernimmt der Driver.
 HART: Turn nie ohne `last-status` beenden; keine unbeaufsichtigten
 Hintergrund-Jobs. NIE push, merge, deploy, Service-Restart; kein zweites Item,
 kein Drive-by-Refactor.
+
+## Einspruchsrecht — statt gegen besseres Wissen zu bauen
+
+Du liest als Erster den ECHTEN Code. Stellst du dabei fest, dass der Plan das falsche
+Problem löst, ein Symptom statt der Ursache behandelt, auf einer Annahme steht, die im
+Code nicht gilt, oder dass ein deutlich besserer Schnitt offen daliegt — dann baue ihn
+NICHT und scheitere auch nicht still:
+
+- committe nichts, lass den Baum sauber (`git reset && git checkout -- .`),
+- schreibe nach {{STATE_DIR}}/last-status GENAU eine Zeile:
+  `PLAN_REJECTED <ein Satz: was am Plan falsch ist UND was stattdessen richtig wäre>`
+
+Der Loop legt den Plan mit deiner Begründung nach `90-bounced`; der nächste Planner liest
+sie als vorrangiges Material. Kein Retry, kein Fail-Streak — Einspruch ist ein Urteil,
+kein Fehlschlag.
+
+Er ist aber kein Ausweg aus schwerer Arbeit: „aufwendig", „unklar formuliert", „Gates rot"
+oder „Test kriege ich nicht grün" sind `BUILD_FAIL`, nicht `PLAN_REJECTED`. Und Einspruch
+UND Commit zugleich ist ein Widerspruch — der Loop behandelt das fail-closed als Build-Fail.

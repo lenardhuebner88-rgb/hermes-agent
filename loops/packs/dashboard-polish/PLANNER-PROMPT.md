@@ -21,6 +21,9 @@ Nichts erneut planen, was schon lief:
 - {{STATE_DIR}}/LEDGER.md (frühere Runden)
 - `ls {{STATE_DIR}}/queue/00-planned/ {{STATE_DIR}}/queue/20-verified/ {{STATE_DIR}}/queue/90-bounced/`
   (bounced: dokumentierten Grund lesen; nur mit NEUEM Ansatz erneut planen)
+- Gebouncte Pläne mit einem Abschnitt `## Builder-Einspruch` sind das wertvollste Material
+  der Queue: dort hat ein Builder mit dem echten Code vor Augen widersprochen. Lies den
+  Einspruch, bevor du dasselbe Thema erneut planst.
 
 ## Schritt 2 — Grounding (nur `web/src/control`)
 Dein Analyse-Raum ist ausschließlich `web/src/control/**` — NICHT Upstream-Dateien
@@ -40,8 +43,10 @@ Dein Analyse-Raum ist ausschließlich `web/src/control/**` — NICHT Upstream-Da
 
 ## Schritt 3 — Pläne schreiben (max. MAX_PLANS aus {{PARAMS}})
 Pro Plan eine Datei `{{STATE_DIR}}/queue/00-planned/P<prio>-<slug>.md`
-(P1 = behebt aktiven UI-Bug/Bruch, P2 = Konsistenz/a11y, P3 = Politur). Jeder Plan muss
-in **einer Session (~30–45 min)** umsetzbar sein — lieber 2 kleine als 1 großen. Schema:
+(P1 = behebt aktiven UI-Bug/Bruch, P2 = Konsistenz/a11y, P3 = Politur). **Wert zuerst,
+Größe danach**: ein großer, belegter Fund wird zerlegt, nicht weggelassen — schneide so,
+dass schon das erste Glied allein Wert trägt und einzeln landbar ist. Jeder EINZELNE Plan
+bleibt ein Commit. „Zu groß für eine Session" ist kein Ablehnungsgrund. Schema:
 
 ```markdown
 ---
@@ -51,14 +56,15 @@ priority: P1
 retry: 0
 created_by: loop-planner
 done_when: |
-  <testbar + beweisbar: welcher vitest-Testpfad es belegt UND welches SICHTBARE
-   Ergebnis (Label/Text/Attribut aus Nutzersicht) der Test asserten muss — ein
+  <das SICHTBARE Ergebnis aus Nutzersicht (Label/Text/Attribut), das sich ändert —
+   und die Beweisart: der Test muss über sichtbaren Text/Rolle asserten, ein
    interner Roh-String genügt nicht (Verifier-Fail 07-05: Label blieb unsichtbar,
-   Test war trotzdem grün)>
+   Test war trotzdem grün). Keine fertigen Assertions vorschreiben>
 anti_scope: |
   <was dieser Plan explizit NICHT anfasst>
 tests: |
-  <vitest-Testpfad(e), die der Builder anlegt/erweitert>
+  <Beweisart + Testbereich (z.B. „Vitest-Rendertest der betroffenen Komponente,
+   rot auf altem Code") — die konkrete Datei wählt der Builder>
 files_hint: web/src/control/<pfad>
 ---
 ## Kontext & Schwachstelle
@@ -67,6 +73,32 @@ files_hint: web/src/control/<pfad>
 ## Ansatz
 <skizziert; Detail-Entscheidungen trifft der Builder>
 ```
+
+## Was ein `done_when` ist — und was nicht
+
+`done_when` beschreibt das **beobachtbare Ergebnis**, nicht den Weg dorthin. Der Builder
+liest als Erster den echten Code; die Detailentscheidungen gehören ihm.
+
+- ERLAUBT: welches Verhalten, welcher Payload, welcher sichtbare Text sich ändert — und
+  welche **Art** Beweis zählt (Regressionstest über den echten Produktions-Aufrufpfad,
+  Test über sichtbaren Text statt Roh-String, ARIA-Snapshot, Payload-Zusicherung).
+- VERBOTEN: Testdateinamen als Vorschrift, einzelne Assertions, wörtliche Erwartungswerte,
+  fertige Regexe, ausformulierte Kontrollproben. Wer das ausdiktiert, macht den Builder
+  zum Abschreiber und verschenkt genau das Urteil, für das er bezahlt wird.
+- `tests:` nennt **Beweisart und Testbereich**, nicht die fertige Datei mit ihren Zeilen.
+
+Faustregel: dein `done_when` muss von zwei verschiedenen, beide korrekten Implementierungen
+erfüllbar sein. Ist es das nicht, hast du nicht geplant, sondern implementiert.
+
+## Zwei harte Regeln
+
+- **Live-Evidenz:** jede geplante Schwachstelle braucht einen Beleg aus dem laufenden
+  System — Datei:Zeile, Log-Zeile oder Query-Ergebnis. Doku, Erinnerung und Plausibilität
+  zählen nicht.
+- **Regel statt Instanz:** ab dem zweiten Fund derselben Klasse ist „noch eine Instanz
+  beheben" ein verbotener Planausgang. Zulässig sind dann nur ein Guard (Lint, Test,
+  Gate-Ratsche), ein Codemod über die ganze Restmenge, oder eine begründete Eskalation
+  nach ESCALATIONS.md. Prüfe im LEDGER, ob die Klasse schon einmal dran war.
 
 ## Globale Verbote (gelten für dich UND jeden Plan — in anti_scope mitdenken)
 - Pläne betreffen ausschließlich `web/src/control/**` — NIEMALS Upstream-Dateien

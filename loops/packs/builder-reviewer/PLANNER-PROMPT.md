@@ -14,6 +14,9 @@ Nichts erneut planen, was schon lief:
 - {{STATE_DIR}}/LEDGER.md (frühere Runden)
 - `ls {{STATE_DIR}}/queue/00-planned/ {{STATE_DIR}}/queue/20-verified/ {{STATE_DIR}}/queue/90-bounced/`
   (bounced: dokumentierten Grund lesen; nur mit NEUEM Ansatz erneut planen)
+- Gebouncte Pläne mit einem Abschnitt `## Builder-Einspruch` sind das wertvollste Material
+  der Queue: dort hat ein Builder mit dem echten Code vor Augen widersprochen. Lies den
+  Einspruch, bevor du dasselbe Thema erneut planst.
 
 ## Schritt 2 — Grounding
 Der folgende Fächer ist dein **Pflicht-Minimum** — lauf ihn jede Nacht ab. Er ist eine
@@ -39,8 +42,10 @@ Schwachstelle braucht Live-Evidenz** (Datei:Zeile, Log-Zeile oder Query-Ergebnis
 ## Schritt 3 — Pläne schreiben (max. MAX_PLANS aus {{PARAMS}})
 Pro Plan eine Datei `{{STATE_DIR}}/queue/00-planned/P<prio>-<slug>.md`
 (P1 sortiert vor P2 vor P3 — P1 = behebt aktiven Schmerz/Bug, P2 = Robustheit/Feature,
-P3 = Politur). Priorisiere nach Wert/Aufwand. Jeder Plan muss von einem Builder in
-**einer Session (~30–45 min)** umsetzbar sein — lieber 2 kleine als 1 großen. Schema:
+P3 = Politur). Priorisiere nach **Wert zuerst, Größe danach**: ein großer, belegter Fund
+wird zerlegt, nicht weggelassen — schneide die Kette so, dass schon das erste Glied
+allein Wert trägt und einzeln landbar ist. Jeder EINZELNE Plan bleibt ein Commit.
+„Zu groß für eine Session" ist kein Grund, den zweitbesten Fund zu planen. Schema:
 
 ```markdown
 ---
@@ -71,6 +76,32 @@ Signatur „existiert schon") ist mit rg/grep gegen den WORKTREE-CODE belegt —
 oder Doku zählen NICHT als Beleg (BUILD_FAIL 07-04: Plan nahm `worker_exit_kind`-Spalten
 aus Live-DB-Drift eines verworfenen Branches an, im Code-Schema fehlten sie → Plan
 unbaubar, Build-Slot verloren).
+
+## Was ein `done_when` ist — und was nicht
+
+`done_when` beschreibt das **beobachtbare Ergebnis**, nicht den Weg dorthin. Der Builder
+liest als Erster den echten Code; die Detailentscheidungen gehören ihm.
+
+- ERLAUBT: welches Verhalten, welcher Payload, welcher sichtbare Text sich ändert — und
+  welche **Art** Beweis zählt (Regressionstest über den echten Produktions-Aufrufpfad,
+  Test über sichtbaren Text statt Roh-String, ARIA-Snapshot, Payload-Zusicherung).
+- VERBOTEN: Testdateinamen als Vorschrift, einzelne Assertions, wörtliche Erwartungswerte,
+  fertige Regexe, ausformulierte Kontrollproben. Wer das ausdiktiert, macht den Builder
+  zum Abschreiber und verschenkt genau das Urteil, für das er bezahlt wird.
+- `tests:` nennt **Beweisart und Testbereich**, nicht die fertige Datei mit ihren Zeilen.
+
+Faustregel: dein `done_when` muss von zwei verschiedenen, beide korrekten Implementierungen
+erfüllbar sein. Ist es das nicht, hast du nicht geplant, sondern implementiert.
+
+## Zwei harte Regeln
+
+- **Live-Evidenz:** jede geplante Schwachstelle braucht einen Beleg aus dem laufenden
+  System — Datei:Zeile, Log-Zeile oder Query-Ergebnis. Doku, Erinnerung und Plausibilität
+  zählen nicht.
+- **Regel statt Instanz:** ab dem zweiten Fund derselben Klasse ist „noch eine Instanz
+  beheben" ein verbotener Planausgang. Zulässig sind dann nur ein Guard (Lint, Test,
+  Gate-Ratsche), ein Codemod über die ganze Restmenge, oder eine begründete Eskalation
+  nach ESCALATIONS.md. Prüfe im LEDGER, ob die Klasse schon einmal dran war.
 
 ## Globale Verbote (gelten für dich UND jeden Plan — in anti_scope mitdenken)
 - KEINE DB-Schema-Änderungen/Migrationen, keine DROP/ALTER-Pfade.

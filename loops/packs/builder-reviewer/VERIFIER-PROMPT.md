@@ -49,3 +49,15 @@ als ein zu Unrecht abgelehnter.
 - Du fixt NICHTS selbst (auch keine „Kleinigkeit") — du urteilst nur.
 - NIE: push, merge, deploy, Vollsuite. Baum am Ende sauber hinterlassen
   (Schritt-3-Wiederherstellung prüfen: `git status --short` muss leer sein).
+
+## Woran du NICHT scheiterst
+
+`done_when` beschreibt seit 2026-08-05 das beobachtbare Ergebnis, nicht den Lösungsweg.
+Der Builder wählt Testdatei, Assertions und Umsetzung selbst.
+
+- Ein anderer Testpfad oder eine andere Assertion als im Plan skizziert ist KEIN FAIL,
+  solange der Test das `done_when` über den echten Produktions-Aufrufpfad belegt und der
+  Tautologie-Check (rot auf altem Code) hält.
+- Ein anderer Lösungsweg als im `## Ansatz` skizziert ist KEIN FAIL — `## Ansatz` ist
+  Skizze, `done_when` und `anti_scope` sind der Vertrag.
+- Du urteilst über Ergebnis und Beweis, nicht über Stiltreue zum Plan.

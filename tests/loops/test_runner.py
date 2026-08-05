@@ -2716,6 +2716,78 @@ def test_pipeline_build_fail_without_commit(tmp_path, fake_engine):
     assert g(runner.wt, "status", "--porcelain").stdout.strip() == ""
 
 
+def test_pipeline_plan_rejected_bounces_without_retry(tmp_path, fake_engine):
+    """Builder-Einspruch ist kein Fehlschlag: kein Retry, kein Fail-Streak.
+
+    Ein Retry gäbe dem Builder denselben Plan zurück, den er gerade als falsch
+    bezeichnet hat — genau die Schleife, die das Einspruchsrecht auflöst.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "reject", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "reject")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def reject(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PLAN_REJECTED done_when zielt auf ein Symptom, die Ursache liegt in foo.py\n",
+            encoding="utf-8",
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = reject
+    runner.cmd_run()
+
+    assert calls.count("build") == 1  # KEIN Retry mit demselben Plan
+    assert calls.count("verify") == 0
+    assert not (runner.queue / "00-planned" / "P1-beispiel.md").exists()
+    bounced = runner.queue / "90-bounced" / "P1-beispiel.md"
+    assert bounced.is_file()
+    body = bounced.read_text(encoding="utf-8")
+    assert "## Builder-Einspruch" in body
+    assert "die Ursache liegt in foo.py" in body
+    ledger = (runner.state / "ledger.jsonl").read_text(encoding="utf-8")
+    assert '"verdict": "rejected"' in ledger
+    assert '"fail_kind": "plan_rejected"' in ledger
+
+
+def test_pipeline_plan_rejected_with_commit_is_build_fail(tmp_path, fake_engine):
+    """Einspruch UND Commit ist ein Widerspruch — fail-closed als Build-Fail.
+
+    Sonst landete ein unverifizierter Commit auf dem Branch, während der Plan
+    als „zurückgewiesen" abgelegt wird und nie ein Verifier draufschaut.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "rejcommit", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "rejcommit")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+    prehead = runner.rev_parse()
+
+    def reject_but_commit(kv, cwd):
+        commit_in(cwd, "trotzdem gebaut")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PLAN_REJECTED aber gebaut\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = reject_but_commit
+    runner.cmd_run()
+
+    assert calls.count("verify") == 0
+    # Der Build-Fail-Pfad revertiert per Revert-COMMIT, HEAD wandert also weiter;
+    # bewiesen wird der Zustand des Baums, nicht die SHA.
+    assert g(runner.wt, "diff", "--stat", f"{prehead}..HEAD").stdout.strip() == ""
+    assert (runner.queue / "90-bounced" / "P1-beispiel.md").is_file()
+    ledger = (runner.state / "ledger.jsonl").read_text(encoding="utf-8")
+    assert '"verdict": "rejected"' not in ledger
+    assert '"fail_kind": "build_fail"' in ledger
+
+
 def test_stop_file_halts_between_rounds(tmp_path, fake_engine):
     behaviors, calls = fake_engine
     repo = init_repo(tmp_path / "repo")

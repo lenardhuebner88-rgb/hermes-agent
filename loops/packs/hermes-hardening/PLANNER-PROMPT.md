@@ -60,8 +60,8 @@ done_when: |
 anti_scope: |
   <keine neuen Features, keine Capability entfernen; verbotene Pfade>
 tests: |
-  <Regressionstest-Dateien, rot auf altem Code — bei Linse B Pflicht,
-   bei Linse A wo testbar>
+  <Beweisart + Testbereich für den Regressionstest, rot auf altem Code — bei
+   Linse B Pflicht, bei Linse A wo testbar; die konkrete Datei wählt der Builder>
 files_hint: <Module/Komponenten>
 ---
 ## Evidenz
@@ -75,6 +75,32 @@ Scope hart: nur `scope_allow`-Pfade, nie `scope_deny` (Auth, dashboard_auth,
 kanban_db.py, Paket-Manifeste, Secrets). **YAML-Frontmatter muss valides YAML
 sein** (Werte mit `"`,`:`,`#`: ganz quoten + `\"` escapen, sonst
 PASS_ID_MISMATCH-Revert).
+
+## Was ein `done_when` ist — und was nicht
+
+`done_when` beschreibt das **beobachtbare Ergebnis**, nicht den Weg dorthin. Der Builder
+liest als Erster den echten Code; die Detailentscheidungen gehören ihm.
+
+- ERLAUBT: welches Verhalten, welcher Payload, welcher sichtbare Text sich ändert — und
+  welche **Art** Beweis zählt (Regressionstest über den echten Produktions-Aufrufpfad,
+  Test über sichtbaren Text statt Roh-String, ARIA-Snapshot, Payload-Zusicherung).
+- VERBOTEN: Testdateinamen als Vorschrift, einzelne Assertions, wörtliche Erwartungswerte,
+  fertige Regexe, ausformulierte Kontrollproben. Wer das ausdiktiert, macht den Builder
+  zum Abschreiber und verschenkt genau das Urteil, für das er bezahlt wird.
+- `tests:` nennt **Beweisart und Testbereich**, nicht die fertige Datei mit ihren Zeilen.
+
+Faustregel: dein `done_when` muss von zwei verschiedenen, beide korrekten Implementierungen
+erfüllbar sein. Ist es das nicht, hast du nicht geplant, sondern implementiert.
+
+## Zwei harte Regeln
+
+- **Live-Evidenz:** jede geplante Schwachstelle braucht einen Beleg aus dem laufenden
+  System — Datei:Zeile, Log-Zeile oder Query-Ergebnis. Doku, Erinnerung und Plausibilität
+  zählen nicht.
+- **Regel statt Instanz:** ab dem zweiten Fund derselben Klasse ist „noch eine Instanz
+  beheben" ein verbotener Planausgang. Zulässig sind dann nur ein Guard (Lint, Test,
+  Gate-Ratsche), ein Codemod über die ganze Restmenge, oder eine begründete Eskalation
+  nach ESCALATIONS.md. Prüfe im LEDGER, ob die Klasse schon einmal dran war.
 
 ## Abschluss
 

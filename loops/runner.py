@@ -256,14 +256,18 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
         path_prefixes=("web/src/control/",),
         deny_prefixes=(),
         safety_sha256="cedbcf5ea93cdb72f7f70f82b258a212fcca0380a76239d3c8f7c7e787e9207f",
-        # Re-signiert 2026-07-28 (Operator-Freigabe): VERIFIER benennt
-        # {{STATE_DIR}}/last-status jetzt als Datei statt nur als Namen (Vorfall
-        # hermes-hardening R1 vom 28.07.), PLANNER traegt statt "(Opus 4.8)" die
-        # Platzhalter seiner Schwesterphasen. BUILDER unveraendert.
+        # Re-signiert 2026-08-05 (Operator-Freigabe, Grill „Loops entengen"):
+        # PLANNER — `done_when` beschreibt das beobachtbare Ergebnis, nicht den
+        # Testcode; `tests:` nennt Beweisart statt fertiger Datei; Live-Evidenz
+        # und „Regel statt Instanz" als harte Regeln. BUILDER — Einspruchsrecht
+        # `PLAN_REJECTED`. VERIFIER — anderer Testpfad/Lösungsweg als skizziert
+        # ist kein FAIL. Die Pfad- und Visual-Vertraege bleiben unveraendert.
+        # Voriger Stand (2026-07-28): PLANNER 00ec377e…, BUILDER 4a6eb2e5…,
+        # VERIFIER b1b7c270….
         prompt_sha256={
-        "PLANNER-PROMPT.md": "00ec377ef1d1a753d4ea01f593b1f6ee65b171e383136416f78f5312061027da",
-        "BUILDER-PROMPT.md": "4a6eb2e5e558901a0d3e06a0f5785b30295e56c84c51d3f0321a7eed06ec8d93",
-        "VERIFIER-PROMPT.md": "b1b7c2702820e8974491b3173e5594949534239818c17dff201f233ec1cbb972",
+        "PLANNER-PROMPT.md": "09db24e93bbed2ae770c103a912ff2de2c30e186f08bf55c5f9afc4d5a1d63e4",
+        "BUILDER-PROMPT.md": "fd377cd755b98283265e652d6e7eb57479d1d2249011502f1ac4abdd4a8f5c77",
+        "VERIFIER-PROMPT.md": "c07fa11046d2deb1422f025b0a0bc25f8d9b3bfeccd01b5af0f6f8137bec933c",
         },
         require_visual="always",
     ),
@@ -2648,7 +2652,7 @@ class LoopRunner:
 
     def _run_pipeline(self) -> None:
         deadline = self._deadline()
-        fails = verified = stale_requeues = 0
+        fails = verified = stale_requeues = rejects = 0
         self._expire_stale_building()
         for rnd in range(1, self.stop_cfg("max_rounds") + 1):
             if self.stop_requested():
@@ -2697,6 +2701,44 @@ class LoopRunner:
                                        fail_kind="usage_limit", reason="kein commit")
                 break
             status = "TIMEOUT" if build.timed_out else self.last_status()
+            # Builder-Einspruch (2026-08-05): der Builder liest als Erster den echten
+            # Code und darf einen Plan zurückweisen, statt ihn gegen besseres Wissen
+            # zu transkribieren. Das ist ein Urteil, kein Fehlschlag — deshalb KEIN
+            # Retry (der gäbe ihm denselben Plan zurück, den er gerade als falsch
+            # bezeichnet hat) und kein Beitrag zum fail_streak. Der Plan geht mit
+            # Begründung nach 90-bounced; die Dedup-Pflicht des nächsten Planners
+            # liest bounced-Pläne, der Einspruch erreicht so die Planung.
+            # Einspruch UND Commit ist ein Widerspruch: dann fail-closed als
+            # Build-Fail, sonst läge ein unverifizierter Commit auf dem Branch.
+            if (
+                build.rc == 0
+                and not build.timed_out
+                and status.startswith("PLAN_REJECTED")
+                and self.rev_parse() == prehead
+            ):
+                reason = status[len("PLAN_REJECTED"):].strip() or "ohne Grund"
+                self.say(f"PLAN_REJECTED [{reason}]")
+                if not self.guard_clean():
+                    break
+                append_section(building, "Builder-Einspruch", reason)
+                target = self.queue / "90-bounced" / building.name
+                if target.exists():  # Namens-Wiederverwendung: alte Evidenz halten
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    target = target.with_name(f"{target.stem}.{stamp}.md")
+                building.rename(target)
+                self.ledger(f"R{rnd} 🛑 {target.name} plan-rejected: {reason}")
+                self.ledger_event(round=rnd, phase="build", verdict="rejected",
+                                   plan=target.name, fail_kind="plan_rejected", reason=reason)
+                rejects += 1
+                # Deckel gegen den Ausartungsfall „Builder weist alles zurück":
+                # dann ist die Planung kaputt, nicht der einzelne Plan.
+                if rejects >= self.stop_cfg("fail_streak"):
+                    self.say("Einspruch-Streak — Stop für Human-Review.")
+                    self.notify(f"{self.pack.name}: {rejects}× Plan-Einspruch in Folge — gestoppt.")
+                    self.ledger_event(round=rnd, phase="stop", verdict="stopped",
+                                       reason="reject_streak")
+                    break
+                continue
             build_ok = build.rc == 0 and status.startswith("BUILT")
             if self.rev_parse() == prehead or not build_ok:
                 if build.rc != 0 and not build.timed_out:
@@ -2822,7 +2864,7 @@ class LoopRunner:
             if verify.rc == 0 and pass_matches and visual_ok:
                 building.rename(self.queue / "20-verified" / building.name)
                 verified += 1
-                fails = 0
+                fails = rejects = 0
                 sha = self.rev_parse()[:9]
                 self.ledger(f"R{rnd} ✅ {building.name} verified ({sha}) [{self._secs('build', 'verify')}]")
                 self.notify(f"✅ {self.pack.name} R{rnd}: {building.name} verified ({sha}) — {verified} gesamt")

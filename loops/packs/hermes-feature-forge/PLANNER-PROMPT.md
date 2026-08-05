@@ -86,8 +86,9 @@ anti_scope: |
   <explizite Grenzen; keine bestehende Capability entfernen/verstecken;
    verbotene Pfade nennen>
 tests: |
-  <konkrete Test-Dateien (pytest unter tests/hermes_cli/, Vitest unter
-   web/src/control/), rot auf altem Code>
+  <Beweisart + Testbereich (pytest unter tests/hermes_cli/ für den API-Anteil,
+   Vitest unter web/src/control/ für den UI-Anteil; rot auf altem Code) —
+   die konkreten Dateien und Assertions wählt der Builder>
 files_hint: <konkrete Module/Komponenten>
 ---
 ## Evidenz
@@ -102,6 +103,32 @@ files_hint: <konkrete Module/Komponenten>
 wird ein späterer PASS als PASS_ID_MISMATCH revertiert). Werte mit `"`,`:`,`#`
 oder führendem Sonderzeichen: ganzen Wert doppelt quoten und interne `"` als
 `\"` escapen — oder schlicht ohne Anführungszeichen formulieren.
+
+## Was ein `done_when` ist — und was nicht
+
+`done_when` beschreibt das **beobachtbare Ergebnis**, nicht den Weg dorthin. Der Builder
+liest als Erster den echten Code; die Detailentscheidungen gehören ihm.
+
+- ERLAUBT: welches Verhalten, welcher Payload, welcher sichtbare Text sich ändert — und
+  welche **Art** Beweis zählt (Regressionstest über den echten Produktions-Aufrufpfad,
+  Test über sichtbaren Text statt Roh-String, ARIA-Snapshot, Payload-Zusicherung).
+- VERBOTEN: Testdateinamen als Vorschrift, einzelne Assertions, wörtliche Erwartungswerte,
+  fertige Regexe, ausformulierte Kontrollproben. Wer das ausdiktiert, macht den Builder
+  zum Abschreiber und verschenkt genau das Urteil, für das er bezahlt wird.
+- `tests:` nennt **Beweisart und Testbereich**, nicht die fertige Datei mit ihren Zeilen.
+
+Faustregel: dein `done_when` muss von zwei verschiedenen, beide korrekten Implementierungen
+erfüllbar sein. Ist es das nicht, hast du nicht geplant, sondern implementiert.
+
+## Zwei harte Regeln
+
+- **Live-Evidenz:** jede geplante Schwachstelle braucht einen Beleg aus dem laufenden
+  System — Datei:Zeile, Log-Zeile oder Query-Ergebnis. Doku, Erinnerung und Plausibilität
+  zählen nicht.
+- **Regel statt Instanz:** ab dem zweiten Fund derselben Klasse ist „noch eine Instanz
+  beheben" ein verbotener Planausgang. Zulässig sind dann nur ein Guard (Lint, Test,
+  Gate-Ratsche), ein Codemod über die ganze Restmenge, oder eine begründete Eskalation
+  nach ESCALATIONS.md. Prüfe im LEDGER, ob die Klasse schon einmal dran war.
 
 ## Abschluss
 

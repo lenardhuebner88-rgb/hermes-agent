@@ -54,6 +54,25 @@ dann beende den Turn.
    und LISTE übrige untracked Dateien in der Notiz (löschen übernimmt der Loop-Driver).
    NICHT committen.
 
+## Einspruchsrecht — statt gegen besseres Wissen zu bauen
+
+Du liest als Erster den ECHTEN Code. Stellst du dabei fest, dass der Plan das falsche
+Problem löst, ein Symptom statt der Ursache behandelt, auf einer Annahme steht, die im
+Code nicht gilt, oder dass ein deutlich besserer Schnitt offen daliegt — dann baue ihn
+NICHT und scheitere auch nicht still:
+
+- committe nichts, lass den Baum sauber (`git reset && git checkout -- .`),
+- schreibe nach {{STATE_DIR}}/last-status GENAU eine Zeile:
+  `PLAN_REJECTED <ein Satz: was am Plan falsch ist UND was stattdessen richtig wäre>`
+
+Der Loop legt den Plan mit deiner Begründung nach `90-bounced`; der nächste Planner liest
+sie als vorrangiges Material. Kein Retry, kein Fail-Streak — Einspruch ist ein Urteil,
+kein Fehlschlag.
+
+Er ist aber kein Ausweg aus schwerer Arbeit: „aufwendig", „unklar formuliert", „Gates rot"
+oder „Test kriege ich nicht grün" sind `BUILD_FAIL`, nicht `PLAN_REJECTED`. Und Einspruch
+UND Commit zugleich ist ein Widerspruch — der Loop behandelt das fail-closed als Build-Fail.
+
 ## Verbote
 - NIE: push, merge, deploy, Service-Restart, DB-Schreibzugriff auf `~/.hermes/kanban.db`,
   Secrets/Auth-Dateien, `package-lock.json`, Schema-Migrationen.
