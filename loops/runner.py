@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Literal, Mapping, NoReturn
 
 import yaml
 
@@ -1269,11 +1269,18 @@ class LoopRunner:
         if res.returncode != 0:
             raise RuntimeError(f"worktree add fehlgeschlagen: {res.stderr.strip()}")
 
+    def _fail_guard_clean(self, reason: str) -> NoReturn:
+        """Guard-Abbruch einmalig protokollieren und bis zur Unit tragen."""
+        message = f"GUARD-CLEAN: {reason}"
+        self.say(f"ABBRUCH: {reason}")
+        self.ledger(f"⚠️ {message}")
+        self.notify(f"{self.pack.name}: {message}")
+        raise RuntimeError(message)
+
     def guard_clean(self) -> bool:
         """Loop-exklusiven Baum deterministisch säubern (Driver-Ebene, hook-frei)."""
         if not self.wt.is_dir():
-            self.say(f"ABBRUCH: Worktree fehlt: {self.wt}")
-            return False
+            self._fail_guard_clean(f"Worktree fehlt: {self.wt}")
         head = self.git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         if head != self.pack.branch:
             # Drift (live 2026-07-31 + 08-03: Baum stand auf 'master',
@@ -1288,15 +1295,11 @@ class LoopRunner:
             self.git("clean", "-fd")
             res = self.git("checkout", self.pack.branch)
             if res.returncode != 0:
-                self.say(
-                    f"ABBRUCH: Rückkehr auf {self.pack.branch!r} fehlgeschlagen: "
-                    f"{res.stderr.strip()}"
+                detail = res.stderr.strip() or "keine Fehlerdetails"
+                self._fail_guard_clean(
+                    f"Rückkehr auf {self.pack.branch!r} fehlgeschlagen "
+                    f"(war {head!r}): {detail}"
                 )
-                self.ledger(
-                    f"⚠️ WORKTREE-DRIFT: Heilung auf {self.pack.branch} "
-                    f"fehlgeschlagen (war {head})"
-                )
-                return False
             self.ledger(f"WORKTREE-DRIFT geheilt: {head} → {self.pack.branch}")
         if not self.git("status", "--porcelain").stdout.strip():
             return True
@@ -1309,8 +1312,9 @@ class LoopRunner:
         self.git("clean", "-fd")
         left = self.git("status", "--porcelain").stdout.strip()
         if left:
-            self.say(f"ABBRUCH: Worktree lässt sich nicht säubern:\n{left}")
-            return False
+            self._fail_guard_clean(
+                f"Worktree lässt sich nicht säubern:\n{left}"
+            )
         return True
 
     def revert_range(self, prehead: str) -> bool:
@@ -3562,10 +3566,10 @@ def main(argv: list[str] | None = None) -> int:
                 rc = runner.cmd_run(fresh=args.fresh)
             else:
                 night_ok = runner.cmd_night(fresh=args.fresh, skip_plan=args.skip_plan)
-                # Bestehende Review-only-Packs behalten ihre bisherigen Service-
-                # Exitcodes. Nur die autorisierte Auto-Land-Pipeline meldet einen
-                # unvollständigen Landungsversuch als harte Unit-Fehlfunktion.
-                rc = 0 if night_ok or not runner.autoland_active else 4
+                # Jeder explizite Fehlausgang erreicht die Unit — unabhängig von
+                # Autoland. Erfolgreiche Review- und Autoland-Packs bleiben Exit 0;
+                # Autoland-Fehlausgänge behalten ihren bisherigen Exit 4.
+                rc = 0 if night_ok else 4
             runner.say(f"ENDE cmd={args.cmd}")
             if rc:
                 return rc
