@@ -8341,9 +8341,20 @@ def maybe_integrate_on_complete(
     sibling commits and spawn phantom fixers (Opus R2-1).
     """
     row = conn.execute(
-        "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+        "SELECT workspace_path, skills FROM tasks WHERE id = ?", (task_id,)
     ).fetchone()
-    if not row or not row["workspace_path"]:
+    if not row:
+        return None
+    try:
+        task_skills = json.loads(row["skills"]) if row["skills"] else []
+    except (TypeError, json.JSONDecodeError):
+        task_skills = []
+    # Landing-loop recovery cards repair loop/<pack> where that branch already
+    # lives. Their chain worktree is worker isolation only, not an integration
+    # target; the pinned repair skill is the durable card-level discriminator.
+    if isinstance(task_skills, list) and "loop-branch-repair" in task_skills:
+        return None
+    if not row["workspace_path"]:
         return None
     provisioned = split_provisioned_path(row["workspace_path"])
     if provisioned is None:
