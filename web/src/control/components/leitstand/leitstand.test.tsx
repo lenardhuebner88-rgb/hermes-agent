@@ -247,6 +247,13 @@ describe("leitstand building blocks", () => {
   });
 
   describe("FreshnessStrip", () => {
+    it("meldet nie eine Zukunft, auch wenn der Load den eingefrorenen Takt ueberholt", () => {
+      render(<FreshnessStrip lastUpdated={nowSec() + 5} />);
+      const line = screen.getByText(/^aktualisiert vor /);
+      expect(line.textContent).toBe("aktualisiert vor 0s");
+      expect(screen.queryByText(/^aktualisiert in /)).toBeNull();
+    });
+
     it("shows the muted age line in font-data micro and fires the refresh handler", () => {
       const onRefresh = vi.fn();
       render(<FreshnessStrip lastUpdated={nowSec() - 65} onRefresh={onRefresh} />);

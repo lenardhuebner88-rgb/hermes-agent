@@ -121,6 +121,53 @@ def _state_root() -> Path:
     return STATE_ROOT_OVERRIDE or loop_runner.DEFAULT_STATE_ROOT
 
 
+def _parse_escalations_file(text: str) -> list[dict[str, Any]]:
+    """Parse level-two Markdown sections from one ESCALATIONS.md file."""
+    lines = text.splitlines()
+    heading_indexes = [
+        index for index, line in enumerate(lines) if line.startswith("## ")
+    ]
+    entries: list[dict[str, Any]] = []
+
+    for position, start in enumerate(heading_indexes):
+        end = (
+            heading_indexes[position + 1]
+            if position + 1 < len(heading_indexes)
+            else len(lines)
+        )
+        body_lines = lines[start + 1 : end]
+        while body_lines and (
+            not body_lines[0].strip() or body_lines[0].strip() == "---"
+        ):
+            body_lines.pop(0)
+        while body_lines and (
+            not body_lines[-1].strip() or body_lines[-1].strip() == "---"
+        ):
+            body_lines.pop()
+
+        severity = None
+        for line in body_lines:
+            match = re.match(
+                r"^\s*(?:[-*]\s*)?(?:\*\*Schwere:\*\*|Schwere:)\s*(\S+)",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                candidate = match.group(1).lower()
+                if candidate in {"niedrig", "mittel", "hoch"}:
+                    severity = candidate
+                break
+
+        entries.append({
+            "title": lines[start][3:].strip(),
+            "severity": severity,
+            "body_lines": body_lines,
+            "line_start": start + 1,
+        })
+
+    return entries
+
+
 def _models_path() -> Path:
     return MODELS_PATH_OVERRIDE or (loop_runner.REPO_ROOT / "loops" / "models.yaml")
 
@@ -1325,6 +1372,45 @@ def register_loops_routes(app: FastAPI) -> None:
         summaries = [_pack_summary(name, source, timers) for name, source in packs]
         _annotate_repo_lock(summaries)
         return {"packs": summaries}
+
+    @app.get("/api/loops/escalations")
+    def loop_escalations() -> dict[str, Any]:
+        entries: list[dict[str, Any]] = []
+        packs_with_escalations = 0
+
+        for pack, source in _all_pack_names():
+            path = _state_root() / pack / "ESCALATIONS.md"
+            if not path.is_file():
+                continue
+            parsed = _parse_escalations_file(
+                path.read_text(encoding="utf-8", errors="replace")
+            )
+            if not parsed:
+                continue
+
+            packs_with_escalations += 1
+            title_occurrences: dict[str, int] = {}
+            for entry in parsed:
+                title = entry["title"]
+                occurrence = title_occurrences.get(title, 0) + 1
+                title_occurrences[title] = occurrence
+                identity = f"{pack}:{title}"
+                if occurrence > 1:
+                    identity = f"{identity}:{occurrence}"
+                entries.append({
+                    "id": hashlib.sha1(
+                        identity.encode("utf-8"), usedforsecurity=False
+                    ).hexdigest()[:12],
+                    "pack": pack,
+                    "source": source,
+                    **entry,
+                })
+
+        return {
+            "entries": entries,
+            "packs_with_escalations": packs_with_escalations,
+            "total": len(entries),
+        }
 
     @app.get("/api/loops/models")
     def loop_models() -> dict[str, Any]:
