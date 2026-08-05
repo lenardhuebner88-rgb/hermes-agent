@@ -860,17 +860,26 @@ def _tree_blob_at(repo: Path, ref: str, path: str) -> str:
     echoes the argument to stdout, so an absent file looks like a real,
     distinct blob and every deletion reads as lost content.
     """
-    out = _git(repo, "ls-tree", ref, "--", path, check=False)
+    out = _git(repo, "ls-tree", "-z", ref, "--", path, strip=False)
     if not out:
         return ""
     parts = out.split()
     return parts[2] if len(parts) >= 3 else ""
 
 
-def _blob_text(repo: Path, blob: str) -> str:
+def _blob_text(repo: Path, blob: str) -> Optional[str]:
+    """Blob content as text; ``None`` for binary/undecodable blobs.
+
+    ``strip=False`` keeps leading indentation and trailing whitespace intact
+    for the comparison; a strict UTF-8 failure marks the blob as opaque so
+    the caller can fail closed instead of crashing on a ``UnicodeDecodeError``.
+    """
     if not blob:
         return ""
-    return _git(repo, "cat-file", "blob", blob, check=False)
+    try:
+        return _git(repo, "cat-file", "blob", blob, check=False, strip=False)
+    except UnicodeDecodeError:
+        return None
 
 
 def _added_lines(base_text: str, branch_text: str) -> list[str]:
@@ -888,20 +897,17 @@ def _added_lines(base_text: str, branch_text: str) -> list[str]:
 def _silent_branch_content_loss(
     repo: Path, target: str, old_head: str, new_head: str, base: str
 ) -> list[str]:
-    """Branch-side paths whose contribution a base update silently dropped.
+    """Branch-side paths a recovery replay silently dropped.
 
-    *base* is the divergence point the branch's changes are measured against
-    (the fork point for an ordinary rebase, the reverted merge's first
-    parent for a recovery replay).  A path counts as lost only when the
-    replayed result matches the target exactly (`new_blob == target_blob`)
-    AND the branch's added lines are not all present in the target version.
-    Blob identity is deliberately NOT the criterion: a target that landed
-    the change and then kept editing the file (or absorbed it as a subset
-    of a larger commit) must read as landed, and a clean shared-file rebase
-    produces a third, merged blob.  The real incident shape — the path
-    EXISTS in the target but without the chain's content (merge+revert) —
-    fails the line-containment test and is reported.  Branch-side pure
-    line deletions carry no added lines and are never reported.
+    Only meaningful on the reverted-merge recovery path, where *base* is
+    the reverted merge's first parent and the replay is expected to
+    reproduce the branch's content: a path is lost when the replayed
+    result matches the target exactly (`new_blob == target_blob`) while
+    the branch's added lines are not all present in the target version.
+    Binary blobs cannot be line-compared; reaching this point with one
+    means its distinct branch version vanished, which reads as a loss.
+    Branch-side pure line deletions carry no added lines and are never
+    reported.
     """
     lost: list[str] = []
     for path in _changed_files_between(repo, base, old_head):
@@ -913,14 +919,14 @@ def _silent_branch_content_loss(
             continue  # genuinely landed in the target
         if _tree_blob_at(repo, new_head, path) != target_blob:
             continue  # branch delta (possibly merged) present in the result
-        if not target_blob:
-            lost.append(path)  # the target lacks the path entirely
+        branch_text = _blob_text(repo, branch_blob)
+        target_text = _blob_text(repo, target_blob)
+        if branch_text is None or target_text is None:
+            lost.append(path)  # opaque binary branch version did not survive
             continue
-        base_blob = _tree_blob_at(repo, base, path)
-        added = _added_lines(
-            _blob_text(repo, base_blob), _blob_text(repo, branch_blob)
-        )
-        target_lines = set(_blob_text(repo, target_blob).splitlines())
+        base_text = _blob_text(repo, _tree_blob_at(repo, base, path)) or ""
+        added = _added_lines(base_text, branch_text)
+        target_lines = set(target_text.splitlines())
         if any(line not in target_lines for line in added):
             lost.append(path)
     return lost
@@ -1754,20 +1760,11 @@ def prepare_worker_base(
         )
     landed, pending = _branch_landing_groups(wt, target, actual_head)
     if landed and not pending:
-        lost = _silent_branch_content_loss(
-            wt,
-            target,
-            actual_head,
-            target_head,
-            _git(wt, "merge-base", actual_head, target_head),
-        )
-        if lost:
-            raise WorktreeError(
-                "worker branch commits are patch-equivalent to target "
-                f"history, but their content is absent from {target} "
-                f"({', '.join(lost[:8])}); refusing to reset the branch "
-                "away — reconcile the landing divergence explicitly"
-            )
+        # No loss guard here: patch-equivalence plus later target evolution
+        # (an edited landed line, a renamed file) is legitimate landed work,
+        # and blob/line comparison cannot separate it from a real drop.  The
+        # production loss class (merge + integrator revert) is intercepted by
+        # the recovery path above before this classification is ever trusted.
         _git(wt, "reset", "--hard", target)
         new_head = _git(wt, "rev-parse", "HEAD")
         post_dirty = dirty_files(wt)
@@ -1835,21 +1832,6 @@ def prepare_worker_base(
             raise WorktreeError(mixed_diagnosis)
         action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
-    if action == "rebased":
-        lost = _silent_branch_content_loss(
-            wt,
-            target,
-            actual_head,
-            new_head,
-            _git(wt, "merge-base", actual_head, target_head),
-        )
-        if lost:
-            _git(wt, "reset", "--hard", actual_head)
-            raise WorktreeError(
-                f"rebase onto {target} silently dropped branch content that "
-                f"is not present in the target ({', '.join(lost[:8])}); "
-                "branch restored to pre-rebase HEAD"
-            )
     post_dirty = dirty_files(wt)
     unexpected_dirty = [path for path in post_dirty if path not in skipped_wip_files]
     if unexpected_dirty:

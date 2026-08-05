@@ -1609,37 +1609,88 @@ def test_prepare_worker_base_recovers_multi_commit_reverted_merge(repo):
     assert kwt.dirty_files(info["path"]) == []
 
 
-def test_prepare_worker_base_refuses_reset_when_patch_equivalent_content_absent(repo):
-    """Patch-ID equivalence without the tree content must fail closed, not reset."""
-    info = kwt.ensure_worktree(repo, "t_patch_lie")
+def test_prepare_worker_base_landed_then_line_reformatted_is_already_landed(repo):
+    """B8: a landed line that main later reformats is still landed work.
+
+    Replaces the removed reset-path loss guard: patch-equivalence plus
+    later target evolution is the normal 'already landed' shape, and no
+    blob/line comparison may park it (opus review rounds 2-3: the guard
+    fired on 8/8 real branches in exactly this state).
+    """
+    info = kwt.ensure_worktree(repo, "t_landed_reformat")
     worktree = info["path"]
-    (worktree / "a.txt").write_text("branch version\n")
-    _git(worktree, "add", "a.txt")
-    _git(worktree, "commit", "-m", "branch change")
+    (worktree / "mod.py").write_text("def f():\n    timeout=30\n    return 1\n")
+    _git(worktree, "add", "mod.py")
+    _git(worktree, "commit", "-m", "branch adds mod.py")
     recorded_head = _git(worktree, "rev-parse", "HEAD")
 
-    # Patch-equivalent landing via cherry-pick, then main supersedes the content.
-    # The unrelated commit first prevents a cherry-pick fast-forward, which
-    # would put the branch commit itself (not a patch twin) into main history.
-    (repo / "unrelated.txt").write_text("unrelated main work\n")
+    (repo / "unrelated.txt").write_text("u\n")
     _git(repo, "add", "unrelated.txt")
     _git(repo, "commit", "-m", "unrelated main work")
     _git(repo, "cherry-pick", recorded_head)
-    (repo / "a.txt").write_text("main follow-up\n")
-    _git(repo, "add", "a.txt")
-    _git(repo, "commit", "-m", "main supersedes the change")
+    (repo / "mod.py").write_text("def f():\n    timeout = 30\n    return 1\n")
+    _git(repo, "add", "mod.py")
+    _git(repo, "commit", "-m", "main reformats the landed line")
 
-    with pytest.raises(kwt.WorktreeError, match="refusing to reset"):
-        kwt.prepare_worker_base(
-            worktree,
-            recorded_head=recorded_head,
-            merge_target="main",
-            task_id="t_patch_lie",
-        )
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_landed_reformat",
+    )
 
-    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
-    assert (worktree / "a.txt").read_text() == "branch version\n"
-    assert kwt.dirty_files(worktree) == []
+    assert result["action"] == "already_landed"
+    assert _git(worktree, "rev-parse", "HEAD") == _git(repo, "rev-parse", "main")
+
+
+def test_prepare_worker_base_rebase_through_target_rename(repo):
+    """B7: a rename on the target is not a loss of the branch's change."""
+    (repo / "old.py").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n"
+    )
+    _git(repo, "add", "old.py")
+    _git(repo, "commit", "-m", "add old.py")
+
+    info = kwt.ensure_worktree(repo, "t_target_rename")
+    worktree = info["path"]
+    (worktree / "old.py").write_text(
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9 branch\nl10\n"
+    )
+    _git(worktree, "add", "old.py")
+    _git(worktree, "commit", "-m", "branch touches line nine")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+
+    _git(repo, "mv", "old.py", "new.py")
+    _git(repo, "commit", "-m", "main renames old.py to new.py")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_target_rename",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "old.py").exists()
+    assert "l9 branch" in (worktree / "new.py").read_text()
+
+
+def test_silent_branch_content_loss_treats_binary_blob_as_loss_not_crash(repo):
+    """B9: an opaque (binary) blob must fail closed, not raise UnicodeDecodeError."""
+    _git(repo, "checkout", "-b", "binchain")
+    (repo / "pix.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00\x01branchpixels")
+    _git(repo, "add", "pix.png")
+    _git(repo, "commit", "-m", "branch adds png")
+    old_head = _git(repo, "rev-parse", "HEAD")
+    base = _git(repo, "rev-parse", "HEAD^")
+    _git(repo, "checkout", "main")
+    # Target holds a DIFFERENT binary version (landed, then re-encoded) and
+    # the replay result equals the target — the branch's variant vanished.
+    (repo / "pix.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00mainpixels")
+    _git(repo, "add", "pix.png")
+    _git(repo, "commit", "-m", "main has its own png")
+    lost = kwt._silent_branch_content_loss(repo, "main", old_head, "main", base)
+    assert lost == ["pix.png"]
 
 
 def test_prepare_worker_base_reverted_merge_recovery_moves_branch_ref(repo):
