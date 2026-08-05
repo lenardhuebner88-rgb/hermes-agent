@@ -1191,7 +1191,7 @@ class GatewayKanbanWatchersMixin:
         call = functools.partial(fn, *args, **kwargs)
         return await loop.run_in_executor(self._get_executor(), ctx.run, call)
 
-    async def _kanban_notifications_watcher(self, interval: float = 5.0) -> None:
+    async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Own Kanban subscription delivery and alert-rule evaluation.
 
         For each subscription row, fetches ``task_events`` newer than the
@@ -1252,10 +1252,14 @@ class GatewayKanbanWatchersMixin:
         # "status" covers dashboard drag-drop and `_set_status_direct()`
         # writes — surface those transitions to subscribers too. "archived" /
         # "unblocked" are claimed so the cursor advances past them (silent,
-        # see the comment below) and "received" / "tree_stalled_flush" are
-        # the fork's own report kinds (initial-receipt ping / stalled-tree
-        # trailing flush).
-        REPORT_KINDS = ("received", "completed", "blocked", "gave_up", "crashed", "timed_out", "tree_stalled_flush", "status", "archived", "unblocked")
+        # see the comment below).
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected")
+        # Fork superset: "received" / "tree_stalled_flush" are the fork's own
+        # report kinds (initial-receipt ping / stalled-tree trailing flush).
+        # Derived from TERMINAL_KINDS so an upstream addition to that tuple —
+        # "block_loop_detected" was the last one — is claimed here too instead
+        # of silently dropping out of the fork's notifier.
+        REPORT_KINDS = TERMINAL_KINDS + ("received", "tree_stalled_flush")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -1272,7 +1276,13 @@ class GatewayKanbanWatchersMixin:
         # means the chat is dead (deleted, bot kicked, etc.) — after N
         # consecutive send failures the sub is dropped so we don't spin
         # against a dead chat every 5 seconds forever.
-        MAX_SEND_FAILURES = 3
+        # Raised from 3 to 12 (~60s at the 5s tick cadence): now that a
+        # reported SendResult(success=False) also lands here (see the
+        # delivery loop below), a transient Telegram/API outage of a few
+        # ticks must NOT permanently unsubscribe a live review-gate channel.
+        # A genuinely dead chat still drops, just ~60s later — a fine trade
+        # for an unattended gate where a false drop means silent work pileup.
+        MAX_SEND_FAILURES = 12
         sub_fail_counts: dict[tuple, int] = getattr(
             self, "_kanban_sub_fail_counts", {}
         )
@@ -1431,6 +1441,24 @@ class GatewayKanbanWatchersMixin:
                         getattr(platform, "value", str(platform)).lower()
                         for platform in self.adapters.keys()
                     }
+                    # Widen to every platform any secondary profile has live,
+                    # not just the default profile's. This is only a coarse
+                    # pre-filter to skip claiming events for subs nobody can
+                    # possibly deliver — the precise per-profile check (via
+                    # gateway/authz_mixin.py::_authorization_adapter, which
+                    # forbids default-profile fallback) still runs at delivery
+                    # time below, rewinding the claim if it resolves to None.
+                    # Without this, a subscription owned by a secondary
+                    # profile on a platform the DEFAULT profile never
+                    # connected (e.g. beta owns discord, default doesn't) was
+                    # dropped here before ever being claimed — no rewind
+                    # applies to an unclaimed event, so it silently never
+                    # retries.
+                    for _profile_adapter_map in getattr(self, "_profile_adapters", {}).values():
+                        active_platforms.update(
+                            getattr(platform, "value", str(platform)).lower()
+                            for platform in _profile_adapter_map.keys()
+                        )
                     if not active_platforms:
                         logger.debug("kanban notifier: no connected adapters; skipping tick")
                         return deliveries
@@ -1459,6 +1487,26 @@ class GatewayKanbanWatchersMixin:
                             )
                             continue
                         seen_db_paths.add(resolved_db_path)
+                        # Zero-subscription early exit: probe the board with a
+                        # cheap read-only connection BEFORE the writable
+                        # `connect()`. A board with no subscriptions has
+                        # nothing to notify, and the writable open (schema
+                        # init/migration on first open, WAL/-shm sidecars,
+                        # checkpoint traffic) is exactly the per-tick cost
+                        # this skip avoids.
+                        try:
+                            if _kb.count_notify_subs(board=slug) == 0:
+                                logger.debug(
+                                    "kanban notifier: board %s has no subscriptions; skipping open",
+                                    slug,
+                                )
+                                continue
+                        except Exception as exc:
+                            logger.debug(
+                                "kanban notifier: read-only subscription probe failed "
+                                "for board %s (%s); falling back to writable open",
+                                slug, exc,
+                            )
                         try:
                             conn = _kb.connect(board=slug)
                         except Exception as exc:
@@ -1481,59 +1529,75 @@ class GatewayKanbanWatchersMixin:
                             if not subs:
                                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
                             for sub in subs:
-                                owner_profile = sub.get("notifier_profile") or None
-                                if owner_profile and owner_profile != notifier_profile:
-                                    _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
-                                    if not _owner_adapters:
+                                try:
+                                    owner_profile = sub.get("notifier_profile") or None
+                                    if owner_profile and owner_profile != notifier_profile:
+                                        _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
+                                        if not _owner_adapters:
+                                            logger.debug(
+                                                "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
+                                                sub.get("task_id"), owner_profile, notifier_profile,
+                                            )
+                                            continue
+                                    platform = (sub.get("platform") or "").lower()
+                                    if platform not in active_platforms:
                                         logger.debug(
-                                            "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
-                                            sub.get("task_id"), owner_profile, notifier_profile,
+                                            "kanban notifier: subscription for %s on %s skipped; adapter not connected",
+                                            sub.get("task_id"), platform or "<missing>",
                                         )
                                         continue
-                                platform = (sub.get("platform") or "").lower()
-                                if platform not in active_platforms:
-                                    logger.debug(
-                                        "kanban notifier: subscription for %s on %s skipped; adapter not connected",
-                                        sub.get("task_id"), platform or "<missing>",
+                                    # Fork additions on top of upstream's loop:
+                                    # a delivery claim token (backed by the
+                                    # delivery_claim_* columns, so a crashed
+                                    # tick's events can be rewound rather than
+                                    # lost) and REPORT_KINDS instead of
+                                    # TERMINAL_KINDS, which adds the fork's own
+                                    # "received" / "tree_stalled_flush" kinds.
+                                    claim_token = uuid.uuid4().hex
+                                    old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
+                                        conn,
+                                        task_id=sub["task_id"],
+                                        platform=sub["platform"],
+                                        chat_id=sub["chat_id"],
+                                        thread_id=sub.get("thread_id") or "",
+                                        kinds=REPORT_KINDS,
+                                        claim_token=claim_token,
                                     )
-                                    continue
-                                claim_token = uuid.uuid4().hex
-                                old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
-                                    conn,
-                                    task_id=sub["task_id"],
-                                    platform=sub["platform"],
-                                    chat_id=sub["chat_id"],
-                                    thread_id=sub.get("thread_id") or "",
-                                    kinds=REPORT_KINDS,
-                                    claim_token=claim_token,
-                                )
-                                if not events:
-                                    continue
-                                task = _kb.get_task(conn, sub["task_id"])
-                                runs_by_event_id: dict[int, Any] = {}
-                                for ev in events:
-                                    if ev.kind != "completed" or ev.run_id is None:
+                                    if not events:
                                         continue
-                                    try:
-                                        run = _kb.get_run(conn, ev.run_id)
-                                    except Exception:
-                                        run = None
-                                    if run is not None:
-                                        runs_by_event_id[int(ev.id)] = run
-                                logger.debug(
-                                    "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
-                                    len(events), sub["task_id"], slug, old_cursor, cursor,
-                                )
-                                deliveries.append({
-                                    "sub": sub,
-                                    "old_cursor": old_cursor,
-                                    "cursor": cursor,
-                                    "claim_token": claim_token,
-                                    "events": events,
-                                    "task": task,
-                                    "runs_by_event_id": runs_by_event_id,
-                                    "board": slug,
-                                })
+                                    task = _kb.get_task(conn, sub["task_id"])
+                                    runs_by_event_id: dict[int, Any] = {}
+                                    for ev in events:
+                                        if ev.kind != "completed" or ev.run_id is None:
+                                            continue
+                                        try:
+                                            run = _kb.get_run(conn, ev.run_id)
+                                        except Exception:
+                                            run = None
+                                        if run is not None:
+                                            runs_by_event_id[int(ev.id)] = run
+                                    logger.debug(
+                                        "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
+                                        len(events), sub["task_id"], slug, old_cursor, cursor,
+                                    )
+                                    deliveries.append({
+                                        "sub": sub,
+                                        "old_cursor": old_cursor,
+                                        "cursor": cursor,
+                                        "claim_token": claim_token,
+                                        "events": events,
+                                        "task": task,
+                                        "runs_by_event_id": runs_by_event_id,
+                                        "board": slug,
+                                    })
+                                except Exception as sub_exc:
+                                    # Isolate per-subscription failures so one
+                                    # bad subscription cannot block delivery for
+                                    # all other subscriptions in this tick.
+                                    logger.warning(
+                                        "kanban notifier: subscription for %s on board %s failed: %s",
+                                        sub.get("task_id"), slug, sub_exc,
+                                    )
                         finally:
                             conn.close()
                     return deliveries
@@ -1685,6 +1749,25 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("status"):
                                 new_status = str(ev.payload["status"])
                             msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
+                        elif kind == "block_loop_detected":
+                            # A task re-blocked for the same cause past the
+                            # recurrence limit and was routed to `triage` for a
+                            # human decision. This is the ONE transition that
+                            # exists to force human attention, yet it emits no
+                            # `blocked`/`status` event — so before adding it to
+                            # TERMINAL_KINDS it produced zero notification and
+                            # the task stalled in triage silently. Ping loudly.
+                            reason = ""
+                            recurrences = None
+                            if ev.payload:
+                                if ev.payload.get("reason"):
+                                    reason = f": {str(ev.payload['reason'])[:160]}"
+                                recurrences = ev.payload.get("recurrences")
+                            rc = f" (blocked {recurrences}x for the same cause)" if recurrences else ""
+                            msg = (
+                                f"🛑 {board_tag}{tag}Kanban {sub['task_id']} routed to TRIAGE"
+                                f" — needs a human decision{rc}{reason}"
+                            )
                         else:
                             # archived / unblocked are claimed by REPORT_KINDS
                             # (so the cursor advances past them and they can't
@@ -1708,9 +1791,23 @@ class GatewayKanbanWatchersMixin:
                             )
                             continue
                         target_chat_id, target_thread_id = target
-                        metadata: dict[str, Any] = {}
+                        # Upstream's per-subscription send metadata is the base
+                        # (Telegram DM-topic reply anchors etc. live there since
+                        # kanban_notify_subs.delivery_metadata was added).
+                        delivery_metadata = sub.get("delivery_metadata")
+                        metadata: dict[str, Any] = (
+                            dict(delivery_metadata)
+                            if isinstance(delivery_metadata, dict)
+                            else {}
+                        )
+                        # The fork's target resolution may redirect this report to
+                        # the orchestrator channel, so the RESOLVED thread wins over
+                        # the subscription's own — otherwise we would send to the
+                        # redirected chat while still carrying the original thread.
                         if target_thread_id:
                             metadata["thread_id"] = target_thread_id
+                        elif sub.get("thread_id") and not metadata.get("thread_id"):
+                            metadata["thread_id"] = sub["thread_id"]
                         event_target_key = (
                             str(board_slug or ""),
                             kind,
@@ -1997,27 +2094,32 @@ class GatewayKanbanWatchersMixin:
                             try:
                                 from gateway.session import SessionSource
                                 from gateway.wake import deliver_wake
-                                # KNOWN LIMITATION (tracked follow-up): the
-                                # subscription row does not persist the
-                                # creator's chat_type, and it is not carried
-                                # on the session-context bridge, so we cannot
-                                # faithfully reconstruct the creator's real
-                                # session key here. build_session_key() keys
-                                # DMs (":dm:<chat_id>") on a wholly different
-                                # shape from group/thread, so any hardcoded
-                                # value mis-routes some creators. "group" is
-                                # the least-surprising default for the
-                                # dashboard/group flows this wake primarily
-                                # serves; DM-originated creators are handled
-                                # by the follow-up that stamps + persists
-                                # chat_type end-to-end. handle_message()
-                                # get_or_create_session's the target, so a
-                                # mismatch degrades to "wake lands in a fresh
-                                # group session" — never an exception.
+                                # Rebuild the creator's real session scope from
+                                # the chat_type persisted on the subscription
+                                # row (#56580). build_session_key() keys DMs
+                                # (":dm:<chat_id>") on a wholly different shape
+                                # from group/thread, so the old hardcoded
+                                # "group" mis-routed DM/thread creators into a
+                                # fresh session. Legacy rows written before the
+                                # column existed may still carry chat_type in
+                                # delivery_metadata (#60600 rows) — fall back
+                                # to that, then to "group" (the historical
+                                # default that suits the dashboard/group flows).
+                                # handle_message() get_or_create_session's the
+                                # target, so a mismatch only ever degrades to a
+                                # fresh session, never an exception.
+                                _chat_type = str(sub.get("chat_type") or "").strip()
+                                if not _chat_type:
+                                    _delivery_meta = sub.get("delivery_metadata")
+                                    if isinstance(_delivery_meta, dict):
+                                        _chat_type = str(
+                                            _delivery_meta.get("chat_type") or ""
+                                        ).strip()
+                                _chat_type = _chat_type or "group"
                                 _source = SessionSource(
                                     platform=plat,
                                     chat_id=sub["chat_id"],
-                                    chat_type="group",
+                                    chat_type=_chat_type,
                                     thread_id=sub.get("thread_id") or None,
                                     user_id=sub.get("user_id"),
                                     profile=sub_profile or None,
@@ -2549,7 +2651,7 @@ class GatewayKanbanWatchersMixin:
         Each tick calls :func:`kanban_db.dispatch_once` inside
         ``self._kanban_off_loop`` so the SQLite WAL lock never blocks the
         event loop. Failures in one tick don't stop subsequent ticks —
-        same pattern as `_kanban_notifications_watcher`.
+        same pattern as `_kanban_notifier_watcher`.
 
         Shutdown: the loop checks ``self._running`` between ticks; gateway
         stop() flips it to False and cancels pending tasks, and the
@@ -2905,7 +3007,7 @@ class GatewayKanbanWatchersMixin:
                 # `init_db()` call here busted the per-process cache and
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
-                # `_kanban_notifications_watcher` and issue #21378.
+                # `_kanban_notifier_watcher` and issue #21378.
                 try:
                     recovery_limit = max(
                         1,

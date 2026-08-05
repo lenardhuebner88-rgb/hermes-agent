@@ -26,9 +26,19 @@
 
 select_test_python() {
   local repo_root="$1"
-  local candidates=("$repo_root/.venv" "$repo_root/venv")
+  # Upstream's three candidates, in UPSTREAM'S ORDER. scripts/run_tests.sh
+  # probed them inline before the fork moved interpreter selection in here;
+  # reordering them would pick a different interpreter whenever two are usable,
+  # which is exactly the kind of silent divergence this helper exists to avoid.
+  local candidates=(
+    "$repo_root/.venv"
+    "$repo_root/venv"
+    "$HOME/.hermes/hermes-agent/venv"
+  )
 
-  # A worktree has no venv of its own and may reuse the live checkout's.
+  # Fork addition, appended AFTER upstream's list so it can only ever be reached
+  # when none of upstream's candidates is usable: a worktree has no venv of its
+  # own and may reuse the live checkout's.
   if [ "$repo_root" != "$HOME/.hermes/hermes-agent" ]; then
     candidates+=("$HOME/.hermes/hermes-agent/.venv")
   fi

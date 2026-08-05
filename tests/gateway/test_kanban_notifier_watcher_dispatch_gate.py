@@ -32,7 +32,7 @@ def test_notifier_watcher_skips_when_dispatch_disabled():
     runner = _make_runner()
     with patch("hermes_cli.config.load_config", return_value=_fake_config(False)):
         with patch("hermes_cli.kanban_db.connect") as mock_connect:
-            asyncio.run(runner._kanban_notifications_watcher())
+            asyncio.run(runner._kanban_notifier_watcher())
     mock_connect.assert_not_called()
 
 
@@ -45,7 +45,7 @@ def test_notifier_watcher_env_override_disables(monkeypatch):
         return_value={"kanban": {"alerts": {"enabled": False}}},
     ) as mock_load_config:
         with patch("hermes_cli.kanban_db.connect") as mock_connect:
-            asyncio.run(runner._kanban_notifications_watcher())
+            asyncio.run(runner._kanban_notifier_watcher())
     mock_load_config.assert_called_once()
     mock_connect.assert_not_called()
 
@@ -90,7 +90,7 @@ def test_alert_rules_run_when_subscription_dispatch_is_external(tmp_path, monkey
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(runner, "_kanban_alert_rules_tick", alert_tick)
 
-    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+    asyncio.run(runner._kanban_notifier_watcher(interval=1))
 
     assert len(alert_ticks) == 1
     list_boards.assert_not_called()
@@ -136,7 +136,7 @@ def test_alert_rule_failure_keeps_configured_cadence(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(runner, "_kanban_alert_rules_tick", failing_alert_tick)
 
-    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+    asyncio.run(runner._kanban_notifier_watcher(interval=1))
 
     assert alert_ticks == [True]
 
@@ -175,8 +175,8 @@ def test_second_gateway_cannot_evaluate_alert_rules(tmp_path, monkeypatch):
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(second, "_kanban_alert_rules_tick", second_tick)
 
-    asyncio.run(first._kanban_notifications_watcher())
-    asyncio.run(second._kanban_notifications_watcher())
+    asyncio.run(first._kanban_notifier_watcher())
+    asyncio.run(second._kanban_notifier_watcher())
 
     second_tick.assert_not_called()
 
@@ -216,7 +216,7 @@ def test_contended_alert_gateway_takes_over_after_owner_exits(tmp_path, monkeypa
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(runner, "_kanban_alert_rules_tick", alert_tick)
 
-    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+    asyncio.run(runner._kanban_notifier_watcher(interval=1))
 
     assert len(alert_ticks) == 1
     assert runner._kanban_alerts_lock_handle is None
@@ -249,7 +249,7 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
                 with patch.object(
                     GatewayRunner, "_kanban_off_loop", fake_kanban_off_loop,
                 ):
-                    asyncio.run(runner._kanban_notifications_watcher())
+                    asyncio.run(runner._kanban_notifier_watcher())
 
     assert past_gate, "list_boards should be called when dispatch_in_gateway=true"
 

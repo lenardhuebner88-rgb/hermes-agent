@@ -273,7 +273,7 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
     """
     try:
         _ensure_push_hook_consumers_registered()
-        from hermes_cli.plugins import invoke_hook
+        from hermes_cli.lifecycle import invoke_hook
         from hermes_cli.profiles import get_active_profile_name
 
         try:
@@ -2434,9 +2434,11 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     task_id       TEXT NOT NULL,
     platform      TEXT NOT NULL,
     chat_id       TEXT NOT NULL,
+    chat_type     TEXT,
     thread_id     TEXT NOT NULL DEFAULT '',
     user_id       TEXT,
     notifier_profile TEXT,
+    delivery_metadata TEXT,
     created_at    INTEGER NOT NULL,
     last_event_id INTEGER NOT NULL DEFAULT 0,
     delivery_claim_token TEXT,
@@ -2685,15 +2687,24 @@ def _sqlite_connect(
 ) -> sqlite3.Connection:
     """Open a Kanban SQLite connection with consistent lock waiting.
 
+    Uses ``connect_tracked`` so the live-connection registry knows this file
+    is open: while it is, byte-level probes of the same file are refused,
+    because an ``open()``/``close()`` would cancel this process's POSIX
+    advisory locks on the database (see ``hermes_cli.sqlite_safe_read``).
+    The registration is released automatically when the connection closes.
+
     ``busy_timeout_ms`` overrides the default (env-resolved, 120s) wait.
     Read-mostly callers like the dashboard pass a few seconds: surfacing a
     busy error quickly beats a 2-minute request hang (the SPA has its own
     GET timeout + retry/backoff).
     """
+    from hermes_cli.sqlite_safe_read import connect_tracked
+
     if busy_timeout_ms is None or busy_timeout_ms <= 0:
         busy_timeout_ms = _resolve_busy_timeout_ms()
-    conn = sqlite3.connect(
-        str(path),
+    conn = connect_tracked(
+        path,
+        connect_fn=sqlite3.connect,
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
     )
@@ -3012,10 +3023,14 @@ def _validate_sqlite_header(path: Path) -> None:
         return
     if stat.st_size == 0:
         return
-    try:
-        with path.open("rb") as handle:
-            head = handle.read(64)
-    except OSError:
+    # Byte-level probe, so it must run BEFORE any connection to this path
+    # exists (connect() calls it under the init lock, ahead of _sqlite_connect).
+    # read_header_bytes_preopen refuses once a connection is live, because the
+    # close() would cancel this process's POSIX locks on the file.
+    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+
+    head = read_header_bytes_preopen(path, length=64)
+    if head is None:
         return
     if head.startswith(_SQLITE_HEADER):
         return
@@ -3072,6 +3087,25 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     resolved = path.resolve()
     parent = resolved.parent
     base_name = resolved.name  # basename only
+    # This reads the whole DB file to fingerprint it. That is a close()-on-a-
+    # database-file hazard (it cancels this process's POSIX advisory locks --
+    # see hermes_cli.sqlite_safe_read), so it must only run once the board has
+    # been taken out of service. Every caller reaches here on the corrupt/
+    # quarantine path after closing its probe connection, but another
+    # SessionDB/kanban connection elsewhere in the process would still be at
+    # risk -- so REFUSE rather than warn-and-proceed. Losing a forensic copy
+    # is strictly better than corrupting the live database we are trying to
+    # rescue.
+    from hermes_cli.sqlite_safe_read import has_live_connection
+
+    if has_live_connection(resolved):
+        _log.error(
+            "refusing to quarantine %s: a connection to it is still open in "
+            "this process, and fingerprinting the file would cancel that "
+            "connection's POSIX locks. Close all connections first.",
+            resolved,
+        )
+        return None
     digest = hashlib.sha256()
     try:
         with resolved.open("rb") as handle:
@@ -3499,6 +3533,12 @@ def connect(
         if fast is not None:
             return fast
     with _cross_process_init_lock(path):
+        # Read-only file/sidecar preflight (port of kilocode#12508) —
+        # repair-or-refuse before the header/integrity probes so a stray
+        # read-only kanban.db fails with an actionable message instead of
+        # "attempt to write a readonly database" mid-init.
+        from hermes_state import preflight_db_writability
+        preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
         if not force_init:
             # Re-check under the lock: another process may have finished the
             # init while we waited for the flock — its stamp lets us skip the
@@ -4184,6 +4224,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
+        if "chat_type" not in notify_cols:
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "chat_type", "chat_type TEXT"
+            )
+        if "delivery_metadata" not in notify_cols:
+            _add_column_if_missing(
+                conn, "kanban_notify_subs", "delivery_metadata", "delivery_metadata TEXT"
+            )
         if "delivery_claim_token" not in notify_cols:
             _add_column_if_missing(
                 conn,
@@ -4374,8 +4422,8 @@ _REBUILD_SPECS = {
     "kanban_notify_subs": (
         "CREATE TABLE kanban_notify_subs ("
         " task_id TEXT NOT NULL, platform TEXT NOT NULL, chat_id TEXT NOT NULL,"
-        " thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
-        " notifier_profile TEXT, created_at INTEGER NOT NULL,"
+        " chat_type TEXT, thread_id TEXT NOT NULL DEFAULT '', user_id TEXT,"
+        " notifier_profile TEXT, delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
         " delivery_claim_token TEXT, delivery_claim_expires INTEGER,"
         " delivery_claim_from_event_id INTEGER,"
@@ -6084,19 +6132,6 @@ def create_task(
                         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                         (pid, task_id),
                     )
-                    # H1b: a task created under an explicit parent inherits that
-                    # parent's notify-subscription (only when the parent has
-                    # one), so the parent's watcher hears this child's terminal
-                    # state without a manual notify-subscribe. Same write_txn,
-                    # idempotent (PK collision). Decompose creates children
-                    # without ``parents=`` (and does its own inheritance), and
-                    # manual ``link_tasks`` goes through a different path, so
-                    # neither double-inherits here.
-                    if conn.execute(
-                        "SELECT 1 FROM kanban_notify_subs WHERE task_id = ? LIMIT 1",
-                        (pid,),
-                    ).fetchone():
-                        _inherit_notify_subs(conn, pid, task_id, now=now)
                 created_payload = {
                     "assignee": assignee,
                     "status": task_status,
@@ -6124,6 +6159,25 @@ def create_task(
                     "created",
                     created_payload,
                 )
+                # H1b: a task created under an explicit parent inherits that
+                # parent's notify-subscription, so the parent's watcher hears
+                # this child's terminal state without a manual notify-subscribe.
+                # Same write_txn, idempotent (PK collision). Decompose creates
+                # children without ``parents=`` (and does its own inheritance),
+                # and manual ``link_tasks`` goes through _link_tasks_in_txn, so
+                # neither double-inherits here.
+                #
+                # POSITION IS LOAD-BEARING. Upstream (#29905) snaps the inherited
+                # cursor to the child's current MAX(task_events.id), so this must
+                # run AFTER the "created" event — otherwise the cursor is 0 and
+                # the sub replays the child's own history — and BEFORE the
+                # fork-only born-blocked "blocked" event below, which is a
+                # terminal kind and would otherwise be delivered as if the child
+                # had just failed.
+                if parents:
+                    _inherit_notify_subs(
+                        conn, task_id, tuple(parents), created_at=now
+                    )
                 if task_status == "blocked":
                     # Born-blocked tasks had no ``blocked`` event, so
                     # ``_has_sticky_block`` (keyed on the latest blocked/
@@ -6179,6 +6233,14 @@ def create_task(
             # opens its own BEGIN IMMEDIATE (not re-entrant). Flag/tier-gated + idempotent.
             if auto_scout and task_status in ("ready", "todo"):
                 _maybe_inject_critical_scout(conn, task_id)
+            # NOTE: upstream calls _inherit_notify_subs once here at the end of
+            # create_task. In this fork the same inheritance already happens in
+            # the `for pid in parents:` loop inside the write_txn above (same
+            # contract, one call per parent, plus a cheap "does the parent even
+            # have a sub" probe). Repeating it here would be a second pass — and
+            # worse, this point is deliberately OUTSIDE that write_txn, while
+            # _inherit_notify_subs issues a bare conn.execute and must run inside
+            # one. Upstream's behaviour is carried above, not dropped.
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -6612,6 +6674,47 @@ def _find_missing_parents(
     return [p for p in parents if p not in present]
 
 
+def _inherit_notify_subs(
+    conn: sqlite3.Connection,
+    child_id: str,
+    parents: Iterable[str],
+    *,
+    created_at: Optional[int] = None,
+) -> None:
+    """Copy gateway notification subscriptions from parent tasks to a child.
+
+    The inherited subscription starts caught up to the child's current event
+    cursor. This makes manual `link_tasks(parent, existing_child)` safe: the
+    parent chat receives future child terminal events without replaying the
+    child's pre-link history.
+    """
+    parent_ids = tuple(dict.fromkeys(p for p in parents if p))
+    if not parent_ids:
+        return
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?",
+        (child_id,),
+    ).fetchone()
+    cursor = int(row["cursor"] if row is not None else 0)
+    placeholders = ",".join("?" * len(parent_ids))
+    conn.execute(
+        f"""
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, user_id,
+             notifier_profile, created_at, last_event_id)
+        SELECT ?, platform, chat_id, thread_id, user_id, notifier_profile, ?, ?
+          FROM kanban_notify_subs
+         WHERE task_id IN ({placeholders})
+        """,
+        (
+            child_id,
+            int(created_at if created_at is not None else time.time()),
+            cursor,
+            *parent_ids,
+        ),
+    )
+
+
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
@@ -6758,6 +6861,10 @@ def _link_tasks_in_txn(conn: sqlite3.Connection, parent_id: str, child_id: str) 
         "linked",
         {"parent": parent_id, "child": child_id},
     )
+    # Upstream carries this inside link_tasks(); the fork extracted the body
+    # into this helper, so it lives here instead — otherwise every caller of
+    # the extracted helper would silently lose upstream's inheritance.
+    _inherit_notify_subs(conn, child_id, (parent_id,))
 
 
 def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
@@ -7185,6 +7292,127 @@ def list_comments(
 
 HANDOFF_RAW_ARTIFACT_KIND = "handoff_raw"
 _HANDOFF_IMMUTABLE_MODE = 0o600
+
+
+
+# --- Aus Upstream nachgetragen (Vollmerge 2026-08-04) -------------------
+# Diese vier Symbole gingen dem Fork verloren; die Fork-Attachment-API
+# (add_attachment / add_immutable_handoff_attachment) ist eine ANDERE
+# Schnittstelle und ersetzt sie nicht. Wiederhergestellt, damit kein
+# Upstream-Code fehlt.
+# ---------------------------------------------------------------------------
+# Attachments
+# ---------------------------------------------------------------------------
+
+# The attachment size cap is the module-level ``KANBAN_ATTACHMENT_MAX_BYTES``
+# (defined near the top of this file) — one constant shared by the dashboard
+# HTTP endpoint, the agent toolset, and the CLI so the limit cannot drift
+# between surfaces.
+
+
+class AttachmentTooLarge(ValueError):
+    """Raised when an attachment exceeds the configured size cap.
+
+    Subclasses :class:`ValueError` so generic ``except ValueError`` handlers
+    (e.g. the dashboard's 400 fallback) still catch it, while callers that
+    want a distinct user-facing message (the tool/CLI 413-equivalent) can
+    catch it specifically.
+    """
+
+
+def _safe_attachment_name(raw: str) -> str:
+    """Reduce a client-supplied filename to a safe basename.
+
+    Strips any directory components (both separators) so a malicious
+    ``../../etc/passwd`` or ``C:\\x`` collapses to its leaf. Drops control
+    chars and leading dots so we never write a dotfile or a name with
+    embedded NULs/newlines. Rejects empty / dotfile-only names. The result
+    is only ever joined under the per-task attachments dir, never used
+    verbatim as a path from the client.
+
+    Raises :class:`ValueError` on an unusable name; HTTP callers map that
+    to a 400.
+    """
+    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
+    name = "".join(ch for ch in name if ch.isprintable() and ch not in "\x00").strip()
+    name = name.lstrip(".").strip()
+    if not name:
+        raise ValueError("invalid attachment filename")
+    return name[:200]
+
+
+def _collision_free_path(dest_dir: Path, safe_name: str) -> Path:
+    """Return a path under ``dest_dir`` that doesn't clobber an existing file.
+
+    ``foo.pdf`` → ``foo.pdf``, then ``foo (1).pdf``, ``foo (2).pdf``, …
+    ``safe_name`` must already be sanitised via :func:`_safe_attachment_name`.
+    """
+    stem, dot, ext = safe_name.partition(".")
+    candidate = safe_name
+    n = 1
+    while (dest_dir / candidate).exists():
+        candidate = f"{stem} ({n}){dot}{ext}"
+        n += 1
+    return dest_dir / candidate
+
+
+def store_attachment_bytes(
+    conn: sqlite3.Connection,
+    task_id: str,
+    filename: str,
+    data: bytes,
+    *,
+    content_type: Optional[str] = None,
+    uploaded_by: Optional[str] = None,
+    board: Optional[str] = None,
+    max_bytes: Optional[int] = None,
+) -> int:
+    """Validate, size-check, persist a blob, and record its metadata row.
+
+    This is the single write path shared by the dashboard endpoint, the
+    agent toolset (``kanban_attach`` / ``kanban_attach_url``), and the CLI
+    (``hermes kanban attach``) so name-sanitisation, the size cap, and the
+    collision-resolution all behave identically everywhere.
+
+    Steps: enforce ``max_bytes``, sanitise ``filename`` to a safe basename,
+    write the bytes under :func:`task_attachments_dir` with a
+    collision-free name, then insert the ``task_attachments`` row via
+    :func:`add_attachment`. Returns the new attachment id.
+
+    Raises :class:`AttachmentTooLarge` when ``data`` exceeds ``max_bytes``,
+    or :class:`ValueError` for a bad filename / unknown task. On any failure
+    after the blob is written (e.g. the task disappeared) the orphaned blob
+    is removed before re-raising.
+    """
+    if max_bytes is None:
+        max_bytes = KANBAN_ATTACHMENT_MAX_BYTES
+    if len(data) > max_bytes:
+        raise AttachmentTooLarge(
+            f"attachment exceeds {max_bytes // (1024 * 1024)} MB limit"
+        )
+    safe_name = _safe_attachment_name(filename)
+    dest_dir = task_attachments_dir(task_id, board=board)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = _collision_free_path(dest_dir, safe_name)
+    dest_path.write_bytes(data)
+    try:
+        return add_attachment(
+            conn,
+            task_id,
+            filename=dest_path.name,
+            stored_path=str(dest_path.resolve()),
+            content_type=content_type,
+            size=len(data),
+            uploaded_by=uploaded_by,
+        )
+    except Exception:
+        # Don't leave an orphan blob if the metadata insert fails (most
+        # commonly: the task id doesn't exist).
+        try:
+            dest_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _attachment_from_row(r: sqlite3.Row) -> Attachment:
@@ -20490,7 +20718,8 @@ def decompose_triage_task(
             # H1: inherit the root/triage task's Discord notify-subscription
             # so this child can deliver its own terminal state back to the
             # originating chat without a manual notify-subscribe. Same write_txn.
-            _inherit_notify_subs(conn, task_id, new_id, now=now)
+            # Upstream's contract: (child_id, parents-iterable).
+            _inherit_notify_subs(conn, new_id, (task_id,), created_at=now)
             child_ids.append(new_id)
 
         # Link children to their sibling parents (within the decomposed graph).
@@ -33445,6 +33674,14 @@ def _default_spawn(
 
     prompt = f"work kanban task {task.id}"
     env = _build_worker_env(os.environ)
+    # The dispatcher is detached from every conversation. Its worker must never
+    # inherit routing mirrored by a previous gateway turn, even before the first
+    # session binds ContextVars in this process. Applied on top of
+    # _build_worker_env's allowlist so upstream's guarantee holds regardless of
+    # what that allowlist happens to permit.
+    from gateway.session_context import _VAR_MAP
+    for key in _VAR_MAP:
+        env.pop(key, None)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root
@@ -39530,6 +39767,40 @@ def _active_lane_entry_for_profile(
 # Notification subscriptions (used by the gateway kanban-notifier)
 # ---------------------------------------------------------------------------
 
+def _encode_notify_delivery_metadata(
+    metadata: Optional[Mapping[str, Any]],
+) -> Optional[str]:
+    """Serialize platform send metadata stored on notification subscriptions."""
+    if not isinstance(metadata, Mapping):
+        return None
+    clean: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            clean[str(key)] = value
+    if not clean:
+        return None
+    return json.dumps(clean, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_notify_delivery_metadata(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        return dict(raw)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(str(raw))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in data.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+
 
 def add_notify_sub(
     conn: sqlite3.Connection,
@@ -39537,30 +39808,59 @@ def add_notify_sub(
     task_id: str,
     platform: str,
     chat_id: str,
+    chat_type: Optional[str] = None,
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
+    delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Register a gateway source that wants terminal-state notifications
-    for ``task_id``. Idempotent on (task, platform, chat, thread)."""
+    for ``task_id``. Idempotent on (task, platform, chat, thread).
+
+    New subscriptions start "caught up": ``last_event_id`` snaps to the
+    task's current ``MAX(task_events.id)`` at creation instead of the
+    schema default 0. A cursor of 0 on an already-active task made the
+    gateway notifier replay every historical terminal event on its next
+    tick — and with many stale subs, a single boot-time burst of 100+
+    messages (issue #29905). Subscribers only want events that occur
+    AFTER they subscribe; the gateway/tool auto-subscribe paths run at
+    task creation, where the snapshot is 0 anyway.
+    """
     now = int(time.time())
+    metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
     with write_txn(conn):
         conn.execute(
             """
             INSERT OR IGNORE INTO kanban_notify_subs
-                (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (task_id, platform, chat_id, chat_type, thread_id, user_id,
+                 notifier_profile, delivery_metadata, created_at, last_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 task_id,
                 platform,
                 chat_id,
+                chat_type,
                 thread_id or "",
                 user_id,
                 notifier_profile,
+                metadata_json,
                 now,
+                task_id,
             ),
         )
+        if chat_type:
+            # Self-heal rows created before chat_type was persisted.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET chat_type = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                   AND (chat_type IS NULL OR chat_type = '')
+                """,
+                (chat_type, task_id, platform, chat_id, thread_id or ""),
+            )
         if notifier_profile:
             # Self-heal legacy rows that predate notifier ownership by
             # backfilling only when the existing value is unset.
@@ -39573,45 +39873,18 @@ def add_notify_sub(
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
             )
-
-
-def _inherit_notify_subs(
-    conn: sqlite3.Connection,
-    src_task_id: str,
-    dst_task_id: str,
-    *,
-    now: Optional[int] = None,
-) -> None:
-    """Copy every notify-subscription of ``src_task_id`` onto ``dst_task_id``.
-
-    Used so auto-decompose children inherit the root/triage task's Discord
-    subscription and can deliver their own terminal state back to the
-    originating chat without a manual ``notify-subscribe``.
-
-    ``last_event_id`` is deliberately NOT copied: the child has its own
-    event stream and the inherited sub must start at cursor 0 so the
-    child's own terminal events get delivered.
-
-    Idempotent: ``INSERT OR IGNORE`` collides on the
-    ``(task_id, platform, chat_id, thread_id)`` primary key, so a repeated
-    decompose never creates duplicate rows.
-
-    MUST be called from inside an existing ``write_txn`` — it issues a bare
-    ``conn.execute`` and does not open its own transaction (mirrors the
-    inlined-INSERT discipline of :func:`decompose_triage_task`).
-    """
-    if now is None:
-        now = int(time.time())
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO kanban_notify_subs
-            (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
-        SELECT ?, platform, chat_id, thread_id, user_id, notifier_profile, ?
-          FROM kanban_notify_subs
-         WHERE task_id = ?
-        """,
-        (dst_task_id, now, src_task_id),
-    )
+        if metadata_json:
+            # A duplicate subscribe from the same chat/thread should refresh
+            # the routing anchor. Telegram DM-topic notifications need the
+            # latest reply anchor to stay inside the visible topic lane.
+            conn.execute(
+                """
+                UPDATE kanban_notify_subs
+                   SET delivery_metadata = ?
+                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
+                """,
+                (metadata_json, task_id, platform, chat_id, thread_id or ""),
+            )
 
 
 def list_notify_subs(
@@ -39625,7 +39898,53 @@ def list_notify_subs(
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM kanban_notify_subs").fetchall()
-    return [dict(r) for r in rows]
+    out: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        if "delivery_metadata" in item:
+            item["delivery_metadata"] = _decode_notify_delivery_metadata(
+                item.get("delivery_metadata")
+            )
+        out.append(item)
+    return out
+
+
+def count_notify_subs(
+    db_path: Optional[Path] = None,
+    *,
+    board: Optional[str] = None,
+) -> int:
+    """Count ``kanban_notify_subs`` rows via a read-only connection.
+
+    Cheap probe for the gateway notifier's zero-subscription early exit:
+    unlike :func:`connect`, this never creates the DB file, never runs
+    schema init/migration, and never opens the database writable (no
+    write locks, no checkpoints — though a read-only open of a WAL
+    database may still create the ``-shm``/``-wal`` sidecars, it cannot
+    write table content). Rows in a not-yet-checkpointed WAL are
+    visible, so a freshly added subscription is never missed. A missing
+    DB, or a legacy DB that predates the subscriptions table, counts as
+    zero. Path resolution matches :func:`connect` (explicit ``db_path``,
+    else ``board`` via :func:`kanban_db_path`). Raises
+    :class:`sqlite3.Error` when the DB exists but cannot be read
+    (locked, corrupt); callers choose their own fallback.
+    """
+    path = db_path if db_path is not None else kanban_db_path(board=board)
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM kanban_notify_subs"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return 0
+            raise
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
 
 
 def remove_notify_sub(

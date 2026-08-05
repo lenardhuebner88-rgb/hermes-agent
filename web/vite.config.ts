@@ -120,32 +120,48 @@ export default defineConfig({
     // Python dashboard server already understands.
     outDir: process.env.HERMES_WEB_DIST ?? "../hermes_cli/web_dist",
     emptyOutDir: true,
-    // The eager entry chunk is ~785 kB minified (app bootstrap; React core is
-    // already split into `vendor-react` below, heavy routes ChatPage/xterm and
-    // ControlPage are already React.lazy code-split). That's a deliberate,
-    // measured baseline — Vite's stock 500 kB warning threshold sits under it
-    // and fired on every build as pure noise. A documented 900 kB ceiling still
-    // flags a real regression (a deeper eager-bundle reduction lives on the
-    // perf track, not here).
-    chunkSizeWarningLimit: 900,
-    rollupOptions: {
+    // Shell stays a bit over Vite's 500 kB default after vendor splits;
+    // page/xterm chunks load on demand. Keep a modest ceiling so a true
+    // regression still warns.
+    chunkSizeWarningLimit: 600,
+    // Split heavy vendors so the first dashboard paint does not download
+    // xterm/three/plot/etc. until a route actually needs them. Lazy page
+    // imports in App.tsx create the route boundaries; these groups keep
+    // shared node_modules out of every page chunk.
+    rolldownOptions: {
       output: {
-        // React core + router made up ~900 kB (pre-minify) of the 1 MB
-        // eager index-*.js and change only on dependency bumps, yet every
-        // app-code deploy rotated the index hash and re-downloaded the
-        // whole thing (slow first paint on the phone). Splitting them into
-        // their own chunk keeps that piece immutable-cached across deploys.
-        // Deliberately ONLY this group: a blanket node_modules vendor chunk
-        // would merge lazily-loaded deps (markdown/zod/framer-motion ride
-        // in lazy route chunks) into the eager first load.
-        manualChunks(id: string) {
-          if (
-            /node_modules\/(?:react|react-dom|scheduler|react-router|react-router-dom)\//.test(
-              id,
-            )
-          ) {
-            return "vendor-react";
-          }
+        codeSplitting: {
+          minSize: 20_000,
+          groups: [
+            {
+              name: "react-vendor",
+              test: /node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom)([\\/]|$)/,
+            },
+            {
+              name: "xterm",
+              test: /node_modules[\\/]@xterm[\\/]/,
+            },
+            {
+              name: "three",
+              test: /node_modules[\\/](three|@react-three)([\\/]|$)/,
+            },
+            {
+              name: "plot",
+              test: /node_modules[\\/]@observablehq[\\/]plot([\\/]|$)/,
+            },
+            {
+              name: "motion",
+              test: /node_modules[\\/](motion|framer-motion)([\\/]|$)/,
+            },
+            {
+              name: "ui",
+              test: /node_modules[\\/]@nous-research[\\/]ui([\\/]|$)/,
+            },
+            {
+              name: "vendor",
+              test: /node_modules[\\/]/,
+            },
+          ],
         },
       },
     },

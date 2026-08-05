@@ -77,21 +77,30 @@ class GatewayAuthorizationMixin:
         if not platform:
             return None
         profile_name = (profile or "").strip() or None
-        # The active profile also lives in self.adapters; only genuinely
-        # secondary profiles are stored in _profile_adapters. The extracted
-        # mixin previously treated every non-literal-"default" stamp as
-        # secondary, so a named active profile could not deliver its own
-        # notifications.
-        active_profile = (
-            str(getattr(self, "_kanban_notifier_profile", "") or "").strip()
-            or None
-        )
-        if active_profile is None:
-            try:
-                active_profile = str(self._active_profile_name() or "").strip() or None
-            except Exception:
-                active_profile = None
-        if profile_name and profile_name not in {"default", active_profile}:
+        if profile_name and profile_name != "default":
+            # The active profile also lives in self.adapters; only genuinely
+            # secondary profiles are stored in _profile_adapters. A named active
+            # profile must therefore not be routed through _profile_adapters, or
+            # it cannot deliver its own notifications.
+            #
+            # _kanban_notifier_profile is consulted first (fork addition): it is
+            # the profile the notifier actually runs under, which need not equal
+            # _active_profile_name(). When it is unset, the resolution below is
+            # byte-for-byte upstream's.
+            active_profile = (
+                str(getattr(self, "_kanban_notifier_profile", "") or "").strip()
+                or None
+            )
+            if active_profile is None:
+                active_profile_fn = getattr(self, "_active_profile_name", None)
+                if callable(active_profile_fn):
+                    try:
+                        active_profile = active_profile_fn()
+                    except Exception:
+                        active_profile = None
+            if profile_name == active_profile:
+                adapters = getattr(self, "adapters", None) or {}
+                return adapters.get(platform)
             profile_adapters = getattr(self, "_profile_adapters", None) or {}
             if profile_name in profile_adapters:
                 return profile_adapters[profile_name].get(platform)

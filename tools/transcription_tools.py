@@ -102,7 +102,7 @@ XAI_STT_BASE_URL = os.getenv("XAI_STT_BASE_URL", "https://api.x.ai/v1")
 ELEVENLABS_STT_BASE_URL = os.getenv("ELEVENLABS_STT_BASE_URL", "https://api.elevenlabs.io/v1")
 # DeepInfra STT base URL now resolved via hermes_cli.models.deepinfra_base_url (shared).
 
-SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".aac", ".flac"}
+SUPPORTED_FORMATS = {".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".oga", ".opus", ".aac", ".flac"}
 LOCAL_NATIVE_AUDIO_FORMATS = {".wav", ".aiff", ".aif"}
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
 
@@ -135,6 +135,38 @@ def is_stt_enabled(stt_config: Optional[dict] = None) -> bool:
         stt_config = _load_stt_config()
     enabled = stt_config.get("enabled", True)
     return is_truthy_value(enabled, default=True)
+
+
+def _resolve_stt_language(
+    provider_key: str,
+    stt_config: Optional[Dict[str, Any]] = None,
+    *,
+    extra_keys: tuple = (),
+) -> Optional[str]:
+    """Resolve the language hint for an STT provider (class-level, all providers).
+
+    Resolution order (first non-empty wins):
+      1. ``stt.<provider>.language`` (plus any *extra_keys* aliases, e.g.
+         ElevenLabs' historical ``language_code``)
+      2. ``stt.language``           — global default for every provider
+      3. ``HERMES_LOCAL_STT_LANGUAGE`` env var (legacy escape hatch)
+      4. ``None``                   — let the provider auto-detect
+
+    Returns a stripped ISO-639-1-ish code or None. Never returns "".
+    """
+    if stt_config is None:
+        stt_config = _load_stt_config()
+    provider_cfg = _get_stt_section(stt_config, provider_key)
+    candidates = [provider_cfg.get("language")]
+    for key in extra_keys:
+        candidates.append(provider_cfg.get(key))
+    if isinstance(stt_config, dict):
+        candidates.append(stt_config.get("language"))
+    candidates.append(os.getenv(LOCAL_STT_LANGUAGE_ENV))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def _has_openai_audio_backend() -> bool:
@@ -672,10 +704,13 @@ def _transcribe_command_stt(
 
     timeout = _get_command_stt_timeout(config)
     output_format = _get_command_stt_output_format(config)
+    # language_override is the fork's explicit per-call argument. It comes first
+    # so it is not silently ignored; when it is None — which is every in-repo
+    # caller — the chain below is exactly upstream's.
     language = (
         language_override
         or config.get("language")
-        or stt_config.get("language")
+        or _resolve_stt_language(provider_name, stt_config)
         or DEFAULT_COMMAND_STT_LANGUAGE
     )
     model = model_override or config.get("model") or ""
@@ -1145,8 +1180,6 @@ def _load_local_whisper_model(model_name: str):
 def _transcribe_local(
     file_path: str,
     model_name: str,
-    language: Optional[str] = None,
-    initial_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     global _local_model, _local_model_name
@@ -1162,20 +1195,15 @@ def _transcribe_local(
             _local_model = _load_local_whisper_model(model_name)
             _local_model_name = model_name
 
-        # Language: explicit call arg > config.yaml (stt.local.language) > env var > auto-detect.
-        _forced_lang = (
-            language
-            or (_load_stt_config().get("local") or {}).get("language")
-            or os.getenv(LOCAL_STT_LANGUAGE_ENV)
-            or None
-        )
+        # Language: stt.local.language > stt.language > env var > auto-detect.
+        stt_config = _load_stt_config()
+        local_config = stt_config.get("local") or {}
+        _forced_lang = _resolve_stt_language("local", stt_config)
         transcribe_kwargs = {"beam_size": 5}
         if _forced_lang:
             transcribe_kwargs["language"] = _forced_lang
-        if initial_prompt:
-            # Whisper conditions on this text like preceding context — personal
-            # vocabulary ("Hermes, PlanSpec, …") measurably steers recognition
-            # of exactly those terms. Never logged (may contain names).
+        initial_prompt = local_config.get("initial_prompt")
+        if isinstance(initial_prompt, str) and initial_prompt.strip():
             transcribe_kwargs["initial_prompt"] = initial_prompt
 
         try:
@@ -1251,13 +1279,8 @@ def _transcribe_local_command(file_path: str, model_name: str, language: Optiona
             ),
         }
 
-    # Language: explicit call arg > config.yaml (stt.local.language) > env var > "en" default.
-    language = (
-        language
-        or (_load_stt_config().get("local") or {}).get("language")
-        or os.getenv(LOCAL_STT_LANGUAGE_ENV)
-        or DEFAULT_LOCAL_STT_LANGUAGE
-    )
+    # Language: stt.local.language > stt.language > env var > "en" default.
+    language = _resolve_stt_language("local") or DEFAULT_LOCAL_STT_LANGUAGE
     normalized_model = _normalize_local_command_model(model_name)
 
     try:
@@ -1316,8 +1339,14 @@ def _transcribe_local_command(file_path: str, model_name: str, language: Optiona
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_groq(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe using Groq Whisper API (free tier available)."""
+def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using Groq Whisper API (free tier available).
+
+    Honours an optional ISO-639-1 language hint resolved from
+    ``stt.groq.language`` > ``stt.language`` (config.yaml) >
+    ``HERMES_LOCAL_STT_LANGUAGE`` (env). When none is set, Groq
+    Whisper auto-detects.
+    """
     api_key = get_env_value("GROQ_API_KEY")
     if not api_key:
         return {"success": False, "transcript": "", "error": "GROQ_API_KEY not set"}
@@ -1330,11 +1359,13 @@ def _transcribe_groq(file_path: str, model_name: str, language: Optional[str] = 
         logger.info("Model %s not available on Groq, using %s", model_name, DEFAULT_GROQ_STT_MODEL)
         model_name = DEFAULT_GROQ_STT_MODEL
 
+    language = _resolve_stt_language("groq")
+
     try:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
         try:
-            create_kwargs: Dict[str, Any] = {
+            create_kwargs = {
                 "model": model_name,
                 "response_format": "text",
             }
@@ -1347,8 +1378,8 @@ def _transcribe_groq(file_path: str, model_name: str, language: Optional[str] = 
                 )
 
             transcript_text = str(transcription).strip()
-            logger.info("Transcribed %s via Groq API (%s, %d chars)",
-                         Path(file_path).name, model_name, len(transcript_text))
+            logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
+                         Path(file_path).name, model_name, language or "auto", len(transcript_text))
 
             return {"success": True, "transcript": transcript_text, "provider": "groq"}
         finally:
@@ -1390,6 +1421,10 @@ def _transcribe_openai(
             return {"success": False, "transcript": "", "error": str(exc)}
         base_url = base_url or fallback_base
 
+    # Language: stt.<provider>.language > stt.language > env > auto-detect.
+    # Explicit language hint improves accuracy for non-English languages.
+    language = _resolve_stt_language(provider_label)
+
     if not _HAS_OPENAI:
         return {"success": False, "transcript": "", "error": "openai package not installed"}
 
@@ -1411,10 +1446,16 @@ def _transcribe_openai(
             if language:
                 create_kwargs["language"] = language
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    file=audio_file,
-                    **create_kwargs,
-                )
+                create_kwargs = {
+                    "model": model_name,
+                    "file": audio_file,
+                    "response_format": "text" if model_name == "whisper-1" else "json",
+                }
+                if language:
+                    create_kwargs["language"] = language
+                    logger.debug("Using language hint '%s' for OpenAI STT", language)
+
+                transcription = client.audio.transcriptions.create(**create_kwargs)
 
             transcript_text = _extract_transcript_text(transcription)
             logger.info(
@@ -1469,11 +1510,15 @@ def _transcribe_mistral(file_path: str, model_name: str, language: Optional[str]
 
         with Mistral(api_key=api_key) as client:
             with open(file_path, "rb") as audio_file:
-                result = client.audio.transcriptions.complete(
-                    model=model_name,
-                    file={"content": audio_file, "file_name": Path(file_path).name},
-                    **complete_kwargs,
-                )
+                complete_kwargs: Dict[str, Any] = {
+                    "model": model_name,
+                    "file": {"content": audio_file, "file_name": Path(file_path).name},
+                }
+                # Language: stt.mistral.language > stt.language > env > auto.
+                language = _resolve_stt_language("mistral")
+                if language:
+                    complete_kwargs["language"] = language
+                result = client.audio.transcriptions.complete(**complete_kwargs)
 
             transcript_text = _extract_transcript_text(result)
             logger.info(
@@ -1520,12 +1565,7 @@ def _transcribe_xai(file_path: str, model_name: str, language: Optional[str] = N
         or creds.get("base_url")
         or XAI_STT_BASE_URL
     ).strip().rstrip("/")
-    language = str(
-        language
-        or xai_config.get("language")
-        or os.getenv("HERMES_LOCAL_STT_LANGUAGE")
-        or DEFAULT_LOCAL_STT_LANGUAGE
-    ).strip()
+    language = _resolve_stt_language("xai", stt_config) or ""
     # .get("format", True) already defaults to True when the key is absent;
     # is_truthy_value only normalizes truthy/falsy strings from config.
     use_format = is_truthy_value(xai_config.get("format", True))
@@ -1616,7 +1656,9 @@ def _transcribe_elevenlabs(file_path: str, model_name: str, language: Optional[s
         or get_env_value("ELEVENLABS_STT_BASE_URL")
         or ELEVENLABS_STT_BASE_URL
     ).strip().rstrip("/")
-    language_code = str(language or elevenlabs_config.get("language_code") or "").strip()
+    language_code = _resolve_stt_language(
+        "elevenlabs", stt_config, extra_keys=("language_code",)
+    ) or ""
     tag_audio_events = is_truthy_value(elevenlabs_config.get("tag_audio_events", False))
     diarize = is_truthy_value(elevenlabs_config.get("diarize", False))
 
@@ -1746,8 +1788,6 @@ def _transcribe_deepinfra(file_path: str, model_name: str) -> Dict[str, Any]:
 def transcribe_audio(
     file_path: str,
     model: Optional[str] = None,
-    language: Optional[str] = None,
-    initial_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
@@ -1759,13 +1799,6 @@ def transcribe_audio(
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
-        language:  BCP-47 / ISO-639-1 language hint (e.g. "de"). Overrides any
-                   configured provider language. If None, provider auto-detects
-                   or falls back to its configured/default language (unchanged
-                   behavior).
-        initial_prompt: Optional vocabulary bias (personal dictionary terms),
-                   honored by the local faster-whisper provider only; other
-                   providers have no equivalent knob and ignore it.
 
     Returns:
         dict with keys:
@@ -1796,7 +1829,7 @@ def transcribe_audio(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
         return _transcribe_local(
-            file_path, model_name, language=language, initial_prompt=initial_prompt
+            file_path, model_name
         )
 
     if provider == "local_command":
@@ -1804,31 +1837,32 @@ def transcribe_audio(
         model_name = _normalize_local_command_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local_command(file_path, model_name, language=language)
+        return _transcribe_local_command(file_path, model_name)
 
     if provider == "groq":
-        model_name = model or DEFAULT_GROQ_STT_MODEL
-        return _transcribe_groq(file_path, model_name, language=language)
+        groq_cfg = stt_config.get("groq") or {}
+        model_name = model or groq_cfg.get("model") or DEFAULT_GROQ_STT_MODEL
+        return _transcribe_groq(file_path, model_name)
 
     if provider == "openai":
         openai_cfg = stt_config.get("openai") or {}
         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
-        return _transcribe_openai(file_path, model_name, language=language)
+        return _transcribe_openai(file_path, model_name)
 
     if provider == "mistral":
         mistral_cfg = stt_config.get("mistral") or {}
         model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
-        return _transcribe_mistral(file_path, model_name, language=language)
+        return _transcribe_mistral(file_path, model_name)
 
     if provider == "xai":
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
-        return _transcribe_xai(file_path, model_name, language=language)
+        return _transcribe_xai(file_path, model_name)
 
     if provider == "elevenlabs":
         elevenlabs_cfg = stt_config.get("elevenlabs") or {}
         model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
-        return _transcribe_elevenlabs(file_path, model_name, language=language)
+        return _transcribe_elevenlabs(file_path, model_name)
 
     if provider == "deepinfra":
         di_config = stt_config.get("deepinfra")  # may be None (YAML null)
@@ -1850,7 +1884,6 @@ def transcribe_audio(
             command_provider_config,
             stt_config,
             model_override=model,
-            language_override=language,
         )
 
     # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
@@ -1867,7 +1900,7 @@ def transcribe_audio(
     # forwards ``language`` from there. Top-level ``model`` argument
     # overrides any config-set model.
     plugin_cfg = stt_config.get(provider, {}) if isinstance(stt_config.get(provider), dict) else {}
-    plugin_language = language or plugin_cfg.get("language")
+    plugin_language = _resolve_stt_language(provider, stt_config)
     plugin_model = model or plugin_cfg.get("model")
     plugin_result = _dispatch_to_plugin_provider(
         file_path,

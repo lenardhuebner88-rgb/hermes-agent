@@ -26,6 +26,109 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+def _assert_inherited_notify_sub(subs: list[dict]) -> None:
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "telegram"
+    assert subs[0]["chat_id"] == "chat1"
+    assert subs[0]["thread_id"] == "topic1"
+    assert subs[0]["user_id"] == "user1"
+    assert subs[0]["notifier_profile"] == "default"
+
+
+def test_create_task_inherits_parent_notify_subscriptions(kanban_home):
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker1")
+        kb.add_notify_sub(
+            conn,
+            task_id=parent,
+            platform="telegram",
+            chat_id="chat1",
+            thread_id="topic1",
+            user_id="user1",
+            notifier_profile="default",
+        )
+
+        child = kb.create_task(conn, title="child", parents=[parent], assignee="worker1")
+
+        subs = kb.list_notify_subs(conn, child)
+    finally:
+        conn.close()
+
+    _assert_inherited_notify_sub(subs)
+
+
+def test_link_tasks_inherits_parent_notify_subscriptions_without_replaying_old_child_events(kanban_home):
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker1")
+        child = kb.create_task(conn, title="child", assignee="worker1")
+        with kb.write_txn(conn):
+            kb._append_event(conn, child, kind="blocked", payload={"reason": "old"})
+        kb.add_notify_sub(
+            conn,
+            task_id=parent,
+            platform="telegram",
+            chat_id="chat1",
+            thread_id="topic1",
+            user_id="user1",
+            notifier_profile="default",
+        )
+
+        kb.link_tasks(conn, parent, child)
+
+        subs = kb.list_notify_subs(conn, child)
+        _, old_events = kb.unseen_events_for_sub(
+            conn,
+            task_id=child,
+            platform="telegram",
+            chat_id="chat1",
+            thread_id="topic1",
+            kinds=["blocked"],
+        )
+    finally:
+        conn.close()
+
+    _assert_inherited_notify_sub(subs)
+    assert old_events == []
+
+
+def test_decompose_triage_task_inherits_root_notify_subscriptions(kanban_home):
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="triage root", triage=True, assignee="orchestrator")
+        kb.add_notify_sub(
+            conn,
+            task_id=root,
+            platform="telegram",
+            chat_id="chat1",
+            thread_id="topic1",
+            user_id="user1",
+            notifier_profile="default",
+        )
+
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee="orchestrator",
+            children=[
+                {"title": "first child", "assignee": "worker1"},
+                {"title": "second child", "assignee": "worker2", "parents": [0]},
+            ],
+            author="triager",
+            auto_promote=False,
+        )
+
+        assert child_ids is not None
+        child_subs = [kb.list_notify_subs(conn, child_id) for child_id in child_ids]
+    finally:
+        conn.close()
+
+    assert len(child_subs) == 2
+    for subs in child_subs:
+        _assert_inherited_notify_sub(subs)
+
+
 @pytest.mark.asyncio
 async def test_notifier_unsubs_after_completed_event(kanban_home):
     """
@@ -62,7 +165,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -122,7 +225,7 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -193,7 +296,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -214,7 +317,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -230,7 +333,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 # ---------------------------------------------------------------------------
 # Regression: gateway watchers must not double-init the kanban DB.
 #
-# Both the notifier watcher (`_kanban_notifications_watcher`) and the dispatcher
+# Both the notifier watcher (`_kanban_notifier_watcher`) and the dispatcher
 # tick (`_tick_once_for_board`) used to call `_kb.connect(board=slug)`
 # immediately followed by `_kb.init_db(board=slug)`. Since `connect()`
 # already runs the schema + idempotent migration on first open per process,
@@ -281,12 +384,12 @@ async def test_notifier_does_not_call_init_db(kanban_home):
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
          patch("hermes_cli.kanban_db.init_db", side_effect=_spy_init_db):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
     assert init_db_calls == [], (
-        "_kanban_notifications_watcher must not call init_db on every tick — "
+        "_kanban_notifier_watcher must not call init_db on every tick — "
         "connect() handles first-run schema init. "
         "Reintroducing init_db revives issue #21378. "
         f"Got {len(init_db_calls)} call(s): {init_db_calls}"
@@ -323,9 +426,9 @@ def test_dispatcher_tick_does_not_call_init_db(kanban_home, monkeypatch):
         "open per process."
     )
 
-    notifier_src = inspect.getsource(GatewayRunner._kanban_notifications_watcher)
+    notifier_src = inspect.getsource(GatewayRunner._kanban_notifier_watcher)
     assert "_kb.init_db(board=slug)" not in notifier_src, (
-        "_kanban_notifications_watcher must not call _kb.init_db(board=slug) — "
+        "_kanban_notifier_watcher must not call _kb.init_db(board=slug) — "
         "see issue #21378."
     )
 
@@ -348,6 +451,9 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
             notifier_profile="default",
         )
         kb.complete_task(conn, tid, result="done")
+        # New subs start caught up at the creation-time MAX(task_events.id)
+        # (issue #29905); claiming the completion would advance past this.
+        pre_claim_cursor = int(kb.list_notify_subs(conn, tid)[0]["last_event_id"])
     finally:
         conn.close()
 
@@ -372,7 +478,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -383,7 +489,9 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
     finally:
         conn.close()
     assert len(subs) == 1
-    assert int(subs[0]["last_event_id"]) == 0, "wrong profile must not claim the event"
+    assert int(subs[0]["last_event_id"]) == pre_claim_cursor, (
+        "wrong profile must not claim the event"
+    )
 
 
 @pytest.mark.asyncio
@@ -427,7 +535,7 @@ async def test_notifier_delivers_subscription_owned_by_current_profile(kanban_ho
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -458,12 +566,15 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     source = SimpleNamespace(
         platform=Platform.TELEGRAM,
         chat_id="chat1",
-        thread_id="th1",
+        chat_type="dm",
+        thread_id="20197",
         user_id="u1",
     )
     event = SimpleNamespace(
         text='/kanban --board projx create "hello" --assignee default',
         source=source,
+        message_id="462",
+        reply_to_message_id=None,
     )
 
     out = await GatewayRunner._handle_kanban_command(runner, event)
@@ -480,7 +591,14 @@ async def test_gateway_create_autosubscribes_on_explicit_board(kanban_home):
     assert [t.title for t in tasks] == ["hello"]
     assert len(subs) == 1
     assert subs[0]["chat_id"] == "chat1"
-    assert subs[0]["thread_id"] == "th1"
+    assert subs[0]["thread_id"] == "20197"
+    assert subs[0]["delivery_metadata"] == {
+        "chat_type": "dm",
+        "direct_messages_topic_id": "20197",
+        "telegram_dm_topic_reply_fallback": True,
+        "telegram_reply_to_message_id": "462",
+        "thread_id": "20197",
+    }
 
     conn = kb.connect(board="default")
     try:
@@ -574,7 +692,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, m
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -650,7 +768,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifications_watcher(interval=1),
+            runner._kanban_notifier_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -667,8 +785,15 @@ def test_decompose_inherits_root_notify_sub(kanban_home):
     """Children created by decompose_triage_task inherit the root/triage
     task's Discord notify-subscription, so a child's own terminal state
     (blocked / gave_up / completed) reaches the originating chat without a
-    manual notify-subscribe. The inherited sub must start at cursor 0
-    (last_event_id not copied) and double-application must not duplicate.
+    manual notify-subscribe. The inherited sub must start CAUGHT UP on the
+    child's existing events and double-application must not duplicate.
+
+    Upstream-Vollmerge 2026-08-04: the cursor used to be asserted as literally
+    0. Upstream's #29905 fix snaps ``last_event_id`` to the child's current
+    ``MAX(task_events.id)`` at inherit time, so on a freshly decomposed child it
+    is the id of that child's own "created"/"linked" rows, not 0. The behaviour
+    this test actually guards — the child's own LATER terminal events reach the
+    chat — is asserted directly below instead of via the magic number.
     """
     with kb.connect() as conn:
         root = kb.create_task(conn, title="ship a feature", triage=True)
@@ -708,18 +833,59 @@ def test_decompose_inherits_root_notify_sub(kanban_home):
             assert s["thread_id"] == "thr-9"
             assert s["user_id"] == "user-42"
             assert s["notifier_profile"] == "reviewer:hub-done"
-            # Fresh cursor: the child's own terminal events must be delivered.
-            assert s["last_event_id"] == 0
+            # Never ahead of the child's own event stream. The cursor is snapped
+            # at INHERIT time, so by now the child has produced further events
+            # (decompose links its siblings afterwards) — asserting equality
+            # against the current MAX would pin an unrelated ordering detail.
+            max_ev = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?",
+                (cid,),
+            ).fetchone()[0]
+            assert 0 <= s["last_event_id"] <= max_ev, (
+                f"cursor {s['last_event_id']} is ahead of the child's stream ({max_ev})"
+            )
+
+    # The point of the fresh cursor: a terminal event the child produces AFTER
+    # the inherit must still be unseen for the inherited subscription.
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            kb._append_event(conn, child_ids[0], kind="completed", payload={})
+        _, events = kb.unseen_events_for_sub(
+            conn,
+            task_id=child_ids[0],
+            platform="discord",
+            chat_id="chan-123",
+            thread_id="thr-9",
+            kinds=["completed"],
+        )
+        assert [ev.kind for ev in events] == ["completed"], (
+            "the child's own terminal event must reach the inherited subscription"
+        )
 
     # Idempotent: re-applying the inherit (a real double-decompose can't
     # happen because the root leaves 'triage', so we exercise the helper
     # directly) must not create duplicate rows — INSERT OR IGNORE on the
     # (task_id, platform, chat_id, thread_id) primary key.
+    # Upstream's contract is (child_id, parents-iterable). The old fork order
+    # was (parent, child) — passing it would put a bare task-id in the parents
+    # slot, where it iterates CHARACTERWISE and matches nothing. That failure is
+    # SILENT, so this block first proves the call actually inserts (on a task
+    # that has no sub yet) and only then checks idempotence. Asserting only
+    # "no duplicate" on an already-subscribed task would pass vacuously with the
+    # broken order and guard nothing.
     with kb.connect() as conn:
+        fresh = kb.create_task(conn, title="late joiner", assignee="worker")
+        assert kb.list_notify_subs(conn, fresh) == []
         with kb.write_txn(conn):
-            kb._inherit_notify_subs(conn, root, child_ids[0])
-        subs = kb.list_notify_subs(conn, child_ids[0])
-    assert len(subs) == 1, "re-inherit must not duplicate the subscription"
+            kb._inherit_notify_subs(conn, fresh, (root,))
+        subs = kb.list_notify_subs(conn, fresh)
+        assert len(subs) == 1, "inherit must actually copy the parent's sub"
+        assert subs[0]["chat_id"] == "chan-123"
+        with kb.write_txn(conn):
+            kb._inherit_notify_subs(conn, fresh, (root,))
+        assert len(kb.list_notify_subs(conn, fresh)) == 1, (
+            "re-inherit must not duplicate the subscription"
+        )
 
 
 def test_decompose_without_root_sub_leaves_children_unsubscribed(kanban_home):
@@ -764,6 +930,9 @@ def test_create_with_parent_inherits_parent_notify_sub(kanban_home):
 
     with kb.connect() as conn:
         subs = kb.list_notify_subs(conn, child)
+        child_max = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?", (child,)
+        ).fetchone()[0]
     assert len(subs) == 1
     s = subs[0]
     assert s["platform"] == "discord"
@@ -771,7 +940,14 @@ def test_create_with_parent_inherits_parent_notify_sub(kanban_home):
     assert s["thread_id"] == "thr-3"
     assert s["user_id"] == "user-9"
     assert s["notifier_profile"] == "coordinator"
-    assert s["last_event_id"] == 0  # fresh cursor: child's own events deliver
+    # Upstream-Vollmerge 2026-08-04: was `== 0`. Upstream's #29905 fix snaps the
+    # inherited cursor to the child's current MAX(task_events.id), so on a fresh
+    # child it is that child's own "created" row, not 0. What matters is that the
+    # cursor never runs AHEAD of the child's stream — then its later terminal
+    # events still deliver.
+    assert 0 < s["last_event_id"] <= child_max, (
+        f"cursor {s['last_event_id']} must sit inside the child's stream (max {child_max})"
+    )
 
 
 def test_create_with_unsubscribed_parent_leaves_child_unsubscribed(kanban_home):
@@ -806,3 +982,59 @@ def test_create_with_multiple_parents_inherits_only_subscribed_ones(kanban_home)
     assert len(subs) == 1
     assert subs[0]["platform"] == "telegram"
     assert subs[0]["chat_id"] == "chat-A"
+
+
+# ---------------------------------------------------------------------------
+# Ported verbatim from upstream tests/hermes_cli/test_kanban_core_functionality.py
+# during the 2026-08-04 upstream vollmerge. The fork split that upstream file
+# into domain files (commit c05ffda1d9); 172 of its 174 tests already live in
+# those splits, but these two arrived with upstream's #29905 fix (add_notify_sub
+# snaps last_event_id to MAX(task_events.id)) and had no home yet. Keeping them
+# here instead of restoring the 4852-line upstream file avoids duplicating the
+# other 172 tests. Do not edit to make green — they encode upstream's contract.
+# ---------------------------------------------------------------------------
+
+def test_notify_sub_starts_caught_up_on_active_task(kanban_home):
+    """A new subscription must NOT replay historical terminal events.
+
+    Regression for issue #29905: `kanban_notify_subs.last_event_id` defaulted
+    to 0, so subscribing to a task that already had terminal events in
+    `task_events` replayed the entire backlog on the next notifier tick — 27
+    stale subs produced a 100+ message burst at gateway boot. The cursor now
+    snaps to the task's MAX(task_events.id) at creation: only events that
+    occur AFTER subscribing are delivered.
+    """
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="old task", assignee="w")
+        # Historical terminal activity BEFORE anyone subscribes.
+        kb.complete_task(conn, tid, result="done long ago")
+
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="123")
+        sub = kb.list_notify_subs(conn, tid)[0]
+        assert int(sub["last_event_id"]) > 0, (
+            "cursor must snap to MAX(task_events.id) at subscription time"
+        )
+        _, events = kb.unseen_events_for_sub(
+            conn, task_id=tid, platform="telegram", chat_id="123",
+            kinds=["completed", "blocked", "gave_up", "crashed", "timed_out"],
+        )
+        assert events == [], "historical events must not replay to a new sub"
+    finally:
+        conn.close()
+
+
+def test_notify_sub_on_fresh_task_still_gets_future_events(kanban_home):
+    """The caught-up snap must not lose events that happen AFTER subscribing."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="fresh", assignee="w")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="123")
+        kb.complete_task(conn, tid, result="ok")
+        _, events = kb.unseen_events_for_sub(
+            conn, task_id=tid, platform="telegram", chat_id="123",
+            kinds=["completed"],
+        )
+        assert [ev.kind for ev in events] == ["completed"]
+    finally:
+        conn.close()

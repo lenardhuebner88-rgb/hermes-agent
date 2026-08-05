@@ -18,6 +18,7 @@ from gateway.platforms.base import (
     validate_inbound_media_size,
     _log_safe_path,
     _prefix_within_utf16_limit,
+    cache_audio_from_bytes,
 )
 
 
@@ -118,6 +119,26 @@ class TestSafeUrlForLog:
         assert safe_url_for_log(url, max_len=3) == "..."
         assert safe_url_for_log(url, max_len=2) == ".."
         assert safe_url_for_log(url, max_len=0) == ""
+
+
+class TestCacheAudioFromBytes:
+    def test_sniffs_mp4_quicktime_audio_even_when_ext_is_ogg(self, tmp_path):
+        payload = b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 32
+        with patch("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path):
+            result = cache_audio_from_bytes(payload, ext=".ogg")
+
+        saved = tmp_path / os.path.basename(result)
+        assert saved.suffix == ".m4a"
+        assert saved.read_bytes() == payload
+
+    def test_preserves_fallback_ext_when_audio_header_is_unknown(self, tmp_path):
+        payload = b"not-a-known-audio-header"
+        with patch("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path):
+            result = cache_audio_from_bytes(payload, ext=".aac")
+
+        saved = tmp_path / os.path.basename(result)
+        assert saved.suffix == ".aac"
+        assert saved.read_bytes() == payload
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +422,31 @@ class TestExtractMedia:
         assert media == [("/tmp/Jane Doe/speech.flac", False)]
         assert cleaned == ""
 
+    def test_duplicate_media_tags_are_deduplicated(self):
+        content = "MEDIA:/tmp/test.png\nMEDIA:/tmp/test.png\nMEDIA:/tmp/other.png"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [
+            ("/tmp/test.png", False),
+            ("/tmp/other.png", False),
+        ]
+        assert cleaned == ""
+
+    def test_duplicate_media_tags_dedup_preserves_first_occurrence_order(self):
+        content = "MEDIA:/tmp/a.png\nMEDIA:/tmp/b.png\nMEDIA:/tmp/a.png\nMEDIA:/tmp/c.png"
+        media, _ = BasePlatformAdapter.extract_media(content)
+        assert media == [
+            ("/tmp/a.png", False),
+            ("/tmp/b.png", False),
+            ("/tmp/c.png", False),
+        ]
+
+    def test_dedup_uses_expanded_path_so_tilde_and_absolute_collapse(self):
+        import os
+        home = os.path.expanduser("~")
+        content = f"MEDIA:~/foo.png\nMEDIA:{home}/foo.png"
+        media, _ = BasePlatformAdapter.extract_media(content)
+        assert media == [(f"{home}/foo.png", False)]
+
     def test_as_document_directive_stripped_from_cleaned_text(self):
         """[[as_document]] is a routing directive — strip it from
         user-visible text just like [[audio_as_voice]]. Callers detect the
@@ -528,6 +574,51 @@ class TestExtractMedia:
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert [p for p, _ in media] == ["/r/a.png"]
         assert "`MEDIA:/ex/b.png`" in cleaned
+
+    # --- Markdown emphasis wrapping tolerance ---
+    # Models routinely present a file as **MEDIA:/path** / *MEDIA:/path* /
+    # _MEDIA:/path_. The old pattern only tolerated a single quote/backtick, so
+    # the emphasis prevented the match and the file was silently never
+    # delivered (the literal MEDIA: text leaked into the chat instead).
+
+    def test_media_bold_wrapped_extracted(self):
+        media, cleaned = BasePlatformAdapter.extract_media(
+            "**MEDIA:/home/u/report.pptx**"
+        )
+        assert media == [("/home/u/report.pptx", False)]
+        assert "MEDIA:" not in cleaned
+
+    def test_media_italic_asterisk_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media("*MEDIA:/home/u/report.pdf*")
+        assert media == [("/home/u/report.pdf", False)]
+
+    def test_media_italic_underscore_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media("_MEDIA:/home/u/report.pdf_")
+        assert media == [("/home/u/report.pdf", False)]
+
+    def test_media_bold_mid_prose_extracted_and_stripped(self):
+        media, cleaned = BasePlatformAdapter.extract_media(
+            "Voici votre fichier **MEDIA:/tmp/r.pdf** bonne lecture"
+        )
+        assert media == [("/tmp/r.pdf", False)]
+        assert "MEDIA:" not in cleaned
+        assert "bonne lecture" in cleaned
+
+    def test_media_bold_wrapped_html_extracted(self):
+        # .html is a recognised extension; emphasis was the only blocker.
+        media, _ = BasePlatformAdapter.extract_media("**MEDIA:/srv/page.html**")
+        assert media == [("/srv/page.html", False)]
+
+    def test_media_underscore_in_filename_unaffected(self):
+        # Emphasis tolerance must not eat a legitimate '_' inside the path.
+        media, _ = BasePlatformAdapter.extract_media("MEDIA:/tmp/my_report_v2.pptx")
+        assert media == [("/tmp/my_report_v2.pptx", False)]
+
+    def test_media_bold_relative_path_still_ignored(self):
+        # The absolute-path anchor must still reject relative paths even when
+        # wrapped in emphasis.
+        media, _ = BasePlatformAdapter.extract_media("**MEDIA:report.html**")
+        assert media == []
 
 
 class TestMediaInsideSerializedJson:

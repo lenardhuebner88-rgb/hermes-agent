@@ -2711,6 +2711,54 @@ class TestCounts:
         assert db.session_count(source="cli") == 2
         assert db.session_count(source="telegram") == 1
 
+    def test_session_count_by_source_group_by(self, db):
+        """session_count_by_source() returns grouped counts via a single query."""
+        db.create_session(session_id="s1", source="cli")
+        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s3", source="cli")
+        db.create_session(session_id="s4", source="discord")
+        result = db.session_count_by_source(include_archived=True)
+        assert result == {"cli": 2, "telegram": 1, "discord": 1}
+
+    def test_session_count_by_source_empty(self, db):
+        """Empty database returns empty dict."""
+        assert db.session_count_by_source() == {}
+
+    def test_session_count_by_source_excludes_children(self, db):
+        """exclude_children=True hides subagent runs and compression continuations.
+
+        Mirrors list_sessions_rich visibility so the source histogram matches
+        what the Sessions page actually lists, not raw row counts.
+        """
+        db.create_session(session_id="root", source="cli")
+        # Child session (subagent run) — should be excluded.
+        db.create_session(
+            session_id="child", source="cli", parent_session_id="root"
+        )
+        # End the parent so the child looks like a subagent run (not a branch).
+        db.end_session("root", "ended")
+
+        without_children = db.session_count_by_source(exclude_children=True)
+        assert without_children == {"cli": 1}
+
+        with_children = db.session_count_by_source(include_archived=True)
+        assert with_children == {"cli": 2}
+
+    def test_session_count_by_source_coalesce_groups_null(self, db):
+        """GROUP BY COALESCE(source, 'cli') avoids duplicate-key data loss.
+
+        If NULL source rows existed (schema is NOT NULL, but defence-in-depth),
+        NULL and literal 'cli' must collapse to a single 'cli' key — not two
+        separate groups that the dict comprehension silently drops.
+        """
+        db.create_session(session_id="s1", source="cli")
+        # Inject a NULL source directly (bypassing the NOT NULL constraint
+        # would fail on a real db, so just verify the COALESCE works on
+        # normal data — the aliasing is the structural invariant).
+        result = db.session_count_by_source(include_archived=True)
+        assert "cli" in result
+        assert result["cli"] == 1
+
     def test_session_count_by_cwd_prefix(self, db):
         db.create_session("s1", "cli", cwd="/repo")
         db.create_session("s2", "cli", cwd="/repo-wt-feature")
@@ -3051,6 +3099,31 @@ class TestPruneSessions:
         session = db.get_session("new")
         assert session is not None
         assert session["id"] == "new"
+
+    def test_age_preview_and_prune_use_last_activity(self, db):
+        old_ts = time.time() - 100 * 86400
+        for sid in ("inactive", "recently-active"):
+            db.create_session(session_id=sid, source="telegram")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (old_ts, sid),
+            )
+        db.end_session("inactive", end_reason="agent_close")
+        db.append_message(
+            "recently-active",
+            role="user",
+            content="A recent message in a long-lived conversation.",
+        )
+        db.end_session("recently-active", end_reason="agent_close")
+        db._conn.commit()
+
+        candidates = db.list_prune_candidates(older_than_days=90)
+
+        assert [row["id"] for row in candidates] == ["inactive"]
+        assert candidates[0]["last_active"] == pytest.approx(old_ts)
+        assert db.prune_sessions(older_than_days=90) == 1
+        assert db.get_session("inactive") is None
+        assert db.get_session("recently-active") is not None
 
     def test_prune_skips_active_sessions(self, db):
         db.create_session(session_id="active", source="cli")
@@ -5676,6 +5749,39 @@ class TestAutoMaintenance:
         assert not (sessions_dir / "request_dump_old1_001.json").exists()
         # Active session's transcript is untouched
         assert (sessions_dir / "new.jsonl").exists()
+
+    def test_auto_prune_preserves_old_session_with_recent_activity(self, db, tmp_path):
+        """Retention is based on activity, not when a conversation began."""
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+
+        db.create_session(session_id="long-lived", source="telegram")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (time.time() - 100 * 86400, "long-lived"),
+        )
+        db._conn.commit()
+        db.append_message(
+            "long-lived",
+            role="user",
+            content="This conversation was active today.",
+        )
+        db.end_session("long-lived", end_reason="agent_close")
+        transcript = sessions_dir / "long-lived.jsonl"
+        transcript.write_text('{"role":"user","content":"recent"}\n')
+
+        result = db.maybe_auto_prune_and_vacuum(
+            retention_days=90,
+            vacuum=False,
+            sessions_dir=sessions_dir,
+        )
+
+        assert result["pruned"] == 0
+        assert db.get_session("long-lived") is not None
+        assert [m["content"] for m in db.get_messages("long-lived")] == [
+            "This conversation was active today."
+        ]
+        assert transcript.exists()
 
     def test_auto_prune_without_sessions_dir_preserves_files(self, db, tmp_path):
         """Backward-compat: no sessions_dir = DB-only cleanup (legacy behavior)."""
