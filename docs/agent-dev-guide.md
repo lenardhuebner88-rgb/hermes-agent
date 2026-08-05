@@ -1203,10 +1203,24 @@ automatically scope to the active profile.
    ```
 
 5. **Gateway platform adapters should use token locks** — if the adapter connects with
-   a unique credential (bot token, API key), call `acquire_scoped_lock()` from
-   `gateway.status` in the `connect()`/`start()` method and `release_scoped_lock()` in
+   a unique credential (bot token, API key, phone number), call the `BasePlatformAdapter`
+   helper `self._acquire_platform_lock(scope, identity, resource_desc)` in the
+   `connect()`/`start()` method and `self._release_platform_lock()` in
    `disconnect()`/`stop()`. This prevents two profiles from using the same credential.
-   See `gateway/platforms/telegram.py` for the canonical pattern.
+   ```python
+   if not self._acquire_platform_lock('signal-phone', self.account, 'Signal account'):
+       return False
+   ```
+   The helper (`gateway/platforms/base.py`, `_acquire_platform_lock` /
+   `_release_platform_lock`) wraps `gateway.status.acquire_scoped_lock()` and remembers
+   scope + identity, so the release side needs no arguments; it also owns the
+   `--replace` takeover path (a live cross-`HERMES_HOME` holder may only be replaced
+   when the runner armed this adapter for its initial replace-connect). Canonical
+   examples: `gateway/platforms/signal.py`, `gateway/platforms/weixin.py`,
+   `gateway/platforms/qqbot/adapter.py`. Calling `acquire_scoped_lock()` /
+   `release_scoped_lock()` from `gateway.status` directly still works and survives in
+   older plugin adapters (`plugins/platforms/{feishu,irc,line}/adapter.py`), but it
+   bypasses the takeover path — prefer the base-class helper in new code.
 
 6. **Profile operations are HOME-anchored, not HERMES_HOME-anchored** — `_get_profiles_root()`
    returns `Path.home() / ".hermes" / "profiles"`, NOT `get_hermes_home() / "profiles"`.
