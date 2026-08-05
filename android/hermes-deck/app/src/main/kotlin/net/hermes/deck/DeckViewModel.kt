@@ -41,6 +41,11 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         /** The probe boots a real agent and takes seconds — say so meanwhile. */
         val modelsLoading: Boolean = false,
         val busyStem: String? = null,
+        /** Windows the server measured over, so the labels quote its numbers. */
+        val heartbeatWindowSeconds: Int = 3600,
+        val heartbeatRecentSeconds: Int = 300,
+        /** Set when the journal could not be read at all — never rendered as calm. */
+        val heartbeatError: String? = null,
     )
 
     private val _agents = MutableStateFlow(AgentsState())
@@ -321,7 +326,15 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         _agents.value = _agents.value.copy(loading = true, error = null)
         val result = withContext(Dispatchers.IO) { runCatching { client.agents() } }
         _agents.value = result.fold(
-            onSuccess = { AgentsState(agents = it, loading = false) },
+            onSuccess = {
+                AgentsState(
+                    agents = it.agents,
+                    loading = false,
+                    heartbeatWindowSeconds = it.windowSeconds,
+                    heartbeatRecentSeconds = it.recentSeconds,
+                    heartbeatError = it.heartbeatError,
+                )
+            },
             onFailure = { _agents.value.copy(loading = false, error = it.message ?: "Abruf fehlgeschlagen") },
         )
     }

@@ -162,6 +162,13 @@ def test_list_agents_never_leaks_the_private_key_or_auth_tag(tmp_path: Path) -> 
             "agent_command": "claude-agent-acp",
             "active_state": "active",
             "last_start": "Wed 2026-08-05 09:00:00 UTC",
+            # The heartbeat fields are pinned here on purpose: this assertion is
+            # exhaustive so that no future key can carry a secret out unnoticed.
+            "tool_calls_window": 0,
+            "tool_calls_recent": 0,
+            "last_tool_call_at": None,
+            "last_tool_call_seconds_ago": None,
+            "working": False,
         }
     ]
 

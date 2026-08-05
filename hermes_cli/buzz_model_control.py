@@ -22,6 +22,11 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from hermes_cli.buzz_agent_cleanup import _SUBSCRIPTION_MARKER as _READINESS_MARKER
+from hermes_cli.buzz_agent_heartbeat import (
+    DEFAULT_RECENT_SECONDS,
+    DEFAULT_WINDOW_SECONDS,
+    HeartbeatReader,
+)
 
 _STEM_RE = re.compile(r"^[a-z0-9-]+$")
 _UNIT_RE = re.compile(r"^buzz-agent@([a-z0-9-]+)\.service$")
@@ -231,6 +236,8 @@ class BuzzModelControlService:
         models_timeout: float = _DEFAULT_MODELS_TIMEOUT_SECONDS,
         models_cache_ttl: float = _DEFAULT_MODELS_CACHE_TTL_SECONDS,
         restart_wait_timeout: float = _DEFAULT_RESTART_WAIT_TIMEOUT_SECONDS,
+        heartbeat_window_seconds: int = DEFAULT_WINDOW_SECONDS,
+        heartbeat_recent_seconds: int = DEFAULT_RECENT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -240,6 +247,8 @@ class BuzzModelControlService:
         self.models_timeout = models_timeout
         self.models_cache_ttl = models_cache_ttl
         self.restart_wait_timeout = restart_wait_timeout
+        self.heartbeat_window_seconds = heartbeat_window_seconds
+        self.heartbeat_recent_seconds = heartbeat_recent_seconds
         self._sleep = sleep
         self._clock = clock
         self._models_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
@@ -254,13 +263,58 @@ class BuzzModelControlService:
     def _known_values(self, stem: str) -> dict[str, str]:
         return _extract_known(_read_env_lines(self._env_path(stem)))
 
-    def list_agents(self) -> list[dict[str, Any]]:
-        stems = sorted(
+    def _stems(self) -> list[str]:
+        return sorted(
             path.name.removesuffix(".env")
             for path in self.config_dir.glob("*.env")
             if path.is_file() and _STEM_RE.fullmatch(path.name.removesuffix(".env")) is not None
         )
-        return [self._agent_summary(stem) for stem in stems]
+
+    def list_agents(self) -> list[dict[str, Any]]:
+        return self.agents_payload()["agents"]
+
+    def agents_payload(self) -> dict[str, Any]:
+        """Agent summaries plus the journal-measured work heartbeat.
+
+        The heartbeat is deliberately part of this response rather than a
+        second endpoint: ``active_state`` on its own has already proven
+        misleading — all eight units reported ``active`` while half of them had
+        done no work for hours — and a client that has to make a second call to
+        learn that is a client that will ship the reassuring half.
+        """
+        stems = self._stems()
+        heartbeats, heartbeat_error = self._heartbeat_reader().read(stems)
+        agents = []
+        for stem in stems:
+            summary = self._agent_summary(stem)
+            beat = heartbeats.get(stem)
+            summary.update(
+                beat.as_payload()
+                if beat is not None
+                else {
+                    "tool_calls_window": None,
+                    "tool_calls_recent": None,
+                    "last_tool_call_at": None,
+                    "last_tool_call_seconds_ago": None,
+                    # Null, never False: the journal could not be read, so
+                    # "not working" is not something we are entitled to claim.
+                    "working": None,
+                }
+            )
+            agents.append(summary)
+        return {
+            "agents": agents,
+            "heartbeat_window_seconds": self.heartbeat_window_seconds,
+            "heartbeat_recent_seconds": self.heartbeat_recent_seconds,
+            "heartbeat_error": heartbeat_error,
+        }
+
+    def _heartbeat_reader(self) -> HeartbeatReader:
+        return HeartbeatReader(
+            self.runner,
+            window_seconds=self.heartbeat_window_seconds,
+            recent_seconds=self.heartbeat_recent_seconds,
+        )
 
     def _agent_summary(self, stem: str) -> dict[str, Any]:
         values = self._known_values(stem)
@@ -445,7 +499,7 @@ def register_buzz_model_control_routes(
 
     @app.get("/api/buzz/agents")
     def list_buzz_agents() -> dict[str, Any]:
-        return {"agents": service_factory().list_agents()}
+        return service_factory().agents_payload()
 
     @app.get("/api/buzz/agents/{stem}/models")
     def get_buzz_agent_models(stem: str) -> dict[str, Any]:

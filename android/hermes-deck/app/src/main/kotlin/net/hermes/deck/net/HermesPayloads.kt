@@ -1,5 +1,7 @@
 package net.hermes.deck.net
 
+import net.hermes.deck.model.BuzzAgent
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -17,6 +19,44 @@ import org.json.JSONObject
 object HermesPayloads {
 
     data class ModelChoices(val models: List<String>, val current: String?, val error: String?)
+
+    /**
+     * `/api/buzz/agents`, whole. The windows travel with the payload so the
+     * card can say "in 1 Stunde" without a second copy of the number that would
+     * drift the moment the server's window is retuned.
+     */
+    data class AgentsSnapshot(
+        val agents: List<BuzzAgent>,
+        val windowSeconds: Int,
+        val recentSeconds: Int,
+        val heartbeatError: String?,
+    )
+
+    fun agentsSnapshot(json: JSONObject): AgentsSnapshot {
+        val array = json.optJSONArray("agents") ?: JSONArray()
+        return AgentsSnapshot(
+            agents = (0 until array.length()).mapNotNull {
+                array.optJSONObject(it)?.let(BuzzAgent::fromJson)
+            },
+            // Defaults match the server's, but only ever apply when the key is
+            // missing — an older dashboard, not a silent disagreement.
+            windowSeconds = json.optInt("heartbeat_window_seconds", 3600),
+            recentSeconds = json.optInt("heartbeat_recent_seconds", 300),
+            heartbeatError = explainHeartbeat(json.optString("heartbeat_error", "")),
+        )
+    }
+
+    /**
+     * A heartbeat failure must never be shown as calm. Zero tool calls and an
+     * unreadable journal produce the same numbers, so this sentence is the only
+     * thing standing between the operator and a reassuring, wrong grey dot.
+     */
+    private fun explainHeartbeat(code: String): String? = when {
+        code.isBlank() || code == "null" -> null
+        code == "journal_unavailable" ->
+            "Aktivität nicht messbar — das Journal liess sich nicht lesen."
+        else -> "Aktivität nicht messbar ($code)."
+    }
 
     data class ModelChange(
         val previous: String,
