@@ -9,9 +9,12 @@ ticker, so a phone on a tail-net makes **one** request per tick instead of four.
 
 Subscription budgets are deliberately *not* in the bundle. ``/api/account-usage``
 is an async handler inside ``web_server`` — importing it here would close an
-import cycle — and the numbers move on the scale of hours, so tying them to an
-eight-second tick would buy nothing. The app keeps its existing separate call at
-its own, slower cadence.
+import cycle — and it fans out to five provider APIs on a cache miss (~2 s
+measured, 15 s timeout each), which would put a network stall inside a loop that
+is otherwise guaranteed local. The app keeps that call at its own, slower cadence.
+
+The *burn rate* is in the bundle for exactly the inverse reason: it is a local
+SQLite read of the observability database, so it costs the tick nothing.
 
 Bundling has a failure mode that this module treats as the main design problem:
 a single sub-source that raises would otherwise take the whole payload with it,
@@ -36,6 +39,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, Query
 
 from hermes_cli.agent_session_facts import SessionFactsService
+from hermes_cli.deck_burn import compute_burn_rate
 from hermes_cli.buzz_agent_tool_calls import (
     DEFAULT_ACTIVITY_WINDOW_SECONDS,
     DEFAULT_CALLS_PER_AGENT,
@@ -203,6 +207,7 @@ class DeckPulseService:
         workers, workers_error = self.workers_payload(board=board)
         holds, holds_error = self.holds_payload(board=board)
         events, events_error = self.events_payload(board=board, since_id=since_id)
+        burn, burn_error = self.burn_payload()
 
         return {
             "as_of": stamp,
@@ -214,7 +219,22 @@ class DeckPulseService:
             "workers": _section(workers, workers_error, stamp),
             "holds": _section(holds, holds_error, stamp),
             "events": _section(_trim_events(events), events_error, stamp),
+            "burn": _section(burn, burn_error, stamp),
         }
+
+    def burn_payload(self) -> tuple[dict[str, Any] | None, str | None]:
+        """The fleet's measured token rate.
+
+        A local SQLite read against the observability database, so it costs the
+        poll loop no network call. It is the one number on the band that is a
+        *rate* rather than a level, and it deliberately excludes cache reads:
+        counting them made the same hour read as 43.9 M instead of 0.68 M
+        tokens, which is a different claim wearing the same units.
+        """
+        try:
+            return compute_burn_rate(), None
+        except Exception as exc:  # noqa: BLE001 — the band degrades, the bundle does not
+            return None, f"{type(exc).__name__}: {exc}"[:200]
 
 
 def _section(data: Any, error: str | None, stamp: str) -> dict[str, Any]:

@@ -1,0 +1,114 @@
+{
+ "providers": [
+  {
+   "provider": "anthropic",
+   "available": true,
+   "source": "oauth_usage_api",
+   "fetched_at": "2026-08-05T21:29:48.741715+00:00",
+   "signal_at": null,
+   "title": "Account limits",
+   "plan": "Max 20×",
+   "windows": [
+    {
+     "label": "Current session",
+     "window_key": "session",
+     "used_percent": 15.0,
+     "reset_at": "2026-08-06T00:49:59.633001+00:00",
+     "detail": null
+    },
+    {
+     "label": "Current week",
+     "window_key": "weekly",
+     "used_percent": 83.0,
+     "reset_at": "2026-08-07T03:59:59.633025+00:00",
+     "detail": null
+    }
+   ],
+   "details": [],
+   "unavailable_reason": null,
+   "fallback": false
+  },
+  {
+   "provider": "openai-codex",
+   "available": true,
+   "source": "usage_api",
+   "fetched_at": "2026-08-05T21:29:49.211164+00:00",
+   "signal_at": null,
+   "title": "Account limits",
+   "plan": "Pro",
+   "windows": [
+    {
+     "label": "Weekly",
+     "window_key": "weekly",
+     "used_percent": 87.0,
+     "reset_at": "2026-08-08T03:36:18+00:00",
+     "detail": null
+    }
+   ],
+   "details": [],
+   "unavailable_reason": null,
+   "fallback": false
+  },
+  {
+   "provider": "kimi",
+   "available": false,
+   "source": "usage_api",
+   "fetched_at": "2026-08-05T21:29:49.211216+00:00",
+   "signal_at": null,
+   "title": "Account limits",
+   "plan": null,
+   "windows": [],
+   "details": [],
+   "unavailable_reason": "Kimi API key not configured (KIMI_API_KEY).",
+   "fallback": false
+  },
+  {
+   "provider": "xai",
+   "available": true,
+   "source": "billing_api",
+   "fetched_at": "2026-08-05T21:29:49.387190+00:00",
+   "signal_at": null,
+   "title": "Grok",
+   "plan": null,
+   "windows": [
+    {
+     "label": "Grok Build",
+     "window_key": "product",
+     "used_percent": 52.0,
+     "reset_at": "2026-08-09T17:58:33.973068+00:00",
+     "detail": null
+    },
+    {
+     "label": "Gesamt",
+     "window_key": "account_total",
+     "used_percent": 52.0,
+     "reset_at": "2026-08-09T17:58:33.973068+00:00",
+     "detail": null
+    }
+   ],
+   "details": [
+    "Plan nicht gemeldet",
+    "Route→Bucket: UNKNOWN"
+   ],
+   "unavailable_reason": null,
+   "fallback": false
+  },
+  {
+   "provider": "openrouter",
+   "available": true,
+   "source": "credits_api",
+   "fetched_at": "2026-08-05T21:29:49.498730+00:00",
+   "signal_at": null,
+   "title": "Account limits",
+   "plan": null,
+   "windows": [],
+   "details": [
+    "Credits balance: $0.00",
+    "API key usage: $173.38 total"
+   ],
+   "unavailable_reason": null,
+   "fallback": false
+  }
+ ],
+ "cache_ttl_seconds": 60
+}

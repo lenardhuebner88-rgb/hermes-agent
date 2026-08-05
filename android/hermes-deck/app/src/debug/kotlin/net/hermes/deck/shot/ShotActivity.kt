@@ -3,6 +3,7 @@ package net.hermes.deck.shot
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.ActionStack
 import net.hermes.deck.model.DeckPulse
 import net.hermes.deck.model.Freshness
@@ -38,6 +39,15 @@ class ShotActivity : ComponentActivity() {
         val payload = assets.open(FIXTURE).bufferedReader().use { it.readText() }
         val pulse = DeckPulse.fromJson(JSONObject(payload), receivedAt = System.currentTimeMillis())
 
+        // The budget line is fed from its own endpoint in the real app, so the
+        // shot carries its own real capture of it — otherwise the band would be
+        // photographed in its empty state and prove nothing.
+        val usageJson = JSONObject(assets.open(USAGE_FIXTURE).bufferedReader().use { it.readText() })
+        val providers = usageJson.optJSONArray("providers")
+        val usage = (0 until (providers?.length() ?: 0)).mapNotNull { index ->
+            providers?.optJSONObject(index)?.let(AccountUsage::fromJson)
+        }
+
         // A pinned agent is the one focus the fixture can prove on demand: the
         // ranking would otherwise pick whatever the captured moment happened to
         // make loudest, and the shot would not be reproducible.
@@ -56,7 +66,7 @@ class ShotActivity : ComponentActivity() {
                         runs = pulse.workerRuns,
                         agents = pulse.agentRows,
                     ),
-                    usage = emptyList(),
+                    usage = usage,
                     loading = false,
                     error = null,
                     pinnedStem = pinned,
@@ -71,6 +81,7 @@ class ShotActivity : ComponentActivity() {
 
     private companion object {
         const val FIXTURE = "deck-pulse-live.json"
+        const val USAGE_FIXTURE = "account-usage-live.json"
         const val EXTRA_STATE = "state"
         const val EXTRA_STEM = "stem"
         const val STATE_NORMAL = "normal"

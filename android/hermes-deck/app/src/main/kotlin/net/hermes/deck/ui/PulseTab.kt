@@ -74,6 +74,23 @@ fun PulseTab(
         }
     }
 
+    // The budget line said "Budget unbekannt" on every fresh start of this tab,
+    // and the reason was not the server: `/api/account-usage` answers with real
+    // percentages, this screen simply never asked. Only the deck's own pulse
+    // was polled, and the usage state stayed at its empty default unless the
+    // operator had visited the home screen first.
+    //
+    // Kept on its own, much slower cadence: that endpoint fans out to five
+    // provider APIs on a cache miss (~2 s measured, 15 s timeout each), so it
+    // must not ride the 8-second pulse loop. Sixty seconds matches the server's
+    // own cache TTL, which makes anything faster pointless anyway.
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.loadAgents()
+            delay(USAGE_REFRESH_MILLIS)
+        }
+    }
+
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -298,3 +315,6 @@ private fun DangerButton(
         Text(text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     }
 }
+
+/** Matches the dashboard's own 60 s cache TTL for `/api/account-usage`. */
+private const val USAGE_REFRESH_MILLIS = 60_000L

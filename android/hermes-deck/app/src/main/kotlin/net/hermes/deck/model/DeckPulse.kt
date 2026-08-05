@@ -40,13 +40,31 @@ data class DeckEvent(
 ) {
     val isFailure: Boolean get() = kind in FAILURE_KINDS
 
+    /**
+     * German, and a *verb* wherever possible.
+     *
+     * The board's own kinds are English snake_case and leak straight onto the
+     * screen otherwise — a stream reading "heartbeat / unblocked / claimed"
+     * next to German prose. Anything not listed still falls through to the raw
+     * kind: an unknown event must stay visible and legible, not be swallowed.
+     */
     val label: String
         get() = when (kind) {
             "completed" -> "fertig"
             "blocked" -> "blockiert"
+            "unblocked" -> "entsperrt"
             "claimed" -> "übernommen"
             "failed", "infra_failed" -> "gescheitert"
             "landed" -> "gelandet"
+            "heartbeat" -> "meldet sich"
+            "started" -> "gestartet"
+            "scheduled" -> "eingeplant"
+            "submitted_for_review" -> "zur Prüfung"
+            "review_diff_snapshot" -> "Diff geprüft"
+            "integration_merged" -> "gemerged"
+            "freigabe_released" -> "freigegeben"
+            "freigabe_vetoed" -> "abgelehnt"
+            "closeout_receipt_written" -> "Beleg geschrieben"
             else -> kind.replace('_', ' ')
         }
 
@@ -119,11 +137,13 @@ data class DeckPulse(
     val workers: Section<List<WorkerRun>>,
     val holds: Section<List<DispatchHold>>,
     val events: Section<List<DeckEvent>>,
+    val burn: Section<BurnRate>,
 ) {
     val agentRows: List<AgentRow> get() = agents.data?.rows.orEmpty()
     val workerRuns: List<WorkerRun> get() = workers.data.orEmpty()
     val heldTasks: List<DispatchHold> get() = holds.data.orEmpty()
     val recentEvents: List<DeckEvent> get() = events.data.orEmpty()
+    val burnRate: BurnRate? get() = burn.data
 
     /** Sections that could not be read at all — shown as a band, never swallowed. */
     val brokenSections: List<String>
@@ -156,6 +176,9 @@ data class DeckPulse(
                 },
                 events = Section.of(json.optJSONObject("events")) { block ->
                     block.optJSONArray("events").mapObjects(DeckEvent::fromJson)
+                },
+                burn = Section.of(json.optJSONObject("burn")) { block ->
+                    checkNotNull(BurnRate.fromJson(block))
                 },
             )
         }

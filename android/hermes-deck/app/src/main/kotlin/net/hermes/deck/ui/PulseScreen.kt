@@ -48,6 +48,7 @@ import net.hermes.deck.model.AccountUsage
 import net.hermes.deck.model.ActionStack
 import net.hermes.deck.model.AgentPulse
 import net.hermes.deck.model.AgentRow
+import net.hermes.deck.model.BurnRate
 import net.hermes.deck.model.DeckPulse
 import net.hermes.deck.model.FocusPick
 import net.hermes.deck.model.Freshness
@@ -112,7 +113,17 @@ fun PulseScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        item { LeitstandHeader(freshness, loading, onRefresh) }
+        // Title, freshness and the whole fleet are one block: the agents are
+        // the subject of this screen, not a row under its title.
+        item {
+            LeitstandHeader(freshness, loading, rows, onRefresh)
+            if (rows.isNotEmpty()) {
+                Spacer(Modifier.height(9.dp))
+                FleetRail(rows, pinnedStem) { stem ->
+                    onPin(if (stem == pinnedStem) null else stem)
+                }
+            }
+        }
 
         // The draft carries this in all three states, and the data was already
         // being computed and thrown away: PulseScreen took `actions` and never
@@ -122,8 +133,7 @@ fun PulseScreen(
         }
 
         if (rows.isNotEmpty()) {
-            item { FleetRail(rows, pinnedStem) { stem -> onPin(if (stem == pinnedStem) null else stem) } }
-            item { BurnBand(rows, usage) }
+            item { BurnBand(rows, usage, pulse?.burnRate, onOpenAgents) }
         }
 
         if (error != null) item { AlertBand(error, deck.danger) }
@@ -194,20 +204,64 @@ fun PulseScreen(
 
 // ------------------------------------------------------------------ header
 
+/**
+ * Title, freshness, and a one-line census of the fleet.
+ *
+ * The census counts only what is measured. "4 arbeiten" comes from agents
+ * whose journal actually shows an open turn; agents whose journal could not be
+ * read are counted separately as unreadable rather than folded into "ruhig",
+ * because a fleet that cannot be measured must never look like a fleet at rest.
+ */
 @Composable
-private fun LeitstandHeader(freshness: Freshness, loading: Boolean, onRefresh: () -> Unit) {
+private fun LeitstandHeader(
+    freshness: Freshness,
+    loading: Boolean,
+    rows: List<AgentRow>,
+    onRefresh: () -> Unit,
+) {
     val deck = LocalDeck.current
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onRefresh).padding(vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Bottom,
-    ) {
-        Text("Leitstand", color = deck.textPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text(
-            if (loading) "wird geholt …" else freshness.headerLabel,
-            style = tickerStyle,
-            color = if (freshness.isStale) deck.warning else deck.textFaint,
-        )
+    val working = rows.count { it.pulse?.looksOpen == true }
+    val unreadable = rows.count { it.pulse == null }
+    val failed = rows.count { it.agent.isFailed }
+
+    Column(Modifier.fillMaxWidth().clickable(onClick = onRefresh).padding(vertical = 2.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text(
+                "Leitstand",
+                color = deck.textPrimary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                if (loading) "wird geholt …" else freshness.headerLabel,
+                style = tickerStyle,
+                color = if (freshness.isStale) deck.warning else deck.textFaint,
+            )
+        }
+        if (rows.isNotEmpty()) {
+            Spacer(Modifier.height(3.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                CensusPart("$working arbeiten", deck.success, working > 0)
+                CensusPart("${rows.size - working - unreadable - failed} ruhig", deck.textFaint, true)
+                if (failed > 0) CensusPart("$failed unten", deck.danger, true)
+                if (unreadable > 0) CensusPart("$unreadable unlesbar", deck.warning, true)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CensusPart(text: String, tint: Color, show: Boolean) {
+    if (!show) return
+    val deck = LocalDeck.current
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(5.dp).clip(CircleShape).background(tint))
+        Spacer(Modifier.width(5.dp))
+        Text(text, style = tickerStyle, color = deck.textSecondary)
     }
 }
 
@@ -386,51 +440,136 @@ private fun meterColor(session: SessionFacts?): Color {
  * budget — so that is what it shows, labelled as what it is.
  */
 @Composable
-private fun BurnBand(rows: List<AgentRow>, usage: List<AccountUsage>) {
+private fun BurnBand(
+    rows: List<AgentRow>,
+    usage: List<AccountUsage>,
+    burn: BurnRate?,
+    onOpenUsage: () -> Unit,
+) {
     val deck = LocalDeck.current
     val loads = rows.map { it.pulse?.callsInWindow ?: 0 }
     val total = loads.sum()
-    val tightest = usage.mapNotNull { entry -> entry.peakPercent?.let { entry to it } }
-        .maxByOrNull { it.second }
-    val alarm = (tightest?.second ?: 0.0) >= FocusPick.BUDGET_ALARM_PERCENT
+    val budget = BudgetLine.of(usage)
+    val alarm = (budget.percent ?: 0.0) >= FocusPick.BUDGET_ALARM_PERCENT
 
-    Row(
+    Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(13.dp))
             .background(if (alarm) deck.danger.copy(alpha = 0.07f) else deck.surface)
-            .padding(horizontal = 11.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .clickable(onClick = onOpenUsage)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
-        Row(
-            Modifier.weight(1f).height(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            val peak = (loads.maxOrNull() ?: 1).coerceAtLeast(1)
-            loads.forEach { load ->
-                Box(
-                    Modifier
-                        .weight(1f)
-                        .height((3 + 13f * load / peak).dp)
-                        .clip(RoundedCornerShape(1.dp))
-                        .background(if (load * 2 > peak) deck.accent else deck.accentSoft),
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).height(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                val peak = (loads.maxOrNull() ?: 1).coerceAtLeast(1)
+                loads.forEachIndexed { index, load ->
+                    // A bar per agent, in the rail's order, so the tallest bar
+                    // can be traced back to a capsule above it.
+                    val silent = rows.getOrNull(index)?.pulse == null
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height((3 + 13f * load / peak).dp)
+                            .clip(RoundedCornerShape(1.dp))
+                            .background(
+                                when {
+                                    silent -> deck.warning.copy(alpha = 0.35f)
+                                    load * 2 > peak -> deck.accent
+                                    else -> deck.accentSoft
+                                },
+                            ),
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(horizontalAlignment = Alignment.End) {
+                // The rate leads: it is the only number here that says how fast
+                // something is being spent rather than how much is left.
+                Text(
+                    burn?.perHourLabel ?: "$total Tool-Calls",
+                    style = tickerStyle,
+                    color = deck.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    when {
+                        burn?.perHourLabel != null -> "$total Tool-Calls"
+                        // No rate is not the same as no traffic — say which.
+                        burn?.reason != null -> burn.reason
+                        else -> "Rate nicht gemessen"
+                    },
+                    style = tickerStyle,
+                    color = deck.textFaint,
                 )
             }
         }
-        Spacer(Modifier.width(10.dp))
-        Column(horizontalAlignment = Alignment.End) {
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
-                "$total Tool-Calls",
+                budget.headline,
                 style = tickerStyle,
-                color = if (alarm) deck.danger else deck.textSecondary,
-                fontWeight = FontWeight.SemiBold,
+                color = when {
+                    alarm -> deck.danger
+                    budget.percent != null -> deck.textSecondary
+                    else -> deck.textFaint
+                },
+                fontWeight = if (alarm) FontWeight.SemiBold else FontWeight.Normal,
             )
-            Text(
-                tightest?.let { (entry, percent) -> "${entry.displayName} ${percent.toInt()} %" }
-                    ?: "Budget unbekannt",
-                style = tickerStyle,
-                color = deck.textFaint,
+            Text(budget.trailer, style = tickerStyle, color = deck.textFaint)
+        }
+    }
+}
+
+/**
+ * What the band may say about the budget.
+ *
+ * "Budget unbekannt" was the old text for every case that was not a clean
+ * percentage, and it is useless: it does not say whether nothing was fetched,
+ * whether the provider refused, or whether the number is a stale fallback. Each
+ * of those has a different next move for the operator, so each gets its own
+ * sentence — and the whole band is tappable into the usage screen.
+ */
+internal data class BudgetLine(
+    val headline: String,
+    val trailer: String,
+    val percent: Double?,
+) {
+    companion object {
+        fun of(usage: List<AccountUsage>): BudgetLine {
+            if (usage.isEmpty()) {
+                return BudgetLine("Verbrauch noch nicht abgerufen", "antippen", null)
+            }
+            val tightest = usage.mapNotNull { entry -> entry.peakPercent?.let { entry to it } }
+                .maxByOrNull { it.second }
+            if (tightest == null) {
+                // Providers answered, none of them with a number. The reason is
+                // the useful part — "unbekannt" would throw it away.
+                val reason = usage.firstNotNullOfOrNull { it.unavailableReason }
+                return BudgetLine(
+                    reason ?: "Kein Anbieter meldet ein Limit",
+                    "${usage.size} Anbieter",
+                    null,
+                )
+            }
+            val (entry, percent) = tightest
+            val others = usage.mapNotNull { other ->
+                other.peakPercent?.let { other to it }
+            }.filter { it.first.provider != entry.provider }.sortedByDescending { it.second }
+
+            return BudgetLine(
+                headline = "${entry.displayName} ${percent.toInt()} %" +
+                    if (entry.isStale) " (Zwischenspeicher)" else "",
+                // The runner-up matters: one provider at 90 % is a lane switch,
+                // two at 90 % is not.
+                trailer = others.firstOrNull()
+                    ?.let { (other, otherPercent) -> "${other.displayName} ${otherPercent.toInt()} %" }
+                    .orEmpty(),
+                percent = percent,
             )
         }
     }
@@ -816,8 +955,34 @@ internal data class StreamEntry(
     val ageSeconds: Int?,
     val tone: Tone,
     val mono: Boolean,
+    /** How many identical events this row stands for. 1 for a plain row. */
+    val repeats: Int = 1,
 ) {
     enum class Tone { LIVE, GOOD, BAD, PLAIN }
+}
+
+/**
+ * Fold a run of identical neighbouring events into one row with a count.
+ *
+ * A worker narrating itself emits the same line every twenty seconds, and three
+ * of them in a row pushed everything that actually *happened* off the screen.
+ * Only immediate neighbours from the same actor with the same wording collapse,
+ * so nothing is reordered and nothing distinct is ever merged; the row keeps the
+ * *newest* age, which is the one the operator is asking about.
+ */
+internal fun collapseRepeats(entries: List<StreamEntry>): List<StreamEntry> {
+    val folded = mutableListOf<StreamEntry>()
+    entries.forEach { entry ->
+        val last = folded.lastOrNull()
+        if (last != null && last.who == entry.who && last.kind == entry.kind &&
+            last.what == entry.what && last.mono == entry.mono
+        ) {
+            folded[folded.lastIndex] = last.copy(repeats = last.repeats + 1)
+        } else {
+            folded.add(entry)
+        }
+    }
+    return folded
 }
 
 /**
@@ -857,7 +1022,9 @@ internal fun buildStream(pulse: DeckPulse?, limit: Int = 12): List<StreamEntry> 
     // One stream, one order: everything that has a measured age sorts by it,
     // and anything unmeasurable sinks to the bottom instead of interleaving on
     // a guess.
-    return (fromAgents + fromBoard).sortedBy { it.ageSeconds ?: Int.MAX_VALUE }.take(limit)
+    return collapseRepeats(
+        (fromAgents + fromBoard).sortedBy { it.ageSeconds ?: Int.MAX_VALUE },
+    ).take(limit)
 }
 
 @Composable
@@ -870,22 +1037,33 @@ private fun StreamRow(entry: StreamEntry) {
     }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Text(
-            entry.ageSeconds?.let { ago(it) }.orEmpty(),
+            entry.ageSeconds?.let { ago(it) } ?: "—",
             style = tickerStyle,
             color = deck.textFaint,
-            modifier = Modifier.width(62.dp),
+            maxLines = 1,
+            modifier = Modifier.width(54.dp).padding(top = 1.dp),
         )
-        Box(
-            Modifier
-                .padding(top = 5.dp)
-                .size(7.dp)
-                .then(if (entry.tone == StreamEntry.Tone.LIVE) Modifier.alpha(breath()) else Modifier)
-                .clip(CircleShape)
-                .background(tint),
-        )
-        Spacer(Modifier.width(11.dp))
-        Column(Modifier.weight(1f).padding(bottom = 11.dp)) {
-            Row(verticalAlignment = Alignment.Bottom) {
+        // The rail: a dot on a hairline, so the eye follows one vertical line
+        // down the stream instead of scanning ragged left edges.
+        Column(
+            Modifier.width(13.dp).padding(top = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(7.dp)
+                    .then(
+                        if (entry.tone == StreamEntry.Tone.LIVE) Modifier.alpha(breath())
+                        else Modifier,
+                    )
+                    .clip(CircleShape)
+                    .background(tint),
+            )
+            Box(Modifier.width(1.dp).height(30.dp).background(deck.outline.copy(alpha = 0.5f)))
+        }
+        Spacer(Modifier.width(9.dp))
+        Column(Modifier.weight(1f).padding(bottom = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     entry.who,
                     color = deck.textPrimary,
@@ -893,8 +1071,23 @@ private fun StreamRow(entry: StreamEntry) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.width(6.dp))
-                Text(entry.kind, color = deck.textFaint, fontSize = 11.sp)
+                Text(
+                    entry.kind,
+                    style = labelStyle.copy(fontSize = 9.sp, letterSpacing = 0.4.sp),
+                    color = deck.textFaint,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(deck.surfaceRaised)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+                if (entry.repeats > 1) {
+                    Spacer(Modifier.width(5.dp))
+                    // "3×" instead of three identical rows — the repetition is
+                    // information, the repeated rows were only noise.
+                    Text("${entry.repeats}×", style = tickerStyle, color = deck.textFaint)
+                }
             }
+            Spacer(Modifier.height(2.dp))
             Text(
                 entry.what,
                 style = if (entry.mono) monoStyle else monoStyle.copy(fontFamily = null),
@@ -960,7 +1153,9 @@ internal fun KindChip(kind: ToolCall.Kind) {
 
 /** "vor 12 s" — relative, always, never an absolute stamp on a card. */
 internal fun ago(seconds: Int): String = when {
-    seconds < 5 -> "gerade eben"
+    // "jetzt", not "gerade eben": the stream's time column is one line wide and
+    // clipped the longer word to "gerade", which reads like a different word.
+    seconds < 5 -> "jetzt"
     seconds < 60 -> "vor $seconds s"
     seconds < 3600 -> "vor ${seconds / 60} min"
     seconds < 86_400 -> "vor ${seconds / 3600} h"

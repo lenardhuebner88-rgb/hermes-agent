@@ -716,5 +716,46 @@
   },
   "error": null,
   "as_of": "2026-08-05T22:13:21+0200"
+ },
+ "burn": {
+  "data": {
+   "window_minutes": 60,
+   "calls": 245,
+   "billable_tokens": 649544,
+   "cache_read_tokens": 42814635,
+   "rate_billable_tokens_per_hour": 850992.0107081913,
+   "rate_reason": null,
+   "covered_from": "2026-08-05T20:29:25.517Z",
+   "covered_to": "2026-08-05T21:15:13.320Z",
+   "covered_seconds": 2747.803,
+   "by_provider": {
+    "anthropic": {
+     "calls": 245,
+     "billable_tokens": 649544,
+     "cache_read_tokens": 42814635
+    }
+   },
+   "by_model": {
+    "claude-opus-5": {
+     "calls": 174,
+     "billable_tokens": 485837,
+     "cache_read_tokens": 39791421
+    },
+    "claude-sonnet-5": {
+     "calls": 71,
+     "billable_tokens": 163707,
+     "cache_read_tokens": 3023214
+    }
+   },
+   "lane_attribution": {
+    "attributed_calls": 0,
+    "attributed_share": 0.0,
+    "by_lane": {},
+    "note": "run_usage_facts traegt lane nur fuer einen Bruchteil der Runs; attributed_share unter ~0.5 heisst: keine Pro-Agent-Balken aus diesen Daten zeichnen."
+   },
+   "source": "ok"
+  },
+  "error": null,
+  "as_of": "2026-08-05T22:13:21+0200"
  }
 }
