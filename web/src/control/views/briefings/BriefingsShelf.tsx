@@ -160,9 +160,9 @@ function BriefingCard({ item, featured = false, onOpen }: { item: LibraryItem; f
   );
 }
 
-// Mittelzeile in allen Nutzungsklassen: Compact gestapelt, Medium zweispaltig
-// und Expanded im bestehenden Dreierspalten-Raster. Beide Vorschauen speisen
-// sich aus bereits vorhandenen Endpoints/Hooks — kein Backend-Change.
+// Mittelzeile (Desktop-only, laut Mockup): Lesesaal-Vorschau + Provenienz-
+// Vorschau unter dem Featured-Briefing. Beide speisen sich aus bereits
+// vorhandenen Endpoints/Hooks — kein Backend-Change.
 function RecentIssuesCard({ items, onOpen }: { items: LibraryItem[]; onOpen: (item: LibraryItem) => void }) {
   return (
     <article className="rounded-card border border-line bg-surface-2 p-5">
@@ -341,9 +341,10 @@ export function BriefingsShelf({ onOpenItem }: BriefingsShelfProps) {
         )}
       </div>
 
-      {/* Mittelzeile: Compact gestapelt, Medium zweispaltig, Expanded im
-          bestehenden Dreierspalten-Raster. */}
-      <div data-testid="bibliothek-mittelzeile" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* Mittelzeile aus dem Mockup: Lesesaal- + Provenienz-Vorschau unter dem
+          Featured-Briefing. Desktop-only — das Mobil-Mockup lässt sie bewusst
+          weg (dort führt der Weg direkt zum Nachschlagewerk). */}
+      <div className="hidden gap-4 lg:grid lg:grid-cols-3">
         <RecentIssuesCard items={issues} onOpen={onOpenItem} />
         <WorkingNowCard sessions={provenance.data?.open_sessions ?? []} />
       </div>

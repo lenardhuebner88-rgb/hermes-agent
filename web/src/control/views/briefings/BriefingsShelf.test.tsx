@@ -200,22 +200,6 @@ describe("BriefingsShelf: strukturierte KI-Frontpage (S5)", () => {
   });
 });
 
-describe("BriefingsShelf: responsive Mittelzeile", () => {
-  it("rendert die Mittelzeile in Compact und zweispaltig ab Medium", () => {
-    mockFetch();
-    render(
-      <MemoryRouter initialEntries={["/control/bibliothek"]}>
-        <BriefingsShelf onOpenItem={() => {}} />
-      </MemoryRouter>,
-    );
-
-    const middleRow = screen.getByTestId("bibliothek-mittelzeile");
-    expect(middleRow.className).not.toMatch(/(^|\s)hidden(\s|$)/);
-    expect(middleRow.className).toContain("sm:grid-cols-2");
-    expect(middleRow.className).toContain("lg:grid-cols-3");
-  });
-});
-
 describe("BriefingsShelf: Markdown-Preview wird in Karten bereinigt", () => {
   const MARKDOWN_BRIEFING = {
     id: "brief-md-1",
