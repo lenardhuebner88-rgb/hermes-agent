@@ -2713,7 +2713,7 @@ class LoopRunner:
             if (
                 build.rc == 0
                 and not build.timed_out
-                and status.startswith("PLAN_REJECTED")
+                and (status == "PLAN_REJECTED" or status.startswith("PLAN_REJECTED "))
                 and self.rev_parse() == prehead
             ):
                 reason = status[len("PLAN_REJECTED"):].strip() or "ohne Grund"
@@ -2731,10 +2731,13 @@ class LoopRunner:
                                    plan=target.name, fail_kind="plan_rejected", reason=reason)
                 rejects += 1
                 # Deckel gegen den Ausartungsfall „Builder weist alles zurück":
-                # dann ist die Planung kaputt, nicht der einzelne Plan.
+                # dann ist die Planung kaputt, nicht der einzelne Plan. Der Zähler
+                # zählt wie `fails` seit dem letzten VERIFIED, nicht strikt
+                # konsekutiv — fail-safe (stoppt eher zu früh), und die Meldung
+                # sagt genau das, statt „in Folge" zu behaupten.
                 if rejects >= self.stop_cfg("fail_streak"):
                     self.say("Einspruch-Streak — Stop für Human-Review.")
-                    self.notify(f"{self.pack.name}: {rejects}× Plan-Einspruch in Folge — gestoppt.")
+                    self.notify(f"{self.pack.name}: {rejects}× Plan-Einspruch seit dem letzten verified — gestoppt.")
                     self.ledger_event(round=rnd, phase="stop", verdict="stopped",
                                        reason="reject_streak")
                     break

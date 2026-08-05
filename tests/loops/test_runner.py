@@ -2788,6 +2788,72 @@ def test_pipeline_plan_rejected_with_commit_is_build_fail(tmp_path, fake_engine)
     assert '"fail_kind": "build_fail"' in ledger
 
 
+def test_pipeline_reject_streak_stops_the_run(tmp_path, fake_engine):
+    """Weist der Builder alles zurück, ist die PLANUNG kaputt — dann laut stoppen.
+
+    Ohne Deckel fräse der Builder still die ganze Queue nach 90-bounced und der
+    Lauf sähe im Ledger aus wie normale Arbeit.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "rejstreak", "pipeline", repo)  # fail_streak=2
+    pack = load_pack(tmp_path / "packs", "rejstreak")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    for i in (1, 2, 3):
+        (runner.queue / "00-planned" / f"P1-plan{i}.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def reject(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PLAN_REJECTED falsches Problem\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = reject
+    runner.cmd_run()
+
+    assert calls.count("build") == 2  # nach dem 2. Einspruch Stop, Plan 3 unangetastet
+    assert (runner.queue / "00-planned" / "P1-plan3.md").is_file()
+    assert '"reason": "reject_streak"' in (runner.state / "ledger.jsonl").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "rc, timed_out",
+    [(0, True), (7, False)],
+    ids=["timeout", "engine-rc"],
+)
+def test_pipeline_plan_rejected_only_counts_on_a_clean_turn(tmp_path, fake_engine, rc, timed_out):
+    """`PLAN_REJECTED` zählt nur bei rc=0 ohne Timeout — sonst Build-Fail.
+
+    Ein abgewürgter oder abgestürzter Turn kann kein Urteil abgegeben haben; die
+    Status-Datei ist dann Überrest, kein Einspruch.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", f"rejdirty{rc}{int(timed_out)}", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", f"rejdirty{rc}{int(timed_out)}")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(PLAN_BODY, encoding="utf-8")
+
+    def dirty_reject(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PLAN_REJECTED angeblich\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=rc, output="", usage_limit=False, timed_out=timed_out)
+
+    behaviors["build"] = dirty_reject
+    runner.cmd_run()
+
+    assert calls.count("build") == 2  # Build-Fail-Pfad: Retry, dann Fail-Streak
+    ledger = (runner.state / "ledger.jsonl").read_text(encoding="utf-8")
+    assert '"verdict": "rejected"' not in ledger
+    assert '"fail_kind": "build_fail"' in ledger
+    assert "## Builder-Einspruch" not in (
+        runner.queue / "90-bounced" / "P1-beispiel.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_stop_file_halts_between_rounds(tmp_path, fake_engine):
     behaviors, calls = fake_engine
     repo = init_repo(tmp_path / "repo")

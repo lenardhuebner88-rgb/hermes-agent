@@ -55,13 +55,15 @@ priority: P1
 retry: 0
 created_by: loop-planner
 done_when: |
-  <testbar + beweisbar: WELCHER Test/Gate belegt es; Test gegen ECHTES Datenformat
-   (Fixture aus Live-Artefakt), nicht synthetisch; der Test läuft über den Aufrufpfad/
-   die Parameter, die die PRODUKTION nutzt — benenne die reale Call-Site>
+  <das beobachtbare Ergebnis + die Beweisart: Fixture aus ECHTEM Datenformat
+   (Live-Artefakt), nicht synthetisch; der Beweis läuft über den Aufrufpfad/die
+   Parameter, die die PRODUKTION nutzt — benenne die reale Call-Site. Keine
+   Testdateinamen, keine fertigen Assertions vorschreiben>
 anti_scope: |
   <was dieser Plan explizit NICHT anfasst>
 tests: |
-  <Testpfad(e), die der Builder anlegt/erweitert und die immer mitlaufen>
+  <Beweisart + Testbereich (welcher Bereich der Suite deckt es ab, was muss
+   immer mitlaufen) — die konkrete Datei wählt der Builder>
 files_hint: <Module/Dateien, die voraussichtlich berührt werden>
 ---
 ## Kontext & Schwachstelle
