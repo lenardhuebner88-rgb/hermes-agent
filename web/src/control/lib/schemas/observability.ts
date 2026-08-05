@@ -52,11 +52,19 @@ const UsageCoverageSchema = z.object({
   missing_columns: z.array(z.string()).catch([]),
 });
 
+// Token sums stay nullable end to end: the read model sums "without
+// manufacturing zeroes for missing data" (hermes_cli/usage_facts_readmodel.py,
+// aggregate_normalized_tokens) and the route hands that null through
+// (_optional_int). Coercing null to 0 here would make "unbekannt" render as
+// "null Tokens". Row counts (fact_rows) are always emitted as int — those keep
+// their 0 default.
+const nullableTokens = z.coerce.number().nullable().catch(null);
+
 const UsageDimensionSchema = z.object({
   name: z.string().catch("unknown"),
   fact_rows: z.coerce.number().catch(0),
-  context_input_tokens: z.coerce.number().catch(0),
-  output_tokens: z.coerce.number().catch(0),
+  context_input_tokens: nullableTokens,
+  output_tokens: nullableTokens,
 });
 
 const UsageProjectionSchema = z.object({
@@ -66,11 +74,11 @@ const UsageProjectionSchema = z.object({
   captured_at: z.string().nullable().catch(null),
   summary: z.object({
     fact_rows: z.coerce.number().catch(0),
-    context_input_tokens: z.coerce.number().catch(0),
-    new_input_tokens: z.coerce.number().catch(0),
-    output_tokens: z.coerce.number().catch(0),
-    cache_read_tokens: z.coerce.number().catch(0),
-    cache_write_tokens: z.coerce.number().catch(0),
+    context_input_tokens: nullableTokens,
+    new_input_tokens: nullableTokens,
+    output_tokens: nullableTokens,
+    cache_read_tokens: nullableTokens,
+    cache_write_tokens: nullableTokens,
     known_metered_usd: z.string().nullable().catch(null),
     price_status: z.string().catch("unknown"),
     priced_breakdowns: z.coerce.number().catch(0),
@@ -78,11 +86,11 @@ const UsageProjectionSchema = z.object({
     unclassified_fact_rows: z.coerce.number().catch(0),
   }).catch({
     fact_rows: 0,
-    context_input_tokens: 0,
-    new_input_tokens: 0,
-    output_tokens: 0,
-    cache_read_tokens: 0,
-    cache_write_tokens: 0,
+    context_input_tokens: null,
+    new_input_tokens: null,
+    output_tokens: null,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
     known_metered_usd: null,
     price_status: "unknown",
     priced_breakdowns: 0,
@@ -90,8 +98,8 @@ const UsageProjectionSchema = z.object({
     unclassified_fact_rows: 0,
   }),
   origins: z.array(UsageDimensionSchema.extend({
-    cache_read_tokens: z.coerce.number().catch(0),
-    cache_write_tokens: z.coerce.number().catch(0),
+    cache_read_tokens: nullableTokens,
+    cache_write_tokens: nullableTokens,
     model_count: z.coerce.number().catch(0),
   })).catch([]),
   models: z.array(UsageDimensionSchema.extend({

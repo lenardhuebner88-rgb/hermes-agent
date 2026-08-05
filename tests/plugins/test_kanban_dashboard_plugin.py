@@ -4176,6 +4176,43 @@ def test_board_done_limit_keeps_fully_completed_omitted_chain_summary(client, mo
     }.items() <= summary.items()
 
 
+def test_board_chain_summary_names_root_outside_the_tenant_filter(client, monkeypatch):
+    """A chain root on another tenant must still supply the summary's title.
+
+    task_links are board-wide, the task set is tenant-filtered — so the sink can
+    be invisible in the filtered view. Regression for the live-board finding of
+    2026-08-05 (20 of 363 ``tenant=planspec`` summaries named a member instead
+    of their root).
+    """
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO tasks (id, title, status, priority, created_at, tenant) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    ("t_xt_root", "Root on another tenant", "running", 0, 1_790_000_300, None),
+                    ("t_xt_member_a", "Member A", "running", 0, 1_790_000_301, "planspec"),
+                    ("t_xt_member_b", "Member B", "running", 0, 1_790_000_302, "planspec"),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                [("t_xt_member_a", "t_xt_root"), ("t_xt_member_b", "t_xt_root")],
+            )
+
+    data = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 30, "tenant": "planspec"},
+    ).json()
+
+    summary = next(
+        row for row in data["chain_summaries"] if row["root_id"] == "t_xt_root"
+    )
+    assert summary["root_title"] == "Root on another tenant"
+    assert summary["total"] == 2
+
+
 def test_board_without_done_limit_adds_only_the_fleet_summary(client, monkeypatch):
     _create_board_compaction_fixture()
     monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
