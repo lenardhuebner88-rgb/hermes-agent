@@ -323,6 +323,7 @@ class Pack:
     notify: dict[str, str] = field(default_factory=dict)
     params: dict[str, str] = field(default_factory=dict)
     autoland: bool = False
+    plan_skip_when_queue_full: bool = True
     base_branch: str = "main"
     land_remote: str = "piet-fork"
     land_gates: list[str] | None = None
@@ -488,6 +489,16 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
     if not isinstance(autoland_raw, bool):
         raise ManifestError(f"Pack {name!r}: autoland muss boolean sein")
     autoland = autoland_raw
+    # Opt-out (Default an): Packs, deren Vertrag jede Nacht frische Pläne
+    # verlangt, setzen plan_skip_when_queue_full: false. Bewusst AUSSERHALB der
+    # Autoland-Sicherheitsprojektion (_autoland_safety_hash listet ihre Keys
+    # explizit) — sonst kippte der kuratierte Hash, sobald ein Pack das Feld
+    # überhaupt setzt.
+    plan_skip_raw = raw.get("plan_skip_when_queue_full", True)
+    if not isinstance(plan_skip_raw, bool):
+        raise ManifestError(
+            f"Pack {name!r}: plan_skip_when_queue_full muss boolean sein"
+        )
     autoland_contract = AUTOLAND_CONTRACTS.get(name)
     if name in AUTOLAND_PACK_ALLOWLIST and (
         autoland_contract is None
@@ -570,6 +581,7 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
         phases=phases, stop=stop, description=str(raw.get("description", "")),
         stability=str(raw.get("stability", "experimental")), notify=notify,
         params=params, autoland=autoland,
+        plan_skip_when_queue_full=plan_skip_raw,
         base_branch=base_branch, land_remote=land_remote,
         land_gates=land_gates, land_push=land_push,
     )
@@ -2953,7 +2965,37 @@ class LoopRunner:
                 self.ledger(f"BASE-REFRESH: {first_line}")
             else:
                 self.ledger(f"BASE-REFRESH übersprungen: {first_line}")
-        if self.pack.type == "pipeline" and not skip_plan:
+        # Plan-Phase sparen, wenn die Queue ohnehin voll ist: cmd_plan wuerde
+        # nur Modellzeit (Rate-Limit-Kontingent) fuer Plaene verbrennen, fuer
+        # die kein Round-Slot frei ist (Nachtbetrieb-Audit 2026-08-05: 16
+        # DRY-Laeufe, ~2 h ohne Ertrag). Opt-out per Manifest fuer Packs, deren
+        # Vertrag jede Nacht frische Plaene verlangt. fresh bleibt unberuehrt:
+        # ohne cmd_plan steht der Worktree noch nicht, cmd_run uebernimmt.
+        queue_full_plan_skip = (
+            self.pack.type == "pipeline"
+            and not skip_plan
+            and self.pack.plan_skip_when_queue_full
+            and self.qcount("00-planned") >= self.stop_cfg("max_rounds")
+        )
+        if queue_full_plan_skip:
+            planned = self.qcount("00-planned")
+            max_rounds = self.stop_cfg("max_rounds")
+            self.ledger(
+                f"PLAN übersprungen: Queue voll ({planned} ≥ max_rounds={max_rounds})"
+            )
+            self.ledger_event(
+                phase="plan", verdict="skipped", reason="queue_full",
+                planned=planned, max_rounds=max_rounds,
+            )
+            self.say(
+                f"Queue voll ({planned} ≥ max_rounds={max_rounds}) — "
+                "Planung übersprungen."
+            )
+        if (
+            self.pack.type == "pipeline"
+            and not skip_plan
+            and not queue_full_plan_skip
+        ):
             if not self.cmd_plan(fresh=fresh):
                 return False
             fresh = False  # Worktree steht jetzt
