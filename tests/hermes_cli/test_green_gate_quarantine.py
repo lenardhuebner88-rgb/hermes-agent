@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from hermes_cli.green_gate_quarantine import (
+    FAILURE_CLASS_ENVIRONMENT,
     QuarantinePolicyError,
+    accepted_quarantined_files,
     classify_failures,
     gate_file_evidence_complete,
     load_quarantine_policy,
@@ -145,3 +147,73 @@ def test_heartbeat_wires_classification_fields_into_ledger_command():
     assert script.index('for classification_gate in "${fail_gates[@]}"') < script.index(
         'for g in "${fail_gates[@]}"'
     )
+
+
+# ── Leseseite: manipulierte oder fremd erzeugte Ledger-Records ────────────────
+# Die Tests oben pruefen `classify_failures`, also den Producer. Der Consumer
+# `accepted_quarantined_files` hat eigene Schutzbedingungen fuer `blocking` und
+# `unattributed` — und die waren ungeprueft: beide liessen sich am 2026-08-05
+# einzeln entfernen, ohne dass ein Test rot wurde (Mutationskontrolle des
+# Dirigenten). Das Ledger ist eine JSONL-Datei; wer sie mit einem anderen
+# Werkzeug, von Hand oder mit einem aelteren Producer schreibt, umgeht die
+# Producer-Validierung vollstaendig. Genau dafuer steht die Consumer-Pruefung.
+
+
+def _stamped_record(policy, **overrides) -> dict:
+    """Ein als environment_quarantine etikettierter Record — per Default gueltig."""
+    record = {
+        "result": "fail",
+        "failure_classification": FAILURE_CLASS_ENVIRONMENT,
+        "quarantine_policy_sha256": policy.sha256,
+        "failed_test_files": ["tests/env/test_clock.py"],
+        "quarantined_test_files": ["tests/env/test_clock.py"],
+        "blocking_test_files": [],
+        "unattributed_fail_gates": [],
+    }
+    record.update(overrides)
+    return record
+
+
+def test_consumer_accepts_the_stamped_record(tmp_path):
+    """Positivkontrolle: ohne sie beweist kein Negativbefund unten etwas."""
+    policy = load_quarantine_policy(_policy(tmp_path, ["tests/env/test_clock.py"]))
+
+    assert accepted_quarantined_files(_stamped_record(policy), policy) == (
+        "tests/env/test_clock.py",
+    )
+
+
+def test_consumer_rejects_environment_label_beside_a_blocking_file(tmp_path):
+    """Ein blockierender Fund darf nie landen lassen — auch im widerspruechlichen Record.
+
+    `failed` und `quarantined` sind hier absichtlich DECKUNGSGLEICH, sonst
+    faengt schon `failed != quarantined` ab und die `blocking`-Bedingung bliebe
+    ungeprueft. Genau so sieht ein Record aus, den ein fremder oder aelterer
+    Producer schreibt: die Partition stimmt nicht mehr mit sich selbst ueberein.
+    """
+    policy = load_quarantine_policy(_policy(tmp_path, ["tests/env/test_clock.py"]))
+    record = _stamped_record(policy, blocking_test_files=["tests/core/test_pay.py"])
+
+    assert accepted_quarantined_files(record, policy) is None
+
+
+def test_consumer_rejects_environment_label_with_an_unattributed_gate(tmp_path):
+    """Ein rotes Gate ohne zuordenbare Evidenz ist keine bekannte Umgebungsfalle.
+
+    Der gefaehrlichste Fall: `failed` enthaelt NUR gelistete Dateien, aber ein
+    Gate (z.B. tsc oder build) war rot, ohne dass ihm eine Datei zugeordnet
+    werden konnte. Die Subset-Pruefung gegen die Allowlist greift hier nicht —
+    nur die `unattributed`-Bedingung.
+    """
+    policy = load_quarantine_policy(_policy(tmp_path, ["tests/env/test_clock.py"]))
+    record = _stamped_record(policy, unattributed_fail_gates=["tsc"])
+
+    assert accepted_quarantined_files(record, policy) is None
+
+
+def test_consumer_rejects_a_record_stamped_with_a_foreign_policy(tmp_path):
+    """Digest-Bindung: eine andere Allowlist als die committete zaehlt nicht."""
+    policy = load_quarantine_policy(_policy(tmp_path, ["tests/env/test_clock.py"]))
+    record = _stamped_record(policy, quarantine_policy_sha256="0" * 64)
+
+    assert accepted_quarantined_files(record, policy) is None
