@@ -89,8 +89,8 @@ describe("Family Organizer queue-first view pieces", () => {
     );
 
     expect(html).toContain("<table");
-    expect(html).toContain("Nächster Schritt");
-    expect(html).toContain("Quelle/Id");
+    expect(html).toContain("Next Action");
+    expect(html).toContain("Source/Id");
     expect(html).toContain("Ready task");
     expect(html).toContain("Akzeptanz");
     expect(html).toContain("backlog/items/0002-task.md");

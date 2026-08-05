@@ -91,15 +91,15 @@ export function FoBacklogQueueTable({
       <table className="w-full table-fixed border-collapse text-left text-sm">
         <thead className="border-t-2 border-line bg-surface-2 font-display text-micro font-semibold uppercase tracking-[0.12em] text-ink-3">
           <tr>
-            <th className="w-[30%] px-3 py-2">{de.backlog.colTitle}</th>
-            <th className="w-[9%] px-3 py-2">{de.backlog.colStatus}</th>
-            <th className="hidden w-[8%] px-3 py-2 md:table-cell">{de.backlog.colRisk}</th>
-            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">{de.backlog.colOwner}</th>
-            <th className="hidden w-[10%] px-3 py-2 xl:table-cell">{de.backlog.colArea}</th>
-            <th className="hidden w-[10%] px-3 py-2 md:table-cell">{de.backlog.colAgeUpdated}</th>
-            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">{de.backlog.colStaleProof}</th>
-            <th className="hidden w-[13%] px-3 py-2 xl:table-cell">{de.backlog.colSourceId}</th>
-            <th className="w-[28%] px-3 py-2">{de.backlog.colNextAction}</th>
+            <th className="w-[30%] px-3 py-2">Title</th>
+            <th className="w-[9%] px-3 py-2">Status</th>
+            <th className="hidden w-[8%] px-3 py-2 md:table-cell">Risk</th>
+            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">Owner</th>
+            <th className="hidden w-[10%] px-3 py-2 xl:table-cell">Area</th>
+            <th className="hidden w-[10%] px-3 py-2 md:table-cell">Age/Updated</th>
+            <th className="hidden w-[10%] px-3 py-2 lg:table-cell">Stale/Proof</th>
+            <th className="hidden w-[13%] px-3 py-2 xl:table-cell">Source/Id</th>
+            <th className="w-[28%] px-3 py-2">Next Action</th>
           </tr>
         </thead>
         <tbody>
