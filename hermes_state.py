@@ -5448,6 +5448,14 @@ class SessionDB:
     _TOKEN_DELTA_ROUTE_FIELDS = (
         "model", "cost_status", "cost_source", "pricing_version",
         "billing_provider", "billing_base_url", "billing_mode",
+        # Fork-eigenes Feld (Upstream kennt es nicht). Es identifiziert EINEN
+        # OpenRouter-Call und wird zur Kostenabstimmung gebraucht. Als
+        # Route-Feld klassifiziert, damit zwei Deltas mit verschiedenen
+        # Generation-IDs nicht verschmelzen — sonst überlebte nur die ID des
+        # ersten Calls und die der folgenden verschwänden lautlos. Bei
+        # Nicht-OpenRouter-Verkehr ist es None und das Coalescing bleibt
+        # unverändert wirksam.
+        "openrouter_generation_id",
     )
 
     def queue_token_counts(self, session_id: str, **kwargs) -> None:

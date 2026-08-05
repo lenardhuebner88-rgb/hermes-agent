@@ -260,7 +260,12 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # uv.lock so the whole tree converges on ONE hub version
     # (tests/test_project_metadata.py enforces both). When bumping: update
     # here AND `uv lock --upgrade-package huggingface-hub` in lockstep.
-    "tool.trace_upload": ("huggingface-hub==1.24.0",),
+    # 1.16.1, nicht 1.24.0: seit dem Upstream-Vollmerge 2026-08-04 deckeln
+    # Upstreams Constraints huggingface-hub auf 1.16.1 (uv lock --upgrade-package
+    # bewegt es nicht). Der Pin MUSS der uv.lock-Aufloesung folgen, sonst
+    # churnt/downgradet `hermes update` das geteilte Paket unter seinen anderen
+    # Konsumenten weg (#60783, #31817).
+    "tool.trace_upload": ("huggingface-hub==1.16.1",),
 }
 
 

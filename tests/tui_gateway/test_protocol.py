@@ -32,7 +32,12 @@ def server():
         get_plugin_command_handler=lambda _name: None,
         resolve_plugin_command_result=_resolve_plugin_command_result,
     )
+    # Die echte Implementierung, nicht nachgebaut: tui_gateway/server.py importiert
+    # sie seit Upstream-Tranche T1, und ein None-Stub liefert ein leeres `display`
+    # statt der Skill-Zeile.
+    from agent.skill_commands import describe_skill_invocation as _real_describe
     fake_skill_commands = types.SimpleNamespace(
+        describe_skill_invocation=_real_describe,
         get_skill_commands=lambda: {},
         scan_skill_commands=lambda: {},
         build_skill_invocation_message=lambda *_args, **_kwargs: None,
