@@ -1692,22 +1692,9 @@ def test_successful_conflict_fixer_resumes_matching_parked_parent(
     assert resumed[0].payload["child_id"] == child_id
 
 
-def test_successful_conflict_fixer_resumes_a_parent_reparked_while_it_ran(
+def test_successful_conflict_fixer_does_not_resume_changed_parent_context(
     kanban_home, monkeypatch,
 ):
-    """CONFLICT-FIXER-REPARK-CAS (2026-08-05): a re-park no longer strands the chain.
-
-    This test previously asserted the opposite — that a second ``blocked``
-    event with a different reason text keeps the parent parked. That WAS the
-    defect: integration parks re-fire on an already-blocked task, so the
-    reason text changes as soon as git names a different file, and the
-    compare-and-swap against the LATEST blocked event then failed silently
-    (45 fixer episodes vs. 13 parent resumes on the live board). Ownership is
-    now decided against the park the fixer was dispatched for; the fail-closed
-    boundaries (closed episode, foreign dispatch park, active operator
-    escalation) are covered by ``test_kanban_conflict_fixer.py`` and by
-    ``test_base_prep_operator_hold_still_blocks_second_fixer``.
-    """
     with kb.connect_closing() as conn:
         tid, _wt, _root = _make_integration_parked_in_worktree(
             conn, "merge conflict/failure (aborted): foo.py",
@@ -1717,7 +1704,7 @@ def test_successful_conflict_fixer_resumes_a_parent_reparked_while_it_ran(
         child_id = summary["conflict_fixer_dispatched"][0]["child_id"]
 
         # Supersede the dispatch context while leaving the parent integration-
-        # parked -- exactly the re-park shape that used to defeat the CAS.
+        # parked, isolating the completion path's compare-and-swap guard.
         with kb.write_txn(conn):
             kb._append_event(
                 conn,
@@ -1727,17 +1714,8 @@ def test_successful_conflict_fixer_resumes_a_parent_reparked_while_it_ran(
             )
         assert kb.complete_task(conn, child_id, summary="old conflict fixed")
         parent = kb.get_task(conn, tid)
-        resumed = [
-            event for event in kb.list_events(conn, tid)
-            if event.kind == "conflict_fixer_parent_resumed"
-        ]
 
-    assert parent.status == "ready"
-    assert len(resumed) == 1
-    assert resumed[0].payload["child_id"] == child_id
-    assert resumed[0].payload["reparked_fingerprint"] == kb._conflict_fingerprint(
-        "integration parked: merge conflict/failure (aborted): bar.py"
-    )
+    assert parent.status == "blocked"
 
 
 def test_conflict_park_needs_operator_unchanged(kanban_home, monkeypatch):

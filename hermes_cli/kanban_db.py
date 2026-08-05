@@ -27011,58 +27011,6 @@ def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return row is not None
 
 
-def _fixer_still_owns_parent_park(
-    conn: sqlite3.Connection,
-    *,
-    parent_id: str,
-    marker_id: int,
-    expected_fingerprint: str,
-    current_reason: str,
-) -> bool:
-    """CAS predicate: does the park that dispatched this fixer still hold the parent?
-
-    CONFLICT-FIXER-REPARK-CAS: the original guard compared
-    ``_conflict_fingerprint`` of the parent's LATEST ``blocked`` event against
-    the fingerprint recorded at dispatch. That is wrong whenever the parent is
-    re-parked while the fixer runs -- integration parks re-fire on a still
-    ``blocked`` task (``_system_park_set_blocked`` accepts ``status =
-    'blocked'``), and a re-park's reason text differs as soon as git names a
-    different file or phase. The fingerprint then mismatched, the resume
-    returned ``False`` silently, and the chain sat parked until a timeout
-    (measured 2026-08-05 on the live board: 45 ``conflict_fixer_for`` episodes
-    vs. 13 ``conflict_fixer_parent_resumed``).
-
-    Ownership is therefore decided against the park the fixer was ACTUALLY
-    dispatched for -- the parent's last ``blocked`` event before the
-    ``conflict_fixer_for`` marker -- while every post-dispatch re-park is
-    tolerated. The episode boundary stays fail-closed: an ``unblocked`` /
-    ``promoted_manual`` / earlier ``conflict_fixer_parent_resumed`` after the
-    marker means this episode is already over, so a late fixer completion must
-    NOT resume whatever unrelated park holds the parent now. Operator
-    escalations are unaffected (``_operator_escalation_is_active`` is checked
-    separately by the caller and is deliberately left untouched).
-    """
-    if _conflict_fingerprint(current_reason) == expected_fingerprint:
-        return True
-    episode_closed = conn.execute(
-        "SELECT 1 FROM task_events WHERE task_id = ? AND id > ? AND kind IN "
-        "('unblocked', 'promoted_manual', 'conflict_fixer_parent_resumed') "
-        "LIMIT 1",
-        (parent_id, marker_id),
-    ).fetchone()
-    if episode_closed is not None:
-        return False
-    dispatched_park = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
-        "AND id < ? ORDER BY id DESC LIMIT 1",
-        (parent_id, marker_id),
-    ).fetchone()
-    if dispatched_park is None:
-        return False
-    park_reason = _decision_event_reason(dispatched_park["payload"]) or ""
-    return _conflict_fingerprint(park_reason) == expected_fingerprint
-
-
 def _resume_parent_for_completed_conflict_fixer(
     conn: sqlite3.Connection,
     child_id: str,
@@ -27070,7 +27018,7 @@ def _resume_parent_for_completed_conflict_fixer(
     """CAS-resume the integration park this successful fixer still owns."""
     with write_txn(conn):
         marker = conn.execute(
-            "SELECT id, payload FROM task_events WHERE task_id = ? "
+            "SELECT payload FROM task_events WHERE task_id = ? "
             "AND kind = 'conflict_fixer_for' ORDER BY id DESC LIMIT 1",
             (child_id,),
         ).fetchone()
@@ -27080,7 +27028,6 @@ def _resume_parent_for_completed_conflict_fixer(
             payload = json.loads(marker["payload"] or "{}")
         except (TypeError, ValueError):
             return False
-        marker_id = int(marker["id"])
         parent_id = str(payload.get("parent_id") or "").strip()
         root_id = str(payload.get("root_id") or parent_id).strip()
         expected_fingerprint = str(
@@ -27116,13 +27063,7 @@ def _resume_parent_for_completed_conflict_fixer(
                 root_id=root_id,
                 conflict_fingerprint=expected_fingerprint,
             ) >= CONFLICT_FIXER_MAX_ATTEMPTS
-            or not _fixer_still_owns_parent_park(
-                conn,
-                parent_id=parent_id,
-                marker_id=marker_id,
-                expected_fingerprint=expected_fingerprint,
-                current_reason=current_reason,
-            )
+            or _conflict_fingerprint(current_reason) != expected_fingerprint
         ):
             return False
 
@@ -27140,21 +27081,15 @@ def _resume_parent_for_completed_conflict_fixer(
         )
         if cur.rowcount != 1:
             return False
-        resume_payload: dict[str, Any] = {
-            "child_id": child_id,
-            "conflict_fingerprint": expected_fingerprint,
-            "status": new_status,
-        }
-        current_fingerprint = _conflict_fingerprint(current_reason)
-        if current_fingerprint != expected_fingerprint:
-            # Only present on the re-park path, so the untouched happy path
-            # keeps its exact historical payload shape.
-            resume_payload["reparked_fingerprint"] = current_fingerprint
         _append_event(
             conn,
             parent_id,
             "conflict_fixer_parent_resumed",
-            resume_payload,
+            {
+                "child_id": child_id,
+                "conflict_fingerprint": expected_fingerprint,
+                "status": new_status,
+            },
         )
         _append_event(
             conn,
