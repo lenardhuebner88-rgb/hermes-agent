@@ -5839,3 +5839,74 @@ def test_operator_can_raise_the_turn_load_cap(tmp_path, fake_engine, monkeypatch
     with runner._worker_environment("round"):
         assert os.environ["HERMES_TEST_WORKERS"] == "6"
         assert os.environ["GATE_FRONTEND_MAX_WORKERS"] == "3"
+
+
+def test_goal_reached_retires_exact_pack_timer_once(tmp_path, fake_engine, monkeypatch):
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    pack_name = "retirement-fixture"
+    timer_name = f"hermes-loop@{pack_name}.timer"
+    write_pack(
+        tmp_path / "packs",
+        pack_name,
+        "sweep",
+        repo,
+        goal={"reached_status": "GOAL_REACHED", "reason": "fixture target closed"},
+        stop={"max_rounds": 3, "max_hours": 1, "dry_rounds": 2, "fail_streak": 2},
+    )
+    runner = LoopRunner(
+        load_pack(tmp_path / "packs", pack_name), state_root=tmp_path / "state"
+    )
+    behaviors["round"] = ok("GOAL_REACHED")
+    disabled: list[str] = []
+
+    def disable_timer(unit: str):
+        disabled.append(unit)
+        return subprocess.CompletedProcess(
+            ["systemctl", "--user", "disable", "--now", unit], 0
+        )
+
+    monkeypatch.setattr(runner_module, "_disable_user_timer", disable_timer)
+    monkeypatch.setattr(runner_module, "_utc_iso", lambda: "2026-08-05T12:34:56Z")
+
+    assert runner.cmd_run() == 0
+
+    assert calls == ["round"]
+    assert disabled == [timer_name]
+    retirement_lines = [
+        line
+        for line in runner.ledger_path.read_text(encoding="utf-8").splitlines()
+        if "PACK-RETIREMENT" in line
+    ]
+    assert len(retirement_lines) == 1
+    assert "reason=fixture target closed" in retirement_lines[0]
+    assert "retired_at=2026-08-05T12:34:56Z" in retirement_lines[0]
+
+
+def test_goal_not_reached_does_not_retire_pack(tmp_path, fake_engine, monkeypatch):
+    behaviors, _ = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    pack_name = "retirement-control"
+    write_pack(
+        tmp_path / "packs",
+        pack_name,
+        "sweep",
+        repo,
+        goal={"reached_status": "GOAL_REACHED", "reason": "fixture target closed"},
+        stop={"max_rounds": 1, "max_hours": 1, "dry_rounds": 2, "fail_streak": 2},
+    )
+    runner = LoopRunner(
+        load_pack(tmp_path / "packs", pack_name), state_root=tmp_path / "state"
+    )
+    behaviors["round"] = ok("WORKED")
+    disabled: list[str] = []
+    monkeypatch.setattr(
+        runner_module,
+        "_disable_user_timer",
+        lambda unit: disabled.append(unit),
+    )
+
+    assert runner.cmd_run() == 0
+
+    assert disabled == []
+    assert "PACK-RETIREMENT" not in runner.ledger_path.read_text(encoding="utf-8")
