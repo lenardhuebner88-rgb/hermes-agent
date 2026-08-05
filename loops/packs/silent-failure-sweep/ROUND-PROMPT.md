@@ -51,7 +51,7 @@ Wenn du nach der Triage keinen Kandidaten hast, der alle vier Punkte erfüllt:
    `rg` zählt hier falsch: mehrzeilige Handler, verschachtelte `try`, und
    Kommentare. Für Python:
 
-       .venv/bin/python - <<'PY'
+       /home/piet/.hermes/hermes-agent/.venv/bin/python - <<'PY'
        import ast, pathlib
        for f in pathlib.Path('<revier>').rglob('*.py'):
            try: t = ast.parse(f.read_text(encoding='utf-8'))
