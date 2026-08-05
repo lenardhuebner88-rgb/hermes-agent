@@ -1,5 +1,5 @@
 {
- "as_of": "2026-08-05T19:06:21+0200",
+ "as_of": "2026-08-05T22:13:21+0200",
  "board": null,
  "agents": {
   "data": {
@@ -10,74 +10,74 @@
      "model": "opus[1m]",
      "agent_command": "claude-agent-acp",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:04 CEST",
-     "tool_calls_window": 32,
+     "last_start": "Wed 2026-08-05 20:07:39 CEST",
+     "tool_calls_window": 17,
      "tool_calls_recent": 0,
-     "last_tool_call_at": "2026-08-05T18:50:11+0200",
-     "last_tool_call_seconds_ago": 970,
+     "last_tool_call_at": "2026-08-05T22:04:08+0200",
+     "last_tool_call_seconds_ago": 553,
      "working": false,
      "activity": {
       "stem": "claude",
-      "calls_in_window": 19,
+      "calls_in_window": 17,
       "latest": {
-       "at": "2026-08-05T18:50:11+0200",
-       "seconds_ago": 969,
+       "at": "2026-08-05T22:04:08+0200",
+       "seconds_ago": 552,
        "label": "Terminal",
        "kind": "execute"
       },
       "looks_open": false,
       "open_for_seconds": null,
-      "last_signal_seconds_ago": 941,
+      "last_signal_seconds_ago": 550,
       "recent": [
        {
-        "at": "2026-08-05T18:50:11+0200",
-        "seconds_ago": 969,
+        "at": "2026-08-05T22:04:08+0200",
+        "seconds_ago": 552,
         "label": "Terminal",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:49:39+0200",
-        "seconds_ago": 1002,
+        "at": "2026-08-05T22:04:02+0200",
+        "seconds_ago": 559,
         "label": "Terminal",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:49:19+0200",
-        "seconds_ago": 1021,
+        "at": "2026-08-05T22:03:30+0200",
+        "seconds_ago": 591,
         "label": "Terminal",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:49:04+0200",
-        "seconds_ago": 1036,
+        "at": "2026-08-05T22:02:46+0200",
+        "seconds_ago": 635,
         "label": "Terminal",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:48:46+0200",
-        "seconds_ago": 1055,
+        "at": "2026-08-05T22:02:30+0200",
+        "seconds_ago": 651,
         "label": "Terminal",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:48:36+0200",
-        "seconds_ago": 1065,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T18:48:27+0200",
-        "seconds_ago": 1074,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T18:48:26+0200",
-        "seconds_ago": 1075,
-        "label": "Terminal",
-        "kind": "execute"
+        "at": "2026-08-05T22:02:28+0200",
+        "seconds_ago": 653,
+        "label": "Read File",
+        "kind": "read"
        }
       ]
+     },
+     "session": {
+      "session_id": "9878b3b8-efaf-4f2f-9e48-f3f24f5ec7c4",
+      "started_at": "2026-08-05T22:01:10+0200",
+      "prompt_tokens": 81811,
+      "context_window": 1000000,
+      "percent": 8.2,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "claude",
+      "steerable": true
      }
     },
     {
@@ -86,20 +86,74 @@
      "model": "gpt-5.6-sol[high]",
      "agent_command": "codex-acp",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:06 CEST",
-     "tool_calls_window": 40,
-     "tool_calls_recent": 0,
-     "last_tool_call_at": "2026-08-05T18:16:58+0200",
-     "last_tool_call_seconds_ago": 2963,
-     "working": false,
+     "last_start": "Wed 2026-08-05 20:07:39 CEST",
+     "tool_calls_window": 196,
+     "tool_calls_recent": 3,
+     "last_tool_call_at": "2026-08-05T22:13:16+0200",
+     "last_tool_call_seconds_ago": 5,
+     "working": true,
      "activity": {
       "stem": "codex",
-      "calls_in_window": 0,
-      "latest": null,
+      "calls_in_window": 103,
+      "latest": {
+       "at": "2026-08-05T22:13:16+0200",
+       "seconds_ago": 4,
+       "label": "BUZZ_ACP_RECOVERY_PATH='/home/piet/.local/state/buzz/acp/2799cedde4838b8c322a1a509681e270d9d46d7b2b66b691dda82e9dd51beb84/recovery-v1.json' BUZZ_ACP_SOURCE_EVEN",
+       "kind": "execute"
+      },
       "looks_open": false,
       "open_for_seconds": null,
-      "last_signal_seconds_ago": null,
-      "recent": []
+      "last_signal_seconds_ago": 4,
+      "recent": [
+       {
+        "at": "2026-08-05T22:13:16+0200",
+        "seconds_ago": 4,
+        "label": "BUZZ_ACP_RECOVERY_PATH='/home/piet/.local/state/buzz/acp/2799cedde4838b8c322a1a509681e270d9d46d7b2b66b691dda82e9dd51beb84/recovery-v1.json' BUZZ_ACP_SOURCE_EVEN",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T22:13:03+0200",
+        "seconds_ago": 18,
+        "label": "buzz-context",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T22:10:38+0200",
+        "seconds_ago": 163,
+        "label": "Context compacting",
+        "kind": "other"
+       },
+       {
+        "at": "2026-08-05T22:00:31+0200",
+        "seconds_ago": 769,
+        "label": "source bin/activate-hermit && exec env -u BUZZ_ACP_AGENTS -u BUZZ_ACP_AGENT_OWNER -u BUZZ_ACP_CONTEXT_MESSAGE_LIMIT -u BUZZ_ACP_IDLE_TIMEOUT -u BUZZ_ACP_MAX_TUR",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T22:00:22+0200",
+        "seconds_ago": 779,
+        "label": "git diff --check && git diff -- crates/buzz-acp/src/config.rs crates/buzz-acp/src/pool.rs && git status --short --branch",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T22:00:05+0200",
+        "seconds_ago": 795,
+        "label": "source bin/activate-hermit && exec cargo fmt --check --all",
+        "kind": "execute"
+       }
+      ]
+     },
+     "session": {
+      "session_id": "019fd357-f0ce-7a91-90c0-b36093aa64ba",
+      "started_at": "2026-08-05T21:13:04+0200",
+      "prompt_tokens": 58478,
+      "context_window": 258400,
+      "percent": 22.6,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "codex",
+      "steerable": true
      }
     },
     {
@@ -108,74 +162,32 @@
      "model": "claude-fable-5[1m]",
      "agent_command": "claude-agent-acp",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:08 CEST",
-     "tool_calls_window": 33,
+     "last_start": "Wed 2026-08-05 20:07:39 CEST",
+     "tool_calls_window": 0,
      "tool_calls_recent": 0,
-     "last_tool_call_at": "2026-08-05T19:01:17+0200",
-     "last_tool_call_seconds_ago": 303,
+     "last_tool_call_at": null,
+     "last_tool_call_seconds_ago": null,
      "working": false,
      "activity": {
       "stem": "fable",
-      "calls_in_window": 33,
-      "latest": {
-       "at": "2026-08-05T19:01:17+0200",
-       "seconds_ago": 303,
-       "label": "Terminal",
-       "kind": "execute"
-      },
+      "calls_in_window": 0,
+      "latest": null,
       "looks_open": false,
       "open_for_seconds": null,
-      "last_signal_seconds_ago": 301,
-      "recent": [
-       {
-        "at": "2026-08-05T19:01:17+0200",
-        "seconds_ago": 303,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:01:12+0200",
-        "seconds_ago": 309,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:01:08+0200",
-        "seconds_ago": 313,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:01:03+0200",
-        "seconds_ago": 318,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:00:45+0200",
-        "seconds_ago": 335,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:00:34+0200",
-        "seconds_ago": 347,
-        "label": "Terminal",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T19:00:21+0200",
-        "seconds_ago": 359,
-        "label": "Edit",
-        "kind": "edit"
-       },
-       {
-        "at": "2026-08-05T18:59:50+0200",
-        "seconds_ago": 390,
-        "label": "Edit",
-        "kind": "edit"
-       }
-      ]
+      "last_signal_seconds_ago": null,
+      "recent": []
+     },
+     "session": {
+      "session_id": "d5635067-fd69-43dc-90ab-dac5fdd22ddc",
+      "started_at": "2026-08-05T18:50:59+0200",
+      "prompt_tokens": 196126,
+      "context_window": 1000000,
+      "percent": 19.6,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "claude",
+      "steerable": true
      }
     },
     {
@@ -184,11 +196,11 @@
      "model": "grok-4.5",
      "agent_command": "grok",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:09 CEST",
-     "tool_calls_window": 0,
+     "last_start": "Wed 2026-08-05 20:07:39 CEST",
+     "tool_calls_window": 16,
      "tool_calls_recent": 0,
-     "last_tool_call_at": null,
-     "last_tool_call_seconds_ago": null,
+     "last_tool_call_at": "2026-08-05T21:25:32+0200",
+     "last_tool_call_seconds_ago": 2869,
      "working": false,
      "activity": {
       "stem": "grok",
@@ -198,6 +210,18 @@
       "open_for_seconds": null,
       "last_signal_seconds_ago": null,
       "recent": []
+     },
+     "session": {
+      "session_id": "019fd362-6bfd-75d1-aa3d-fad35670bc9c",
+      "started_at": "2026-08-05T21:24:31+0200",
+      "prompt_tokens": 90902,
+      "context_window": 500000,
+      "percent": 18.2,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "grok",
+      "steerable": false
      }
     },
     {
@@ -206,74 +230,74 @@
      "model": "openai-codex:gpt-5.6-sol",
      "agent_command": "hermes-acp",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:11 CEST",
-     "tool_calls_window": 15,
-     "tool_calls_recent": 5,
-     "last_tool_call_at": "2026-08-05T19:06:21+0200",
-     "last_tool_call_seconds_ago": 0,
-     "working": true,
+     "last_start": "Wed 2026-08-05 20:07:40 CEST",
+     "tool_calls_window": 31,
+     "tool_calls_recent": 0,
+     "last_tool_call_at": "2026-08-05T22:02:03+0200",
+     "last_tool_call_seconds_ago": 678,
+     "working": false,
      "activity": {
       "stem": "hermes",
-      "calls_in_window": 10,
+      "calls_in_window": 17,
       "latest": {
-       "at": "2026-08-05T19:06:21+0200",
-       "seconds_ago": 0,
-       "label": "terminal: set -e",
-       "kind": "unknown"
+       "at": "2026-08-05T22:02:03+0200",
+       "seconds_ago": 677,
+       "label": "terminal: printf '%s\\n' 'Letzter Takt: 2026-08-05T20:01:55Z · Renderer=OK · default blo...",
+       "kind": "execute"
       },
       "looks_open": false,
       "open_for_seconds": null,
-      "last_signal_seconds_ago": 0,
+      "last_signal_seconds_ago": 677,
       "recent": [
        {
-        "at": "2026-08-05T19:06:21+0200",
-        "seconds_ago": 0,
-        "label": "terminal: set -e",
-        "kind": "unknown"
-       },
-       {
-        "at": "2026-08-05T19:06:14+0200",
-        "seconds_ago": 7,
-        "label": "terminal: date -u +%Y-%m-%dT%H:%M:%SZ",
+        "at": "2026-08-05T22:02:03+0200",
+        "seconds_ago": 677,
+        "label": "terminal: printf '%s\\n' 'Letzter Takt: 2026-08-05T20:01:55Z · Renderer=OK · default blo...",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T19:06:13+0200",
-        "seconds_ago": 8,
-        "label": "terminal: /mnt/data/services/buzz/target/release/buzz canvas get --channel 7abf1e2a-662...",
+        "at": "2026-08-05T22:01:55+0200",
+        "seconds_ago": 686,
+        "label": "terminal: buzz canvas get --channel 7abf1e2a-6629-4ec2-b549-b4833a13a60f; printf '\\n---...",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T19:06:08+0200",
-        "seconds_ago": 12,
-        "label": "terminal: python3 - <<'PY'",
-        "kind": "unknown"
+        "at": "2026-08-05T22:01:48+0200",
+        "seconds_ago": 692,
+        "label": "terminal: HERMES_KANBAN_BOARD=default hermes kanban comment t_5e27f4a2 'ESKALATION-GEME...",
+        "kind": "execute"
        },
        {
-        "at": "2026-08-05T19:05:58+0200",
-        "seconds_ago": 22,
+        "at": "2026-08-05T22:01:41+0200",
+        "seconds_ago": 699,
+        "label": "terminal: buzz messages get --channel 7abf1e2a-6629-4ec2-b549-b4833a13a60f --since 1785...",
+        "kind": "execute"
+       },
+       {
+        "at": "2026-08-05T22:01:32+0200",
+        "seconds_ago": 709,
         "label": "terminal: export BOARD_RELAY=/home/piet/.hermes/hermes-agent/scripts/relay_kanban_escal...",
         "kind": "execute"
        },
        {
-        "at": "2026-08-05T18:46:22+0200",
-        "seconds_ago": 1198,
-        "label": "terminal: set -e",
-        "kind": "unknown"
-       },
-       {
-        "at": "2026-08-05T18:46:13+0200",
-        "seconds_ago": 1208,
-        "label": "terminal: date -u +%Y-%m-%dT%H:%M:%SZ",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T18:46:11+0200",
-        "seconds_ago": 1209,
-        "label": "terminal: /mnt/data/services/buzz/target/release/buzz canvas get --channel 7abf1e2a-662...",
+        "at": "2026-08-05T22:01:26+0200",
+        "seconds_ago": 715,
+        "label": "terminal: python /home/piet/.hermes/hermes-agent/scripts/relay_kanban_escalation_lines....",
         "kind": "execute"
        }
       ]
+     },
+     "session": {
+      "session_id": null,
+      "started_at": null,
+      "prompt_tokens": null,
+      "context_window": null,
+      "percent": null,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "none",
+      "steerable": false
      }
     },
     {
@@ -282,11 +306,11 @@
      "model": "kimi-code/k3",
      "agent_command": "kimi",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:13 CEST",
-     "tool_calls_window": 16,
+     "last_start": "Wed 2026-08-05 20:07:40 CEST",
+     "tool_calls_window": 0,
      "tool_calls_recent": 0,
-     "last_tool_call_at": "2026-08-05T18:13:26+0200",
-     "last_tool_call_seconds_ago": 3175,
+     "last_tool_call_at": null,
+     "last_tool_call_seconds_ago": null,
      "working": false,
      "activity": {
       "stem": "kimi",
@@ -296,6 +320,18 @@
       "open_for_seconds": null,
       "last_signal_seconds_ago": null,
       "recent": []
+     },
+     "session": {
+      "session_id": "session_105eade0-c355-48c7-ab5b-2c1c15949a2b",
+      "started_at": "2026-08-05T20:39:45+0200",
+      "prompt_tokens": 74815,
+      "context_window": 1048576,
+      "percent": 7.1,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "kimi",
+      "steerable": false
      }
     },
     {
@@ -304,11 +340,11 @@
      "model": "qwen-route:v1:WRuqteCqSoPIdAbL",
      "agent_command": "qwen",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:15 CEST",
-     "tool_calls_window": 0,
+     "last_start": "Wed 2026-08-05 20:07:40 CEST",
+     "tool_calls_window": 31,
      "tool_calls_recent": 0,
-     "last_tool_call_at": null,
-     "last_tool_call_seconds_ago": null,
+     "last_tool_call_at": "2026-08-05T21:35:30+0200",
+     "last_tool_call_seconds_ago": 2272,
      "working": false,
      "activity": {
       "stem": "qwen",
@@ -318,6 +354,18 @@
       "open_for_seconds": null,
       "last_signal_seconds_ago": null,
       "recent": []
+     },
+     "session": {
+      "session_id": "95469b9a-3cf8-40fe-9462-f26ee3a1c625",
+      "started_at": "2026-08-05T21:24:30+0200",
+      "prompt_tokens": 125570,
+      "context_window": 1000000,
+      "percent": 12.6,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "qwen",
+      "steerable": false
      }
     },
     {
@@ -326,56 +374,32 @@
      "model": "gpt-5.6-terra",
      "agent_command": "codex-acp",
      "active_state": "active",
-     "last_start": "Wed 2026-08-05 12:48:19 CEST",
-     "tool_calls_window": 5,
+     "last_start": "Wed 2026-08-05 20:07:40 CEST",
+     "tool_calls_window": 0,
      "tool_calls_recent": 0,
-     "last_tool_call_at": "2026-08-05T18:50:46+0200",
-     "last_tool_call_seconds_ago": 935,
+     "last_tool_call_at": null,
+     "last_tool_call_seconds_ago": null,
      "working": false,
      "activity": {
       "stem": "terra",
-      "calls_in_window": 5,
-      "latest": {
-       "at": "2026-08-05T18:50:46+0200",
-       "seconds_ago": 934,
-       "label": "pwd",
-       "kind": "execute"
-      },
+      "calls_in_window": 0,
+      "latest": null,
       "looks_open": false,
       "open_for_seconds": null,
-      "last_signal_seconds_ago": 934,
-      "recent": [
-       {
-        "at": "2026-08-05T18:50:46+0200",
-        "seconds_ago": 934,
-        "label": "pwd",
-        "kind": "execute"
-       },
-       {
-        "at": "2026-08-05T18:50:22+0200",
-        "seconds_ago": 959,
-        "label": "Read file '/home/piet/.codex/skills/worktree-arbeiten/SKILL.md'",
-        "kind": "read"
-       },
-       {
-        "at": "2026-08-05T18:50:22+0200",
-        "seconds_ago": 959,
-        "label": "Read file '/home/piet/vault/00-Canon/vision.md'",
-        "kind": "read"
-       },
-       {
-        "at": "2026-08-05T18:50:22+0200",
-        "seconds_ago": 959,
-        "label": "Read file '/home/piet/.codex/skills/buzz-cli/SKILL.md'",
-        "kind": "read"
-       },
-       {
-        "at": "2026-08-05T18:50:22+0200",
-        "seconds_ago": 959,
-        "label": "Read file '/home/piet/.agents/skills/codex-vault-coordination/SKILL.md'",
-        "kind": "read"
-       }
-      ]
+      "last_signal_seconds_ago": null,
+      "recent": []
+     },
+     "session": {
+      "session_id": "019fd290-31c6-7970-a5d9-38854e354ea7",
+      "started_at": "2026-08-05T17:34:53+0200",
+      "prompt_tokens": 115369,
+      "context_window": 258400,
+      "percent": 44.6,
+      "compacts": 0,
+      "last_compaction": null,
+      "measured_at": "2026-08-05T22:13:21+0200",
+      "source": "codex",
+      "steerable": true
      }
     }
    ],
@@ -385,306 +409,288 @@
    "activity_window_seconds": 1800,
    "activity_error": null,
    "activity_diagnostics": {
-    "lines_seen": 303,
-    "lines_understood": 303,
+    "lines_seen": 4785,
+    "lines_understood": 4785,
     "suspicious": false
    },
-   "as_of": "2026-08-05T19:06:21+0200"
+   "as_of": "2026-08-05T22:13:21+0200"
   },
   "error": null,
-  "as_of": "2026-08-05T19:06:21+0200"
+  "as_of": "2026-08-05T22:13:21+0200"
  },
  "workers": {
   "data": {
    "workers": [
     {
-     "run_id": 9204,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "run_id": 9215,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "task_status": "running",
      "task_assignee": "coder",
      "profile": "coder",
-     "worker_pid": 1805847,
-     "started_at": 1785949439,
+     "worker_pid": 3965022,
+     "started_at": 1785960657,
      "claim_lock": "huebners:851040",
-     "claim_expires": 1785950467,
-     "last_heartbeat_at": 1785949567,
+     "claim_expires": 1785961698,
+     "last_heartbeat_at": 1785960798,
      "max_runtime_seconds": null,
      "run_status": "running",
      "run_outcome": null,
      "block_reason": null,
      "liveness_state": "running",
      "liveness_reason": "heartbeat_fresh",
-     "liveness_observed_at": 1785949581,
+     "liveness_observed_at": 1785960805,
      "last_heartbeat_note": "receiving stream response",
-     "last_heartbeat_note_at": 1785949567,
+     "last_heartbeat_note_at": 1785960798,
      "heartbeat_ticks": [
-      1785949444,
-      1785949505,
-      1785949567
+      1785960678,
+      1785960738,
+      1785960798
      ],
      "input_tokens": null,
      "output_tokens": null,
      "token_status": "no_live_sample",
      "token_status_reason": "task_runs has no live token counters for this active worker yet",
-     "eta_p50_seconds": 372,
-     "eta_p90_seconds": 1091,
+     "eta_p50_seconds": 374,
+     "eta_p90_seconds": 1093,
      "step_key": null,
      "model_override": null,
      "run_progress": null,
      "requested_provider": "openai-codex",
      "requested_model": "gpt-5.6-sol",
-     "active_provider": "openai-codex",
-     "active_model": "gpt-5.6-sol",
+     "active_provider": "kimi",
+     "active_model": "k3",
      "model_state": "in_flight",
      "model_source": "runtime_request",
-     "model_observed_at": 1785949580,
-     "effective_model": "gpt-5.6-sol"
+     "model_observed_at": 1785960726,
+     "effective_model": "k3"
     }
    ],
    "count": 1,
    "cap": 3,
-   "checked_at": 1785949581
+   "checked_at": 1785960805
   },
   "error": null,
-  "as_of": "2026-08-05T19:06:21+0200"
+  "as_of": "2026-08-05T22:13:21+0200"
  },
  "holds": {
   "data": {
-   "holds": [
-    {
-     "task_id": "t_7f265c8a",
-     "title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
-     "assignee": "coder",
-     "priority": 0,
-     "bucket": "chain_worktree_serialized",
-     "since": 1785948785,
-     "chain_root_id": "t_903e7b7c"
-    },
-    {
-     "task_id": "t_7f265c8a",
-     "title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
-     "assignee": "coder",
-     "priority": 0,
-     "bucket": "worktree_writer_active",
-     "since": 1785948785
-    }
-   ],
-   "count": 2,
-   "checked_at": 1785949582
+   "holds": [],
+   "count": 0,
+   "checked_at": 1785960805
   },
   "error": null,
-  "as_of": "2026-08-05T19:06:21+0200"
+  "as_of": "2026-08-05T22:13:21+0200"
  },
  "events": {
   "data": {
    "events": [
     {
-     "id": 97636,
-     "run_id": 9204,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "id": 97843,
+     "run_id": 9215,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "profile": "coder",
      "kind": "heartbeat",
      "note": "receiving stream response",
-     "at": 1785949567
+     "at": 1785960798
     },
     {
-     "id": 97635,
-     "run_id": 9204,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "id": 97842,
+     "run_id": 9215,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "profile": "coder",
      "kind": "heartbeat",
      "note": "receiving stream response",
-     "at": 1785949505
+     "at": 1785960738
     },
     {
-     "id": 97632,
-     "run_id": 9204,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "id": 97838,
+     "run_id": 9215,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "profile": "coder",
      "kind": "heartbeat",
      "note": "starting API call #1",
-     "at": 1785949444
+     "at": 1785960678
     },
     {
-     "id": 97621,
-     "run_id": 9204,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
+     "id": 97833,
+     "run_id": 9215,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "profile": "coder",
      "kind": "claimed",
      "note": null,
-     "at": 1785949439
+     "at": 1785960657
     },
     {
-     "id": 97616,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "completed",
-     "note": null,
-     "at": 1785949398
-    },
-    {
-     "id": 97612,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "tool completed: process (60.0s)",
-     "at": 1785949195
-    },
-    {
-     "id": 97611,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "tool completed: process (60.0s)",
-     "at": 1785949132
-    },
-    {
-     "id": 97610,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "tool completed: process (60.0s)",
-     "at": 1785949067
-    },
-    {
-     "id": 97609,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "Post-Commit-Affected-Gate läuft gegen HEAD~1.",
-     "at": 1785949006
-    },
-    {
-     "id": 97608,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "tool completed: patch (2.5s)",
-     "at": 1785948968
-    },
-    {
-     "id": 97607,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "terminal command running (10s elapsed)",
-     "at": 1785948906
-    },
-    {
-     "id": 97603,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "heartbeat",
-     "note": "starting API call #1",
-     "at": 1785948837
-    },
-    {
-     "id": 97595,
-     "run_id": 9203,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "claimed",
-     "note": null,
-     "at": 1785948830
-    },
-    {
-     "id": 97593,
-     "run_id": null,
-     "task_id": "t_a54a1773",
-     "task_title": "Integrator-Zeitbudget an den Worker-Pfad angleichen",
-     "profile": "coder",
-     "kind": "unblocked",
-     "note": null,
-     "at": 1785948792
-    },
-    {
-     "id": 97592,
-     "run_id": null,
-     "task_id": "t_7f265c8a",
-     "task_title": "Gate-Triage: Single-Flight, Themen-Dedup, Reparatur sichtbar machen",
-     "profile": "coder",
-     "kind": "unblocked",
-     "note": null,
-     "at": 1785948792
-    },
-    {
-     "id": 97591,
-     "run_id": null,
-     "task_id": "t_75d8f785",
-     "task_title": "Alarm block_loop_detected abonnementfrei zustellen",
-     "profile": "coder",
-     "kind": "unblocked",
-     "note": null,
-     "at": 1785948792
-    },
-    {
-     "id": 97590,
-     "run_id": null,
-     "task_id": "t_66ced2fb",
-     "task_title": "Vier stumme Stellen beobachtbar machen",
-     "profile": "coder",
-     "kind": "unblocked",
-     "note": null,
-     "at": 1785948792
-    },
-    {
-     "id": 97589,
+     "id": 97832,
      "run_id": null,
      "task_id": "t_5e27f4a2",
      "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
      "profile": "coder",
      "kind": "unblocked",
      "note": null,
-     "at": 1785948792
+     "at": 1785960604
     },
     {
-     "id": 97568,
+     "id": 97819,
      "run_id": null,
-     "task_id": "t_d81b9bef",
-     "task_title": "PlanSpec disposition-di_b0a73086: Konflikt-Fixer-Exit nach Commit + CAS-Resume-Fingerprint-Bug beheben",
-     "profile": null,
-     "kind": "completed",
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "blocked",
      "note": null,
-     "at": 1785942277
+     "at": 1785957979
     },
     {
-     "id": 97566,
+     "id": 97816,
      "run_id": null,
-     "task_id": "t_d81b9bef",
-     "task_title": "PlanSpec disposition-di_b0a73086: Konflikt-Fixer-Exit nach Commit + CAS-Resume-Fingerprint-Bug beheben",
-     "profile": null,
-     "kind": "unblocked",
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "blocked",
      "note": null,
-     "at": 1785942276
+     "at": 1785956096
+    },
+    {
+     "id": 97813,
+     "run_id": null,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "blocked",
+     "note": null,
+     "at": 1785955983
+    },
+    {
+     "id": 97808,
+     "run_id": null,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "gave_up",
+     "note": null,
+     "at": 1785954684
+    },
+    {
+     "id": 97807,
+     "run_id": 9213,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "critic",
+     "kind": "crashed",
+     "note": null,
+     "at": 1785954684
+    },
+    {
+     "id": 97803,
+     "run_id": 9213,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "critic",
+     "kind": "claimed",
+     "note": null,
+     "at": 1785954621
+    },
+    {
+     "id": 97801,
+     "run_id": 9212,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "critic",
+     "kind": "crashed",
+     "note": null,
+     "at": 1785954620
+    },
+    {
+     "id": 97797,
+     "run_id": 9212,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "critic",
+     "kind": "claimed",
+     "note": null,
+     "at": 1785954558
+    },
+    {
+     "id": 97795,
+     "run_id": 9211,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "reviewer",
+     "kind": "submitted_for_review",
+     "note": null,
+     "at": 1785954549
+    },
+    {
+     "id": 97793,
+     "run_id": 9211,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "reviewer",
+     "kind": "heartbeat",
+     "note": "claude-cli running · log 56KB · last output 115s",
+     "at": 1785954498
+    },
+    {
+     "id": 97789,
+     "run_id": 9211,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "reviewer",
+     "kind": "claimed",
+     "note": null,
+     "at": 1785954436
+    },
+    {
+     "id": 97787,
+     "run_id": 9210,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "submitted_for_review",
+     "note": null,
+     "at": 1785954378
+    },
+    {
+     "id": 97785,
+     "run_id": 9210,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "tool completed: process (51.1s)",
+     "at": 1785954304
+    },
+    {
+     "id": 97784,
+     "run_id": 9210,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "executing tool: terminal",
+     "at": 1785954198
+    },
+    {
+     "id": 97783,
+     "run_id": 9210,
+     "task_id": "t_5e27f4a2",
+     "task_title": "Disposition-Digest: transientes Rauschen nicht zu Hebeln machen",
+     "profile": "coder",
+     "kind": "heartbeat",
+     "note": "receiving stream response",
+     "at": 1785954137
     }
    ],
    "count": 20,
-   "latest_id": 97636,
-   "checked_at": 1785949582
+   "latest_id": 97843,
+   "checked_at": 1785960805
   },
   "error": null,
-  "as_of": "2026-08-05T19:06:21+0200"
+  "as_of": "2026-08-05T22:13:21+0200"
  }
 }

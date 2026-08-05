@@ -59,6 +59,9 @@ fun PulseTab(
 
     var openAgent by remember { mutableStateOf<AgentRow?>(null) }
     var openRun by remember { mutableStateOf<WorkerRun?>(null) }
+    // The operator's pin. It outranks the automatic focus so the screen never
+    // moves under a finger; tapping the same capsule again releases it.
+    var pinnedStem by remember { mutableStateOf<String?>(null) }
 
     // The clock the ages are rendered against. Without it the header would say
     // "gerade eben" until the next payload lands, which is the same lie the
@@ -108,20 +111,12 @@ fun PulseTab(
         pulse = state.pulse,
         freshness = Freshness.of(state.pulse?.receivedAt ?: 0L, now),
         actions = actions,
+        usage = agentsState.usage,
         loading = state.loading,
         error = state.error,
-        silentAfterSeconds = ActionStack.SILENT_AGENT_SECONDS,
+        pinnedStem = pinnedStem,
         onRefresh = { viewModel.refreshPulseNow() },
-        onAction = { item ->
-            when (val target = item.target) {
-                is ActionStack.Target.Run ->
-                    openRun = state.pulse?.workerRuns?.firstOrNull { it.runId == target.runId }
-                is ActionStack.Target.Agent ->
-                    openAgent = state.pulse?.agentRows?.firstOrNull { it.agent.stem == target.stem }
-                is ActionStack.Target.Task -> onOpenTask(target.taskId)
-                ActionStack.Target.Budget -> Unit
-            }
-        },
+        onPin = { pinnedStem = it },
         onAgent = { openAgent = it },
         onRun = { openRun = it },
         onOpenAgents = onOpenAgents,

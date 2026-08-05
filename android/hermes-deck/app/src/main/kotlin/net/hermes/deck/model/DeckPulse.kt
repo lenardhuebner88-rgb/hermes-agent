@@ -65,8 +65,18 @@ data class DeckEvent(
     }
 }
 
-/** One agent plus what it is doing — the two halves the UI always needs together. */
-data class AgentRow(val agent: BuzzAgent, val pulse: AgentPulse?)
+/**
+ * One agent, what it is doing, and what its session is made of.
+ *
+ * The three travel together because every card needs all three and any two of
+ * them alone tell a misleading story: activity without context hides an agent
+ * about to hit the wall, context without activity hides a hang.
+ */
+data class AgentRow(
+    val agent: BuzzAgent,
+    val pulse: AgentPulse?,
+    val session: SessionFacts? = null,
+)
 
 /**
  * The agent section. Both windows travel with it so no card hardcodes a number
@@ -143,6 +153,7 @@ data class DeckPulse(
                 AgentRow(
                     agent = agent,
                     pulse = AgentPulse.fromJson(agent.stem, entry.optJSONObject("activity")),
+                    session = SessionFacts.fromJson(entry.optJSONObject("session")),
                 )
             }
             return AgentsBlock(

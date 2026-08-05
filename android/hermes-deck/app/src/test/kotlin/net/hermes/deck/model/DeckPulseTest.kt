@@ -192,4 +192,60 @@ class DeckPulseTest {
         )
         assertEquals("zuletzt", closed!!.statusWord)
     }
+
+    // --- session facts, end to end ---------------------------------------
+
+    @Test
+    fun `the live payload carries session facts for every agent that keeps a book`() {
+        val rows = parsed().agentRows
+        val measured = rows.filter { it.session?.hasMeasurement == true }
+        // Seven of eight stems keep a session book; only `hermes` does not.
+        assertTrue("nur ${measured.size} Agenten mit Messung", measured.size >= 7)
+        measured.forEach { row ->
+            val s = row.session!!
+            assertTrue("${row.agent.stem}: keine Token", (s.promptTokens ?: 0) > 0)
+            assertNotNull("${row.agent.stem}: keine Quelle", s.source)
+            assertTrue(
+                "${row.agent.stem}: Quelle NONE trotz Messung",
+                s.source != SessionFacts.Source.NONE,
+            )
+        }
+    }
+
+    @Test
+    fun `kimi and grok are measured exactly like the rest`() {
+        // The operator asked for these two to look no different from the others.
+        val rows = parsed().agentRows.associateBy { it.agent.stem }
+        listOf("kimi" to SessionFacts.Source.KIMI, "grok" to SessionFacts.Source.GROK)
+            .forEach { (stem, source) ->
+                val session = rows[stem]?.session
+                assertNotNull("$stem fehlt im Payload", session)
+                assertEquals(source, session!!.source)
+                assertTrue("$stem ohne Token", (session.promptTokens ?: 0) > 0)
+                assertNotNull("$stem ohne Fenster", session.contextWindow)
+                assertNotNull("$stem ohne Prozent", session.percent)
+                assertNull("$stem darf keinen Fehlgrund tragen", session.absenceReason)
+            }
+    }
+
+    @Test
+    fun `an agent without a session book says so instead of showing zero`() {
+        val hermes = parsed().agentRows.first { it.agent.stem == "hermes" }.session
+        assertNotNull(hermes)
+        assertEquals(SessionFacts.Source.NONE, hermes!!.source)
+        assertNull("kein erfundener Prozentwert", hermes.percent)
+        assertNull("kein erfundener Tokenwert", hermes.promptTokens)
+        assertEquals("führt kein Sitzungsbuch", hermes.absenceReason)
+    }
+
+    @Test
+    fun `steerability travels per agent and is never guessed`() {
+        val rows = parsed().agentRows.associateBy { it.agent.stem }
+        // Measured live: the ACP handshake reports true for the claude and codex
+        // families, false for the rest. A missing line must stay null.
+        assertEquals(true, rows["claude"]?.session?.steerable)
+        assertEquals(true, rows["codex"]?.session?.steerable)
+        assertEquals(false, rows["kimi"]?.session?.steerable)
+        assertEquals(false, rows["qwen"]?.session?.steerable)
+    }
 }

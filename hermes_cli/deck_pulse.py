@@ -35,6 +35,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Query
 
+from hermes_cli.agent_session_facts import SessionFactsService
 from hermes_cli.buzz_agent_tool_calls import (
     DEFAULT_ACTIVITY_WINDOW_SECONDS,
     DEFAULT_CALLS_PER_AGENT,
@@ -60,6 +61,7 @@ class DeckPulseService:
         activity_ttl_seconds: float = 5.0,
         clock: Callable[[], float] = time.time,
         kanban_module: Any = None,
+        session_facts: SessionFactsService | None = None,
     ) -> None:
         self._control = control
         self.activity_window_seconds = activity_window_seconds
@@ -67,6 +69,7 @@ class DeckPulseService:
         self._kanban_module = kanban_module
         self._reader: ActivityReader | None = None
         self._activity_ttl_seconds = activity_ttl_seconds
+        self._session_facts = session_facts
 
     # -- wiring ------------------------------------------------------------
 
@@ -75,6 +78,16 @@ class DeckPulseService:
         if self._control is None:
             self._control = BuzzModelControlService()
         return self._control
+
+    @property
+    def session_facts(self) -> SessionFactsService:
+        if self._session_facts is None:
+            # Shares the control service's runner rather than spawning its own
+            # `SubprocessRunner` — same reasoning as `reader` below: one
+            # journal-reading strategy per process, and tests that fake the
+            # control runner get a faked steering query for free.
+            self._session_facts = SessionFactsService(clock=self._clock, runner=self.control.runner)
+        return self._session_facts
 
     @property
     def reader(self) -> ActivityReader:
@@ -115,14 +128,27 @@ class DeckPulseService:
                 # Null, never an empty list: "the journal could not be read" and
                 # "this agent made no calls" must not render the same way.
                 agent["activity"] = None
-                continue
-            agent["activity"] = timeline.as_payload(now=now, limit=limit)
+            else:
+                agent["activity"] = timeline.as_payload(now=now, limit=limit)
+            agent["session"] = self._session_payload(str(agent.get("stem")), now=now)
 
         agents["activity_window_seconds"] = self.activity_window_seconds
         agents["activity_error"] = error
         agents["activity_diagnostics"] = diagnostics.as_payload()
         agents["as_of"] = _iso(now)
         return agents
+
+    def _session_payload(self, stem: str, *, now: float) -> dict[str, Any] | None:
+        """Session facts for one agent. A read failure degrades this one
+        agent's ``session`` to ``null``, the same as a missing timeline —
+        it must never take the rest of the bundle down with it."""
+        if not stem or stem == "None":
+            return None
+        try:
+            facts = self.session_facts.facts_for_stem(stem)
+        except Exception:  # noqa: BLE001 — one bad stem must not sink the rest
+            return None
+        return facts.as_payload(now=now)
 
     def _kanban_section(
         self, name: str, call: Callable[[Any], Any]
