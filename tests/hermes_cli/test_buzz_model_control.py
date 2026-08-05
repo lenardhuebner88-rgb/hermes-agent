@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
+from hermes_cli import buzz_model_control
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -353,3 +355,28 @@ def test_list_agents_covers_all_configured_stems(tmp_path: Path) -> None:
 
     stems = [agent["stem"] for agent in response.json()["agents"]]
     assert stems == ["claude", "grok", "kimi"]
+
+
+def test_probe_environment_puts_agent_binaries_on_path(monkeypatch) -> None:
+    """The probe spawns ``claude-agent-acp`` & friends, which live in npm's
+    global bin — on an interactive PATH but not on a systemd user service's.
+    Without this the live probe failed as ``exited 1`` with nothing naming the
+    cause."""
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    env = buzz_model_control._probe_environment()
+
+    entries = env["PATH"].split(os.pathsep)
+    assert os.path.expanduser("~/.npm-global/bin") in entries
+    # The inherited PATH must survive — dropping /usr/bin would break systemctl.
+    assert "/usr/bin" in entries
+    assert entries.index(os.path.expanduser("~/.npm-global/bin")) < entries.index("/usr/bin")
+
+
+def test_probe_environment_does_not_duplicate_an_existing_entry(monkeypatch) -> None:
+    npm = os.path.expanduser("~/.npm-global/bin")
+    monkeypatch.setenv("PATH", f"{npm}:/usr/bin")
+
+    entries = buzz_model_control._probe_environment()["PATH"].split(os.pathsep)
+
+    assert entries.count(npm) == 1

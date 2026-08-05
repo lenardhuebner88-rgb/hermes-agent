@@ -33,7 +33,10 @@ _ARGS_KEY = "BUZZ_ACP_AGENT_ARGS"
 _KNOWN_KEYS = frozenset({_MODEL_KEY, _COMMAND_KEY, _ARGS_KEY})
 
 DEFAULT_BUZZ_ACP_BINARY = "/mnt/data/services/buzz/target/release/buzz-acp"
-_DEFAULT_MODELS_TIMEOUT_SECONDS = 15.0
+# The probe boots a real agent to ask it for its models; measured at ~8 s cold
+# on this host, so 15 s left no headroom for a loaded machine. The result is
+# cached for 10 minutes, so a generous timeout costs one slow first call.
+_DEFAULT_MODELS_TIMEOUT_SECONDS = 30.0
 _DEFAULT_MODELS_CACHE_TTL_SECONDS = 600.0
 _DEFAULT_RESTART_WAIT_TIMEOUT_SECONDS = 30.0
 
@@ -49,6 +52,28 @@ class Runner(Protocol):
     def run(self, args: list[str], *, timeout: float | None = None) -> CommandResult: ...
 
 
+def _probe_environment() -> dict[str, str]:
+    """Environment for the model probe, with the agent binaries on PATH.
+
+    ``buzz-acp models`` spawns the agent itself (``claude-agent-acp`` and
+    friends), and those live in npm's global bin — which is on an interactive
+    login's PATH but not on a systemd user service's. Without this the probe
+    fails as ``failed to spawn agent: No such file or directory`` and the
+    dashboard reports ``exited 1`` with nothing pointing at PATH.
+    """
+    env = dict(os.environ)
+    extra = [
+        os.path.expanduser("~/.npm-global/bin"),
+        os.path.expanduser("~/.local/bin"),
+        "/usr/local/bin",
+    ]
+    current = env.get("PATH", "").split(os.pathsep)
+    env["PATH"] = os.pathsep.join(
+        [p for p in extra if p and p not in current] + [p for p in current if p]
+    )
+    return env
+
+
 class SubprocessRunner:
     """Run fixed argv vectors without invoking a shell."""
 
@@ -60,6 +85,7 @@ class SubprocessRunner:
                 text=True,
                 check=False,
                 timeout=timeout,
+                env=_probe_environment(),
             )
         except subprocess.TimeoutExpired:
             return CommandResult(-1, "", "timeout")

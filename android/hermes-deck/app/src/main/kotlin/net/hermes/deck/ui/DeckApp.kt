@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -24,9 +25,11 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -62,11 +65,26 @@ fun DeckApp(viewModel: DeckViewModel) {
     val snapshot by viewModel.snapshot.collectAsState()
     val message by viewModel.message.collectAsState()
     val hasIdentity by viewModel.hasIdentity.collectAsState()
+    val pendingSetup by viewModel.pendingSetup.collectAsState()
 
     // Without an identity nothing else can work, so onboarding replaces the
-    // whole surface rather than hiding behind a tab.
+    // whole surface rather than hiding behind a tab. The setup dialog has to
+    // render on top of it — a link tapped on a fresh install is exactly the
+    // case it exists for.
     if (!hasIdentity) {
         OnboardingScreen(viewModel)
+        pendingSetup?.let { SetupConfirmDialog(it, false, viewModel::applyPendingSetup, viewModel::dismissSetup) }
+        message?.let { text ->
+            Box(Modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.BottomCenter) {
+                Snackbar(containerColor = deck.surfaceRaised, contentColor = deck.textPrimary) {
+                    Text(text, fontSize = 13.sp)
+                }
+            }
+            LaunchedEffect(text) {
+                delay(6000)
+                viewModel.dismissMessage()
+            }
+        }
         return
     }
 
@@ -103,6 +121,10 @@ fun DeckApp(viewModel: DeckViewModel) {
         }
     }
 
+    pendingSetup?.let {
+        SetupConfirmDialog(it, replacesIdentity = true, viewModel::applyPendingSetup, viewModel::dismissSetup)
+    }
+
     if (capturing) {
         CaptureSheet(
             viewModel = viewModel,
@@ -118,6 +140,75 @@ fun DeckApp(viewModel: DeckViewModel) {
             task = live,
             onDismiss = { openTask = null },
         )
+    }
+}
+
+/**
+ * Confirmation for a `hermes-deck://setup?…` link.
+ *
+ * Shows the two facts that decide whether the link is trustworthy — which
+ * relay the data will go to, and which identity it will be signed with —
+ * because everything else in the link is invisible once applied.
+ */
+@Composable
+private fun SetupConfirmDialog(
+    payload: net.hermes.deck.data.SetupLink.SetupPayload,
+    replacesIdentity: Boolean,
+    onApply: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val deck = LocalDeck.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = deck.surfaceRaised,
+        titleContentColor = deck.textPrimary,
+        textContentColor = deck.textSecondary,
+        title = { Text("Deck einrichten?", fontSize = 17.sp) },
+        text = {
+            Column {
+                Text(
+                    "Dieser Link richtet die App ein. Prüfe, dass beides stimmt:",
+                    fontSize = 13.sp,
+                    color = deck.textSecondary,
+                )
+                Spacer(Modifier.height(12.dp))
+                SetupFact("Relay", payload.relayHost ?: "bleibt wie eingestellt", deck.textPrimary)
+                payload.npub?.let {
+                    // Truncated in the middle: the tail is what distinguishes
+                    // two npubs, so a plain `take(24)` would hide the part that
+                    // matters.
+                    SetupFact("Identität", it.take(14) + "…" + it.takeLast(6), deck.textPrimary)
+                }
+                if (payload.hermesUrl != null || payload.hermesUser != null) {
+                    SetupFact("Dashboard", "Zugang wird gesetzt", deck.textSecondary)
+                }
+                // Only a warning when there is actually something to lose —
+                // on a fresh install the same sentence would be a lie.
+                if (payload.secretKeyHex != null && replacesIdentity) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(
+                        "Ersetzt die Identität, mit der die App bisher gearbeitet hat.",
+                        fontSize = 11.sp,
+                        color = deck.warning,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onApply) { Text("Übernehmen", color = deck.accent) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Abbrechen", color = deck.textFaint) }
+        },
+    )
+}
+
+@Composable
+private fun SetupFact(label: String, value: String, valueColor: Color) {
+    val deck = LocalDeck.current
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Text(label, fontSize = 12.sp, color = deck.textFaint, modifier = Modifier.width(84.dp))
+        Text(value, fontSize = 12.sp, color = valueColor)
     }
 }
 

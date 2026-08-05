@@ -15,11 +15,23 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.HermesDeck">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- One-tap provisioning from a link. singleTask above means a
+                 second link reaches the running instance via onNewIntent
+                 instead of stacking a second copy of the deck. The link is
+                 never applied on arrival — it only opens a confirmation. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="hermes-deck" android:host="setup" />
             </intent-filter>
         </activity>
 

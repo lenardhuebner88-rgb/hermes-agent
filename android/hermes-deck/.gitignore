@@ -1,3 +1,12 @@
+# The repo-root .gitignore carries a bare `data/` rule for datasets. A pattern
+# that ends in a slash and contains no other slash is NOT path-anchored, so it
+# matched every directory named `data` anywhere in the tree — including the
+# Kotlin package net/hermes/deck/data/. Three commits therefore shipped an app
+# that no longer builds from a fresh clone, while it built fine here because
+# the files were on disk. Re-include it from this fork-owned file; a deeper
+# .gitignore wins over the root one, so upstream's file stays untouched.
+!app/src/main/kotlin/net/hermes/deck/data/
+
 *.apk
 build/
 .gradle/

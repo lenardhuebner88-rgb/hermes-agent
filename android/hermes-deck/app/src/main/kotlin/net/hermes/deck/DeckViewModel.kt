@@ -13,6 +13,7 @@ import kotlinx.coroutines.withContext
 import net.hermes.deck.data.DeckRepository
 import net.hermes.deck.data.DeckSettings
 import net.hermes.deck.data.DeckStore
+import net.hermes.deck.data.SetupLink
 import net.hermes.deck.model.Attachment
 import net.hermes.deck.model.BuzzAgent
 import net.hermes.deck.model.Channel
@@ -34,6 +35,8 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
         val modelsFor: String? = null,
         val models: List<String> = emptyList(),
         val modelsError: String? = null,
+        /** The probe boots a real agent and takes seconds — say so meanwhile. */
+        val modelsLoading: Boolean = false,
         val busyStem: String? = null,
     )
 
@@ -68,6 +71,44 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
     fun forgetIdentity() {
         settings.forgetIdentity()
         _hasIdentity.value = false
+    }
+
+    // --- One-tap setup via `hermes-deck://setup?…` ------------------------
+
+    private val _pendingSetup = MutableStateFlow<SetupLink.SetupPayload?>(null)
+    val pendingSetup: StateFlow<SetupLink.SetupPayload?> = _pendingSetup.asStateFlow()
+
+    /**
+     * Holds a setup link for confirmation. Never applies it: a link is
+     * attacker-supplied, and one that quietly repointed the relay would send
+     * every future note to a stranger's server.
+     */
+    fun offerSetup(rawLink: String) {
+        runCatching { SetupLink.parse(rawLink) }
+            .onSuccess { _pendingSetup.value = it }
+            .onFailure { _message.value = it.message ?: "Einrichtungs-Link nicht lesbar." }
+    }
+
+    fun dismissSetup() {
+        _pendingSetup.value = null
+    }
+
+    fun applyPendingSetup() {
+        val payload = _pendingSetup.value ?: return
+        _pendingSetup.value = null
+        runCatching {
+            payload.relayUrl?.let { settings.relayBaseUrl = it }
+            payload.hermesUrl?.let { settings.hermesBaseUrl = it }
+            payload.hermesUser?.let { settings.hermesUsername = it }
+            payload.hermesPassword?.let { settings.hermesPassword = it }
+            payload.secretKeyHex?.let {
+                settings.importKey(it)
+                _hasIdentity.value = true
+            }
+        }.onSuccess {
+            _message.value = "Eingerichtet — Abgleich läuft."
+            sync()
+        }.onFailure { _message.value = it.message ?: "Einrichtung fehlgeschlagen." }
     }
 
     val snapshot = repository.snapshot
@@ -252,19 +293,30 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun loadModels(stem: String) = viewModelScope.launch {
-        _agents.value = _agents.value.copy(modelsFor = stem, models = emptyList(), modelsError = null)
+        _agents.value = _agents.value.copy(
+            modelsFor = stem,
+            models = emptyList(),
+            modelsError = null,
+            modelsLoading = true,
+        )
         val result = withContext(Dispatchers.IO) { runCatching { hermes().availableModels(stem) } }
         _agents.value = result.fold(
             onSuccess = { choices ->
                 _agents.value.copy(
                     models = choices.models,
+                    modelsLoading = false,
                     // An empty list with no error would look like "this agent has
                     // no models"; say plainly that the probe came back empty.
                     modelsError = choices.error
                         ?: if (choices.models.isEmpty()) "Keine Liste erhalten — Modell lässt sich trotzdem setzen." else null,
                 )
             },
-            onFailure = { _agents.value.copy(modelsError = it.message ?: "Modelle nicht abrufbar") },
+            onFailure = {
+                _agents.value.copy(
+                    modelsLoading = false,
+                    modelsError = it.message ?: "Modelle nicht abrufbar",
+                )
+            },
         )
     }
 
