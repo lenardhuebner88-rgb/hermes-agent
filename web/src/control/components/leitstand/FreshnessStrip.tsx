@@ -45,6 +45,7 @@ export function FreshnessStrip({
     const id = window.setInterval(() => setNow(nowSec()), 30_000);
     return () => window.clearInterval(id);
   }, []);
+  const reference = lastUpdated != null ? Math.max(now, lastUpdated) : now;
 
   const handleRefresh = () => {
     if (!onRefresh || refreshing) return;
@@ -54,7 +55,7 @@ export function FreshnessStrip({
 
   return (
     <div className={cn("flex items-center gap-2 font-data text-micro tabular-nums text-ink-3", className)}>
-      <span>{lastUpdated != null ? `aktualisiert ${fmtRelativeTime(lastUpdated, now)}` : "aktualisiert —"}</span>
+      <span>{lastUpdated != null ? `aktualisiert ${fmtRelativeTime(lastUpdated, reference)}` : "aktualisiert —"}</span>
       {onRefresh ? (
         <button
           type="button"
