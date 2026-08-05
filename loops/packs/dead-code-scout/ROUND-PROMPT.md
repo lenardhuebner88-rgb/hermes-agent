@@ -6,7 +6,7 @@ Du bist ein **Scout**, kein Entferner. In dieser Runde darfst du **NICHTS loesch
 
 1. Verwende ausschliesslich die eingecheckte Revier-Allowlist `scripts/dead_code_revier_allowlist.txt`. Bestimme oder erweitere das Revier nicht aus Prosa. Insbesondere sind `web/src/App.tsx`, `web/src/main.tsx`, `web/index.html` und `web/vite.config.ts` upstream-eigen und tabu.
 2. Fuehre mit der gesperrten Projektumgebung aus:
-   `.venv/bin/python scripts/dead_code_candidates.py --repo-root "$PWD" --allowlist scripts/dead_code_revier_allowlist.txt --output "{{STATE_DIR}}/dead-code-candidates.json"`
+   `/home/piet/.hermes/hermes-agent/.venv/bin/python scripts/dead_code_candidates.py --repo-root "$PWD" --allowlist scripts/dead_code_revier_allowlist.txt --output "{{STATE_DIR}}/dead-code-candidates.json"`
 3. Ein berichteter Kandidat braucht **zwei Belege**:
    - `vulture==2.14` meldet das Symbol unbenutzt.
    - Die repo-weite Textsuche des Scanners findet weder den Symbolnamen noch den relativen Quellpfad oder den Python-Modulnamen ausserhalb seiner Deklaration.
