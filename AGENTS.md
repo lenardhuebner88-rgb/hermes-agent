@@ -166,18 +166,39 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 ## Hard pitfalls
 
 - **`android/` has a gate now — use it, do not rebuild one.**
-  `scripts/gate-android.sh` runs Android Lint + JVM unit tests; `--ui` adds
-  instrumented Compose tests on an emulator it boots and shuts down itself.
-  It pipes nothing, the exit code is the truth. Three things it encodes that
-  cost a session each to find: `/dev/kvm` needs `sg kvm -c` from any shell older
-  than the group change (Piet *is* in `kvm`; only stale sessions are not);
-  `adb devices` keeps listing an emulator that is still tearing down, so a
-  device only counts once `sys.boot_completed` is `1`; and `local.properties`
-  is git-ignored, so a fresh worktree needs it written before Gradle runs.
+  `scripts/gate-android.sh <app> [--ui]` where `<app>` is `deck` (default),
+  `dictate` or `voice`: Android Lint + JVM unit tests, and `--ui` adds
+  instrumented Compose tests. It pipes nothing, the exit code is the truth.
+  `--ui` *refuses* for an app with no instrumented tests rather than booting an
+  emulator and measuring nothing. Three things it encodes that cost a session
+  each to find: `/dev/kvm` needs `sg kvm -c` from any shell older than the group
+  change (Piet *is* in `kvm`; only stale sessions are not); `adb devices` keeps
+  listing an emulator that is still tearing down, so a device only counts once
+  `sys.boot_completed` is `1`; and `local.properties` is git-ignored, so a fresh
+  worktree needs it written before Gradle runs.
+- **The emulator belongs to `scripts/android-emulator.sh`, one AVD and one port
+  per app** (deck 5554, dictate 5560, voice 5562). Do not pick an AVD off the
+  floor: until 2026-08-05 the gate took `emulator -list-avds | head -1`, exactly
+  one AVD existed, and the deck gate therefore booted the *dictate* AVD — the
+  same one the dictate scripts boot. Two boots of one AVD is not two emulators;
+  the second loses, and it reads as a flake.
+- **Shipping an APK means `assembleRelease`, never `assembleDebug`** — and
+  `scripts/release-deck-apk.sh` is the only way to do it. The debug build is
+  43.4 MB with `ui-tooling` and `application-debuggable`; release is 34.9 MB.
+  A session compared the two, ruled out its own diff with a control build, and
+  concluded the *build environment* had drifted. It had not. The script signs
+  with the Android debug keystore (`285a89ae…` — any other key makes updates
+  refuse to install over the shipped builds) and aborts on a foreign
+  certificate, on `debuggable`, or when the APK's internal version disagrees
+  with the one being built.
 - **`pgrep -c <name>` never matches a name longer than 15 characters.**
   `pgrep -c qemu-system-x86_64` returns 0 with exit 1 whether or not an emulator
   is running — a session used exactly that to "prove" it had stopped one. `-f`
-  matches but also matches your own command line. Use `ps -eo comm,args | rg …`.
+  matches but also matches your own command line. And **`ps` is no better here:
+  measured on 2026-08-05, `ps -eo args | rg adb` finds nothing while
+  `pgrep -af "adb -L tcp"` returns the running adb server.** Whatever probe you
+  use, first show it finding a process you know is running; an unfalsifiable
+  zero is not a measurement.
 - **`journalctl -g` greps the rendered line, ANSI escapes and all.** Rust
   `tracing` colours output even under systemd, so `acp::tool: tool_call` does not
   exist as a literal and matching it returns zero lines with exit 0 —
