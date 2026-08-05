@@ -249,6 +249,19 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   footer renders "dünne Nenner bleiben sichtbar" — it stayed green with the
   guarded logic deleted. Assert the marker in context plus a negative case.
 
+- The root `.gitignore` rule `data/` is **not path-anchored** (a trailing slash with no
+  other slash matches at any depth), so it swallows every directory named `data`
+  anywhere in the tree. It kept the Kotlin package `net/hermes/deck/data/` out of four
+  commits while the build stayed green locally — the files were on disk. `git status`
+  and `git add -A` say nothing. After adding a new subproject, check once with
+  `git ls-files <dir> | wc -l` against `ls`, or `git check-ignore -v <file>`, which
+  names the offending rule and line. Fix from a deeper, fork-owned `.gitignore`.
+- **The dashboard answers 401 for every unauthenticated route, including ones that do
+  not exist.** A 401 is therefore no proof that a route is registered — only a logged-in
+  call separates 200 from 404. Verify new endpoints through a real login (see
+  `scripts/smoke_health_status_auth.py`), and keep a nonexistent path in the same probe
+  as the control.
+
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 
