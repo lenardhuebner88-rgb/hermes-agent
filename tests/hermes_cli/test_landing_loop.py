@@ -227,6 +227,60 @@ def test_green_landing_uses_shared_land_gates_and_freshens_branch(
     assert git(repo, "rev-parse", "loop/green").stdout.strip() == new_main
 
 
+def _plan(loops_root: Path, pack: str, stage: str, name: str) -> Path:
+    path = loops_root / pack / "queue" / stage / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"# {name}\n", encoding="utf-8")
+    return path
+
+
+def test_green_landing_archives_the_packs_verified_plans(git_world, monkeypatch):
+    """Landing the branch must also retire the pack's queue bookkeeping.
+
+    Before 2026-08-05 the landing loop merged ``loop/<pack>`` but never touched
+    ``queue/20-verified``. The pack then saw ``verified>0`` at ``ahead=0``, and
+    its own fail-closed readiness contract refused to run — a stall that the
+    ledgers recorded three times (28.07., 02.–05.08.).
+    """
+    repo, loops_root, ledger_dir, add_loop, _commit_main, commit_loop = git_world
+    worktree = add_loop("green")
+    commit_loop(worktree, "green-work")
+    _plan(loops_root, "green", "20-verified", "P1-done.md")
+    monkeypatch.setattr(
+        landing_module, "_land_gates", lambda *a, **k: (True, "shared gates grün")
+    )
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert outcome(run, "loop/green").action == "landed"
+    verified = loops_root / "green" / "queue" / "20-verified"
+    landed = loops_root / "green" / "queue" / "30-landed"
+    assert list(verified.glob("*.md")) == []
+    assert [p.name for p in landed.glob("*.md")] == ["P1-done.md"]
+
+
+def test_parked_branch_keeps_its_verified_plans(git_world):
+    """Control: the archiving must be bound to an actual landing.
+
+    Without this the same code would look 'green' while silently retiring plans
+    for work that never reached main.
+    """
+    repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
+    worktree = add_loop("dead-writer-unstick")
+    target = worktree / "hermes_cli" / "kanban_db.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("SHOULD_NOT_LAND = True\n", encoding="utf-8")
+    git(worktree, "add", "hermes_cli/kanban_db.py")
+    git(worktree, "commit", "-m", "unsafe dead-writer patch")
+    _plan(loops_root, "dead-writer-unstick", "20-verified", "P1-open.md")
+
+    run = make_loop(repo, loops_root, ledger_dir).run()
+
+    assert outcome(run, "loop/dead-writer-unstick").action == "parked"
+    verified = loops_root / "dead-writer-unstick" / "queue" / "20-verified"
+    assert [p.name for p in verified.glob("*.md")] == ["P1-open.md"]
+
+
 def test_dead_writer_unstick_branch_is_parked_before_kanban_db_merge(git_world):
     repo, loops_root, ledger_dir, add_loop, _commit_main, _commit_loop = git_world
     worktree = add_loop("dead-writer-unstick")

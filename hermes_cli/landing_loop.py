@@ -993,7 +993,34 @@ class LandingLoop:
                 f"Commits gelandet, Branch-Reset fehlgeschlagen: "
                 f"{reset.stderr or reset.stdout}",
             )
-        return BranchOutcome(item.branch, "landed", _one_line(gate_report))
+        archived = self._archive_verified_plans(item.branch)
+        return BranchOutcome(
+            item.branch, "landed", _one_line(gate_report + archived)
+        )
+
+    def _archive_verified_plans(self, branch: str) -> str:
+        """Retire the pack's verified plans after its branch reached main.
+
+        The loop runner does this itself in ``--cmd land``; when the landing
+        loop merges instead, nobody did — the pack kept ``verified>0`` at
+        ``ahead=0`` and its own fail-closed readiness contract then refused to
+        run. Purely bookkeeping, and deliberately non-fatal: the merge and its
+        evidence are already durable at this point, so a failure here is
+        reported, never rolled back.
+        """
+        pack = branch.removeprefix("loop/")
+        queue = self.loops_root / pack / "queue"
+        verified, landed = queue / "20-verified", queue / "30-landed"
+        try:
+            plans = sorted(verified.glob("*.md"))
+            if not plans:
+                return ""
+            landed.mkdir(parents=True, exist_ok=True)
+            for plan in plans:
+                plan.rename(landed / plan.name)
+        except OSError as exc:
+            return f" · Queue-Nachzug fehlgeschlagen: {_one_line(str(exc))}"
+        return f" · {len(plans)} Pläne nach 30-landed archiviert"
 
     def _freshen_completed(
         self,
