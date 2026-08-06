@@ -2,19 +2,62 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
-_SCRIPT = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "relay_kanban_escalation_lines.py"
-)
+_REPO = Path(__file__).resolve().parents[1]
+_SCRIPT = _REPO / "scripts" / "relay_kanban_escalation_lines.py"
+_RENDERER_SCRIPT = _REPO / "scripts" / "render_kanban_escalation_lines.py"
 _spec = importlib.util.spec_from_file_location("relay_kanban_escalation_lines", _SCRIPT)
 assert _spec is not None and _spec.loader is not None
 relay = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(relay)
+
+# Same bait as the renderer overlimit pins (literal cut edges must match).
+_VALID_BAIT_NPUB = (
+    "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0ug09x"
+)
+
+
+def _write_blocked_board(
+    home: Path, *, task_id: str, title: str, reason: str
+) -> None:
+    board_dir = home / "kanban" / "boards" / "default"
+    board_dir.mkdir(parents=True, exist_ok=True)
+    (board_dir / "board.json").write_text(
+        json.dumps({"slug": "default", "name": "Default"}), encoding="utf-8"
+    )
+    db = home / "kanban.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL,
+            block_kind TEXT
+        );
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            payload TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, block_kind) VALUES (?, ?, 'blocked', ?)",
+        (task_id, title, "needs_input"),
+    )
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload) VALUES (?, 'blocked', ?)",
+        (task_id, json.dumps({"reason": reason})),
+    )
+    conn.commit()
+    conn.close()
 
 
 def test_posts_renderer_line_without_changing_any_character():
@@ -144,3 +187,72 @@ def test_process_safe_line_survives_real_subprocess_argv():
     )
     assert result.returncode == 0
     assert "\ufffd" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Done-when 4 (Fassung 12): overlimit expectations through relay.main
+# Real _load_renderer + real render_all_boards — no mocks/stubs.
+# ---------------------------------------------------------------------------
+
+
+def test_main_overlimit_reason_matches_literal_cap_via_real_renderer(tmp_path, capsys):
+    """Relay inspect path: reason capped at 500 with literal suffix 200."""
+    home = tmp_path / ".hermes"
+    bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
+    assert len(bait) < 500
+    reason = bait + ("X" * (700 - len(bait)))
+    assert len(reason) == 700
+    _write_blocked_board(home, task_id="t_over_reason", title="Safe", reason=reason)
+
+    exit_code = relay.main(
+        [
+            "--hermes-home",
+            str(home),
+            "--renderer",
+            str(_RENDERER_SCRIPT),
+            "inspect",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    line = lines[0]
+    reason_span = line.split("Grund: ", 1)[1].split(" | Operator-Halt:", 1)[0]
+    # Same literal expectation as the renderer overlimit pin.
+    assert "… [truncated, 200 chars omitted]" in reason_span
+    assert reason_span == (
+        f"`{reason[:500]}… [truncated, 200 chars omitted]`"
+    )
+
+
+def test_main_overlimit_title_matches_literal_cap_via_real_renderer(tmp_path, capsys):
+    """Relay inspect path: title capped at 256 with literal suffix 100."""
+    home = tmp_path / ".hermes"
+    bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
+    assert len(bait) < 256
+    title = bait + ("Y" * (356 - len(bait)))
+    assert len(title) == 356
+    _write_blocked_board(home, task_id="t_over_title", title=title, reason="ok")
+
+    exit_code = relay.main(
+        [
+            "--hermes-home",
+            str(home),
+            "--renderer",
+            str(_RENDERER_SCRIPT),
+            "inspect",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    lines = [ln for ln in captured.out.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    line = lines[0]
+    title_span = line.split(" — ", 1)[1].split(" | Blocktyp:", 1)[0]
+    assert "… [truncated, 100 chars omitted]" in title_span
+    assert title_span == (
+        f"`{title[:256]}… [truncated, 100 chars omitted]`"
+    )
