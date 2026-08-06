@@ -21,7 +21,13 @@ class OverlayHarnessActivity : Activity() {
             addView(
                 pill,
                 FrameLayout.LayoutParams(
-                    OverlayGeometry.pillWidthPx(resources.displayMetrics.widthPixels, resources.displayMetrics.density),
+                    // Starts quiet/empty, same as production before any status ever renders.
+                    OverlayGeometry.pillWidthPx(
+                        resources.displayMetrics.widthPixels,
+                        resources.displayMetrics.density,
+                        active = false,
+                        contentVisible = false,
+                    ),
                     OverlayGeometry.pillHeightPx(resources.displayMetrics.density),
                     Gravity.CENTER,
                 ),
@@ -84,6 +90,7 @@ class OverlayHarnessActivity : Activity() {
         val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
             presentation.label == OverlayLabel.PROCESSING ||
             presentation.label == OverlayLabel.UPLOADING
+        val contentVisible = listening || presentation.showMessage
         pill.findViewById<View>(R.id.pill_message).visibility =
             if (presentation.showMessage) View.VISIBLE else View.GONE
         pill.findViewById<OverlayWaveView>(R.id.pill_wave).apply {
@@ -95,6 +102,20 @@ class OverlayHarnessActivity : Activity() {
             contentDescription = getString(textId)
         }
         val semantics = OverlayActionSemantics.from(presentation)
+        // Same state-dependent width as production: generous while active, only as wide as the
+        // visible actions once quiet again.
+        pill.findViewById<View>(R.id.pill_content_column).minimumWidth =
+            if (contentVisible) resources.getDimensionPixelSize(R.dimen.pill_column_min_width) else 0
+        (pill.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
+            params.width = OverlayGeometry.pillWidthPx(
+                resources.displayMetrics.widthPixels,
+                resources.displayMetrics.density,
+                active = listening,
+                secondaryVisible = semantics.secondaryVisible,
+                contentVisible = contentVisible,
+            )
+            pill.layoutParams = params
+        }
         pill.findViewById<ImageButton>(R.id.pill_cancel).apply {
             applyActionState(presentation.cancelEnabled)
             contentDescription = getString(semantics.cancelDescription)

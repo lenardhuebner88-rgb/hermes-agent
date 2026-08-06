@@ -31,6 +31,7 @@
             android:tint="@color/text_primary" />
 
         <FrameLayout
+            android:id="@+id/pill_content_column"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="@dimen/pill_column_margin"
