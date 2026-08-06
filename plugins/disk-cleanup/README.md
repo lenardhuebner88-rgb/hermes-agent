@@ -13,8 +13,19 @@ never needs to remember to call a tool.
 
 | Hook | Behaviour |
 |---|---|
-| `post_tool_call` | When `write_file` / `terminal` / `patch` creates a file matching `test_*`, `tmp_*`, or `*.test.*` inside `HERMES_HOME`, track it silently as `test` / `temp` / `cron-output`. |
+| `post_tool_call` | When `write_file` / `terminal` / `patch` touches a path inside `HERMES_HOME` or `/tmp/hermes-*`, `guess_category()` decides whether to track it silently (see below). |
 | `on_session_end` | If any test files were auto-tracked during this turn, run `quick` cleanup (no prompts). |
+
+Auto-categorisation is **either** by name **or** by location — the two rules are
+independent, and only the name rules produce the `test` category:
+
+| Rule | Category |
+|---|---|
+| Name starts with `test_` or `tmp_` | `test` |
+| Name ends with `.test.py`, `.test.js`, `.test.ts`, `.test.md` (exactly these four — `.test.tsx` / `.test.json` are *not* matched) | `test` |
+| Anything under `$HERMES_HOME/cache/`, regardless of name | `temp` |
+| Anything under `$HERMES_HOME/cron/output/` or `cronjobs/output/`, regardless of name | `cron-output` |
+| Everything else (incl. the excluded top-level dirs below) | not tracked |
 
 Deletion rules (same as the original PR):
 

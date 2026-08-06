@@ -50,16 +50,24 @@ Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
 
 ## Engines (`loops/engines/`, Katalog `loops/models.yaml`)
 
-| engine | Träger | "model"-Feld |
-|---|---|---|
-| claude | `claude -p` (Abo) | Modell-Slug (claude-fable-5, claude-sonnet-5, …) |
-| kimi | kimi-code CLI (Abo, $0) | kimi-code/kimi-for-coding |
-| codex | `codex exec --sandbox danger-full-access` (Abo; workspace-write scheiterte an Worktree-gitdir/STATE_DIR/tmux, 2026-07-05) | gpt-5.5, gpt-5.3-codex |
-| hermes | `hermes -p <profil> -z` (+ HERMES_SANDBOX_MODE=1) | **Hermes-PROFIL** (reviewer→NeuralWatt/glm-5.2, coder→Codex-Pool) |
-| neuralwatt | `hermes -m <model> --provider neuralwatt -z` (+ HERMES_SANDBOX_MODE=1) | NeuralWatt-Modell-Slug (glm-5.2, kimi-k2.7-code, …) |
+| engine | Träger | "model"-Feld | Effort-Transport |
+|---|---|---|---|
+| claude | `claude -p` (Abo) | Modell-Slug (claude-fable-5, claude-opus-5, …) | `--effort`: low/medium/high/xhigh/max |
+| kimi | kimi-code CLI (Abo, $0) | kimi-code/kimi-for-coding, k3 | — |
+| codex | `codex exec --sandbox danger-full-access` (Abo; workspace-write scheiterte an Worktree-gitdir/STATE_DIR/tmux, 2026-07-05) | gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.3-codex | `-c model_reasoning_effort=`: none/low/medium/high/xhigh |
+| hermes | `hermes -p <profil> -z` (+ HERMES_SANDBOX_MODE=1) | **Hermes-PROFIL** (reviewer→NeuralWatt/glm-5.2, coder→Codex-Pool) | — |
+| neuralwatt | `hermes -m <model> --provider neuralwatt -z` (+ HERMES_SANDBOX_MODE=1) | NeuralWatt-Modell-Slug (glm-5.2, kimi-k2.7-code, …) | — |
+| xai | `grok --single` (Abo) | grok-4.5 | `--reasoning-effort`: low/medium/high |
+| alibaba-token-plan | `qwen -p --safe-mode --sandbox` (Abo) | qwen3.8-max-preview | — |
 
-Neue Engine = Modul mit `@register("name")` nach dem Contract
-`run(model, prompt, cwd, timeout_s) -> EngineResult`.
+Neue Engine = Modul mit `@register("name", effort_levels=(…))` nach dem Contract
+`run(model, prompt, cwd, timeout_s, effort=None) -> EngineResult` — der Runner
+übergibt `effort` **positional** als 5. Argument (`loops/runner.py`,
+`_run_phase` → `engines.get_engine(...)`), eine Engine ohne diesen Parameter
+bricht also bei jedem Dispatch. Leeres `effort_levels` = kein Transport; ein
+trotzdem gesetzter Effort ist fail-closed ein Fehler (`validate_effort`), kein
+stiller Drop. Und die Selbst-Registrierung am Ende von `loops/engines/__init__.py`
+braucht die neue `from . import <modul>`-Zeile, sonst ist die Engine unsichtbar.
 
 ## Landung (Stufe 1 — standardmäßig bewusster Schritt)
 
@@ -107,9 +115,12 @@ Custom-Packs leben in `~/.hermes/loops/packs-custom/` (nie im Repo; Namens-Kolli
 mit Repo-Packs = Fehler). Erstellen: im Dashboard „Duplizieren" oder
 `cp -r loops/packs/_blank ~/.hermes/loops/packs-custom/<name>` — Manifest-Schema und
 Pflicht-Konventionen (Platzhalter, last-status, Verbote) erzwingt der Server-Lint bzw.
-`tests/loops` Pack-Lint. Die Meta-Packs **loop-schmiede** (schmiedet neue Packs aus
-eigener Evidenz) und **loop-tuner** (härtet bestehende Prompts evidenzbasiert; Verbote
-dürfen nur schärfer werden) pflegen das System selbst.
+`tests/loops` Pack-Lint. Das Meta-Pack **loop-schmiede** (schmiedet neue Packs aus
+eigener Evidenz) pflegt das System selbst. `loop-tuner` (Prompt-Härtung) ist seit
+2026-07-28 stillgelegt: es liegt als `loops/packs/_retired-loop-tuner/` und ist damit
+weder im Loops-Tab sichtbar (`hermes_cli/control_loops.py:115` überspringt
+`_`-Präfix-Verzeichnisse) noch per `--pack loop-tuner` ladbar (`load_pack` findet
+keine `pack.yaml`). Reaktivieren = zurückbenennen.
 
 ## Teuer gelernte Fallen (nicht wieder einbauen)
 

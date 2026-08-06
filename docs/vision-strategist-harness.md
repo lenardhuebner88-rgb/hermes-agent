@@ -14,7 +14,7 @@ repo-side, callable logic (`hermes_cli/strategist.py`, exposed as
 | Repo logic (propose/reflect/harvest/harvest-watch/digest) | `hermes_cli/strategist.py` | this repo (I1) |
 | CLI surface | `hermes vision strategist --mode propose\|reflect\|harvest\|harvest-watch\|digest` | this repo |
 | Annotation contract (emit/parse) | `hermes_cli/strategist_surface.py` (`format_annotation` / `parse_annotation`) | G1 |
-| Held-proposal surface (read side) | `strategist_surface.held_operator_proposals` + `/api/strategist/proposals` | G1 |
+| Held-proposal surface (read side) | `strategist_surface.held_operator_proposals` + `GET /api/plugins/kanban/strategist/proposals` | G1 |
 | Escalation ledger (input) | `kanban_db.read_escalation_ledger` | Phase 1 (Heiler) |
 | Vision metrics (input) | `~/.hermes/state/vision-metrics.json` | H1 |
 | Budget gate (input) | `agent.account_usage.fetch_account_usage` | existing |

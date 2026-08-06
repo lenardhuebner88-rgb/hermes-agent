@@ -58,13 +58,25 @@ profile_routes:
 
 | Field | Required | Description |
 |---|---|---|
-| `name` | yes | Human-readable route identifier (used in logs). |
 | `platform` | yes | Adapter platform: `discord`, `telegram`, `feishu`, `slack`, … |
-| `profile` | yes | Target profile name (must exist under `~/.hermes/profiles/<name>`). |
+| `profile` | yes | Target profile name. Normalized and syntax-validated at parse time (path-traversal guard); **existence is not checked here**. |
+| `name` | no | Human-readable route identifier, used only in log messages. Defaults to `""`. |
 | `guild_id` | no | Server/guild (Discord). |
 | `chat_id` | no | Channel/group/DM id. |
 | `thread_id` | no | Thread id within a channel. |
 | `enabled` | no | Default `true`; set `false` to disable a route without removing it. |
+
+Only `platform` and `profile` are enforced: `parse_profile_routes` drops a route that is
+missing either of them, or whose `profile` fails `validate_profile_name`, and logs a
+`Skipping profile route …` warning — the gateway still starts. A route with no `name` is
+kept and works; the name only shows up in logs.
+
+> **A typo in `profile` is not a config error.** Route parsing accepts any syntactically
+> valid profile name. If no such profile exists on disk, `_resolve_profile_home_for_source`
+> logs `Profile %r does not exist for source …` and falls back to the **global
+> `HERMES_HOME`** — i.e. the routed community silently shares the default memory/session
+> state instead of getting its own. Check the gateway log after adding a route, or create
+> the profile first.
 
 ## Matching rules
 

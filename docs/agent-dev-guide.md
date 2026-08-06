@@ -1023,16 +1023,29 @@ go to `~/.hermes/skills/.archive/` and are restorable.
 - **Core:** `agent/curator.py` (review loop, auto-transitions, LLM review
   prompt) + `agent/curator_backup.py` (pre-run tar.gz snapshots).
 - **CLI:** `hermes_cli/curator.py` wires `hermes curator <verb>` where
-  verbs are: `status`, `run`, `pause`, `resume`, `pin`, `unpin`,
-  `archive`, `restore`, `prune`, `backup`, `rollback`.
+  verbs are: `status`, `usage`, `run`, `pause`, `resume`, `pin`, `unpin`,
+  `list-unmanaged`, `adopt`, `archive`, `restore`, `list-archived`,
+  `prune`, `backup`, `rollback`.
 - **Telemetry:** `tools/skill_usage.py` owns the sidecar
   `~/.hermes/skills/.usage.json` — per-skill `use_count`, `view_count`,
   `patch_count`, `last_activity_at`, `state` (active / stale /
   archived), `pinned`.
 
 Invariants:
-- Curator only touches skills with `created_by: "agent"` provenance —
-  bundled + hub-installed skills are off-limits.
+- **Hub-installed and external-dir skills are off-limits** — they have an
+  upstream owner (`is_curation_eligible` in `tools/skill_usage.py`).
+- **Bundled built-ins are NOT off-limits by default.** They become
+  curation-eligible whenever `curator.prune_builtins` is on, and that flag
+  **defaults to `True`** (`agent/curator.py:get_prune_builtins`,
+  `tools/skill_usage.py:_prune_builtins_enabled`). Set
+  `curator.prune_builtins: false` to exempt all built-ins. Independent of the
+  flag, the names in `PROTECTED_BUILTIN_SKILLS` (currently `plan`) are never
+  archived or consolidated on any path — they back load-bearing UX.
+- `created_by: "agent"` in `.usage.json` is a **curator-management opt-in
+  flag, not provenance** (see the naming note on
+  `_is_curator_managed_record`). Users can flip it for a manually authored
+  skill via `hermes curator adopt`; `hermes curator list-unmanaged` shows the
+  candidates. Non-bundled skills without that marker stay untracked.
 - Never deletes; max destructive action is archive.
 - Pinned skills are exempt from every auto-transition and from the
   LLM review pass.
@@ -1042,7 +1055,8 @@ Invariants:
 
 Config section (`curator:` in `config.yaml`):
 `enabled`, `interval_hours`, `min_idle_hours`, `stale_after_days`,
-`archive_after_days`, `backup.*`.
+`archive_after_days`, `prune_builtins` (default `true`), `consolidate`,
+`backup.*`.
 
 Full user-facing docs: `website/docs/user-guide/features/curator.md`.
 
@@ -1203,10 +1217,24 @@ automatically scope to the active profile.
    ```
 
 5. **Gateway platform adapters should use token locks** — if the adapter connects with
-   a unique credential (bot token, API key), call `acquire_scoped_lock()` from
-   `gateway.status` in the `connect()`/`start()` method and `release_scoped_lock()` in
+   a unique credential (bot token, API key, phone number), call the `BasePlatformAdapter`
+   helper `self._acquire_platform_lock(scope, identity, resource_desc)` in the
+   `connect()`/`start()` method and `self._release_platform_lock()` in
    `disconnect()`/`stop()`. This prevents two profiles from using the same credential.
-   See `gateway/platforms/telegram.py` for the canonical pattern.
+   ```python
+   if not self._acquire_platform_lock('signal-phone', self.account, 'Signal account'):
+       return False
+   ```
+   The helper (`gateway/platforms/base.py`, `_acquire_platform_lock` /
+   `_release_platform_lock`) wraps `gateway.status.acquire_scoped_lock()` and remembers
+   scope + identity, so the release side needs no arguments; it also owns the
+   `--replace` takeover path (a live cross-`HERMES_HOME` holder may only be replaced
+   when the runner armed this adapter for its initial replace-connect). Canonical
+   examples: `gateway/platforms/signal.py`, `gateway/platforms/weixin.py`,
+   `gateway/platforms/qqbot/adapter.py`. Calling `acquire_scoped_lock()` /
+   `release_scoped_lock()` from `gateway.status` directly still works and survives in
+   older plugin adapters (`plugins/platforms/{feishu,irc,line}/adapter.py`), but it
+   bypasses the takeover path — prefer the base-class helper in new code.
 
 6. **Profile operations are HOME-anchored, not HERMES_HOME-anchored** — `_get_profiles_root()`
    returns `Path.home() / ".hermes" / "profiles"`, NOT `get_hermes_home() / "profiles"`.
@@ -1292,40 +1320,46 @@ def profile_env(tmp_path, monkeypatch):
 ## Testing
 
 **ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly. The script enforces
-hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8,
-`-n auto` xdist workers, in-tree subprocess-isolation plugin). Direct `pytest`
-on a 16+ core developer machine with API keys set diverges from CI in ways
-that have caused multiple "works locally, fails in CI" incidents (and the reverse).
+hermetic environment parity with CI (`env -i` plus an explicit allow-list, so no credential
+var can leak; TZ=UTC, LANG/LC_ALL=C.UTF-8, PYTHONHASHSEED=0, a per-run temp `HERMES_HOME`)
+and runs the suite through the per-file isolation runner `scripts/run_tests_parallel.py`
+— **no xdist**. Direct `pytest` on a developer machine with API keys set diverges from CI
+in ways that have caused multiple "works locally, fails in CI" incidents (and the reverse).
 
 ```bash
 scripts/run_tests.sh                                  # full suite, CI-parity
 scripts/run_tests.sh tests/gateway/                   # one directory
-scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
-scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
-scripts/run_tests.sh --no-isolate tests/foo/          # disable subprocess isolation (faster, for debugging)
+scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test (node id → file + -k)
+scripts/run_tests.sh -v --tb=long                     # bare pytest flags pass through
+scripts/run_tests.sh -j 4 tests/foo/                  # cap parallelism
 scripts/run-affected.sh                               # only the tests your diff touches; skips if none (never the full suite)
 ```
 
-### Subprocess-per-test isolation
+### Per-file isolation
 
-Every test runs in a freshly-spawned Python subprocess via the in-tree plugin
-at `tests/_isolate_plugin.py`. This means module-level dicts/sets and
-ContextVars from one test cannot leak into the next — the historic
-`_reset_module_state` autouse fixture is gone.
+Every test **file** runs in its own freshly-spawned `python -m pytest <file>`
+subprocess (`scripts/run_tests_parallel.py`). Module-level dicts/sets and
+ContextVars cannot leak across files; within one file, tests still share a
+process — that is what `tests/_module_isolation.py` and the autouse fixtures in
+`tests/conftest.py` exist for.
 
 Implementation notes:
 
-- The plugin uses `multiprocessing.get_context("spawn")`, which works on
-  Linux, macOS, and Windows alike (POSIX `fork` is not used).
-- Per-test overhead is ~0.5–1.0s (Python startup + pytest collection). xdist
-  parallelism amortizes this across cores; on a 20-core box the full suite
-  finishes in roughly the same wall time as before, but flake-free.
-- `isolate_timeout` (configured in `pyproject.toml`) caps each test at 30s.
-  Hangs are killed and surfaced as a failure report.
-- Pass `--no-isolate` to disable isolation — useful when debugging a single
-  test interactively, or when you specifically want to verify state leakage.
-- The plugin disables itself in child processes (sentinel envvar
-  `HERMES_ISOLATE_CHILD=1`), so there's no fork-bomb risk.
+- Parallelism is `-j/--jobs`, default `$HERMES_TEST_WORKERS` (the wrapper pins
+  **8**, so a gate run never owns the whole box) or `cpu_count * 2` when the
+  runner is called directly.
+- Per-**file** wall-clock cap is **300s** (`_DEFAULT_FILE_TIMEOUT_SECONDS`),
+  overridable via `--file-timeout` or `HERMES_TEST_FILE_TIMEOUT`. An overrunning
+  file is killed and reported as a failure. There is no per-test timeout.
+- A file that exits non-zero is retried **once** in a fresh subprocess; if the
+  retry passes it counts as passed but is loudly reported as FLAKY
+  (`HERMES_TEST_FILE_RETRIES=0` disables this).
+- `--slice I/N` splits the file set across CI jobs by cached durations
+  (`test_durations.json`); `tests/{integration,e2e,docker}` are skipped by
+  default and have their own jobs.
+- There is **no** `--no-isolate` flag and no `isolate_timeout` ini key — both
+  belonged to an older subprocess-per-*test* plugin that no longer exists.
+  Passing `--no-isolate` forwards it to pytest, which errors out.
 
 ### Why the wrapper (and why the old "just call pytest" doesn't work)
 
@@ -1337,7 +1371,7 @@ Five real sources of local-vs-CI drift the script closes:
 | HOME / `~/.hermes/` | Your real config+auth.json | Temp dir per test |
 | Timezone | Local TZ (PDT etc.) | UTC |
 | Locale | Whatever is set | C.UTF-8 |
-| xdist workers | `-n auto` = all cores | `-n auto` (safe — subprocess isolation prevents cross-worker flakes) |
+| Cross-file state | One process for the whole run — module state leaks between files | One `python -m pytest` subprocess **per file** |
 
 `tests/conftest.py` also enforces points 1-4 as an autouse fixture so ANY pytest
 invocation (including IDE integrations) gets hermetic behavior — but the wrapper
@@ -1346,20 +1380,18 @@ is belt-and-suspenders.
 ### Running without the wrapper (only if you must)
 
 If you can't use the wrapper (e.g. inside an IDE that shells pytest directly),
-at minimum activate the venv. The isolation plugin loads automatically from
-`addopts` in `pyproject.toml`, so you get the same per-test process isolation
-either way.
+at minimum activate the venv — and scope the run to a **single file**. There is no
+isolation plugin in `addopts` (`pyproject.toml` sets only `-m 'not integration'`),
+so a bare `pytest tests/` runs everything in one process and drowns in cross-file
+state leakage that says nothing about your change.
 
 ```bash
 source .venv/bin/activate   # or: source venv/bin/activate
-python -m pytest tests/ -q
+python -m pytest tests/agent/test_foo.py -q
 ```
 
-If you need to bypass isolation for fast feedback while debugging:
-
-```bash
-python -m pytest tests/agent/test_foo.py -q --no-isolate
-```
+For anything wider than one file, go back through `scripts/run_tests.sh` (or
+`scripts/run-affected.sh`) — that is the only path that reproduces CI.
 
 ### Test scope: targeted by default, full suite only nightly
 

@@ -66,12 +66,24 @@ Responses transport receives it only through an explicit request override.
 `NULL` is therefore expected for ordinary workers.
 
 The same transport does set `reasoning.effort` (default `medium`). Tool-heavy
-worker requests can exceed the 50,000-character hook-payload limit, however.
-`AIAgent._sanitize_hook_payload` then replaces the structured request with a
-truncated preview object before plugins run, so `board_facts` has no reliable
-effort field to read. It deliberately leaves `reasoning_effort` as `NULL`
-instead of inferring the transport default, because reasoning can be disabled
-or overridden per request.
+worker requests can exceed the hook-payload limit, however. That limit is not
+fixed at 50,000 characters: `AIAgent._hook_payload_max_chars` reads
+`HERMES_PLUGIN_PAYLOAD_MAX_CHARS` and falls back to `50000`, with a hard floor
+of `1000` for unusable values.
+
+Exceeding it does not immediately cost the effort field.
+`AIAgent._sanitize_hook_payload` shrinks in two stages: it first re-encodes the
+same payload with tighter caps (strings cut to 1000 characters, list items and
+dict keys cut to 50 entries — long `messages` histories are what usually gets
+cut). The request therefore stays a structured object, and a short field such
+as `body.reasoning.effort` normally survives that pass and remains readable.
+
+Only when the shrunken payload is *still* over the limit does the hook receive
+the flat `{"_truncated": true, "original_type": …, "preview": …}` object. Then
+no `body` mapping is left at all and `board_facts` has no effort field to read.
+In that case it deliberately leaves `reasoning_effort` as `NULL` instead of
+inferring the transport default, because reasoning can be disabled or
+overridden per request.
 
 `cache_write_tokens` is also expected to be `NULL` for current
 `openai-codex` Responses usage. The normalizer already accepts Anthropic's
