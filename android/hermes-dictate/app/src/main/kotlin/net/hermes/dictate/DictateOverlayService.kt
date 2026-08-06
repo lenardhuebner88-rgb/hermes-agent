@@ -182,7 +182,7 @@ class DictateOverlayService :
         val density = resources.displayMetrics.density
         val sizePx = (BubbleAppearance.sizeDp(prefs.overlayBubbleSize, prefs.overlayShrinkIdle) * density).toInt()
         val marginPx = edgeMarginPx()
-        val onRight = prefs.overlayBubbleOnRight
+        val x = initialBubbleX(screen, sizePx, marginPx)
         val y = prefs.overlayBubbleY.takeIf { it >= 0 }
             ?.let { BubblePlacement.clampY(it, sizePx, screen, marginPx) }
             ?: BubblePlacement.centeredY(sizePx, screen, marginPx)
@@ -193,8 +193,10 @@ class DictateOverlayService :
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-            x = marginPx
+            // Gravity is fixed from here on: with X free to drag, START vs END would just make
+            // the same coordinates mean different things depending on which edge was last docked.
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
             this.y = y
         }
         overlayParams = params
@@ -227,8 +229,11 @@ class DictateOverlayService :
         )
         params.width = (sizeDp * density).toInt()
         params.height = (sizeDp * density).toInt()
-        params.x = edgeMarginPx()
-        params.y = BubblePlacement.clampY(params.y, params.height, currentScreen(), edgeMarginPx())
+        val screen = currentScreen()
+        // Size can change (idle shrink) without a drag — reclamp the dragged-to X against the
+        // new width instead of resetting it to the edge.
+        params.x = BubblePlacement.clampX(params.x, params.width, screen, edgeMarginPx())
+        params.y = BubblePlacement.clampY(params.y, params.height, screen, edgeMarginPx())
         view.alpha = prefs.overlayBubbleOpacity / 100f
         runCatching { windowManager.updateViewLayout(view, params) }
         overlayView?.takeIf { !expanded }?.setBackgroundResource(
@@ -236,9 +241,11 @@ class DictateOverlayService :
         )
     }
 
-    /** Drag-to-move with edge snap; a plain tap (no meaningful drag) starts/stops dictation. */
+    /** Drag-to-move anywhere on screen; a plain tap (no meaningful drag) starts/stops dictation. */
     private fun wireBubbleTouch(view: View, params: WindowManager.LayoutParams) {
+        var startX = 0
         var startY = 0
+        var startRawX = 0f
         var startRawY = 0f
         var longPressed = false
         val gesture = BubbleGesture(ViewConfiguration.get(this).scaledTouchSlop.toFloat())
@@ -255,7 +262,9 @@ class DictateOverlayService :
         view.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    startX = params.x
                     startY = params.y
+                    startRawX = event.rawX
                     startRawY = event.rawY
                     gesture.begin(event.rawX, event.rawY)
                     longPressed = false
@@ -263,18 +272,16 @@ class DictateOverlayService :
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - startRawX).toInt()
                     val dy = (event.rawY - startRawY).toInt()
                     val moved = gesture.move(event.rawX, event.rawY)
                     if (moved) mainHandler.removeCallbacks(longPress)
                     if (moved) {
-                        // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted Y the
-                        // bubble could otherwise be parked off-screen permanently.
-                        params.y = BubblePlacement.clampY(
-                            startY + dy,
-                            v.height,
-                            currentScreen(),
-                            edgeMarginPx(),
-                        )
+                        // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted
+                        // position the bubble could otherwise be parked off-screen permanently.
+                        val screen = currentScreen()
+                        params.x = BubblePlacement.clampX(startX + dx, v.width, screen, edgeMarginPx())
+                        params.y = BubblePlacement.clampY(startY + dy, v.height, screen, edgeMarginPx())
                         runCatching { windowManager.updateViewLayout(v, params) }
                     }
                     true
@@ -283,7 +290,8 @@ class DictateOverlayService :
                     mainHandler.removeCallbacks(longPress)
                     when (gesture.finish(event.actionMasked == MotionEvent.ACTION_CANCEL, longPressed)) {
                         BubbleGesture.Finish.DRAG -> {
-                            snapToEdge(v, params, event.rawX)
+                            // Free placement: no more edge snap, just persist where it was let go.
+                            prefs.overlayBubbleX = params.x
                             prefs.overlayBubbleY = params.y
                         }
                         BubbleGesture.Finish.TAP -> {
@@ -298,16 +306,6 @@ class DictateOverlayService :
                 else -> false
             }
         }
-    }
-
-    private fun snapToEdge(v: View, params: WindowManager.LayoutParams, lastRawX: Float) {
-        val screen = currentScreen()
-        val onRight = BubblePlacement.isRight(lastRawX, screen.widthPx)
-        prefs.overlayBubbleOnRight = onRight
-        params.gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-        params.x = edgeMarginPx()
-        params.y = BubblePlacement.clampY(params.y, v.height, screen, edgeMarginPx())
-        runCatching { windowManager.updateViewLayout(v, params) }
     }
 
     private fun currentScreen(): BubbleScreen {
@@ -328,12 +326,28 @@ class DictateOverlayService :
 
     private fun edgeMarginPx(): Int = (BUBBLE_EDGE_MARGIN_DP * resources.displayMetrics.density).toInt()
 
+    /**
+     * Once the user has dragged the bubble at least once, [DictatePrefs.overlayBubbleX] is real
+     * and wins; before that, fall back to [BubblePlacement.migratedX] from the legacy edge flag.
+     */
+    private fun initialBubbleX(screen: BubbleScreen, bubbleWidthPx: Int, marginPx: Int): Int {
+        val stored = prefs.overlayBubbleX
+        return if (stored >= 0) {
+            BubblePlacement.clampX(stored, bubbleWidthPx, screen, marginPx)
+        } else {
+            BubblePlacement.migratedX(prefs.overlayBubbleOnRight, bubbleWidthPx, screen, marginPx)
+        }
+    }
+
     private fun applyPillGeometry(view: View, params: WindowManager.LayoutParams) {
         val density = resources.displayMetrics.density
         val screen = currentScreen()
         params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density)
         params.height = OverlayGeometry.pillHeightPx(density)
-        params.x = edgeMarginPx()
+        // Free placement: reclamp the dragged-to X against the pill's (wider) width instead of
+        // resetting to the edge. Gravity is inherited from the bubble's LayoutParams instance
+        // (fixed TOP|START at creation) and intentionally untouched here.
+        params.x = BubblePlacement.clampX(params.x, params.width, screen, edgeMarginPx())
         params.y = BubblePlacement.clampY(params.y, params.height, screen, edgeMarginPx())
         if (view.isAttachedToWindow) runCatching { windowManager.updateViewLayout(view, params) }
     }

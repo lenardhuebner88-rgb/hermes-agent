@@ -80,7 +80,21 @@ class DictatePrefs(context: Context) {
         get() = prefs.getInt("overlay_bubble_y", -1)
         set(value) = prefs.edit().putInt("overlay_bubble_y", value).apply()
 
-    /** Which screen edge the bubble last snapped to. */
+    /**
+     * Remembered horizontal bubble position (px, top-left origin, gravity is fixed TOP|START).
+     * -1 means "never persisted" — the bubble is free to move anywhere now, so there is no more
+     * built-in edge to fall back to; callers must migrate from [overlayBubbleOnRight] instead
+     * (see [DictateOverlayService]).
+     */
+    var overlayBubbleX: Int
+        get() = prefs.getInt("overlay_bubble_x", -1)
+        set(value) = prefs.edit().putInt("overlay_bubble_x", value).apply()
+
+    /**
+     * Legacy edge flag from before free dragging. Read-only from here on — only used once, to
+     * migrate a pre-update install's docked side into an initial [overlayBubbleX] so it doesn't
+     * jump to the left edge on first launch after the update.
+     */
     var overlayBubbleOnRight: Boolean
         get() = prefs.getBoolean("overlay_bubble_on_right", true)
         set(value) = prefs.edit().putBoolean("overlay_bubble_on_right", value).apply()
