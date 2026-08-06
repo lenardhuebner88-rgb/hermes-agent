@@ -52,8 +52,12 @@ scripts/refactor/fork_loss_check.py
 scripts/refactor/layering.py
 scripts/refactor/split_module.py
 scripts/refactor/upstream_divergence.py
+# External callers (not visible to the static repo scanner):
+# /home/piet/vault/_agents/_shared/prompts/role-hermes.md:34-38,55-58
 scripts/relay_kanban_escalation_lines.py
 scripts/render_autoresearch_dashboard.py
+# External callers (not visible to the static repo scanner):
+# /home/piet/vault/_agents/_shared/prompts/role-hermes.md:34-38,55-58
 scripts/render_kanban_escalation_lines.py
 scripts/replay_autoresearch_outcomes.py
 scripts/retention_reap.py

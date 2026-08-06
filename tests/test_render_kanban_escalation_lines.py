@@ -113,8 +113,8 @@ def test_renders_block_kind_and_latest_reason_verbatim_for_every_board(tmp_path)
         "observability-sentinel",
     ):
         assert (
-            f"[{slug}] t_{slug} — Title {slug} | Blocktyp: needs_input | "
-            f"Grund: literal | {slug} | Operator-Halt: nein"
+            f"[{slug}] t_{slug} — `Title {slug}` | Blocktyp: needs_input | "
+            f"Grund: `literal | {slug}` | Operator-Halt: nein"
         ) in lines
 
 
@@ -127,8 +127,8 @@ def test_missing_block_kind_is_explicit_and_reason_uses_repo_cap_convention(tmp_
     lines = renderer.render_all_boards(home, reason_limit=10)
 
     assert lines == [
-        "[default] t_born — Born blocked | Blocktyp: fehlt | "
-        "Grund: 0123456789… [truncated, 6 chars omitted] | Operator-Halt: nein"
+        "[default] t_born — `Born blocked` | Blocktyp: fehlt | "
+        "Grund: `0123456789… [truncated, 6 chars omitted]` | Operator-Halt: nein"
     ]
 
 
@@ -161,7 +161,7 @@ def test_operator_halt_matches_latest_product_event_rule(tmp_path):
     assert by_task["t_resolved"].endswith("Operator-Halt: nein")
     assert by_task["t_nonspawnable"].endswith("Operator-Halt: nein")
     assert by_task["t_reblocked"].endswith("Operator-Halt: nein")
-    assert "Grund: unrelated later block" in by_task["t_reblocked"]
+    assert "Grund: `unrelated later block`" in by_task["t_reblocked"]
 
 
 def test_main_returns_zero_for_empty_boards_without_modifying_them(tmp_path, capsys):
@@ -193,3 +193,205 @@ def test_main_returns_nonzero_when_a_board_cannot_be_read(tmp_path, capsys):
     assert captured.out == ""
     assert "default" in captured.err
     assert "kanban.db" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Security: process-safe + normalize + cap-before-wrap + inline code spans
+# ---------------------------------------------------------------------------
+
+_PIET_NPUB = (
+    "npub1g8hwuesqexeqw3l5x0xh9h8z8l5kq5n6z8example000000000000000000"
+)
+# Valid-looking bech32 npub (32-byte payload encoded) used only as bait text.
+_VALID_BAIT_NPUB = (
+    "npub1sg6plzptd64u62a878hep2kev88swjh3tw00gjsfl8f237lmu63q0ug09x"
+)
+
+
+def _hostile_bait(separator: str = "\n") -> str:
+    return f"@Piet{separator}nostr:{_VALID_BAIT_NPUB}{separator}tick`here"
+
+
+def test_security_hostile_title_is_single_line_closed_code_span(tmp_path):
+    home = tmp_path / ".hermes"
+    title = _hostile_bait("\n")
+    db = _write_board(home, "default", [("t_hostile_title", title, "needs_input")])
+    _append_event(db, "t_hostile_title", "blocked", {"reason": "plain"})
+
+    lines = renderer.render_all_boards(home)
+
+    assert len(lines) == 1
+    line = lines[0]
+    assert "\n" not in line
+    # Title is one closed inline-code span; bait markers survive only as text.
+    assert " — `" in line
+    assert "` | Blocktyp:" in line
+    title_span = line.split(" — ", 1)[1].split(" | Blocktyp:", 1)[0]
+    assert title_span.startswith("`") and title_span.endswith("`")
+    assert title_span.count("`") == 2  # opening + closing only
+    assert "@Piet" in title_span
+    assert "nostr:" in title_span
+    assert "`" not in title_span[1:-1]  # backticks neutralized inside span
+
+
+def test_security_hostile_reason_is_single_line_closed_code_span(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_hostile_reason", "Safe title", "needs_input")])
+    _append_event(
+        db, "t_hostile_reason", "blocked", {"reason": _hostile_bait("\n")}
+    )
+
+    lines = renderer.render_all_boards(home)
+    line = lines[0]
+    assert "\n" not in line
+    reason_span = line.split("Grund: ", 1)[1].split(" | Operator-Halt:", 1)[0]
+    assert reason_span.startswith("`") and reason_span.endswith("`")
+    assert reason_span.count("`") == 2
+    assert "@Piet" in reason_span
+    assert "nostr:" in reason_span
+
+
+def test_security_hostile_reason_crlf_is_single_line_closed_code_span(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_crlf", "Safe title", "needs_input")])
+    _append_event(
+        db, "t_crlf", "blocked", {"reason": _hostile_bait("\r\n")}
+    )
+
+    lines = renderer.render_all_boards(home)
+    line = lines[0]
+    assert "\n" not in line and "\r" not in line
+    reason_span = line.split("Grund: ", 1)[1].split(" | Operator-Halt:", 1)[0]
+    assert reason_span.startswith("`") and reason_span.endswith("`")
+    assert reason_span.count("`") == 2
+
+
+def test_security_overlimit_reason_keeps_closed_span_with_bait_before_cut(tmp_path):
+    """Cap-before-wrap: bait before the cut must stay inside a closed span."""
+    home = tmp_path / ".hermes"
+    bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
+    # Ensure bait sits before DEFAULT_REASON_LIMIT (500).
+    assert len(bait) < renderer.DEFAULT_REASON_LIMIT
+    filler = "X" * (renderer.DEFAULT_REASON_LIMIT + 50)
+    reason = bait + filler
+    db = _write_board(home, "default", [("t_over_reason", "Safe", "needs_input")])
+    _append_event(db, "t_over_reason", "blocked", {"reason": reason})
+
+    lines = renderer.render_all_boards(home)
+    line = lines[0]
+    reason_span = line.split("Grund: ", 1)[1].split(" | Operator-Halt:", 1)[0]
+    assert reason_span.startswith("`") and reason_span.endswith("`")
+    assert reason_span.count("`") == 2
+    assert "@Piet" in reason_span
+    assert "nostr:" in reason_span
+    assert "truncated" in reason_span
+    # Closing backtick is the last char of the span — wrap after cap.
+    assert reason_span[-1] == "`"
+
+
+def test_security_overlimit_title_keeps_closed_span_with_bait_before_cut(tmp_path):
+    home = tmp_path / ".hermes"
+    bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
+    assert len(bait) < renderer.DEFAULT_TITLE_LIMIT
+    title = bait + ("Y" * (renderer.DEFAULT_TITLE_LIMIT + 40))
+    db = _write_board(home, "default", [("t_over_title", title, "needs_input")])
+    _append_event(db, "t_over_title", "blocked", {"reason": "ok"})
+
+    lines = renderer.render_all_boards(home)
+    line = lines[0]
+    title_span = line.split(" — ", 1)[1].split(" | Blocktyp:", 1)[0]
+    assert title_span.startswith("`") and title_span.endswith("`")
+    assert title_span.count("`") == 2
+    assert "@Piet" in title_span
+    assert "nostr:" in title_span
+    assert "truncated" in title_span
+    assert title_span[-1] == "`"
+
+
+def test_process_safe_replaces_nul_and_lone_surrogates():
+    raw = "pre\x00mid\ud800end\udfff"
+    safe = renderer._process_safe(raw)
+    assert "\x00" not in safe
+    assert safe.encode("utf-8")  # must not raise
+    assert "\ufffd" in safe
+    assert safe.count("\ufffd") == 3
+
+
+def test_process_safe_nul_title_and_surrogate_reason_roundtrip_in_line(tmp_path):
+    home = tmp_path / ".hermes"
+    title = "nul\x00title"
+    # Surrogate must be injected the way JSON round-trips it into Python str.
+    reason = json.loads('"reason\\u0000and\\ud800surrogate"')
+    db = _write_board(home, "default", [("t_proc", title, "needs_input")])
+    _append_event(db, "t_proc", "blocked", {"reason": reason})
+
+    lines = renderer.render_all_boards(home)
+    line = lines[0]
+    assert "\x00" not in line
+    line.encode("utf-8")  # argv-survivable
+    assert "\ufffd" in line
+
+
+# ---------------------------------------------------------------------------
+# Darstellung: exotic separators collapse to one display line (not security)
+# ---------------------------------------------------------------------------
+
+def test_display_carriage_return_alone_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_cr", "Safe", "needs_input")])
+    _append_event(db, "t_cr", "blocked", {"reason": "a\rb"})
+
+    lines = renderer.render_all_boards(home)
+    assert len(lines) == 1
+    assert "\r" not in lines[0]
+    assert "Grund: `a b`" in lines[0]
+
+
+def test_display_vertical_tab_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_vt", "Safe", "needs_input")])
+    _append_event(db, "t_vt", "blocked", {"reason": "a\x0bb"})
+
+    lines = renderer.render_all_boards(home)
+    assert "\x0b" not in lines[0]
+    assert "Grund: `a b`" in lines[0]
+
+
+def test_display_form_feed_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_ff", "Safe", "needs_input")])
+    _append_event(db, "t_ff", "blocked", {"reason": "a\x0cb"})
+
+    lines = renderer.render_all_boards(home)
+    assert "\x0c" not in lines[0]
+    assert "Grund: `a b`" in lines[0]
+
+
+def test_display_nel_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_nel", "Safe", "needs_input")])
+    _append_event(db, "t_nel", "blocked", {"reason": "a\u0085b"})
+
+    lines = renderer.render_all_boards(home)
+    assert "\u0085" not in lines[0]
+    assert "Grund: `a b`" in lines[0]
+
+
+def test_display_line_separator_u2028_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_ls", "Safe", "needs_input")])
+    _append_event(db, "t_ls", "blocked", {"reason": "a\u2028b"})
+
+    lines = renderer.render_all_boards(home)
+    assert "\u2028" not in lines[0]
+    assert "Grund: `a b`" in lines[0]
+
+
+def test_display_paragraph_separator_u2029_collapses_to_one_line(tmp_path):
+    home = tmp_path / ".hermes"
+    db = _write_board(home, "default", [("t_ps", "Safe", "needs_input")])
+    _append_event(db, "t_ps", "blocked", {"reason": "a\u2029b"})
+
+    lines = renderer.render_all_boards(home)
+    assert "\u2029" not in lines[0]
+    assert "Grund: `a b`" in lines[0]

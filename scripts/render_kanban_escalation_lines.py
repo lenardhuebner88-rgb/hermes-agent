@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, NamedTuple, Sequence
 
 DEFAULT_REASON_LIMIT = 500
+DEFAULT_TITLE_LIMIT = 256
 MISSING = "fehlt"
+# Visible stand-in for process-unsafe scalars (NUL, lone surrogates) so argv
+# survives and a reader can see that something stood there.
+_PROCESS_UNSAFE_REPLACEMENT = "\uFFFD"
 
 
 class BoardDatabase(NamedTuple):
@@ -40,6 +44,49 @@ def _cap_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + f"… [truncated, {len(value) - limit} chars omitted]"
+
+
+def _process_safe(value: str) -> str:
+    """Replace NUL and lone surrogates so the text survives argv encoding.
+
+    Both classes raise before buzz is ever called when passed as one argv
+    element to ``subprocess.run`` (``ValueError: embedded null byte`` /
+    ``UnicodeEncodeError: surrogates not allowed``). Surrogates are detected
+    via the encode failure path rather than a hand-maintained range list
+    alone: the property that must hold is ``text.encode("utf-8")`` succeeds
+    and the result contains no ``\\x00``.
+    """
+    out: list[str] = []
+    for ch in value:
+        code = ord(ch)
+        if code == 0 or 0xD800 <= code <= 0xDFFF:
+            out.append(_PROCESS_UNSAFE_REPLACEMENT)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _normalize_field(value: str) -> str:
+    """Make a worker-controlled field safe for one-line argv delivery.
+
+    Order is load-bearing (see V1 Meldepfad Done-when 3):
+    1. process-safe (NUL / lone surrogates → visible replacement)
+    2. collapse every ``splitlines()`` boundary to a single ASCII space
+    3. neutralize ASCII backticks so the later inline-code span stays closed
+    Cap and wrap are applied by the caller after this step.
+    """
+    text = _process_safe(str(value))
+    # splitlines() covers \\n, \\r, CRLF, VT, FF, NEL, U+2028, U+2029.
+    text = " ".join(text.splitlines())
+    text = text.replace("`", "'")
+    return text
+
+
+def _field_for_line(value: str, limit: int) -> str:
+    """Normalize → cap → wrap. Cap-before-wrap keeps the closing backtick."""
+    text = _normalize_field(value)
+    text = _cap_text(text, limit)
+    return f"`{text}`"
 
 
 def discover_board_databases(hermes_home: Path) -> list[BoardDatabase]:
@@ -119,7 +166,12 @@ def _reason_from_payload(raw: str | None) -> str:
     return str(reason)
 
 
-def render_board(board: BoardDatabase, *, reason_limit: int) -> list[str]:
+def render_board(
+    board: BoardDatabase,
+    *,
+    reason_limit: int,
+    title_limit: int = DEFAULT_TITLE_LIMIT,
+) -> list[str]:
     """Render every blocked card from one board snapshot."""
     try:
         snapshot = _copy_readonly_snapshot(board.database)
@@ -140,10 +192,13 @@ def render_board(board: BoardDatabase, *, reason_limit: int) -> list[str]:
     lines: list[str] = []
     for row in rows:
         block_kind = MISSING if row["block_kind"] is None else str(row["block_kind"])
-        reason = _cap_text(_reason_from_payload(row["blocked_payload"]), reason_limit)
+        title = _field_for_line(str(row["title"]), title_limit)
+        reason = _field_for_line(
+            _reason_from_payload(row["blocked_payload"]), reason_limit
+        )
         operator_halt = "ja" if row["halt_event"] == "operator_escalation" else "nein"
         lines.append(
-            f"[{board.slug}] {row['id']} — {row['title']} | "
+            f"[{board.slug}] {row['id']} — {title} | "
             f"Blocktyp: {block_kind} | Grund: {reason} | "
             f"Operator-Halt: {operator_halt}"
         )
@@ -151,14 +206,23 @@ def render_board(board: BoardDatabase, *, reason_limit: int) -> list[str]:
 
 
 def render_all_boards(
-    hermes_home: Path, *, reason_limit: int = DEFAULT_REASON_LIMIT
+    hermes_home: Path,
+    *,
+    reason_limit: int = DEFAULT_REASON_LIMIT,
+    title_limit: int = DEFAULT_TITLE_LIMIT,
 ) -> list[str]:
     """Render blocked cards from every configured board."""
     if reason_limit < 0:
         raise ValueError("reason_limit must not be negative")
+    if title_limit < 0:
+        raise ValueError("title_limit must not be negative")
     lines: list[str] = []
     for board in discover_board_databases(hermes_home):
-        lines.extend(render_board(board, reason_limit=reason_limit))
+        lines.extend(
+            render_board(
+                board, reason_limit=reason_limit, title_limit=title_limit
+            )
+        )
     return lines
 
 

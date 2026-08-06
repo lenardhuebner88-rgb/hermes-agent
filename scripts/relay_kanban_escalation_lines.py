@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+import os
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 
-DEFAULT_CHANNEL = "board-eskalation"
+# Buzz CLI requires a UUID; the slug "board-eskalation" is rejected as invalid UUID.
+DEFAULT_CHANNEL = "7abf1e2a-6629-4ec2-b549-b4833a13a60f"
+
+# Inherited from a buzz-acp turn these make the second ``messages send`` in the
+# same turn report exit 0 with recovered:true and never hit the network.
+_RECOVERY_ENV_KEYS = (
+    "BUZZ_ACP_RECOVERY_PATH",
+    "BUZZ_ACP_SOURCE_EVENT_IDS",
+)
 
 
 def render_or_report(
@@ -82,14 +92,28 @@ def run_wakeup(
     return 0
 
 
+def _send_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Copy the process env without buzz-acp reply-recovery keys."""
+    env = dict(base if base is not None else os.environ)
+    for key in _RECOVERY_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
 def send_buzz_message(
     content: str,
     *,
     buzz: str,
     channel: str,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    env: Mapping[str, str] | None = None,
 ) -> None:
-    """Send ``content`` as one argv value so no shell or model can rewrite it."""
+    """Send ``content`` as one argv value so no shell or model can rewrite it.
+
+    Recovery env vars are stripped so multiple card posts in one Board turn
+    each reach the network; exit 0 alone is not enough when the CLI returns
+    ``recovered:true``.
+    """
     command = [
         buzz,
         "messages",
@@ -99,11 +123,23 @@ def send_buzz_message(
         "--content",
         content,
     ]
-    result = run(command, capture_output=True, text=True, check=False)
+    clean_env = _send_env(env)
+    result = run(command, capture_output=True, text=True, check=False, env=clean_env)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         suffix = f": {detail}" if detail else ""
         raise RuntimeError(f"buzz message send failed (Exit {result.returncode}){suffix}")
+    stdout = (result.stdout or "").strip()
+    if not stdout:
+        return
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return
+    if isinstance(payload, dict) and payload.get("recovered") is True:
+        raise RuntimeError(
+            "buzz message send recovered prior acknowledgement; network send suppressed"
+        )
 
 
 def _load_renderer(script_path: Path) -> ModuleType:
