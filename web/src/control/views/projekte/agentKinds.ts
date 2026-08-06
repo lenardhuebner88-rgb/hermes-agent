@@ -2,14 +2,14 @@
 // Identity colors use the DATA palette (DESIGN.md W6-4) — never status/bronze.
 import type { LucideIcon } from "lucide-react";
 import {
-  Bot,
+  Braces,
   CircleHelp,
+  Feather,
   KanbanSquare,
-  RefreshCw,
-  Server,
+  Orbit,
+  Repeat,
   Sparkles,
-  Terminal,
-  Wind,
+  Waypoints,
   Zap,
 } from "lucide-react";
 import type { ProjectAgent, ProjectAgentKind } from "../../lib/schemas";
@@ -45,13 +45,13 @@ export const PROJECT_AGENT_KIND_ORDER: readonly ProjectAgentKind[] = [
  */
 export const AGENT_KIND_STYLES: Record<ProjectAgentKind, AgentKindStyle> = {
   claude: { label: labels.claude, icon: Sparkles, tone: "text-data-1" },
-  codex: { label: labels.codex, icon: Terminal, tone: "text-data-4" },
-  kimi: { label: labels.kimi, icon: Bot, tone: "text-data-5" },
+  codex: { label: labels.codex, icon: Braces, tone: "text-data-4" },
+  kimi: { label: labels.kimi, icon: Orbit, tone: "text-data-5" },
   grok: { label: labels.grok, icon: Zap, tone: "text-data-3" },
-  qwen: { label: labels.qwen, icon: Wind, tone: "text-data-7" },
-  hermes: { label: labels.hermes, icon: Server, tone: "text-data-2" },
+  qwen: { label: labels.qwen, icon: Feather, tone: "text-data-7" },
+  hermes: { label: labels.hermes, icon: Waypoints, tone: "text-data-2" },
   kanban: { label: labels.kanban, icon: KanbanSquare, tone: "text-data-6" },
-  loop: { label: labels.loop, icon: RefreshCw, tone: "text-ink-2" },
+  loop: { label: labels.loop, icon: Repeat, tone: "text-ink-2" },
   unknown: { label: labels.unknown, icon: CircleHelp, tone: "text-ink-3" },
 };
 
