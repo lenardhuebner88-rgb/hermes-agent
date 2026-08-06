@@ -23237,11 +23237,16 @@ def _claude_cli_activity_age_seconds(
 
     Activity = the per-task stdout log mtime or the Claude session
     transcript mtime, whichever is newer. Both are stat-only probes (no
-    file body is ever read). Returns ``None`` when NO signal exists —
-    unknown workspace, absent transcript dir, unreadable log — which
-    callers must treat as "cannot judge", never as "stalled": withholding
-    a heartbeat on an unobservable worker would eventually hand a healthy
-    run to the terminate/reclaim backstop.
+    file body is ever read). A 0-byte log is NOT a signal: with
+    ``--output-format json`` the log is created at spawn and flushed only
+    at exit, so its mtime is just "time since spawn" — counting it would
+    withhold + eventually reclaim a perfectly healthy worker whenever the
+    transcript is unobservable (e.g. CLAUDE_CONFIG_DIR drift between
+    dispatcher and worker). Returns ``None`` when no signal exists —
+    unknown workspace, absent transcript, empty log — which callers must
+    treat as "cannot judge", never as "stalled": withholding a heartbeat
+    on an unobservable worker would eventually hand a healthy run to the
+    terminate/reclaim backstop.
     """
     try:
         now_i = int(time.time()) if now is None else int(now)
@@ -23249,7 +23254,8 @@ def _claude_cli_activity_age_seconds(
         if task_id:
             try:
                 st = (worker_logs_dir(board=board) / f"{task_id}.log").stat()
-                newest = int(st.st_mtime)
+                if int(st.st_size) > 0:
+                    newest = int(st.st_mtime)
             except OSError:
                 pass
         activity = _claude_jsonl_activity(workspace_path)

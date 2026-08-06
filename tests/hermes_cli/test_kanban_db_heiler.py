@@ -368,6 +368,113 @@ def test_claude_cli_heartbeat_failopen_without_any_activity_signal(
         assert kb.get_task(conn, t).last_heartbeat_at >= now
 
 
+def test_claude_cli_heartbeat_zero_byte_log_carries_no_signal(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """A 0-byte per-task log is spawn noise, not activity: with
+    ``--output-format json`` it is created at spawn and flushed only at
+    exit. Counting its mtime would withhold + reclaim a HEALTHY worker
+    ~90 min after spawn whenever the transcript is unobservable
+    (CLAUDE_CONFIG_DIR drift). Empty log + no transcript = no signal =
+    legacy beat (fail-open)."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4264,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        empty_log = log_dir / f"{t}.log"
+        empty_log.write_text("")
+        # mtime deliberately ancient: the size gate, not the mtime, decides.
+        os.utime(empty_log, (now - 10_000, now - 10_000))
+
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        assert kb.get_task(conn, t).last_heartbeat_at >= now
+
+
+def test_claude_cli_heartbeat_stale_nonempty_log_withholds(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """The log IS a signal once it carries content (streaming configs): a
+    stale non-empty log with no transcript withholds the beat."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4265,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        log_dir = kb.worker_logs_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log = log_dir / f"{t}.log"
+        log.write_text("partial output\n")
+        os.utime(log, (now - (kb._CLAUDE_CLI_HEARTBEAT_STALL_SECONDS + 300),) * 2)
+
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+
+
+def test_claude_cli_withhold_then_stale_backstop_reclaims(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Link contract: withhold → heartbeat ages past the 1h backstop →
+    release_stale_claims terminates + reclaims the wedged worker. This is
+    the reaper the unconditional PID heartbeat had silently disabled."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4266,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        _seed_claude_transcript(
+            monkeypatch, tmp_path, str(workspace),
+            body='{"type":"assistant"}\n',
+            mtime=now - (kb._CLAUDE_CLI_HEARTBEAT_STALL_SECONDS + 300),
+        )
+        # Step 1: the stall gate withholds the beat.
+        assert kb.heartbeat_live_claude_cli_workers(conn) == []
+
+        # Step 2: heartbeat + claim age past the backstop thresholds.
+        stale_hb = now - (kb.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS + 60)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET last_heartbeat_at = ?, claim_expires = ? "
+                "WHERE id = ?",
+                (stale_hb, now - 10, t),
+            )
+        # Termination seam: group probe goes through _pid_alive when a
+        # signal_fn seam is supplied — report the process gone.
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+        reclaimed = kb.release_stale_claims(conn, signal_fn=lambda _p, _s: None)
+        assert reclaimed == 1
+        assert kb.get_task(conn, t).status != "running"
+
+
 def test_claude_cli_heartbeat_note_failsoft_without_log(kanban_home, monkeypatch):
     """No worker log → the note degrades to the honest base, never raises."""
     import hermes_cli.kanban_db as _kb
