@@ -115,6 +115,21 @@ class DictationController(
 
     private var emptyRounds = 0
     private var busyRestarts = 0
+
+    /**
+     * The most recent raw partial from the recognizer, kept so that stopping can salvage it.
+     *
+     * Without this, tapping confirm mid-sentence could lose everything that had already been
+     * spoken AND shown on screen: `stopListening()` often answers with ERROR_NO_MATCH rather
+     * than a final result, and the STOPPING branches below used to answer any such failure with
+     * ClearPreview + Idle — no text, no message, no trace. The user saw their words in the pill
+     * and then saw them vanish.
+     *
+     * Raw, not the transformed preview: salvaging re-runs the full `transform`, so a rescued
+     * segment is formatted exactly like a normal final — and a spoken command ("rückgängig")
+     * still acts as a command instead of being committed as literal text.
+     */
+    private var pendingPartial = ""
     private var uploadToken = 0
     private var retryAvailable = false
     private var retryConsumed = false
@@ -123,6 +138,7 @@ class DictationController(
         Phase.IDLE -> {
             emptyRounds = 0
             busyRestarts = 0
+            pendingPartial = ""
             if (mode == Mode.CLOUD) {
                 phase = Phase.RECORDING
                 listOf(Cmd.StartRecording, Cmd.Status(UiStatus.Recording))
@@ -156,10 +172,32 @@ class DictationController(
         if (phase != Phase.LISTENING && phase != Phase.STOPPING) return emptyList()
         val result = (previewTransform ?: transform)(text)
         return if (result is DictationTransform.Text && result.value.isNotEmpty()) {
+            pendingPartial = text
             listOf(Cmd.Preview(result.value))
         } else {
             emptyList()
         }
+    }
+
+    /**
+     * End a stop that produced no final text — rescuing the last partial if there was one.
+     *
+     * The old behaviour here was ClearPreview + Idle for every such case, justified as "the user
+     * already asked to stop, so end quietly". Quietly is right; empty-handed is not. If the
+     * recognizer already delivered a partial, that text was spoken and was on screen, so it gets
+     * committed like any other segment. Only with genuinely nothing in hand do we fall back to
+     * the silent close.
+     */
+    private fun finishStopSalvagingPartial(): List<Cmd> {
+        phase = Phase.IDLE
+        val salvaged = pendingPartial
+        pendingPartial = ""
+        if (salvaged.isEmpty()) return listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
+        val result = transform(salvaged)
+        if (result is DictationTransform.Text && result.value.isEmpty()) {
+            return listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
+        }
+        return commandsFor(result) + Cmd.Status(UiStatus.Done)
     }
 
     fun recognizerFinal(text: String): List<Cmd> = when (phase) {
@@ -169,15 +207,19 @@ class DictationController(
                 emptySegmentRound()
             } else {
                 emptyRounds = 0
+                pendingPartial = ""
                 commandsFor(result) + Cmd.StartRecognizer
             }
         }
         Phase.STOPPING -> {
-            phase = Phase.IDLE
             val result = transform(text)
             if (result is DictationTransform.Text && result.value.isEmpty()) {
-                listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
+                // An empty final does not mean nothing was said — the recognizer often returns
+                // one after stopListening() even though it already delivered partials.
+                finishStopSalvagingPartial()
             } else {
+                phase = Phase.IDLE
+                pendingPartial = ""
                 commandsFor(result) + Cmd.Status(UiStatus.Done)
             }
         }
@@ -200,9 +242,10 @@ class DictationController(
             RecognizerFailure.OTHER -> failStop(ErrorKind.RECOGNIZER_OTHER)
         }
         Phase.STOPPING -> {
-            // The user already asked to stop; whatever went wrong, just end quietly.
-            phase = Phase.IDLE
-            listOf(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle))
+            // The user already asked to stop, so no error is surfaced — but "quietly" must not
+            // mean "empty-handed". stopListening() answering ERROR_NO_MATCH is the single most
+            // likely way to get here, and it is exactly the case where a partial is in hand.
+            finishStopSalvagingPartial()
         }
         else -> emptyList()
     }
@@ -287,6 +330,9 @@ class DictationController(
     fun interrupted(): List<Cmd> = when (phase) {
         Phase.LISTENING, Phase.STOPPING -> {
             phase = Phase.IDLE
+            // The service already finalized the composing preview into committed text before
+            // calling this, so salvaging here would commit the same words a second time.
+            pendingPartial = ""
             listOf(Cmd.CancelRecognizer, Cmd.Status(UiStatus.Idle))
         }
         Phase.RECORDING, Phase.WAITING_FILE -> {
@@ -307,6 +353,7 @@ class DictationController(
             Phase.LISTENING, Phase.STOPPING -> {
                 cmds += Cmd.CancelRecognizer
                 cmds += Cmd.ClearPreview
+                pendingPartial = ""
             }
             Phase.RECORDING, Phase.WAITING_FILE -> cmds += Cmd.AbortRecording
             Phase.UPLOADING -> uploadToken += 1
@@ -320,6 +367,7 @@ class DictationController(
 
     private fun emptySegmentRound(): List<Cmd> {
         emptyRounds += 1
+        pendingPartial = ""
         return if (emptyRounds >= MAX_EMPTY_ROUNDS) {
             phase = Phase.IDLE
             listOf(Cmd.ClearPreview, Cmd.CancelRecognizer, Cmd.Status(UiStatus.Failed(ErrorKind.NO_SPEECH)))
@@ -336,6 +384,7 @@ class DictationController(
 
     private fun failStop(kind: ErrorKind): List<Cmd> {
         phase = Phase.IDLE
+        pendingPartial = ""
         return listOf(Cmd.ClearPreview, Cmd.CancelRecognizer, Cmd.Status(UiStatus.Failed(kind)))
     }
 

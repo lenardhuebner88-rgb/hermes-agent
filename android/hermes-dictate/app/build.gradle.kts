@@ -18,8 +18,8 @@ android {
         targetSdk = 37
         // Settings screen rebuilt greenfield in Compose (audit 2026-08-06: overflowing
         // RadioGroup + stale login button, both structural to the old View layout).
-        versionCode = 9
-        versionName = "1.8"
+        versionCode = 10
+        versionName = "1.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
