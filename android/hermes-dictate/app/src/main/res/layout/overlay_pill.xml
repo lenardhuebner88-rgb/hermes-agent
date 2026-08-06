@@ -83,6 +83,19 @@
             </LinearLayout>
         </FrameLayout>
 
+        <!-- Icon-only undo, visible only in the short window after a commit. Separate from
+             pill_confirm, which now always shows the plain "done" checkmark. -->
+        <ImageButton
+            android:id="@+id/pill_undo"
+            android:layout_width="@dimen/overlay_touch_target"
+            android:layout_height="@dimen/overlay_touch_target"
+            android:background="@drawable/bg_pill_action"
+            android:contentDescription="@string/overlay_undo_desc"
+            android:padding="@dimen/overlay_icon_inset"
+            android:src="@drawable/ic_undo"
+            android:tint="@color/text_primary"
+            android:visibility="gone" />
+
         <ImageButton
             android:id="@+id/pill_confirm"
             android:layout_width="@dimen/overlay_touch_target"

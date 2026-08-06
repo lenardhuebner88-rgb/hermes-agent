@@ -1,14 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Idle state: a small draggable mic bubble. Same visuals as the IME's mic key so the two
-     entry points feel like one product. Every measurement comes from values/dimens.xml. -->
-<ImageButton
+     entry points feel like one product. Every measurement comes from values/dimens.xml.
+
+     bubble_mic is a plain (non-clickable) ImageView so all touches still reach the root's
+     OnTouchListener — see DictateOverlayService.wireBubbleTouch, which is wired on this root
+     view exactly as it was on the old single-ImageButton layout. bubble_ring draws a
+     level-reactive ring while the mic is open; it is invisible at rest. -->
+<FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:id="@+id/bubble_mic"
+    android:id="@+id/bubble_root"
     android:layout_width="@dimen/bubble_size"
     android:layout_height="@dimen/bubble_size"
-    android:background="@drawable/bg_bubble"
-    android:src="@drawable/ic_mic"
-    android:tint="@color/accent"
-    android:padding="@dimen/overlay_icon_inset"
     android:contentDescription="@string/overlay_bubble_desc"
-    android:elevation="@dimen/overlay_elevation" />
+    android:elevation="@dimen/overlay_elevation">
+
+    <net.hermes.dictate.BubbleRingView
+        android:id="@+id/bubble_ring"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:importantForAccessibility="no" />
+
+    <ImageView
+        android:id="@+id/bubble_mic"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@drawable/bg_bubble"
+        android:src="@drawable/ic_mic"
+        android:tint="@color/accent"
+        android:padding="@dimen/overlay_icon_inset"
+        android:clickable="false"
+        android:focusable="false"
+        android:importantForAccessibility="no" />
+</FrameLayout>

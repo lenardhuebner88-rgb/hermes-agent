@@ -74,12 +74,25 @@ class OverlayViewStateTest {
     }
 
     @Test
+    fun `done shows no text row, just the confirm checkmark, and offers undo as a separate action`() {
+        val committed = state(UiStatus.Done, committed = "Finaler Satz.")
+        assertEquals(OverlayConfirmAction.NONE, committed.confirmAction)
+        assertEquals(OverlayConfirmAction.UNDO, committed.secondaryAction)
+        assertFalse(committed.showMessage)
+
+        val withoutCommit = state(UiStatus.Done, preview = "alt")
+        assertEquals(OverlayConfirmAction.NONE, withoutCommit.secondaryAction)
+        assertFalse(withoutCommit.showMessage)
+    }
+
+    @Test
     fun `cloud done offers copy while preserving the committed text`() {
         val value = state(UiStatus.CloudDone("test"), committed = "Cloud final.")
         assertEquals(OverlayLabel.COPY, value.label)
         assertEquals("Cloud final.", value.body)
         assertEquals(OverlayConfirmAction.COPY, value.confirmAction)
         assertTrue(value.cancelEnabled)
+        assertTrue(value.showMessage)
     }
 
     @Test
@@ -90,5 +103,6 @@ class OverlayViewStateTest {
         assertEquals(OverlayLabel.ERROR, plain.label)
         assertEquals(OverlayConfirmAction.NONE, plain.confirmAction)
         assertEquals(OverlayConfirmAction.RETRY, retry.confirmAction)
+        assertTrue(plain.showMessage)
     }
 }

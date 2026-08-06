@@ -313,6 +313,8 @@ class DictateInputMethodService :
         run(controller.recognizerError(failure))
     }
 
+    override fun onLevel(rmsDb: Float) = updateWaveLevel(AudioLevel.fromRmsDb(rmsDb))
+
     // --- Recorder events (recorder thread) ---
 
     override fun onMaxDuration() {
@@ -321,6 +323,14 @@ class DictateInputMethodService :
 
     override fun onRecorderError() {
         mainHandler.post { run(controller.recordingError()) }
+    }
+
+    // Cloud path's own level source (MediaRecorder.getMaxAmplitude polling in CloudRecorder),
+    // already normalized onto the same 0..100 scale as onLevel(rmsDb) above.
+    override fun onLevel(level: Int) = updateWaveLevel(level)
+
+    private fun updateWaveLevel(level: Int) {
+        panel?.findViewById<OverlayWaveView>(R.id.keyboard_wave)?.level = level
     }
 
     // --- Text output ---
@@ -474,6 +484,26 @@ class DictateInputMethodService :
             }
         }
         refreshMicVisual()
+        refreshKeyboardWave(status)
+    }
+
+    /**
+     * The wave overlays the status/chip row while recording — a real level meter beats a
+     * standing "I'm listening" line, and hiding it the rest of the time keeps it from reading as
+     * a static, unmoving strip of bars.
+     */
+    private fun refreshKeyboardWave(status: UiStatus) {
+        val wave = panel?.findViewById<OverlayWaveView>(R.id.keyboard_wave) ?: return
+        val recording = status == UiStatus.Listening || status == UiStatus.Recording
+        wave.visibility = if (recording) View.VISIBLE else View.GONE
+        if (recording) {
+            wave.fillColor = ContextCompat.getColor(
+                this,
+                if (status == UiStatus.Recording) R.color.cloud else R.color.listening,
+            )
+        } else {
+            wave.reset()
+        }
     }
 
     private fun reportStatus(event: DictateStatusEvent, error: ErrorKind? = null) {
