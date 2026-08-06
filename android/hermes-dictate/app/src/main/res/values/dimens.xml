@@ -13,6 +13,10 @@
     <dimen name="pill_padding_horizontal">8dp</dimen>
     <dimen name="pill_column_margin">10dp</dimen>
     <dimen name="pill_column_min_width">132dp</dimen>
+    <!-- Gap between two adjacent action buttons. Only the content column carried margins, so
+         once the rest-state capsule collapsed that column to zero the undo and confirm buttons
+         sat flush against each other. -->
+    <dimen name="pill_action_gap">8dp</dimen>
     <dimen name="pill_wave_height">28dp</dimen>
 
     <!-- Bubble -->

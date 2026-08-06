@@ -339,10 +339,20 @@ class DictateOverlayService :
         }
     }
 
-    private fun applyPillGeometry(view: View, params: WindowManager.LayoutParams) {
+    // Both halves of tonight's overlay work meet here: the width/height come from the pill's
+    // state, the x/y from wherever the user parked the bubble. Neither may swallow the other.
+    private fun applyPillGeometry(
+        view: View,
+        params: WindowManager.LayoutParams,
+        active: Boolean,
+        contentVisible: Boolean,
+        secondaryVisible: Boolean,
+    ) {
         val density = resources.displayMetrics.density
         val screen = currentScreen()
-        params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density)
+        view.findViewById<View>(R.id.pill_content_column)?.minimumWidth =
+            if (contentVisible) resources.getDimensionPixelSize(R.dimen.pill_column_min_width) else 0
+        params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density, active, secondaryVisible, contentVisible)
         params.height = OverlayGeometry.pillHeightPx(density)
         // Free placement: reclamp the dragged-to X against the pill's (wider) width instead of
         // resetting to the edge. Gravity is inherited from the bubble's LayoutParams instance
@@ -353,7 +363,12 @@ class DictateOverlayService :
     }
 
     /** Swaps the collapsed bubble layout for the expanded pill layout, or back. */
-    private fun setExpanded(expand: Boolean) {
+    private fun setExpanded(
+        expand: Boolean,
+        active: Boolean = false,
+        contentVisible: Boolean = false,
+        secondaryVisible: Boolean = false,
+    ) {
         if (expand == expanded) return
         expanded = expand
         val current = overlayView ?: return
@@ -362,9 +377,11 @@ class DictateOverlayService :
         val layout = if (expand) R.layout.overlay_pill else R.layout.overlay_bubble
         val view = layoutInflater().inflate(layout, null)
         overlayView = view
-        val pillEntryDuration = if (expand) preparePillEntry(view) else 0L
+        var pillEntryDuration = 0L
         if (expand) {
-            applyPillGeometry(view, params)
+            // Geometry first so the entry animation knows the width it needs to slide in across.
+            applyPillGeometry(view, params, active, contentVisible, secondaryVisible)
+            pillEntryDuration = preparePillEntry(view, params.width)
         } else {
             wireBubbleTouch(view, params)
         }
@@ -388,7 +405,7 @@ class DictateOverlayService :
         updateBubbleVisibility()
     }
 
-    private fun preparePillEntry(view: View): Long {
+    private fun preparePillEntry(view: View, pillWidthPx: Int): Long {
         val animatorScale = runCatching {
             Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
         }.getOrDefault(1f)
@@ -397,10 +414,12 @@ class DictateOverlayService :
             view.alpha = 1f
             view.scaleX = 1f
             view.scaleY = 1f
+            view.translationX = 0f
         } else {
             view.alpha = 0f
             view.scaleX = PILL_ENTER_SCALE
             view.scaleY = PILL_ENTER_SCALE
+            view.translationX = OverlayMotion.slideDistancePx(pillWidthPx).toFloat()
         }
         return duration
     }
@@ -411,6 +430,7 @@ class DictateOverlayService :
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
+            .translationX(0f)
             .setDuration(duration)
             .setInterpolator(DecelerateInterpolator())
             .start()
@@ -669,17 +689,20 @@ class DictateOverlayService :
             cloudMode = controller.mode == Mode.CLOUD,
         )
         val semantics = OverlayActionSemantics.from(presentation)
-        setExpanded(presentation.expanded)
-        if (!presentation.expanded) return
-        val view = overlayView ?: return
-        overlayParams?.let { applyPillGeometry(view, it) }
-        val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
-        val statusText = getString(labelText(presentation.label))
         // Two faces in one pill: while the microphone is open only the voice is shown; result and
-        // error states swap in the short message that actually has something to say.
+        // error states swap in the short message that actually has something to say. The window's
+        // width follows the same split — generous while listening, only as wide as what's visible
+        // once the pill is quiet again.
         val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
             presentation.label == OverlayLabel.PROCESSING ||
             presentation.label == OverlayLabel.UPLOADING
+        val contentVisible = listening || presentation.showMessage
+        setExpanded(presentation.expanded, listening, contentVisible, semantics.secondaryVisible)
+        if (!presentation.expanded) return
+        val view = overlayView ?: return
+        overlayParams?.let { applyPillGeometry(view, it, listening, contentVisible, semantics.secondaryVisible) }
+        val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
+        val statusText = getString(labelText(presentation.label))
         view.findViewById<View>(R.id.pill_message)?.visibility =
             if (presentation.showMessage) View.VISIBLE else View.GONE
         view.findViewById<OverlayWaveView>(R.id.pill_wave)?.apply {

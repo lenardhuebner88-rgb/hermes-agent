@@ -31,6 +31,7 @@
             android:tint="@color/text_primary" />
 
         <FrameLayout
+            android:id="@+id/pill_content_column"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="@dimen/pill_column_margin"
@@ -92,6 +93,7 @@
             android:background="@drawable/bg_pill_action"
             android:contentDescription="@string/overlay_undo_desc"
             android:padding="@dimen/overlay_icon_inset"
+            android:layout_marginEnd="@dimen/pill_action_gap"
             android:src="@drawable/ic_undo"
             android:tint="@color/text_primary"
             android:visibility="gone" />
