@@ -30,8 +30,8 @@ android {
         targetSdk = 37
         // The version had lived only in the APK's filename: six releases had
         // shipped while the app kept telling anyone who asked that it was 0.1.
-        versionCode = 8
-        versionName = "0.8"
+        versionCode = 9
+        versionName = "0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
