@@ -24,7 +24,7 @@ object OverlayGeometry {
         if (!active) {
             val quietDp = QUIET_BASE_WIDTH_DP +
                 (if (contentVisible) CONTENT_COLUMN_WIDTH_DP else 0) +
-                (if (secondaryVisible) TOUCH_TARGET_DP else 0)
+                (if (secondaryVisible) TOUCH_TARGET_DP + ACTION_GAP_DP else 0)
             return (quietDp * density).toInt().coerceAtMost(available)
         }
         val maximum = (MAX_PILL_WIDTH_DP * density).toInt()
@@ -50,6 +50,10 @@ object OverlayGeometry {
     // content column, which is the space the cancel/confirm actions always need even with the
     // content column collapsed to zero width. 8*2 + 10*2 + 48(cancel) + 48(confirm) = 132dp.
     private const val QUIET_BASE_WIDTH_DP = 132
+    // Mirrors pill_action_gap (8dp): the breathing room between undo and confirm. Only the
+    // content column carried margins, so without this the two buttons sit flush once the quiet
+    // capsule collapses the column to zero — and the capsule would be 8dp too narrow for them.
+    const val ACTION_GAP_DP = 8
     // Mirrors pill_column_min_width (132dp): the room a visible wave or message needs.
     private const val CONTENT_COLUMN_WIDTH_DP = 132
     /** Mirrors @dimen/pill_height; OverlayGeometryTokenTest asserts they stay equal. */

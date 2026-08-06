@@ -37,6 +37,13 @@ class OverlayGeometryTokenTest {
     }
 
     @Test
+    fun `action gap constant matches the layout token`() {
+        // The quiet capsule is sized from this constant while the layout spaces the buttons from
+        // the dimen. If they drift, the capsule is too narrow for what it draws and clips a button.
+        assertEquals(OverlayGeometry.ACTION_GAP_DP, dimen("pill_action_gap"))
+    }
+
+    @Test
     fun `touch targets stay at or above the android minimum`() {
         assertTrue("48dp is the Android minimum touch target", dimen("overlay_touch_target") >= 48)
         assertTrue("48dp is the Android minimum touch target", dimen("bubble_size") >= 48)

@@ -45,7 +45,9 @@ class OverlayGeometryTest {
             secondaryVisible = true,
             contentVisible = false,
         )
-        assertEquals(472, width)
+        // 132dp base + 48dp undo + 8dp gap = 188dp -> 493px. The gap is part of the width the
+        // capsule must carry: without it the two buttons render flush and the last one clips.
+        assertEquals(493, width)
     }
 
     @Test fun `quiet pill with a visible message reserves the content column for it`() {
