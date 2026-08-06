@@ -267,13 +267,21 @@ def test_security_hostile_reason_crlf_is_single_line_closed_code_span(tmp_path):
 
 
 def test_security_overlimit_reason_keeps_closed_span_with_bait_before_cut(tmp_path):
-    """Cap-before-wrap: bait before the cut must stay inside a closed span."""
+    """Cap-before-wrap: bait before the cut must stay inside a closed span.
+
+    Contract values are asserted literally so a drifted constant turns the
+    test red instead of rewriting the fixture with itself.
+    """
+    # Vertrag: Done-when 4 — Grenzwerte woertlich, nicht aus dem Code gelesen.
+    assert renderer.DEFAULT_REASON_LIMIT == 500
+    assert renderer.DEFAULT_TITLE_LIMIT == 256
+
     home = tmp_path / ".hermes"
     bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
-    # Ensure bait sits before DEFAULT_REASON_LIMIT (500).
-    assert len(bait) < renderer.DEFAULT_REASON_LIMIT
-    filler = "X" * (renderer.DEFAULT_REASON_LIMIT + 50)
-    reason = bait + filler
+    # Fixed total length 700 → cap at 500 leaves exactly 200 chars omitted.
+    assert len(bait) < 500
+    reason = bait + ("X" * (700 - len(bait)))
+    assert len(reason) == 700
     db = _write_board(home, "default", [("t_over_reason", "Safe", "needs_input")])
     _append_event(db, "t_over_reason", "blocked", {"reason": reason})
 
@@ -284,16 +292,27 @@ def test_security_overlimit_reason_keeps_closed_span_with_bait_before_cut(tmp_pa
     assert reason_span.count("`") == 2
     assert "@Piet" in reason_span
     assert "nostr:" in reason_span
-    assert "truncated" in reason_span
-    # Closing backtick is the last char of the span — wrap after cap.
+    # Woertliche Suffix-Zahl fuer den Grund-Pfad (nicht nachgerechnet).
+    assert "… [truncated, 200 chars omitted]" in reason_span
+    # Closed span: wrap after cap keeps the trailing backtick.
     assert reason_span[-1] == "`"
+    # Schnittkante: first 500 chars of the raw reason are the capped body.
+    assert reason_span == (
+        f"`{reason[:500]}… [truncated, 200 chars omitted]`"
+    )
 
 
 def test_security_overlimit_title_keeps_closed_span_with_bait_before_cut(tmp_path):
+    """Cap-before-wrap for title; contract 256 pinned with a literal suffix."""
+    assert renderer.DEFAULT_REASON_LIMIT == 500
+    assert renderer.DEFAULT_TITLE_LIMIT == 256
+
     home = tmp_path / ".hermes"
     bait = f"@Piet nostr:{_VALID_BAIT_NPUB} "
-    assert len(bait) < renderer.DEFAULT_TITLE_LIMIT
-    title = bait + ("Y" * (renderer.DEFAULT_TITLE_LIMIT + 40))
+    # Fixed total length 356 → cap at 256 leaves exactly 100 chars omitted.
+    assert len(bait) < 256
+    title = bait + ("Y" * (356 - len(bait)))
+    assert len(title) == 356
     db = _write_board(home, "default", [("t_over_title", title, "needs_input")])
     _append_event(db, "t_over_title", "blocked", {"reason": "ok"})
 
@@ -304,8 +323,12 @@ def test_security_overlimit_title_keeps_closed_span_with_bait_before_cut(tmp_pat
     assert title_span.count("`") == 2
     assert "@Piet" in title_span
     assert "nostr:" in title_span
-    assert "truncated" in title_span
+    # Woertliche Suffix-Zahl fuer den Titel-Pfad (nicht nachgerechnet).
+    assert "… [truncated, 100 chars omitted]" in title_span
     assert title_span[-1] == "`"
+    assert title_span == (
+        f"`{title[:256]}… [truncated, 100 chars omitted]`"
+    )
 
 
 def test_process_safe_replaces_nul_and_lone_surrogates():
