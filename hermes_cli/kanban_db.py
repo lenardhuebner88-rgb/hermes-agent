@@ -327,6 +327,28 @@ WORKER_LIVENESS_HEARTBEAT_SUSPECT_SECONDS = 10 * 60
 # reads as stale/stuck.
 _CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS = 120
 
+# Stall gate for the dispatcher-side claude-CLI heartbeat (idle-hang class,
+# see _spawn_claude_worker: a wedged ``claude -p`` sits in ep_poll forever —
+# PID alive, zero output). Refreshing the heartbeat for such a PID pins the
+# task + worker slot indefinitely because every reclaim path keys off
+# ``last_heartbeat_at`` freshness. So the beat is withheld once no
+# observable activity (per-task log or Claude transcript mtime) is younger
+# than this threshold. Withholding hands the worker to the
+# ``release_stale_claims`` 1h backstop, which terminates + reclaims it —
+# the reaper the idle-hang fix documented as "~1h later" but the
+# PID-unconditional heartbeat had silently disabled.
+#
+# The threshold must sit comfortably ABOVE the longest legitimate silent
+# stretch: ``--output-format json`` never streams (log only flushes at
+# exit) and the transcript pauses for the whole duration of any single
+# long tool call — the fleet's full test suite runs ~30 min inside one
+# Bash call with zero transcript writes. Reclaim lands ~threshold + 1h
+# after the last observed activity, so a false positive needs >90 min of
+# total silence. No activity signal at all (unknown workspace, missing
+# transcript) keeps the legacy unconditional beat — never withhold on an
+# unobservable worker.
+_CLAUDE_CLI_HEARTBEAT_STALL_SECONDS = 30 * 60
+
 
 def derive_worker_liveness(
     *,
@@ -23204,6 +23226,43 @@ def _claude_jsonl_activity(
         return None
 
 
+def _claude_cli_activity_age_seconds(
+    workspace_path: Optional[str],
+    *,
+    board: Optional[str] = None,
+    task_id: Optional[str] = None,
+    now: Optional[int] = None,
+) -> Optional[int]:
+    """Age in seconds of the newest observable claude-CLI worker activity.
+
+    Activity = the per-task stdout log mtime or the Claude session
+    transcript mtime, whichever is newer. Both are stat-only probes (no
+    file body is ever read). Returns ``None`` when NO signal exists —
+    unknown workspace, absent transcript dir, unreadable log — which
+    callers must treat as "cannot judge", never as "stalled": withholding
+    a heartbeat on an unobservable worker would eventually hand a healthy
+    run to the terminate/reclaim backstop.
+    """
+    try:
+        now_i = int(time.time()) if now is None else int(now)
+        newest: Optional[int] = None
+        if task_id:
+            try:
+                st = (worker_logs_dir(board=board) / f"{task_id}.log").stat()
+                newest = int(st.st_mtime)
+            except OSError:
+                pass
+        activity = _claude_jsonl_activity(workspace_path)
+        if activity is not None:
+            j_mtime, _j_size = activity
+            newest = j_mtime if newest is None else max(newest, j_mtime)
+        if newest is None:
+            return None
+        return max(0, now_i - newest)
+    except Exception:
+        return None
+
+
 def _claude_cli_heartbeat_note(
     task_id: str,
     *,
@@ -23279,6 +23338,13 @@ def heartbeat_live_claude_cli_workers(
         ``_run_is_claude_cli`` (Hermes-runtime runs are skipped — they self-
         heartbeat, and a second writer would mask a genuine stall);
       * only when the PID is actually alive;
+      * stall-gated: when the worker shows no observable activity (per-task
+        log or Claude transcript mtime) younger than
+        ``_CLAUDE_CLI_HEARTBEAT_STALL_SECONDS``, the beat is withheld so the
+        ``release_stale_claims`` 1h backstop can terminate + reclaim a
+        wedged (ep_poll idle-hang) process instead of pinning the slot
+        forever. No observable signal at all keeps the legacy beat —
+        withholding never applies to an unobservable worker;
       * rate-limited: re-emit only when the existing heartbeat is older than
         ``_CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS`` (NULL → always), so the run
         timeline gets a steady pulse instead of one event per tick.
@@ -23320,6 +23386,48 @@ def heartbeat_live_claude_cli_workers(
 
             tid = row["id"]
             run_id = row["current_run_id"]
+            # Stall gate (idle-hang class): a live PID with no observable
+            # activity beyond the stall threshold is wedged, not working.
+            # Stop feeding heartbeat + claim so release_stale_claims' 1h
+            # backstop terminates and reclaims it instead of pinning the
+            # slot forever. ``None`` (no observable signal) keeps the
+            # legacy beat — never withhold on an unobservable worker.
+            stall_age = _claude_cli_activity_age_seconds(
+                row["workspace_path"], board=board, task_id=tid, now=now,
+            )
+            if (
+                stall_age is not None
+                and stall_age > _CLAUDE_CLI_HEARTBEAT_STALL_SECONDS
+            ):
+                # One board event per stall episode (deduped against the
+                # last emitted heartbeat), so the timeline shows WHY the
+                # pulse stopped instead of going silently dark.
+                try:
+                    since = int(last_hb) if last_hb is not None else 0
+                    already = conn.execute(
+                        "SELECT 1 FROM task_events WHERE task_id = ? "
+                        "AND kind = 'claude_cli_heartbeat_withheld' "
+                        "AND created_at >= ? LIMIT 1",
+                        (tid, since),
+                    ).fetchone()
+                    if already is None:
+                        with write_txn(conn):
+                            _append_event(
+                                conn,
+                                tid,
+                                "claude_cli_heartbeat_withheld",
+                                {
+                                    "reason": "no_observable_activity",
+                                    "activity_age_seconds": stall_age,
+                                    "stall_threshold_seconds": (
+                                        _CLAUDE_CLI_HEARTBEAT_STALL_SECONDS
+                                    ),
+                                },
+                                run_id=run_id,
+                            )
+                except Exception:
+                    pass
+                continue
             # Hold the claim too, mirroring the Hermes bridge (heartbeat_claim
             # + heartbeat_worker). release_stale_claims already extends a
             # live-PID claim, but doing it here keeps claude-CLI liveness

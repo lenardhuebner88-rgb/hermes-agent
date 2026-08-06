@@ -232,6 +232,142 @@ def test_claude_cli_heartbeat_rate_limited(kanban_home, monkeypatch):
         assert kb.get_task(conn, t_stale).last_heartbeat_at >= now
 
 
+def test_claude_cli_heartbeat_withheld_for_wedged_worker(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Idle-hang class: live PID, but the transcript has not moved beyond the
+    stall threshold → the beat is withheld so the 1h release_stale_claims
+    backstop can terminate + reclaim the wedged worker, and ONE
+    ``claude_cli_heartbeat_withheld`` event explains the silence."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4260,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        _seed_claude_transcript(
+            monkeypatch, tmp_path, str(workspace),
+            body='{"type":"assistant"}\n',
+            mtime=now - (kb._CLAUDE_CLI_HEARTBEAT_STALL_SECONDS + 300),
+        )
+
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+        # Heartbeat untouched — it must go stale so the backstop can fire.
+        assert kb.get_task(conn, t).last_heartbeat_at == (
+            now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60)
+        )
+        n_withheld = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? "
+            "AND kind = 'claude_cli_heartbeat_withheld'",
+            (t,),
+        ).fetchone()[0]
+        assert n_withheld == 1
+
+        # Second tick: still withheld, but no second event (dedup per episode).
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == []
+        n_withheld = conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? "
+            "AND kind = 'claude_cli_heartbeat_withheld'",
+            (t,),
+        ).fetchone()[0]
+        assert n_withheld == 1
+
+
+def test_claude_cli_heartbeat_resumes_when_activity_returns(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """A worker whose transcript moves again must get its pulse back — the
+    stall gate is a latch on silence, not a one-way park."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4261,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        jsonl = _seed_claude_transcript(
+            monkeypatch, tmp_path, str(workspace),
+            body='{"type":"assistant"}\n',
+            mtime=now - (kb._CLAUDE_CLI_HEARTBEAT_STALL_SECONDS + 300),
+        )
+        assert kb.heartbeat_live_claude_cli_workers(conn) == []
+
+        # Activity resumes (newest turn lands in the transcript).
+        os.utime(jsonl, (now, now))
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        assert kb.get_task(conn, t).last_heartbeat_at >= now
+
+
+def test_claude_cli_heartbeat_beats_with_fresh_activity_below_threshold(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """A silent-but-recent transcript (inside the stall threshold — e.g. a
+    long single tool call like the ~30 min full test suite) must keep its
+    heartbeat: withholding is only for silence BEYOND the threshold."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4262,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        _seed_claude_transcript(
+            monkeypatch, tmp_path, str(workspace),
+            body='{"type":"assistant"}\n',
+            mtime=now - (kb._CLAUDE_CLI_HEARTBEAT_STALL_SECONDS - 120),
+        )
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        assert kb.get_task(conn, t).last_heartbeat_at >= now
+
+
+def test_claude_cli_heartbeat_failopen_without_any_activity_signal(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Workspace known but no transcript and no log → no signal at all.
+    The gate must fail OPEN (legacy beat): never withhold on an
+    unobservable worker."""
+    import hermes_cli.kanban_db as _kb
+    monkeypatch.setenv("HERMES_CLAUDE_CLI_PROFILES", "coder-claude")
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    now = int(time.time())
+    workspace = tmp_path / "wt"
+    workspace.mkdir()
+
+    with kb.connect_closing() as conn:
+        t, _ = _make_running_worker(
+            conn, profile="coder-claude", pid=4263,
+            last_heartbeat_at=now - (kb._CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS + 60),
+            workspace_path=str(workspace),
+        )
+        beat = kb.heartbeat_live_claude_cli_workers(conn)
+        assert beat == [t]
+        assert kb.get_task(conn, t).last_heartbeat_at >= now
+
+
 def test_claude_cli_heartbeat_note_failsoft_without_log(kanban_home, monkeypatch):
     """No worker log → the note degrades to the honest base, never raises."""
     import hermes_cli.kanban_db as _kb
