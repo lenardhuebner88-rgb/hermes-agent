@@ -3455,11 +3455,18 @@ class TestWebServerEndpoints:
         assert captured["kwargs"] == {"model": None}
 
     def test_audio_transcription_passes_language_hint(self, monkeypatch):
-        import tools.transcription_tools as transcription_tools
+        # The endpoint's collaborator for hinted requests is
+        # hermes_cli.dictate_transcription.transcribe_with_hints (not raw
+        # tools.transcription_tools.transcribe_audio, whose signature has no
+        # language/initial_prompt kwargs at all — passing them straight
+        # through used to raise TypeError -> HTTP 502 in production; see
+        # tests/hermes_cli/test_dictate_transcription.py for the coverage of
+        # transcribe_with_hints() itself, including the real provider dispatch).
+        import hermes_cli.dictate_transcription as dictate_transcription
 
         captured = {}
 
-        def fake_transcribe_audio(path, **kwargs):
+        def fake_transcribe_with_hints(path, **kwargs):
             captured["kwargs"] = kwargs
             return {
                 "success": True,
@@ -3467,7 +3474,9 @@ class TestWebServerEndpoints:
                 "provider": "test",
             }
 
-        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+        monkeypatch.setattr(
+            dictate_transcription, "transcribe_with_hints", fake_transcribe_with_hints
+        )
 
         resp = self.client.post(
             "/api/audio/transcribe",
@@ -3480,18 +3489,20 @@ class TestWebServerEndpoints:
 
         assert resp.status_code == 200
         assert resp.json()["transcript"] == "hallo aus dem diktat"
-        assert captured["kwargs"] == {"language": "de"}
+        assert captured["kwargs"] == {"language": "de", "initial_prompt": None}
 
     def test_audio_transcription_passes_initial_prompt(self, monkeypatch):
-        import tools.transcription_tools as transcription_tools
+        import hermes_cli.dictate_transcription as dictate_transcription
 
         captured = {}
 
-        def fake_transcribe_audio(path, **kwargs):
+        def fake_transcribe_with_hints(path, **kwargs):
             captured["kwargs"] = kwargs
             return {"success": True, "transcript": "Hermes läuft", "provider": "test"}
 
-        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+        monkeypatch.setattr(
+            dictate_transcription, "transcribe_with_hints", fake_transcribe_with_hints
+        )
 
         resp = self.client.post(
             "/api/audio/transcribe",
@@ -3502,7 +3513,10 @@ class TestWebServerEndpoints:
             },
         )
         assert resp.status_code == 200
-        assert captured["kwargs"] == {"initial_prompt": "Hermes, PlanSpec, Leitstand"}
+        assert captured["kwargs"] == {
+            "language": None,
+            "initial_prompt": "Hermes, PlanSpec, Leitstand",
+        }
 
         rejected = self.client.post(
             "/api/audio/transcribe",

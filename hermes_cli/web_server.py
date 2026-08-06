@@ -5995,21 +5995,20 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
             tmp.write(audio_bytes)
             temp_path = tmp.name
 
-        # transcribe_recording (not raw transcribe_audio): filters Whisper
-        # hallucinations and maps provider "empty transcript" errors to a
-        # successful empty result — the live voice loop treats "" as silence
-        # and re-listens instead of surfacing a 400 on every quiet turn.
-        from tools.transcription_tools import transcribe_audio
-        from tools.voice_mode import transcribe_recording
+        # Hint-less path is transcribe_recording (not raw transcribe_audio):
+        # it filters Whisper hallucinations and maps provider "empty
+        # transcript" errors to a successful empty result — the live voice
+        # loop treats "" as silence and re-listens instead of surfacing a
+        # 400 on every quiet turn. See hermes_cli/dictate_transcription.py
+        # for how language/initial_prompt hints are forwarded from there.
+        from hermes_cli.dictate_transcription import transcribe_with_hints
 
         loop = asyncio.get_running_loop()
-        transcribe_kwargs = {"language": language} if language else {}
-        if initial_prompt:
-            transcribe_kwargs["initial_prompt"] = initial_prompt
-        transcribe_call = (
-            functools.partial(transcribe_audio, temp_path, **transcribe_kwargs)
-            if transcribe_kwargs
-            else functools.partial(transcribe_recording, temp_path)
+        transcribe_call = functools.partial(
+            transcribe_with_hints,
+            temp_path,
+            language=language,
+            initial_prompt=initial_prompt,
         )
         result = await asyncio.wait_for(
             loop.run_in_executor(None, transcribe_call),
