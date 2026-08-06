@@ -112,7 +112,12 @@ class CloudTranscriber(
             200 -> parseSuccess(response.body)
             // 3xx = the gate bouncing an unauthenticated caller towards /login (redirects are
             // disabled in the transport) — same recovery as 401: sign in again.
-            401, in 300..399 -> CloudOutcome.AuthRequired
+            //
+            // 403 belongs here too, and used to be missing: SessionProbe already treats it as
+            // "not signed in" (SessionProbe.kt), so a 403 made the settings screen say signed-out
+            // while the overlay said "transcription failed — back to on-device". Two different
+            // stories about one cause, and only the useless one was actionable.
+            401, 403, in 300..399 -> CloudOutcome.AuthRequired
             413 -> CloudOutcome.TooLarge
             else -> CloudOutcome.Server(errorDetail(response))
         }

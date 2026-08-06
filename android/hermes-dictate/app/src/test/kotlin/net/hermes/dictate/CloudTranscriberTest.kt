@@ -168,6 +168,17 @@ class CloudTranscriberTest {
     }
 
     @Test
+    fun `403 maps to AuthRequired, like SessionProbe already treated it`() {
+        // SessionProbe reads a 403 as "not signed in". The transcriber used to drop it into the
+        // generic `else` branch, so the same server state told the settings screen "signed out"
+        // and the overlay "transcription failed" — and only the settings screen was right.
+        val transport = FakeTransport(
+            HttpResponse(403, """{"error":"forbidden","detail":"Forbidden"}""", emptyList()),
+        )
+        assertEquals(CloudOutcome.AuthRequired, transcriber(transport).transcribe(audio, "audio/mp4"))
+    }
+
+    @Test
     fun `login redirect maps to AuthRequired too`() {
         // Redirects are disabled in the transport; a 3xx is the gate bouncing an
         // unauthenticated caller to /login — the recovery is signing in, not "server error".
