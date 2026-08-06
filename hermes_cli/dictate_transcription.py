@@ -167,6 +167,32 @@ def _transcribe_groq_with_hints(
         return {"success": False, "transcript": "", "error": f"Transcription failed: {e}"}
 
 
+def _filter_silence(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply the silence post-processing that ``transcribe_recording`` does, to a hinted result.
+
+    The unhinted path goes through ``tools.voice_mode.transcribe_recording``,
+    which drops known Whisper hallucinations and maps a provider's
+    ``no_speech`` flag to plain silence. The hinted paths call the providers
+    directly and so skipped both — and since the Android app and the SPA
+    *always* send a language, that meant the filter was effectively off for
+    every real dictation: speaking into a quiet room returned invented
+    subtitle credits ("Untertitel von …") as if they had been said.
+
+    Mirrors transcribe_recording's post-processing rather than duplicating the
+    predicate, so the two cannot drift.
+    """
+    from tools.voice_mode import is_whisper_hallucination
+
+    if result.get("success") and is_whisper_hallucination(result.get("transcript", "")):
+        logger.info("Filtered Whisper hallucination: %r", result["transcript"])
+        return {"success": True, "transcript": "", "filtered": True}
+
+    if result.get("no_speech"):
+        return {"success": True, "transcript": "", "no_speech": True}
+
+    return result
+
+
 def transcribe_with_hints(
     file_path: str,
     *,
@@ -196,19 +222,33 @@ def transcribe_with_hints(
         model_name = (
             model or groq_cfg.get("model") or transcription_tools.DEFAULT_GROQ_STT_MODEL
         )
-        return _transcribe_groq_with_hints(
-            file_path, model_name, language=language, initial_prompt=initial_prompt
+        return _filter_silence(
+            _transcribe_groq_with_hints(
+                file_path, model_name, language=language, initial_prompt=initial_prompt
+            )
         )
 
     handler_name = _HINT_CAPABLE_HANDLERS.get(provider)
-    if handler_name:
-        handler = getattr(transcription_tools, handler_name)
+    # getattr must not be bare: an upstream rename would raise AttributeError,
+    # become a 502, and break this function's "never raise on account of a
+    # hint" contract. A missing handler is exactly the case the plain
+    # fallback below exists for.
+    handler = getattr(transcription_tools, handler_name, None) if handler_name else None
+    if handler is not None:
         model_name = _resolve_hint_capable_model(provider, stt_config, model)
         kwargs: Dict[str, Any] = {}
         if language and "language" in inspect.signature(handler).parameters:
             kwargs["language"] = language
-        return handler(file_path, model_name, **kwargs)
+        return _filter_silence(handler(file_path, model_name, **kwargs))
+
+    if handler_name:
+        logger.warning(
+            "STT provider %r maps to %r, which no longer exists in "
+            "tools.transcription_tools — transcribing without hints.",
+            provider,
+            handler_name,
+        )
 
     # Provider can't take either hint (local, deepinfra, a user command
     # provider, "none", ...) — fall back to the plain path rather than crash.
-    return transcription_tools.transcribe_audio(file_path, model=model)
+    return _filter_silence(transcription_tools.transcribe_audio(file_path, model=model))

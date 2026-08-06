@@ -116,12 +116,71 @@ class TestProviderSignatureClasses:
         assert result["success"] is True
         assert mock_openai.call_args.kwargs.get("language") == "de"
 
+    def test_hallucination_on_silence_is_filtered_on_the_hinted_path(self, sample_wav):
+        """Speaking into a quiet room must not return invented subtitle credits.
+
+        The unhinted path filters these via transcribe_recording. The hinted
+        paths call providers directly, so they skipped the filter — and since
+        both clients always send a language, that left the filter effectively
+        off for every real dictation. Verified against the live symptom: a
+        hinted request returned "Untertitel von …" verbatim where the unhinted
+        one returned "".
+        """
+        with patch(
+            "tools.transcription_tools._load_stt_config",
+            return_value={"provider": "openai"},
+        ), patch(
+            "tools.transcription_tools._get_provider", return_value="openai"
+        ), patch(
+            "tools.transcription_tools._transcribe_openai",
+            autospec=True,
+            return_value={
+                "success": True,
+                "transcript": "Untertitel von Stephanie Geiges",
+                "provider": "openai",
+            },
+        ):
+            result = transcribe_with_hints(sample_wav, language="de")
+
+        assert result["success"] is True
+        assert result["transcript"] == ""
+        assert result["filtered"] is True
+
+    def test_renamed_upstream_handler_falls_back_instead_of_raising(self, sample_wav):
+        """An upstream rename must not become a 502.
+
+        _HINT_CAPABLE_HANDLERS names private upstream symbols. If a sync
+        renames one, a bare getattr would raise AttributeError, which the
+        endpoint turns into "Cloud-Transkription fehlgeschlagen" — the exact
+        failure mode this whole module was written to remove.
+        """
+        with patch(
+            "tools.transcription_tools._load_stt_config",
+            return_value={"provider": "openai"},
+        ), patch(
+            "tools.transcription_tools._get_provider", return_value="openai"
+        ), patch.dict(
+            "hermes_cli.dictate_transcription._HINT_CAPABLE_HANDLERS",
+            {"openai": "_transcribe_openai_renamed_by_upstream"},
+        ), patch(
+            "tools.transcription_tools.transcribe_audio",
+            autospec=True,
+            return_value={"success": True, "transcript": "hallo welt", "provider": "openai"},
+        ) as mock_plain:
+            result = transcribe_with_hints(sample_wav, language="de")
+
+        assert result["success"] is True
+        assert result["transcript"] == "hallo welt"
+        assert mock_plain.called, "must fall back to the plain path, not raise"
+
     def test_provider_without_language_param_still_succeeds(self, monkeypatch, sample_wav):
         """groq's private handler has no language param at all — this must
         route through the dedicated hint-aware Groq call instead, not crash."""
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
         mock_client = MagicMock()
-        mock_client.audio.transcriptions.create.return_value = "ok"
+        # Not "ok": the shared hallucination filter treats a bare "ok" as
+        # silence noise, so it would be blanked and hide what this test checks.
+        mock_client.audio.transcriptions.create.return_value = "hallo welt"
 
         with patch("tools.transcription_tools._HAS_OPENAI", True), \
              patch("openai.OpenAI", return_value=mock_client), \
@@ -132,7 +191,7 @@ class TestProviderSignatureClasses:
             result = transcribe_with_hints(sample_wav, language="de")
 
         assert result["success"] is True
-        assert result["transcript"] == "ok"
+        assert result["transcript"] == "hallo welt"
 
 
 class TestGroqRequestFormat:
@@ -168,7 +227,9 @@ class TestGroqRequestFormat:
         actual no-hints code path)."""
         monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
         mock_client = MagicMock()
-        mock_client.audio.transcriptions.create.return_value = "ok"
+        # Not "ok": the shared hallucination filter treats a bare "ok" as
+        # silence noise, so it would be blanked and hide what this test checks.
+        mock_client.audio.transcriptions.create.return_value = "hallo welt"
 
         with patch("tools.transcription_tools._HAS_OPENAI", True), \
              patch("openai.OpenAI", return_value=mock_client), \
