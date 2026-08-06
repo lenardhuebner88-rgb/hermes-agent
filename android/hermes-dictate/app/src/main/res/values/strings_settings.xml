@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- New strings introduced by the Compose settings rebuild. Existing settings strings stay
+         in strings.xml and are referenced as-is (not duplicated here). -->
+    <string name="readiness_ready">Bereit ✓</string>
+    <string name="readiness_progress">%1$d von %2$d erledigt</string>
+    <!-- Secondary action once already signed in — same LoginActivity flow as "Anmelden", just
+         demoted to a secondary button so it never competes with a primary "Anmelden" that would
+         contradict the "angemeldet ✓" state next to it (audit defect 2). -->
+    <string name="btn_login_again">Neu anmelden</string>
+</resources>
