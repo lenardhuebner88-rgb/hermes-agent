@@ -32,6 +32,7 @@ import net.hermes.deck.model.TaskPriority
 import net.hermes.deck.model.TaskStatus
 import net.hermes.deck.model.ThreadActivity
 import net.hermes.deck.net.HermesClient
+import net.hermes.deck.net.HermesClientCache
 
 class DeckViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -394,8 +395,20 @@ class DeckViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- Buzz agents via the Hermes dashboard -----------------------------
 
-    private fun hermes(): HermesClient =
-        HermesClient(settings.hermesBaseUrl, settings.hermesUsername, settings.hermesPassword)
+    /**
+     * The session cookie lives inside the client, so the client has to outlive
+     * the call. It used to be built fresh here every time, which meant every
+     * request logged in first — seven or eight logins a minute from the poll
+     * loop alone, until the dashboard's brute-force throttle answered 429 and
+     * the screen showed "Anmeldung am Dashboard fehlgeschlagen".
+     */
+    private val hermesClients = HermesClientCache()
+
+    private fun hermes(): HermesClient = hermesClients.get(
+        settings.hermesBaseUrl,
+        settings.hermesUsername,
+        settings.hermesPassword,
+    )
 
     fun loadAgents() = viewModelScope.launch {
         val client = hermes()

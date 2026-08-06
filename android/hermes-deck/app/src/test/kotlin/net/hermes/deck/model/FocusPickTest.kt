@@ -19,18 +19,22 @@ class FocusPickTest {
         open: Boolean = false,
         callAgo: Int = 10,
         signalAgo: Int? = 5,
+        calls: Int = 3,
     ) = AgentRow(
         agent = BuzzAgent(stem, stem.replaceFirstChar { it.uppercase() }, "m", "c", state, "",
             0, 0, callAgo, open),
         pulse = AgentPulse(
             stem = stem,
-            callsInWindow = 3,
+            callsInWindow = calls,
             latest = ToolCall(callAgo, "Terminal", ToolCall.Kind.EXECUTE),
             looksOpen = open,
             lastSignalSecondsAgo = signalAgo,
             recent = listOf(ToolCall(callAgo, "Terminal", ToolCall.Kind.EXECUTE)),
         ),
     )
+
+    private fun AgentRow.copyPulseSignal(seconds: Int) =
+        copy(pulse = pulse?.copy(lastSignalSecondsAgo = seconds))
 
     private fun session(percent: Int) = SessionFacts(
         sessionId = "s", ageSeconds = 3600, promptTokens = percent * 1000,
@@ -46,14 +50,64 @@ class FocusPickTest {
     )
 
     @Test
-    fun `the resting state is the fullest measured context, not the busiest agent`() {
+    fun `the resting state is whoever works, not whoever has the fullest context`() {
+        // The operator's ask, 2026-08-06: the card should say who is working
+        // when — an idle agent with a fat context is not the news.
         val choice = FocusPick.of(
             rows = listOf(row("claude", open = true), row("qwen")),
             sessions = mapOf("claude" to session(20), "qwen" to session(88)),
         )
-        assertEquals(FocusPick.Subject.Agent("qwen"), choice.subject)
+        assertEquals(FocusPick.Subject.Agent("claude"), choice.subject)
         assertEquals(FocusPick.Rank.RESTING, choice.rank)
-        assertEquals("Im Blick · vollster Kontext", choice.reason)
+        assertEquals("Im Blick · arbeitet", choice.reason)
+    }
+
+    @Test
+    fun `among working agents the busiest one gets the card`() {
+        val choice = FocusPick.of(
+            rows = listOf(
+                row("claude", open = true, calls = 4),
+                row("codex", open = true, calls = 31),
+            ),
+            sessions = mapOf("claude" to session(90)),
+        )
+        assertEquals(FocusPick.Subject.Agent("codex"), choice.subject)
+    }
+
+    @Test
+    fun `the card does not swap agents just because a signal ticked`() {
+        // Ranked by calls, not by signal age: two busy agents would otherwise
+        // hand the card back and forth on every eight-second poll.
+        val rows = listOf(
+            row("claude", open = true, calls = 20, signalAgo = 2),
+            row("codex", open = true, calls = 31, signalAgo = 9),
+        )
+        assertEquals(FocusPick.Subject.Agent("codex"), FocusPick.of(rows).subject)
+        val ticked = listOf(rows[0].copyPulseSignal(9), rows[1].copyPulseSignal(2))
+        assertEquals(FocusPick.Subject.Agent("codex"), FocusPick.of(ticked).subject)
+    }
+
+    @Test
+    fun `with nobody working the card shows who worked last`() {
+        val choice = FocusPick.of(
+            rows = listOf(row("claude", callAgo = 900), row("qwen", callAgo = 40)),
+            sessions = mapOf("claude" to session(88)),
+        )
+        assertEquals(FocusPick.Subject.Agent("qwen"), choice.subject)
+        assertEquals("Im Blick · zuletzt aktiv", choice.reason)
+    }
+
+    @Test
+    fun `a context at the brim is an alarm, a merely full one is not`() {
+        val rows = listOf(row("claude", open = true), row("qwen"))
+        assertEquals(
+            "Im Blick · arbeitet",
+            FocusPick.of(rows, sessions = mapOf("qwen" to session(88))).reason,
+        )
+        val brim = FocusPick.of(rows, sessions = mapOf("qwen" to session(96)))
+        assertEquals(FocusPick.Subject.Agent("qwen"), brim.subject)
+        assertEquals(FocusPick.Rank.ALARM, brim.rank)
+        assertEquals("Dringend · Kontext fast voll", brim.reason)
     }
 
     @Test

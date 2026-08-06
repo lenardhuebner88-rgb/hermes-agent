@@ -23,17 +23,34 @@ import org.json.JSONObject
  * keeps a cookie jar and re-logs in when a call comes back 401. Requests are
  * pinned to the configured origin: a redirect to somewhere else would otherwise
  * carry the session cookie off-host.
+ *
+ * **One instance per credential set, for the app's lifetime** ([HermesClientCache]).
+ * The cookie is state of *this object*; a client built per call is a client that
+ * logs in on every single request, and the dashboard throttles that as the
+ * credential stuffing it looks like.
+ *
+ * Two callers hitting an expired session at the same moment must still produce
+ * one login, not two: [sessionEpoch] is the version of the session a caller saw
+ * before its request went out, and whoever arrives second finds the epoch
+ * already moved and reuses the fresh cookie instead of minting another.
  */
 class HermesClient(
     private val baseUrl: String,
     private val username: String,
     private val password: String,
+    private val throttle: LoginThrottle = LoginThrottle(),
 ) {
 
     class NotAuthorised(message: String) : IOException(message)
     class Unreachable(message: String) : IOException(message)
 
     private val cookies = mutableMapOf<String, MutableList<Cookie>>()
+
+    /** Bumped by every successful login; see the class comment. */
+    @Volatile
+    private var sessionEpoch: Int = 0
+
+    private val loginLock = Any()
 
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -58,7 +75,30 @@ class HermesClient(
     val isConfigured: Boolean
         get() = baseUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
 
+    /**
+     * Refreshes the session unless someone else already did.
+     *
+     * [seenEpoch] is the session version the caller's failed request was made
+     * under. A different current epoch means another thread logged in while
+     * this one was waiting for the lock, so its cookie is fresh and a second
+     * login would only spend one of the ten attempts the server grants a minute.
+     */
+    private fun ensureSession(seenEpoch: Int) {
+        synchronized(loginLock) {
+            if (sessionEpoch != seenEpoch) return
+            login()
+        }
+    }
+
     fun login() {
+        val wait = throttle.waitMillis()
+        if (wait > 0L) {
+            // Not a network call at all: the server said 429 recently and every
+            // further attempt inside its window only keeps the lockout alive.
+            throw NotAuthorised(
+                "Dashboard bremst die Anmeldung — nächster Versuch in ${(wait + 999) / 1000} s.",
+            )
+        }
         val body = JSONObject().apply {
             put("provider", "basic")
             put("username", username)
@@ -70,11 +110,19 @@ class HermesClient(
             .post(body.toString().toRequestBody(JSON))
             .build()
         http.newCall(request).execute().use { response ->
+            if (response.code == 429) {
+                throttle.rateLimited()
+                throw NotAuthorised(
+                    "Zu viele Anmeldungen — das Dashboard sperrt kurz. Die App wartet.",
+                )
+            }
             // A 302 counts as success here: the dashboard redirects after minting
             // the cookie, and redirects are deliberately not followed.
             if (response.code !in 200..399) {
                 throw NotAuthorised("Anmeldung am Dashboard fehlgeschlagen (HTTP ${response.code})")
             }
+            throttle.succeeded()
+            sessionEpoch += 1
         }
     }
 
@@ -164,19 +212,23 @@ class HermesClient(
     }
 
     private fun executeJson(request: Request, retryOnUnauthorised: Boolean): JSONObject {
+        // Read *before* the call: if the session turns out to be dead, this is
+        // the version that died, and a login is only needed if nobody has since
+        // replaced it.
+        val seenEpoch = sessionEpoch
         val response = runCatching { http.newCall(request).execute() }
             .getOrElse { throw Unreachable("Dashboard nicht erreichbar: ${it.message}") }
         response.use {
             if (it.code == 401 || it.code == 403) {
                 if (!retryOnUnauthorised) throw NotAuthorised("Sitzung abgelehnt (HTTP ${it.code})")
-                login()
+                ensureSession(seenEpoch)
                 return executeJson(request.newBuilder().build(), retryOnUnauthorised = false)
             }
             if (it.code == 302 || it.code == 303) {
                 // The auth gate answers unauthenticated browsers with a redirect
                 // to the login page; for us that is a 401 in disguise.
                 if (!retryOnUnauthorised) throw NotAuthorised("Nicht angemeldet")
-                login()
+                ensureSession(seenEpoch)
                 return executeJson(request.newBuilder().build(), retryOnUnauthorised = false)
             }
             val text = it.body?.string().orEmpty()

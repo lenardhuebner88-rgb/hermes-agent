@@ -11,7 +11,10 @@ package net.hermes.deck.model
  * Two guarantees the UI depends on:
  *
  *  1. **Alarm beats normal.** A budget about to bite or an agent that stopped
- *     reporting outranks "fullest context", which is only the resting state.
+ *     reporting outranks the resting state, which is simply whoever is working.
+ *     A context filling up is not an alarm until it is nearly full: it is a
+ *     number that barely moves, and a card that sits on it for hours teaches the
+ *     operator to stop reading the card.
  *  2. **The screen never moves under the finger.** A pinned subject — the
  *     operator tapped a capsule in the fleet rail, or is typing — wins over
  *     everything the ranking would otherwise choose. A focus card that jumps
@@ -46,6 +49,14 @@ object FocusPick {
 
     /** Budget share from which the next long run may hit the wall. */
     const val BUDGET_ALARM_PERCENT: Double = 90.0
+
+    /**
+     * Context share at which a compaction is imminent rather than eventual.
+     * Deliberately far above the old resting rule's threshold of "the fullest
+     * one, whatever that is": at 42 % nothing is about to happen, at 96 % the
+     * next long turn interrupts itself.
+     */
+    const val CONTEXT_ALARM_PERCENT: Int = 95
 
     /**
      * An open call with no life sign for this long is a hang, not long work.
@@ -105,29 +116,67 @@ object FocusPick {
                 )
             }
 
-        // 5. Resting state: the fullest measured context. Deliberately not "the
-        //    busiest" — busy is normal and needs no attention, while a context
-        //    filling up is the thing that will interrupt work without warning.
-        val fullest = rows
-            .mapNotNull { row -> sessions[row.agent.stem]?.percent?.let { row to it } }
+        // 4b. A context at the brim. Last of the alarms: it interrupts one
+        //     agent's turn, not the whole fleet, and unlike a hang it is
+        //     something the operator can still act on calmly.
+        rows.mapNotNull { row -> sessions[row.agent.stem]?.percent?.let { row to it } }
+            .filter { it.second >= CONTEXT_ALARM_PERCENT }
             .maxByOrNull { it.second }
-        if (fullest != null) {
-            return Choice(
-                subject = Subject.Agent(fullest.first.agent.stem),
-                rank = Rank.RESTING,
-                reason = "Im Blick · vollster Kontext",
-            )
-        }
+            ?.let { (row, _) ->
+                return Choice(
+                    subject = Subject.Agent(row.agent.stem),
+                    rank = Rank.ALARM,
+                    reason = "Dringend · Kontext fast voll",
+                )
+            }
 
-        // 6. No session numbers anywhere — fall back to whoever is working, so
-        //    the card is still about something real.
-        rows.firstOrNull { it.pulse?.looksOpen == true }?.let { row ->
+        // 5. Resting state: whoever is actually working — and of those, the one
+        //    doing the most. A context percentage was the old answer here and it
+        //    was the wrong question: it moves slowly, it is the same number for
+        //    hours, and it puts an idle agent on the card while three others are
+        //    mid-turn. What the screen is for is *who is working, and since when*.
+        //
+        //    Ranked by calls in the window rather than by the freshest signal:
+        //    the signal ticks every few seconds and would hand the card back and
+        //    forth between two busy agents on every poll, while the call count
+        //    only moves as work is actually done.
+        val working = rows.filter { it.pulse?.looksOpen == true }
+        if (working.isNotEmpty()) {
+            val busiest = working.maxWith(
+                compareBy<AgentRow> { it.pulse?.callsInWindow ?: 0 }
+                    .thenByDescending { it.pulse?.lastSignalSecondsAgo ?: Int.MAX_VALUE },
+            )
             return Choice(
-                subject = Subject.Agent(row.agent.stem),
+                subject = Subject.Agent(busiest.agent.stem),
                 rank = Rank.RESTING,
                 reason = "Im Blick · arbeitet",
             )
         }
+
+        // 6. Nobody has an open turn: the one who worked most recently. Still an
+        //    answer to "wer arbeitet wann", just in the past tense.
+        rows.mapNotNull { row -> row.pulse?.latest?.let { row to it.secondsAgo } }
+            .minByOrNull { it.second }
+            ?.let { (row, _) ->
+                return Choice(
+                    subject = Subject.Agent(row.agent.stem),
+                    rank = Rank.RESTING,
+                    reason = "Im Blick · zuletzt aktiv",
+                )
+            }
+
+        // 7. No measurable activity anywhere — the session numbers are the only
+        //    thing left that is real, so the fullest context keeps the card from
+        //    going blank. Last resort, not the resting state.
+        rows.mapNotNull { row -> sessions[row.agent.stem]?.percent?.let { row to it } }
+            .maxByOrNull { it.second }
+            ?.let { (row, _) ->
+                return Choice(
+                    subject = Subject.Agent(row.agent.stem),
+                    rank = Rank.RESTING,
+                    reason = "Im Blick · vollster Kontext",
+                )
+            }
 
         return Choice(subject = null, rank = Rank.NONE, reason = "Niemand arbeitet gerade")
     }

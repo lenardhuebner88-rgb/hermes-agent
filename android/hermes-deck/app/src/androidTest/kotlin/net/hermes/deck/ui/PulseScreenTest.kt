@@ -88,8 +88,11 @@ class PulseScreenTest {
 
     @Test
     fun theFocusCardNamesWhyItChoseThisAgent() {
+        // Codex is the one with an open turn, so the card is about work in
+        // progress — not about whose context happens to be fullest, which was
+        // the old rule and put a resting agent on the screen for hours.
         render(pulse(fleet))
-        rule.onNodeWithText("IM BLICK · VOLLSTER KONTEXT").assertIsDisplayed()
+        rule.onNodeWithText("IM BLICK · ARBEITET").assertIsDisplayed()
         rule.onAllNodesWithText("Codex")[0].assertIsDisplayed()
     }
 
