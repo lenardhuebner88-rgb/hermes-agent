@@ -57,13 +57,16 @@ class OverlayDeviceTest {
         assertNotNull(
             "readiness card did not collapse although all four steps are granted",
             device.wait(
-                Until.findObject(By.res(APP_ID, SettingsTestTags.READINESS_ALL_DONE)),
+                // Single-arg By.res: testTagsAsResourceId writes the tag RAW into
+                // viewIdResourceName, with no "pkg:id/" prefix — the two-arg overload
+                // builds exactly that prefix and can never match.
+                Until.findObject(By.res(SettingsTestTags.READINESS_ALL_DONE)),
                 5_000,
             ),
         )
         assertNull(
             "granular step rows must be gone once everything is done",
-            device.findObject(By.res(APP_ID, SettingsTestTags.READINESS_PROGRESS)),
+            device.findObject(By.res(SettingsTestTags.READINESS_PROGRESS)),
         )
     }
 
