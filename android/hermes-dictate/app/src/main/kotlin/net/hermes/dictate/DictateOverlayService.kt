@@ -231,7 +231,7 @@ class DictateOverlayService :
         params.y = BubblePlacement.clampY(params.y, params.height, currentScreen(), edgeMarginPx())
         view.alpha = prefs.overlayBubbleOpacity / 100f
         runCatching { windowManager.updateViewLayout(view, params) }
-        overlayView?.takeIf { !expanded }?.findViewById<View>(R.id.bubble_mic)?.setBackgroundResource(
+        overlayView?.takeIf { !expanded }?.setBackgroundResource(
             if (active) R.drawable.bg_bubble_active else R.drawable.bg_bubble,
         )
     }
@@ -564,10 +564,8 @@ class DictateOverlayService :
     // already normalized onto the same 0..100 scale as onLevel(rmsDb) above.
     override fun onLevel(level: Int) = updateWaveLevel(level)
 
-    /** Drives both wave presentations — whichever one is currently inflated finds its view. */
     private fun updateWaveLevel(level: Int) {
         overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = level
-        overlayView?.findViewById<BubbleRingView>(R.id.bubble_ring)?.level = level
     }
 
     // --- Text output: preview stays inside the pill, only CommitSegment writes to the field ---

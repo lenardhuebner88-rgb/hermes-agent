@@ -80,10 +80,14 @@ class OverlayDeviceTest {
         val done = snapshot(harness)
         assertEquals(targetContext.getString(R.string.status_done), done.status)
         assertFalse(done.cancelEnabled)
-        // The success state offers a visible undo for the text that was just written; it used to
-        // leave the confirm slot dead, which hid the only way to take a wrong commit back.
-        assertTrue(done.confirmEnabled)
-        assertEquals(targetContext.getString(R.string.overlay_undo_desc), done.confirmDescription)
+        // The confirm slot only ever shows the plain "done" checkmark now and stays inactive —
+        // no status word, no echoed text (done.messageVisible is false).
+        assertFalse(done.confirmEnabled)
+        assertEquals(targetContext.getString(R.string.overlay_done_desc), done.confirmDescription)
+        assertFalse(done.messageVisible)
+        // Undo is not lost: it moved to its own icon-only button, visible during the undo window.
+        assertTrue(done.undoVisible)
+        assertEquals(targetContext.getString(R.string.overlay_undo_desc), done.undoDescription)
         // The wave replaces the visible status word, so it must announce the state itself.
         assertEquals(targetContext.getString(R.string.status_listening), first.waveDescription)
 

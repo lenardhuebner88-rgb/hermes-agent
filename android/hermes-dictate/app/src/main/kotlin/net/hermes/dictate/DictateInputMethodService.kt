@@ -501,6 +501,11 @@ class DictateInputMethodService :
                 this,
                 if (status == UiStatus.Recording) R.color.cloud else R.color.listening,
             )
+            // The wave replaces the status line visually, so it has to carry it for a screen
+            // reader — same contract as the pill's pill_wave.
+            wave.contentDescription = getString(
+                if (status == UiStatus.Recording) R.string.status_recording else R.string.status_listening,
+            )
         } else {
             wave.reset()
         }

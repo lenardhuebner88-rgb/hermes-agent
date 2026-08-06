@@ -25,10 +25,12 @@ class AudioLevelTest {
     }
 
     @Test
-    fun `a real-device max-amplitude sample maps onto the same range as the on-device path`() {
-        // Harvested from an on-device VOICE_RECOGNITION capture: normal speaking volume typically
-        // peaks in the low thousands out of 32767, which is a real device's noisy floor above
-        // silence but well short of clipping — comparable to a mid-range rmsDb reading.
+    fun `plausible speech amplitudes map onto the same range as the on-device path`() {
+        // NOT measured from a live capture — these are assumed representative points (a few
+        // hundred out of 32767 for quiet speech up to the low thousands for normal volume,
+        // well short of clipping), chosen to exercise the calibrated FLOOR_DB..CEIL_DB window
+        // in AudioLevel.fromMaxAmplitude. Un-verified against a real device; see the builder
+        // report for that caveat.
         val quietSpeech = AudioLevel.fromMaxAmplitude(600)
         val normalSpeech = AudioLevel.fromMaxAmplitude(4_000)
         val loudSpeech = AudioLevel.fromMaxAmplitude(15_000)

@@ -3,9 +3,9 @@ package net.hermes.dictate
 import kotlin.math.log10
 
 /**
- * Converts each dictation path's raw microphone reading onto the SAME 0..100 meter scale the
- * wave views draw ([OverlayWaveView.level], [BubbleRingView.level]) — otherwise the cloud and
- * on-device paths would visibly pulse differently for the same voice.
+ * Converts each dictation path's raw microphone reading onto the SAME 0..100 meter scale
+ * [OverlayWaveView.level] draws — otherwise the cloud and on-device paths would visibly pulse
+ * differently for the same voice.
  */
 object AudioLevel {
 
