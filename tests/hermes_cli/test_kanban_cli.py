@@ -410,6 +410,89 @@ def test_run_slash_comment_without_directive_is_plain_comment(kanban_home, monke
     assert [c.kind for c in comments] == ["comment"]
 
 
+# ---------------------------------------------------------------------------
+# Worker-ownership guard on the CLI mutation path
+# (mirror of tools/kanban_tools.py:_enforce_worker_task_ownership, #19534)
+# ---------------------------------------------------------------------------
+
+def _create_task_id(title: str) -> str:
+    out = kc.run_slash(f"create '{title}'")
+    return re.search(r"(t_[a-f0-9]+)", out).group(1)
+
+
+def test_worker_cli_complete_foreign_task_refused(kanban_home, monkeypatch):
+    """A worker (HERMES_KANBAN_TASK set) completing a FOREIGN task id must
+    not fall through to the operator path — before the guard it landed an
+    unconditional status='done' UPDATE with no claim check, no review gate,
+    and even orphan-reaped the real worker's process."""
+    own = _create_task_id("own task")
+    foreign = _create_task_id("foreign task")
+    kc.run_slash(f"claim {foreign}")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    out = kc.run_slash(f"complete {foreign} --result forged")
+    assert "scoped to task" in out
+    with kb.connect() as conn:
+        assert kb.get_task(conn, foreign).status == "running"
+
+
+def test_worker_cli_block_foreign_task_refused(kanban_home, monkeypatch):
+    own = _create_task_id("own task")
+    foreign = _create_task_id("foreign task")
+    kc.run_slash(f"claim {foreign}")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    out = kc.run_slash(f"block {foreign} 'sabotage'")
+    assert "scoped to task" in out
+    with kb.connect() as conn:
+        assert kb.get_task(conn, foreign).status == "running"
+
+
+def test_worker_cli_unblock_foreign_task_refused(kanban_home, monkeypatch):
+    own = _create_task_id("own task")
+    foreign = _create_task_id("foreign task")
+    kc.run_slash(f"claim {foreign}")
+    kc.run_slash(f"block {foreign} 'hold'")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    out = kc.run_slash(f"unblock {foreign}")
+    assert "scoped to task" in out
+    with kb.connect() as conn:
+        assert kb.get_task(conn, foreign).status == "blocked"
+
+
+def test_worker_cli_heartbeat_foreign_task_refused(kanban_home, monkeypatch, capsys):
+    own = _create_task_id("own task")
+    foreign = _create_task_id("foreign task")
+    kc.run_slash(f"claim {foreign}")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    rc = kc._cmd_heartbeat(argparse.Namespace(task_id=foreign, note=None))
+    assert rc == 2
+    assert "scoped to task" in capsys.readouterr().err
+
+
+def test_worker_cli_own_task_mutations_still_allowed(kanban_home, monkeypatch):
+    """The guard scopes a worker to its own task, it does not cage it there:
+    mutations against the worker's OWN task id keep working."""
+    own = _create_task_id("own task")
+    kc.run_slash(f"claim {own}")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    assert "Blocked" in kc.run_slash(f"block {own} 'need a decision'")
+    with kb.connect() as conn:
+        assert kb.get_task(conn, own).status == "blocked"
+
+
+def test_operator_cli_foreign_mutations_unaffected(kanban_home, monkeypatch):
+    """No HERMES_KANBAN_TASK in env = operator context: unrestricted by
+    design (dispositioning foreign tasks is the operator's job)."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    foreign = _create_task_id("foreign task")
+    kc.run_slash(f"claim {foreign}")
+    assert "Blocked" in kc.run_slash(f"block {foreign} 'hold'")
+    assert "Unblocked" in kc.run_slash(f"unblock {foreign}")
+    out = kc.run_slash(f"complete {foreign} --result done")
+    assert "Completed" in out or "accepted" in out
+    with kb.connect() as conn:
+        assert kb.get_task(conn, foreign).status == "done"
+
+
 def test_run_slash_block_unblock_cycle(kanban_home):
     out = kc.run_slash("create 'x' --assignee alice")
     import re

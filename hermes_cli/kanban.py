@@ -2062,6 +2062,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
+    refusal = _worker_ownership_refusal(args.task_id)
+    if refusal:
+        print(f"kanban: {refusal}", file=sys.stderr)
+        return 2
     with kb.connect_closing() as conn:
         ok = kb.heartbeat_worker(
             conn,
@@ -3333,6 +3337,28 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     print(delivery.message)
     return 0
 
+def _worker_ownership_refusal(tid: str) -> Optional[str]:
+    """CLI mirror of ``tools/kanban_tools._enforce_worker_task_ownership``.
+
+    A dispatcher-spawned worker carries ``HERMES_KANBAN_TASK`` = its own
+    task id. On the CLI path a mutation against a *foreign* task id used
+    to fall through with ``expected_run_id=None`` — which the ``kb``
+    layer treats as the trusted operator path: no claim check, no review
+    gate, and ``complete_task`` even orphan-reaps the real worker's
+    process. Fail closed instead, exactly like the in-process tool guard
+    (#19534). Processes without the env marker (operators, orchestrators)
+    stay unrestricted by design.
+    """
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    if not env_tid or tid == env_tid:
+        return None
+    return (
+        f"worker is scoped to task {env_tid}; refusing to mutate {tid}. "
+        "Use `hermes kanban comment` to hand off information to other "
+        "tasks, or `hermes kanban create` to spawn follow-up work."
+    )
+
+
 def _worker_run_id_for(task_id: str) -> Optional[int]:
     if os.environ.get("HERMES_KANBAN_TASK") != task_id:
         return None
@@ -3457,6 +3483,13 @@ def _complete_one_task(
     metadata: Any,
 ) -> bool:
     """Complete a single task. Prints status lines. Returns True on success."""
+    # A worker completing a FOREIGN task id must not fall through to the
+    # operator path (expected_run_id=None below) — see
+    # _worker_ownership_refusal.
+    refusal = _worker_ownership_refusal(tid)
+    if refusal:
+        print(f"kanban: {refusal}", file=sys.stderr)
+        return False
     # Goal-mode pre-completion judge gate (Issue #38367), the CLI
     # side of the SAME gate the kanban_complete model tool enforces
     # (tools/kanban_tools.py:_handle_complete) — the documented
@@ -3645,6 +3678,11 @@ def _cmd_block(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            refusal = _worker_ownership_refusal(tid)
+            if refusal:
+                failed.append(tid)
+                print(f"kanban: {refusal}", file=sys.stderr)
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
             if not kb.block_task(
@@ -3749,6 +3787,11 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     per_task_input_token_cap = kanban_config.get("per_task_input_token_cap")
     with kb.connect_closing() as conn:
         for tid in ids:
+            refusal = _worker_ownership_refusal(tid)
+            if refusal:
+                failed.append(tid)
+                print(f"kanban: {refusal}", file=sys.stderr)
+                continue
             refusal = None if args.force else kb.budget_runaway_unblock_refusal(
                 conn,
                 tid,
