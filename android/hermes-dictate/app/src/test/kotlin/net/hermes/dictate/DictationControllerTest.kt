@@ -87,6 +87,69 @@ class DictationControllerTest {
     }
 
     @Test
+    fun `stopping after a partial commits it instead of dropping it`() {
+        // The reported failure, 2026-08-06: speak, tap confirm, everything vanishes.
+        // stopListening() commonly answers ERROR_NO_MATCH rather than a final result, and the
+        // STOPPING error branch used to answer that with ClearPreview + Idle — losing text the
+        // user had spoken AND seen on screen, with no message to explain it.
+        val c = controller()
+        c.micTapped()
+        assertEquals(listOf<Cmd>(Cmd.Preview("hallo welt")), c.recognizerPartial("hallo welt"))
+        c.micTapped()
+
+        val cmds = c.recognizerError(RecognizerFailure.NO_SPEECH)
+
+        assertEquals(
+            listOf<Cmd>(Cmd.CommitSegment("hallo welt"), Cmd.Status(UiStatus.Done)),
+            cmds,
+        )
+        assertEquals(DictationController.Phase.IDLE, c.phase)
+    }
+
+    @Test
+    fun `empty final after a partial commits the partial`() {
+        // Same loss, other trigger: an empty final arriving after real partials.
+        val c = controller()
+        c.micTapped()
+        c.recognizerPartial("hallo welt")
+        c.micTapped()
+
+        assertEquals(
+            listOf<Cmd>(Cmd.CommitSegment("hallo welt"), Cmd.Status(UiStatus.Done)),
+            c.recognizerFinal(""),
+        )
+    }
+
+    @Test
+    fun `a salvaged partial is not committed twice`() {
+        // A late final can still arrive after the error already rescued the partial. Phase is
+        // IDLE by then, so it must be ignored — otherwise the rescue doubles the text.
+        val c = controller()
+        c.micTapped()
+        c.recognizerPartial("hallo welt")
+        c.micTapped()
+        c.recognizerError(RecognizerFailure.NO_SPEECH)
+
+        assertEquals(emptyList<Cmd>(), c.recognizerFinal("hallo welt"))
+    }
+
+    @Test
+    fun `a committed segment is not salvaged again on the next stop`() {
+        // pendingPartial must not outlive the segment it belongs to: commit "erster teil",
+        // then stop without any new partial, and nothing may be re-committed.
+        val c = controller()
+        c.micTapped()
+        c.recognizerPartial("erster teil")
+        c.recognizerFinal("erster teil")
+        c.micTapped()
+
+        assertEquals(
+            listOf<Cmd>(Cmd.ClearPreview, Cmd.Status(UiStatus.Idle)),
+            c.recognizerError(RecognizerFailure.NO_SPEECH),
+        )
+    }
+
+    @Test
     fun `silent rounds restart the recognizer until the cap then stop visibly`() {
         val c = controller()
         c.micTapped()

@@ -182,7 +182,7 @@ class DictateOverlayService :
         val density = resources.displayMetrics.density
         val sizePx = (BubbleAppearance.sizeDp(prefs.overlayBubbleSize, prefs.overlayShrinkIdle) * density).toInt()
         val marginPx = edgeMarginPx()
-        val onRight = prefs.overlayBubbleOnRight
+        val x = initialBubbleX(screen, sizePx, marginPx)
         val y = prefs.overlayBubbleY.takeIf { it >= 0 }
             ?.let { BubblePlacement.clampY(it, sizePx, screen, marginPx) }
             ?: BubblePlacement.centeredY(sizePx, screen, marginPx)
@@ -193,8 +193,10 @@ class DictateOverlayService :
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-            x = marginPx
+            // Gravity is fixed from here on: with X free to drag, START vs END would just make
+            // the same coordinates mean different things depending on which edge was last docked.
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
             this.y = y
         }
         overlayParams = params
@@ -227,8 +229,11 @@ class DictateOverlayService :
         )
         params.width = (sizeDp * density).toInt()
         params.height = (sizeDp * density).toInt()
-        params.x = edgeMarginPx()
-        params.y = BubblePlacement.clampY(params.y, params.height, currentScreen(), edgeMarginPx())
+        val screen = currentScreen()
+        // Size can change (idle shrink) without a drag — reclamp the dragged-to X against the
+        // new width instead of resetting it to the edge.
+        params.x = BubblePlacement.clampX(params.x, params.width, screen, edgeMarginPx())
+        params.y = BubblePlacement.clampY(params.y, params.height, screen, edgeMarginPx())
         view.alpha = prefs.overlayBubbleOpacity / 100f
         runCatching { windowManager.updateViewLayout(view, params) }
         overlayView?.takeIf { !expanded }?.setBackgroundResource(
@@ -236,9 +241,11 @@ class DictateOverlayService :
         )
     }
 
-    /** Drag-to-move with edge snap; a plain tap (no meaningful drag) starts/stops dictation. */
+    /** Drag-to-move anywhere on screen; a plain tap (no meaningful drag) starts/stops dictation. */
     private fun wireBubbleTouch(view: View, params: WindowManager.LayoutParams) {
+        var startX = 0
         var startY = 0
+        var startRawX = 0f
         var startRawY = 0f
         var longPressed = false
         val gesture = BubbleGesture(ViewConfiguration.get(this).scaledTouchSlop.toFloat())
@@ -255,7 +262,9 @@ class DictateOverlayService :
         view.setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    startX = params.x
                     startY = params.y
+                    startRawX = event.rawX
                     startRawY = event.rawY
                     gesture.begin(event.rawX, event.rawY)
                     longPressed = false
@@ -263,18 +272,16 @@ class DictateOverlayService :
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - startRawX).toInt()
                     val dy = (event.rawY - startRawY).toInt()
                     val moved = gesture.move(event.rawX, event.rawY)
                     if (moved) mainHandler.removeCallbacks(longPress)
                     if (moved) {
-                        // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted Y the
-                        // bubble could otherwise be parked off-screen permanently.
-                        params.y = BubblePlacement.clampY(
-                            startY + dy,
-                            v.height,
-                            currentScreen(),
-                            edgeMarginPx(),
-                        )
+                        // Clamp inside the screen: with FLAG_LAYOUT_NO_LIMITS and persisted
+                        // position the bubble could otherwise be parked off-screen permanently.
+                        val screen = currentScreen()
+                        params.x = BubblePlacement.clampX(startX + dx, v.width, screen, edgeMarginPx())
+                        params.y = BubblePlacement.clampY(startY + dy, v.height, screen, edgeMarginPx())
                         runCatching { windowManager.updateViewLayout(v, params) }
                     }
                     true
@@ -283,7 +290,8 @@ class DictateOverlayService :
                     mainHandler.removeCallbacks(longPress)
                     when (gesture.finish(event.actionMasked == MotionEvent.ACTION_CANCEL, longPressed)) {
                         BubbleGesture.Finish.DRAG -> {
-                            snapToEdge(v, params, event.rawX)
+                            // Free placement: no more edge snap, just persist where it was let go.
+                            prefs.overlayBubbleX = params.x
                             prefs.overlayBubbleY = params.y
                         }
                         BubbleGesture.Finish.TAP -> {
@@ -298,16 +306,6 @@ class DictateOverlayService :
                 else -> false
             }
         }
-    }
-
-    private fun snapToEdge(v: View, params: WindowManager.LayoutParams, lastRawX: Float) {
-        val screen = currentScreen()
-        val onRight = BubblePlacement.isRight(lastRawX, screen.widthPx)
-        prefs.overlayBubbleOnRight = onRight
-        params.gravity = Gravity.TOP or (if (onRight) Gravity.END else Gravity.START)
-        params.x = edgeMarginPx()
-        params.y = BubblePlacement.clampY(params.y, v.height, screen, edgeMarginPx())
-        runCatching { windowManager.updateViewLayout(v, params) }
     }
 
     private fun currentScreen(): BubbleScreen {
@@ -328,18 +326,49 @@ class DictateOverlayService :
 
     private fun edgeMarginPx(): Int = (BUBBLE_EDGE_MARGIN_DP * resources.displayMetrics.density).toInt()
 
-    private fun applyPillGeometry(view: View, params: WindowManager.LayoutParams) {
+    /**
+     * Once the user has dragged the bubble at least once, [DictatePrefs.overlayBubbleX] is real
+     * and wins; before that, fall back to [BubblePlacement.migratedX] from the legacy edge flag.
+     */
+    private fun initialBubbleX(screen: BubbleScreen, bubbleWidthPx: Int, marginPx: Int): Int {
+        val stored = prefs.overlayBubbleX
+        return if (stored >= 0) {
+            BubblePlacement.clampX(stored, bubbleWidthPx, screen, marginPx)
+        } else {
+            BubblePlacement.migratedX(prefs.overlayBubbleOnRight, bubbleWidthPx, screen, marginPx)
+        }
+    }
+
+    // Both halves of tonight's overlay work meet here: the width/height come from the pill's
+    // state, the x/y from wherever the user parked the bubble. Neither may swallow the other.
+    private fun applyPillGeometry(
+        view: View,
+        params: WindowManager.LayoutParams,
+        active: Boolean,
+        contentVisible: Boolean,
+        secondaryVisible: Boolean,
+    ) {
         val density = resources.displayMetrics.density
         val screen = currentScreen()
-        params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density)
+        view.findViewById<View>(R.id.pill_content_column)?.minimumWidth =
+            if (contentVisible) resources.getDimensionPixelSize(R.dimen.pill_column_min_width) else 0
+        params.width = OverlayGeometry.pillWidthPx(screen.widthPx, density, active, secondaryVisible, contentVisible)
         params.height = OverlayGeometry.pillHeightPx(density)
-        params.x = edgeMarginPx()
+        // Free placement: reclamp the dragged-to X against the pill's (wider) width instead of
+        // resetting to the edge. Gravity is inherited from the bubble's LayoutParams instance
+        // (fixed TOP|START at creation) and intentionally untouched here.
+        params.x = BubblePlacement.clampX(params.x, params.width, screen, edgeMarginPx())
         params.y = BubblePlacement.clampY(params.y, params.height, screen, edgeMarginPx())
         if (view.isAttachedToWindow) runCatching { windowManager.updateViewLayout(view, params) }
     }
 
     /** Swaps the collapsed bubble layout for the expanded pill layout, or back. */
-    private fun setExpanded(expand: Boolean) {
+    private fun setExpanded(
+        expand: Boolean,
+        active: Boolean = false,
+        contentVisible: Boolean = false,
+        secondaryVisible: Boolean = false,
+    ) {
         if (expand == expanded) return
         expanded = expand
         val current = overlayView ?: return
@@ -348,9 +377,11 @@ class DictateOverlayService :
         val layout = if (expand) R.layout.overlay_pill else R.layout.overlay_bubble
         val view = layoutInflater().inflate(layout, null)
         overlayView = view
-        val pillEntryDuration = if (expand) preparePillEntry(view) else 0L
+        var pillEntryDuration = 0L
         if (expand) {
-            applyPillGeometry(view, params)
+            // Geometry first so the entry animation knows the width it needs to slide in across.
+            applyPillGeometry(view, params, active, contentVisible, secondaryVisible)
+            pillEntryDuration = preparePillEntry(view, params.width)
         } else {
             wireBubbleTouch(view, params)
         }
@@ -374,7 +405,7 @@ class DictateOverlayService :
         updateBubbleVisibility()
     }
 
-    private fun preparePillEntry(view: View): Long {
+    private fun preparePillEntry(view: View, pillWidthPx: Int): Long {
         val animatorScale = runCatching {
             Settings.Global.getFloat(contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f)
         }.getOrDefault(1f)
@@ -383,10 +414,12 @@ class DictateOverlayService :
             view.alpha = 1f
             view.scaleX = 1f
             view.scaleY = 1f
+            view.translationX = 0f
         } else {
             view.alpha = 0f
             view.scaleX = PILL_ENTER_SCALE
             view.scaleY = PILL_ENTER_SCALE
+            view.translationX = OverlayMotion.slideDistancePx(pillWidthPx).toFloat()
         }
         return duration
     }
@@ -397,6 +430,7 @@ class DictateOverlayService :
             .alpha(1f)
             .scaleX(1f)
             .scaleY(1f)
+            .translationX(0f)
             .setDuration(duration)
             .setInterpolator(DecelerateInterpolator())
             .start()
@@ -546,10 +580,7 @@ class DictateOverlayService :
 
     override fun onPartial(text: String) = run(controller.recognizerPartial(text))
     override fun onFinal(text: String) = run(controller.recognizerFinal(text))
-    override fun onLevel(rmsDb: Float) {
-        val normalized = (((rmsDb + 2f) / 12f) * 100f).toInt().coerceIn(0, 100)
-        overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = normalized
-    }
+    override fun onLevel(rmsDb: Float) = updateWaveLevel(AudioLevel.fromRmsDb(rmsDb))
     override fun onError(failure: RecognizerFailure) {
         if (failure == RecognizerFailure.BUSY) dictation?.recreate()
         run(controller.recognizerError(failure))
@@ -561,6 +592,14 @@ class DictateOverlayService :
 
     override fun onRecorderError() {
         mainHandler.post { run(controller.recordingError()) }
+    }
+
+    // Cloud path's own level source (MediaRecorder.getMaxAmplitude polling in CloudRecorder),
+    // already normalized onto the same 0..100 scale as onLevel(rmsDb) above.
+    override fun onLevel(level: Int) = updateWaveLevel(level)
+
+    private fun updateWaveLevel(level: Int) {
+        overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = level
     }
 
     // --- Text output: preview stays inside the pill, only CommitSegment writes to the field ---
@@ -650,18 +689,22 @@ class DictateOverlayService :
             cloudMode = controller.mode == Mode.CLOUD,
         )
         val semantics = OverlayActionSemantics.from(presentation)
-        setExpanded(presentation.expanded)
-        if (!presentation.expanded) return
-        val view = overlayView ?: return
-        overlayParams?.let { applyPillGeometry(view, it) }
-        val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
-        val statusText = getString(labelText(presentation.label))
         // Two faces in one pill: while the microphone is open only the voice is shown; result and
-        // error states swap in the short message that actually has something to say.
+        // error states swap in the short message that actually has something to say. The window's
+        // width follows the same split — generous while listening, only as wide as what's visible
+        // once the pill is quiet again.
         val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
             presentation.label == OverlayLabel.PROCESSING ||
             presentation.label == OverlayLabel.UPLOADING
-        view.findViewById<View>(R.id.pill_message)?.visibility = if (listening) View.GONE else View.VISIBLE
+        val contentVisible = listening || presentation.showMessage
+        setExpanded(presentation.expanded, listening, contentVisible, semantics.secondaryVisible)
+        if (!presentation.expanded) return
+        val view = overlayView ?: return
+        overlayParams?.let { applyPillGeometry(view, it, listening, contentVisible, semantics.secondaryVisible) }
+        val toneColor = ContextCompat.getColor(this, toneColor(presentation.tone))
+        val statusText = getString(labelText(presentation.label))
+        view.findViewById<View>(R.id.pill_message)?.visibility =
+            if (presentation.showMessage) View.VISIBLE else View.GONE
         view.findViewById<OverlayWaveView>(R.id.pill_wave)?.apply {
             visibility = if (listening) View.VISIBLE else View.GONE
             fillColor = toneColor
@@ -727,6 +770,27 @@ class DictateOverlayService :
                 }
                 OverlayConfirmAction.NONE -> null
             })
+        }
+        view.findViewById<ImageButton>(R.id.pill_undo)?.apply {
+            val visible = semantics.secondaryVisible
+            visibility = if (visible) View.VISIBLE else View.GONE
+            if (visible) {
+                contentDescription = getString(semantics.secondaryDescription)
+                setImageResource(semantics.secondaryIcon)
+                setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    // Not every field accepts ACTION_SET_TEXT. Saying "done" when the text is
+                    // still standing there would be the worse failure.
+                    if (editFocusedField(undoLast = true, requireCommitNode = true)) {
+                        lastPreview = ""
+                        applyStatus(UiStatus.Idle)
+                    } else {
+                        applyStatus(UiStatus.Failed(ErrorKind.UNDO_FAILED))
+                    }
+                }
+            } else {
+                setOnClickListener(null)
+            }
         }
     }
 

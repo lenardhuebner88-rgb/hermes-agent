@@ -15,6 +15,7 @@ import java.io.FileInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -42,11 +43,31 @@ class OverlayDeviceTest {
 
     @Test
     fun preparedDeviceExposesReadableSetupState() {
+        // This is the only test that ever renders the settings screen at all, so it is also the
+        // only proof that the Compose rewrite starts without throwing. Keep it anchored on
+        // testTags, not on German display text: the previous version asserted "erteilt ✓" /
+        // "ausgewählt ✓" / "aktiv ✓" and broke the moment the four setup rows were replaced by
+        // one readiness card — a wording change should not read as a broken app.
         open(SettingsActivity::class.java)
         assertNotNull(device.wait(Until.findObject(By.text("Hermes Diktat")), 5_000))
-        assertNotNull(device.findObject(By.text("erteilt ✓")))
-        assertNotNull(device.findObject(By.text("ausgewählt ✓")))
-        assertNotNull(device.findObject(By.text("aktiv ✓")))
+
+        // prepareEmulatorState() grants all four steps, so the card must collapse to its
+        // single "ready" line. Asserting the collapse is the point: it is the behaviour that
+        // replaced the four per-step rows.
+        assertNotNull(
+            "readiness card did not collapse although all four steps are granted",
+            device.wait(
+                // Single-arg By.res: testTagsAsResourceId writes the tag RAW into
+                // viewIdResourceName, with no "pkg:id/" prefix — the two-arg overload
+                // builds exactly that prefix and can never match.
+                Until.findObject(By.res(SettingsTestTags.READINESS_ALL_DONE)),
+                5_000,
+            ),
+        )
+        assertNull(
+            "granular step rows must be gone once everything is done",
+            device.findObject(By.res(SettingsTestTags.READINESS_PROGRESS)),
+        )
     }
 
     @Test
@@ -80,10 +101,14 @@ class OverlayDeviceTest {
         val done = snapshot(harness)
         assertEquals(targetContext.getString(R.string.status_done), done.status)
         assertFalse(done.cancelEnabled)
-        // The success state offers a visible undo for the text that was just written; it used to
-        // leave the confirm slot dead, which hid the only way to take a wrong commit back.
-        assertTrue(done.confirmEnabled)
-        assertEquals(targetContext.getString(R.string.overlay_undo_desc), done.confirmDescription)
+        // The confirm slot only ever shows the plain "done" checkmark now and stays inactive —
+        // no status word, no echoed text (done.messageVisible is false).
+        assertFalse(done.confirmEnabled)
+        assertEquals(targetContext.getString(R.string.overlay_done_desc), done.confirmDescription)
+        assertFalse(done.messageVisible)
+        // Undo is not lost: it moved to its own icon-only button, visible during the undo window.
+        assertTrue(done.undoVisible)
+        assertEquals(targetContext.getString(R.string.overlay_undo_desc), done.undoDescription)
         // The wave replaces the visible status word, so it must announce the state itself.
         assertEquals(targetContext.getString(R.string.status_listening), first.waveDescription)
 

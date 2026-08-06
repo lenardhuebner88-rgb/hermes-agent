@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- New overlay strings live here, not in strings.xml — see CLAUDE.md anti-scope note: a parallel
+     builder owns strings.xml/colors.xml in this working set. -->
+<resources>
+    <string name="overlay_done_desc">Diktat abgeschlossen</string>
+</resources>

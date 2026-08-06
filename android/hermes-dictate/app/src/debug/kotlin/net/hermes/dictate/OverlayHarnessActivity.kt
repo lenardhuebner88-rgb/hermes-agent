@@ -21,7 +21,13 @@ class OverlayHarnessActivity : Activity() {
             addView(
                 pill,
                 FrameLayout.LayoutParams(
-                    OverlayGeometry.pillWidthPx(resources.displayMetrics.widthPixels, resources.displayMetrics.density),
+                    // Starts quiet/empty, same as production before any status ever renders.
+                    OverlayGeometry.pillWidthPx(
+                        resources.displayMetrics.widthPixels,
+                        resources.displayMetrics.density,
+                        active = false,
+                        contentVisible = false,
+                    ),
                     OverlayGeometry.pillHeightPx(resources.displayMetrics.density),
                     Gravity.CENTER,
                 ),
@@ -78,12 +84,15 @@ class OverlayHarnessActivity : Activity() {
             text = OverlayText.visibleBody(presentation) ?: getString(R.string.overlay_speak_now)
             contentDescription = presentation.body ?: getString(R.string.overlay_speak_now)
         }
-        // Same two faces as production: the wave while the microphone is open, the message
-        // otherwise. Driving the real layout is the point of this harness.
+        // Same faces as production: the wave while the microphone is open, the result/error
+        // message only when the state actually has something to say (showMessage). Driving the
+        // real layout is the point of this harness.
         val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
             presentation.label == OverlayLabel.PROCESSING ||
             presentation.label == OverlayLabel.UPLOADING
-        pill.findViewById<View>(R.id.pill_message).visibility = if (listening) View.GONE else View.VISIBLE
+        val contentVisible = listening || presentation.showMessage
+        pill.findViewById<View>(R.id.pill_message).visibility =
+            if (presentation.showMessage) View.VISIBLE else View.GONE
         pill.findViewById<OverlayWaveView>(R.id.pill_wave).apply {
             visibility = if (listening) View.VISIBLE else View.GONE
             // A single sample cannot show a wave; a replayed sequence renders the real thing.
@@ -93,6 +102,20 @@ class OverlayHarnessActivity : Activity() {
             contentDescription = getString(textId)
         }
         val semantics = OverlayActionSemantics.from(presentation)
+        // Same state-dependent width as production: generous while active, only as wide as the
+        // visible actions once quiet again.
+        pill.findViewById<View>(R.id.pill_content_column).minimumWidth =
+            if (contentVisible) resources.getDimensionPixelSize(R.dimen.pill_column_min_width) else 0
+        (pill.layoutParams as? FrameLayout.LayoutParams)?.let { params ->
+            params.width = OverlayGeometry.pillWidthPx(
+                resources.displayMetrics.widthPixels,
+                resources.displayMetrics.density,
+                active = listening,
+                secondaryVisible = semantics.secondaryVisible,
+                contentVisible = contentVisible,
+            )
+            pill.layoutParams = params
+        }
         pill.findViewById<ImageButton>(R.id.pill_cancel).apply {
             applyActionState(presentation.cancelEnabled)
             contentDescription = getString(semantics.cancelDescription)
@@ -101,6 +124,13 @@ class OverlayHarnessActivity : Activity() {
             applyActionState(presentation.confirmAction != OverlayConfirmAction.NONE)
             contentDescription = getString(semantics.confirmDescription)
             setImageResource(semantics.confirmIcon)
+        }
+        pill.findViewById<ImageButton>(R.id.pill_undo).apply {
+            visibility = if (semantics.secondaryVisible) View.VISIBLE else View.GONE
+            if (semantics.secondaryVisible) {
+                contentDescription = getString(semantics.secondaryDescription)
+                setImageResource(semantics.secondaryIcon)
+            }
         }
     }
 
@@ -116,11 +146,14 @@ class OverlayHarnessActivity : Activity() {
         level = pill.findViewById<OverlayWaveView>(R.id.pill_wave).level,
         width = pill.width,
         height = pill.height,
+        messageVisible = pill.findViewById<View>(R.id.pill_message).visibility == View.VISIBLE,
         cancelEnabled = pill.findViewById<ImageButton>(R.id.pill_cancel).isEnabled,
         confirmEnabled = pill.findViewById<ImageButton>(R.id.pill_confirm).isEnabled,
         cancelDescription = pill.findViewById<ImageButton>(R.id.pill_cancel).contentDescription.toString(),
         confirmDescription = pill.findViewById<ImageButton>(R.id.pill_confirm).contentDescription.toString(),
         waveDescription = pill.findViewById<OverlayWaveView>(R.id.pill_wave).contentDescription.toString(),
+        undoVisible = pill.findViewById<ImageButton>(R.id.pill_undo).visibility == View.VISIBLE,
+        undoDescription = pill.findViewById<ImageButton>(R.id.pill_undo).contentDescription?.toString().orEmpty(),
     )
 
     data class Snapshot(
@@ -129,11 +162,14 @@ class OverlayHarnessActivity : Activity() {
         val level: Int,
         val width: Int,
         val height: Int,
+        val messageVisible: Boolean,
         val cancelEnabled: Boolean,
         val confirmEnabled: Boolean,
         val cancelDescription: String,
         val confirmDescription: String,
         val waveDescription: String,
+        val undoVisible: Boolean,
+        val undoDescription: String,
     )
 
     companion object {
