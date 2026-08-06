@@ -19,6 +19,19 @@ _TERMINAL_STATUSES = frozenset({"done", "archived", "failed", "cancelled"})
 CONFLICT_FIXER_FAILED_EVENT = "conflict_fixer_failed"
 LANE_SCOPE_FIXER_FAILED_EVENT = "lane_scope_fixer_failed"
 FIXER_FAILURE_PUBLISH_FAILED_EVENT = "fixer_failure_publish_failed"
+CONFLICT_FIXER_RESUME_DECLINED_EVENT = "conflict_fixer_resume_declined"
+
+# Machine-readable decline reasons for CONFLICT_FIXER_RESUME_DECLINED_EVENT,
+# one key per decline class of the resume guard. ``marker_invalid`` covers two
+# physical exits (unreadable marker payload and empty required field).
+RESUME_DECLINED_MARKER_INVALID = "marker_invalid"
+RESUME_DECLINED_PARENT_MISSING = "parent_missing"
+RESUME_DECLINED_PARENT_NOT_BLOCKED = "parent_not_blocked"
+RESUME_DECLINED_NOT_INTEGRATION_PARK = "not_integration_park"
+RESUME_DECLINED_OPERATOR_ESCALATION_ACTIVE = "operator_escalation_active"
+RESUME_DECLINED_BUDGET_EXHAUSTED = "budget_exhausted"
+RESUME_DECLINED_PARK_OWNERSHIP_LOST = "park_ownership_lost"
+RESUME_DECLINED_UPDATE_RACE = "update_race"
 
 
 def _payload_dict(raw: object) -> dict[str, Any]:
@@ -94,6 +107,32 @@ def _matching_conflict_fixer_attempts(
         if child_id:
             child_ids.add(child_id)
     return len(child_ids)
+
+
+def record_conflict_fixer_resume_declined(
+    conn: sqlite3.Connection,
+    child_id: str,
+    reason: str,
+    *,
+    parent_id: str = "",
+    root_id: str = "",
+) -> None:
+    """Leave a durable receipt when a fixer completion does not resume its parent.
+
+    The event hangs off the CHILD card: it is the only task that exists on
+    every decline path (``parent is None`` has no parent to write to).
+    ``parent_id`` / ``root_id`` are attached only when present — on
+    ``marker_invalid`` they are unreliable, and an empty string is not
+    evidence.
+    """
+    from hermes_cli import kanban_db as kb
+
+    payload: dict[str, Any] = {"child_id": child_id, "reason": reason}
+    if parent_id:
+        payload["parent_id"] = parent_id
+    if root_id:
+        payload["root_id"] = root_id
+    kb._append_event(conn, child_id, CONFLICT_FIXER_RESUME_DECLINED_EVENT, payload)
 
 
 def _failure_event_exists(

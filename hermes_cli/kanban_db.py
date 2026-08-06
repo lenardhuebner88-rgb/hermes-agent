@@ -107,11 +107,20 @@ from hermes_cli import kanban_review_authority as _review_authority
 from hermes_cli import kanban_review_policy as _review_policy
 from hermes_cli import kanban_runtime_facts as _runtime_facts
 from hermes_cli.kanban_chain_status import (
+    RESUME_DECLINED_BUDGET_EXHAUSTED,
+    RESUME_DECLINED_MARKER_INVALID,
+    RESUME_DECLINED_NOT_INTEGRATION_PARK,
+    RESUME_DECLINED_OPERATOR_ESCALATION_ACTIVE,
+    RESUME_DECLINED_PARENT_MISSING,
+    RESUME_DECLINED_PARENT_NOT_BLOCKED,
+    RESUME_DECLINED_PARK_OWNERSHIP_LOST,
+    RESUME_DECLINED_UPDATE_RACE,
     _matching_conflict_fixer_attempts,
     blocked_event_kind,
     is_integration_park,
     is_settled_fixer_card,
     on_fixer_card_failed,
+    record_conflict_fixer_resume_declined,
 )
 from hermes_cli.kanban_scores_digest import scores_digest as _fork_scores_digest
 from hermes_cli import kanban_templates
@@ -27105,6 +27114,9 @@ def _resume_parent_for_completed_conflict_fixer(
         try:
             payload = json.loads(marker["payload"] or "{}")
         except (TypeError, ValueError):
+            record_conflict_fixer_resume_declined(
+                conn, child_id, RESUME_DECLINED_MARKER_INVALID
+            )
             return False
         marker_id = int(marker["id"])
         parent_id = str(payload.get("parent_id") or "").strip()
@@ -27113,6 +27125,13 @@ def _resume_parent_for_completed_conflict_fixer(
             payload.get("conflict_fingerprint") or ""
         ).strip()
         if not parent_id or not root_id or not expected_fingerprint:
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_MARKER_INVALID,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
             return False
 
         parent = conn.execute(
@@ -27127,29 +27146,81 @@ def _resume_parent_for_completed_conflict_fixer(
         current_reason = _decision_event_reason(
             blocked["payload"] if blocked else None
         ) or ""
-        if (
-            parent is None
-            or parent["status"] != "blocked"
-            or not is_integration_park(
-                reason=current_reason,
-                block_kind=blocked_event_kind(
-                    blocked["payload"] if blocked else None,
-                ),
+        # The chain below is the former short-circuit ``or`` guard, decomposed
+        # exit-by-exit so each decline leaves a machine-readable receipt.
+        # Order is semantic: parent_missing must precede any parent["status"]
+        # access, and the chain keeps its original left-to-right evaluation.
+        if parent is None:
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_PARENT_MISSING,
+                parent_id=parent_id,
+                root_id=root_id,
             )
-            or _operator_escalation_is_active(conn, parent_id)
-            or _matching_conflict_fixer_attempts(
+            return False
+        if parent["status"] != "blocked":
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_PARENT_NOT_BLOCKED,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
+            return False
+        if not is_integration_park(
+            reason=current_reason,
+            block_kind=blocked_event_kind(
+                blocked["payload"] if blocked else None,
+            ),
+        ):
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_NOT_INTEGRATION_PARK,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
+            return False
+        if _operator_escalation_is_active(conn, parent_id):
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_OPERATOR_ESCALATION_ACTIVE,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
+            return False
+        if (
+            _matching_conflict_fixer_attempts(
                 conn,
                 root_id=root_id,
                 conflict_fingerprint=expected_fingerprint,
-            ) >= CONFLICT_FIXER_MAX_ATTEMPTS
-            or not _fixer_still_owns_parent_park(
-                conn,
-                parent_id=parent_id,
-                marker_id=marker_id,
-                expected_fingerprint=expected_fingerprint,
-                current_reason=current_reason,
             )
+            >= CONFLICT_FIXER_MAX_ATTEMPTS
         ):
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_BUDGET_EXHAUSTED,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
+            return False
+        if not _fixer_still_owns_parent_park(
+            conn,
+            parent_id=parent_id,
+            marker_id=marker_id,
+            expected_fingerprint=expected_fingerprint,
+            current_reason=current_reason,
+        ):
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_PARK_OWNERSHIP_LOST,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
             return False
 
         undone_parent = conn.execute(
@@ -27165,6 +27236,13 @@ def _resume_parent_for_completed_conflict_fixer(
             (new_status, parent_id),
         )
         if cur.rowcount != 1:
+            record_conflict_fixer_resume_declined(
+                conn,
+                child_id,
+                RESUME_DECLINED_UPDATE_RACE,
+                parent_id=parent_id,
+                root_id=root_id,
+            )
             return False
         resume_payload: dict[str, Any] = {
             "child_id": child_id,
