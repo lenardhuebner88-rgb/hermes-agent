@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -30,7 +33,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,6 +58,7 @@ fun SettingsScreen(
     form: SettingsFormState,
     onDictionaryChange: (String) -> Unit,
     onSnippetChange: (String) -> Unit,
+    onCloudEnabledChange: (Boolean) -> Unit,
     loginStatus: LoginStatus,
     onLoginClick: () -> Unit,
     onHermesHandoffClick: () -> Unit,
@@ -61,6 +68,11 @@ fun SettingsScreen(
         Modifier
             .fillMaxWidth()
             .background(deck.background)
+            // testTagsAsResourceId bridges Compose's testTag to UiAutomator's By.res() — the
+            // instrumented device test that renders this screen runs outside the Compose test
+            // tree and cannot resolve a semantics testTag any other way.
+            .semantics { testTagsAsResourceId = true }
+            .windowInsetsPadding(WindowInsets.statusBars)
             .verticalScroll(rememberScrollState())
             .padding(DictateMetrics.screenPadding),
     ) {
@@ -87,10 +99,10 @@ fun SettingsScreen(
             SwitchRow(stringResource(R.string.cloud_preferred_switch), form.cloudPreferred) { form.cloudPreferred = it }
             SwitchRow(stringResource(R.string.flow_polish_switch), form.flowPolish) { form.flowPolish = it }
             SwitchRow(stringResource(R.string.local_refine_switch), form.localRefine) { form.localRefine = it }
-            SliderRow(stringResource(R.string.bubble_size), form.bubbleSize.toFloat(), 70f..115f) {
+            SliderRow(stringResource(R.string.bubble_size), form.bubbleSize.toFloat(), BubbleAppearance.sizeStops) {
                 form.bubbleSize = it.toInt()
             }
-            SliderRow(stringResource(R.string.bubble_opacity), form.bubbleOpacity.toFloat(), 20f..100f) {
+            SliderRow(stringResource(R.string.bubble_opacity), form.bubbleOpacity.toFloat(), BubbleAppearance.opacityStops) {
                 form.bubbleOpacity = it.toInt()
             }
             SwitchRow(stringResource(R.string.bubble_shrink), form.bubbleShrinkIdle) { form.bubbleShrinkIdle = it }
@@ -168,7 +180,7 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(DictateMetrics.sectionGap))
         SectionCard(stringResource(R.string.section_cloud)) {
-            SwitchRow(stringResource(R.string.cloud_switch), form.cloudEnabled) { form.cloudEnabled = it }
+            SwitchRow(stringResource(R.string.cloud_switch), form.cloudEnabled, onCloudEnabledChange)
             Text(
                 stringResource(R.string.cloud_hint, DictateConfig.ALLOWED_HOST),
                 color = deck.textDim,
@@ -201,7 +213,7 @@ private fun ReadinessCard(
 ) {
     val deck = LocalDictate.current
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().testTag(SettingsTestTags.READINESS_CARD),
         shape = RoundedCornerShape(DictateMetrics.cardRadius),
         colors = CardDefaults.cardColors(containerColor = deck.surface),
     ) {
@@ -221,6 +233,7 @@ private fun ReadinessCard(
                     color = deck.success,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag(SettingsTestTags.READINESS_ALL_DONE),
                 )
                 return@Column
             }
@@ -229,6 +242,7 @@ private fun ReadinessCard(
                 color = deck.textPrimary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(SettingsTestTags.READINESS_PROGRESS),
             )
             Spacer(Modifier.height(DictateMetrics.rowGap))
             readiness.steps.forEach { step ->
@@ -238,17 +252,23 @@ private fun ReadinessCard(
                     ReadinessStepId.SELECT -> Triple(R.string.row_select, R.string.btn_select, onSelectClick)
                     ReadinessStepId.OVERLAY -> Triple(R.string.row_overlay, R.string.btn_overlay_enable, onOverlayClick)
                 }
-                ReadinessStepRow(stringResource(label), step.done, stringResource(buttonLabel), onClick)
+                ReadinessStepRow(
+                    stringResource(label),
+                    step.done,
+                    stringResource(buttonLabel),
+                    onClick,
+                    testTag = readinessStepTag(step.id),
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ReadinessStepRow(label: String, done: Boolean, buttonLabel: String, onClick: () -> Unit) {
+private fun ReadinessStepRow(label: String, done: Boolean, buttonLabel: String, onClick: () -> Unit, testTag: String) {
     val deck = LocalDictate.current
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        Modifier.fillMaxWidth().padding(vertical = 4.dp).testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(label, color = deck.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
@@ -294,15 +314,25 @@ private fun SwitchRow(label: String, checked: Boolean, onCheckedChange: (Boolean
     }
 }
 
+/**
+ * [stops] must be the exact evenly-spaced values [DictatePrefs] snaps to (see
+ * [BubbleAppearance]) — `steps` locks the thumb to those positions so the value shown here and
+ * the value persisted are always identical. Without it a drag could land on e.g. 92, the prefs
+ * setter silently snaps the stored value to 85, and the slider visibly jumps on the next
+ * recomposition (e.g. after a rotation reloads state from prefs).
+ */
 @Composable
-private fun SliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
+private fun SliderRow(label: String, value: Float, stops: List<Int>, onChange: (Float) -> Unit) {
     val deck = LocalDictate.current
     Column(Modifier.padding(vertical = 4.dp)) {
         Text(label, color = deck.textPrimary, fontSize = 14.sp)
         Slider(
             value = value,
             onValueChange = onChange,
-            valueRange = range,
+            valueRange = stops.first().toFloat()..stops.last().toFloat(),
+            // Compose's `steps` is the count of intermediate positions, i.e. one less than the
+            // number of gaps between stops.
+            steps = (stops.size - 2).coerceAtLeast(0),
             colors = SliderDefaults.colors(thumbColor = deck.accent, activeTrackColor = deck.accent),
         )
     }
@@ -346,16 +376,48 @@ private fun LoginRow(status: LoginStatus, onLoginClick: () -> Unit) {
             LoginStatus.Unreachable -> stringResource(R.string.login_state_unreachable) to deck.error
         }
         Text(stringResource(R.string.row_login), color = deck.textPrimary, fontSize = 15.sp, modifier = Modifier.weight(1f))
-        Text(text, color = color, fontSize = 13.sp)
+        Text(text, color = color, fontSize = 13.sp, modifier = Modifier.testTag(SettingsTestTags.LOGIN_STATUS))
         Spacer(Modifier.width(12.dp))
         if (status.showsPrimaryLoginButton()) {
-            Button(onClick = onLoginClick, colors = ButtonDefaults.buttonColors(containerColor = deck.accent)) {
+            Button(
+                onClick = onLoginClick,
+                colors = ButtonDefaults.buttonColors(containerColor = deck.accent),
+                modifier = Modifier.testTag(SettingsTestTags.LOGIN_PRIMARY_BUTTON),
+            ) {
                 Text(stringResource(R.string.btn_login))
             }
         } else {
-            OutlinedButton(onClick = onLoginClick) {
+            OutlinedButton(onClick = onLoginClick, modifier = Modifier.testTag(SettingsTestTags.LOGIN_SECONDARY_BUTTON)) {
                 Text(stringResource(R.string.btn_login_again))
             }
         }
     }
+}
+
+private fun readinessStepTag(id: ReadinessStepId): String = when (id) {
+    ReadinessStepId.MIC -> SettingsTestTags.READINESS_STEP_MIC
+    ReadinessStepId.ENABLE -> SettingsTestTags.READINESS_STEP_ENABLE
+    ReadinessStepId.SELECT -> SettingsTestTags.READINESS_STEP_SELECT
+    ReadinessStepId.OVERLAY -> SettingsTestTags.READINESS_STEP_OVERLAY
+}
+
+/**
+ * Stable UiAutomator anchors (`By.res(APP_ID, tag)`, once `testTagsAsResourceId` is set — see
+ * [SettingsScreen]) for the parts of this screen a device test needs to assert on without
+ * depending on rendered strings. Handed to the instrumented test that used to assert on
+ * `state_granted`/`state_selected`/`state_active` text, which this screen's collapsed
+ * "all done" readiness card no longer renders (see the readiness-card doc comment in
+ * `SettingsScreen`).
+ */
+object SettingsTestTags {
+    const val READINESS_CARD = "readiness_card"
+    const val READINESS_ALL_DONE = "readiness_all_done"
+    const val READINESS_PROGRESS = "readiness_progress"
+    const val READINESS_STEP_MIC = "readiness_step_mic"
+    const val READINESS_STEP_ENABLE = "readiness_step_enable"
+    const val READINESS_STEP_SELECT = "readiness_step_select"
+    const val READINESS_STEP_OVERLAY = "readiness_step_overlay"
+    const val LOGIN_STATUS = "login_status"
+    const val LOGIN_PRIMARY_BUTTON = "login_primary_button"
+    const val LOGIN_SECONDARY_BUTTON = "login_secondary_button"
 }

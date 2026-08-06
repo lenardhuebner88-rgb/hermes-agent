@@ -57,6 +57,64 @@ class SettingsPersistenceKeyTest {
     }
 
     @Test
+    fun `bubble opacity written through the new form still lands under overlay_bubble_opacity`() {
+        val form = SettingsFormState(DictatePrefs(context))
+
+        form.bubbleOpacity = 60
+
+        assertEquals(60, rawPrefs.getInt("overlay_bubble_opacity", -1))
+    }
+
+    @Test
+    fun `cloud-preferred toggle written through the new form still lands under cloud_preferred`() {
+        val form = SettingsFormState(DictatePrefs(context))
+
+        form.cloudPreferred = true
+
+        assertEquals(true, rawPrefs.getBoolean("cloud_preferred", false))
+    }
+
+    @Test
+    fun `local-refine toggle written through the new form still lands under local_refine`() {
+        val form = SettingsFormState(DictatePrefs(context))
+
+        form.localRefine = false
+
+        assertEquals(false, rawPrefs.getBoolean("local_refine", true))
+    }
+
+    @Test
+    fun `idle-shrink toggle written through the new form still lands under overlay_shrink_idle`() {
+        val form = SettingsFormState(DictatePrefs(context))
+
+        form.bubbleShrinkIdle = true
+
+        assertEquals(true, rawPrefs.getBoolean("overlay_shrink_idle", false))
+    }
+
+    @Test
+    fun `dictionary rules written through the settings screen's DictatePrefs path still land under dictionary_rules`() {
+        // dictionaryRules/snippetRules are the one pair SettingsFormState deliberately does NOT
+        // auto-persist (see its doc comment) — SettingsActivity's onDictionaryChanged/
+        // onSnippetChanged write to DictatePrefs directly, on the same debounced-push path as the
+        // personalization sync. That is the setter this test has to hit.
+        val prefs = DictatePrefs(context)
+
+        prefs.dictionaryRules = "hermes agent => Hermes Agent"
+
+        assertEquals("hermes agent => Hermes Agent", rawPrefs.getString("dictionary_rules", null))
+    }
+
+    @Test
+    fun `snippet rules written through the settings screen's DictatePrefs path still land under snippet_rules`() {
+        val prefs = DictatePrefs(context)
+
+        prefs.snippetRules = "signatur => Viele Gruesse"
+
+        assertEquals("signatur => Viele Gruesse", rawPrefs.getString("snippet_rules", null))
+    }
+
+    @Test
     fun `local recovery toggled off through the new form still clears last_recovery_text`() {
         rawPrefs.edit().putString("last_recovery_text", "leftover draft").apply()
         val form = SettingsFormState(DictatePrefs(context))

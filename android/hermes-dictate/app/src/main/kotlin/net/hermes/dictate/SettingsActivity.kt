@@ -11,6 +11,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +39,7 @@ class SettingsActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         prefs = DictatePrefs(this)
         form = SettingsFormState(prefs)
         // Third cleanup hook besides recorder start + IME service start: after a crash during
@@ -60,6 +62,7 @@ class SettingsActivity : ComponentActivity() {
                     form = form,
                     onDictionaryChange = ::onDictionaryChanged,
                     onSnippetChange = ::onSnippetChanged,
+                    onCloudEnabledChange = ::onCloudEnabledChanged,
                     loginStatus = loginViewModel.status,
                     onLoginClick = { startActivity(Intent(this, LoginActivity::class.java)) },
                     onHermesHandoffClick = ::handoffToHermesVoice,
@@ -78,9 +81,19 @@ class SettingsActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshReadiness()
-        // The user comes back here from LoginActivity — re-probe every time the screen resumes,
-        // not just once on create.
-        loginViewModel.refresh()
+        // Cloud opt-in gate (old refreshCloudRows() had the same `if (!enabled) return` before
+        // its probe): without opt-in, nothing is allowed to leave the device, including a probe
+        // GET against AUTH_PROBE_URL. The user comes back here from LoginActivity, so this also
+        // covers "re-probe every time the screen resumes", not just once on create.
+        if (form.cloudEnabled) loginViewModel.refresh()
+    }
+
+    private fun onCloudEnabledChanged(enabled: Boolean) {
+        form.cloudEnabled = enabled
+        // Turning the switch on is also a resume-equivalent moment for the login row: it just
+        // became visible and would otherwise show a stale/never-probed status until the next
+        // onResume (e.g. coming back from LoginActivity).
+        if (enabled) loginViewModel.refresh()
     }
 
     override fun onDestroy() {
