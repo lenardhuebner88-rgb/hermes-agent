@@ -1428,7 +1428,11 @@ guards and be dispatched inline, not via `_process_message_background()`
 ### Squash merges from stale branches silently revert recent fixes
 Before squash-merging a PR, ensure the branch is up to date with `main`
 (`git fetch origin main && git reset --hard origin/main` in the worktree,
-then re-apply the PR's commits). A stale branch's version of an unrelated
+then re-apply the PR's commits). **`git reset --hard` is a hard stop — ask the
+operator first, every time.** It is on the never-autonomous list in Canon
+`conventions-gates.md` alongside force-push and destructive FS operations; this
+recipe describes *what* to do once you have that approval, it does not grant it.
+A stale branch's version of an unrelated
 file will silently overwrite recent fixes on main when squashed. Verify
 with `git diff HEAD~1..HEAD` after merging — unexpected deletions are a
 red flag.
@@ -1465,11 +1469,24 @@ hermetic environment parity with CI (unset credential vars, TZ=UTC, LANG=C.UTF-8
 on a 16+ core developer machine with API keys set diverges from CI in ways
 that have caused multiple "works locally, fails in CI" incidents (and the reverse).
 
+**Test scope — targeted by default, the full suite is NOT the default.** Binding for
+Hermes, Claude, Codex and workers alike (Canon `conventions-gates.md`; the project
+`CLAUDE.md` carries the same rule, but Codex loads only this file):
+
+- While building or verifying: `scripts/run-affected.sh` — the tests your diff touches.
+- Before deploy/push: one collection sweep (`pytest --co -q tests/`) plus the affected
+  tests. Not the full suite.
+- The **full** suite runs nightly (`green-gate-heartbeat`), and on demand only when the
+  operator asks for it. It costs ~30 min.
+- Never have worker *and* verifier both run the full suite — that doubled cost is the
+  incident this rule exists for.
+
 ```bash
-scripts/run_tests.sh                                  # full suite, CI-parity
+scripts/run-affected.sh                               # DEFAULT while working
 scripts/run_tests.sh tests/gateway/                   # one directory
 scripts/run_tests.sh tests/agent/test_foo.py::test_x  # one test
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
+scripts/run_tests.sh                                  # full suite — nightly / on request only
 ```
 
 **Flake policy:** the runner auto-retries a failing test FILE once in a fresh
