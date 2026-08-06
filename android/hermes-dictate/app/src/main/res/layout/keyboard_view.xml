@@ -9,38 +9,52 @@
     android:paddingTop="8dp"
     android:paddingBottom="10dp">
 
-    <!-- Status line + cloud opt-in chip -->
-    <LinearLayout
+    <!-- Status line + cloud opt-in chip, with the live wave as an overlay over the same strip
+         while recording — fixed height reserved either way, so keys never shift when it toggles. -->
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="28dp"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:layout_height="28dp">
 
-        <TextView
-            android:id="@+id/status"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="@string/status_idle"
-            android:textColor="@color/text_dim"
-            android:textSize="13sp"
-            android:maxLines="1"
-            android:ellipsize="end" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-        <TextView
-            android:id="@+id/cloud_chip"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:background="@drawable/bg_chip"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:paddingTop="4dp"
-            android:paddingBottom="4dp"
-            android:text="@string/chip_on_device"
-            android:textColor="@color/text_dim"
-            android:textSize="12sp"
-            android:visibility="gone" />
-    </LinearLayout>
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/status_idle"
+                android:textColor="@color/text_dim"
+                android:textSize="13sp"
+                android:maxLines="1"
+                android:ellipsize="end" />
+
+            <TextView
+                android:id="@+id/cloud_chip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_chip"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:text="@string/chip_on_device"
+                android:textColor="@color/text_dim"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <net.hermes.dictate.OverlayWaveView
+            android:id="@+id/keyboard_wave"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/kb_bg"
+            android:visibility="gone"
+            android:importantForAccessibility="yes" />
+    </FrameLayout>
 
     <!-- Mic row: switcher | mic | backspace -->
     <FrameLayout

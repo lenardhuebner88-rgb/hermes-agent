@@ -3,6 +3,8 @@ package net.hermes.dictate
 import android.content.Context
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import java.io.File
 
 data class RecordedAudio(val bytes: ByteArray, val mimeType: String)
@@ -21,11 +23,29 @@ class CloudRecorder(
     interface Events {
         fun onMaxDuration()
         fun onRecorderError()
+        /** Same 0..100 meter scale [DictateOverlayService.onLevel]/[OverlayWaveView.level] use. */
+        fun onLevel(level: Int) {}
     }
 
     private var recorder: MediaRecorder? = null
     private var file: File? = null
     private var injectedAudio: RecordedAudio? = null
+
+    // getMaxAmplitude() throws once the recorder is released, so the poller only ever reads it
+    // through this field and is always cancelled BEFORE that field is nulled/released.
+    private val levelHandler = Handler(Looper.getMainLooper())
+    private val levelPoller = object : Runnable {
+        override fun run() {
+            val r = recorder ?: return
+            val amplitude = try {
+                r.maxAmplitude
+            } catch (_: IllegalStateException) {
+                return
+            }
+            events.onLevel(AudioLevel.fromMaxAmplitude(amplitude))
+            levelHandler.postDelayed(this, LEVEL_POLL_MS)
+        }
+    }
 
     /**
      * Set when the recorder hit max duration and stopped ITSELF: our later stop() call then
@@ -77,6 +97,7 @@ class CloudRecorder(
             r.start()
             recorder = r
             file = target
+            levelHandler.postDelayed(levelPoller, LEVEL_POLL_MS)
             true
         } catch (e: Exception) {
             runCatching { r.release() }
@@ -91,6 +112,7 @@ class CloudRecorder(
             injectedAudio = null
             return it
         }
+        levelHandler.removeCallbacks(levelPoller)
         val r = recorder ?: return null
         recorder = null
         val f = file
@@ -113,6 +135,7 @@ class CloudRecorder(
     }
 
     fun abort() {
+        levelHandler.removeCallbacks(levelPoller)
         recorder?.let { r ->
             runCatching { r.stop() }
             runCatching { r.release() }
@@ -129,6 +152,7 @@ class CloudRecorder(
 
     companion object {
         private const val FILE_PREFIX = "dictate-"
+        private const val LEVEL_POLL_MS = 50L
 
         /**
          * Deletes crash leftovers. Called on every recorder start AND on IME service creation,

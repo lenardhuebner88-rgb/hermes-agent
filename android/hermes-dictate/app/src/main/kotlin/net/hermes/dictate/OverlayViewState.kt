@@ -20,6 +20,10 @@ data class OverlayViewState(
     val tone: OverlayTone,
     val cancelEnabled: Boolean,
     val confirmAction: OverlayConfirmAction,
+    /** A second, icon-only action alongside [confirmAction] — currently only ever UNDO or NONE. */
+    val secondaryAction: OverlayConfirmAction = OverlayConfirmAction.NONE,
+    /** Whether the pill's result/error text row should render at all. */
+    val showMessage: Boolean = false,
     val hermesEnabled: Boolean,
     /** Whether this dictation runs, or would run, through the opt-in cloud recognizer. */
     val cloudMode: Boolean = false,
@@ -76,15 +80,17 @@ data class OverlayViewState(
                     tone = OverlayTone.CLOUD,
                     cancelEnabled = false,
                 )
-                // Undo existed only as a spoken phrase nobody could discover. In the success
-                // state the confirm slot is free, so the just-written text can be taken back
-                // with one visible tap.
+                // The confirm slot only ever shows the "done" checkmark now — no status word, no
+                // echoed text. Undo existed only as a spoken phrase nobody could discover; it gets
+                // its own icon-only secondary action instead of taking over the confirm slot, so
+                // it stays reachable without putting text back on screen.
                 UiStatus.Done -> active(
                     label = OverlayLabel.DONE,
                     body = committed ?: preview,
                     tone = OverlayTone.SUCCESS,
                     cancelEnabled = false,
-                    confirmAction = if (committed != null) {
+                    confirmAction = OverlayConfirmAction.NONE,
+                    secondaryAction = if (committed != null) {
                         OverlayConfirmAction.UNDO
                     } else {
                         OverlayConfirmAction.NONE
@@ -97,6 +103,7 @@ data class OverlayViewState(
                     tone = OverlayTone.SUCCESS,
                     cancelEnabled = true,
                     confirmAction = OverlayConfirmAction.COPY,
+                    showMessage = true,
                     hermesEnabled = committed != null,
                 )
                 is UiStatus.Failed -> active(
@@ -109,6 +116,7 @@ data class OverlayViewState(
                     } else {
                         OverlayConfirmAction.NONE
                     },
+                    showMessage = true,
                 )
             }
             // The recognizer that is actually in use overrides the per-status default, so the
@@ -122,6 +130,8 @@ data class OverlayViewState(
             tone: OverlayTone,
             cancelEnabled: Boolean,
             confirmAction: OverlayConfirmAction = OverlayConfirmAction.NONE,
+            secondaryAction: OverlayConfirmAction = OverlayConfirmAction.NONE,
+            showMessage: Boolean = false,
             hermesEnabled: Boolean = false,
         ) = OverlayViewState(
             expanded = true,
@@ -130,6 +140,8 @@ data class OverlayViewState(
             tone = tone,
             cancelEnabled = cancelEnabled,
             confirmAction = confirmAction,
+            secondaryAction = secondaryAction,
+            showMessage = showMessage,
             hermesEnabled = hermesEnabled,
         )
     }

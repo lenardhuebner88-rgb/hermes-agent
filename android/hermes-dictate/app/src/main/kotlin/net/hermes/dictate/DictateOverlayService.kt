@@ -546,10 +546,7 @@ class DictateOverlayService :
 
     override fun onPartial(text: String) = run(controller.recognizerPartial(text))
     override fun onFinal(text: String) = run(controller.recognizerFinal(text))
-    override fun onLevel(rmsDb: Float) {
-        val normalized = (((rmsDb + 2f) / 12f) * 100f).toInt().coerceIn(0, 100)
-        overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = normalized
-    }
+    override fun onLevel(rmsDb: Float) = updateWaveLevel(AudioLevel.fromRmsDb(rmsDb))
     override fun onError(failure: RecognizerFailure) {
         if (failure == RecognizerFailure.BUSY) dictation?.recreate()
         run(controller.recognizerError(failure))
@@ -561,6 +558,14 @@ class DictateOverlayService :
 
     override fun onRecorderError() {
         mainHandler.post { run(controller.recordingError()) }
+    }
+
+    // Cloud path's own level source (MediaRecorder.getMaxAmplitude polling in CloudRecorder),
+    // already normalized onto the same 0..100 scale as onLevel(rmsDb) above.
+    override fun onLevel(level: Int) = updateWaveLevel(level)
+
+    private fun updateWaveLevel(level: Int) {
+        overlayView?.findViewById<OverlayWaveView>(R.id.pill_wave)?.level = level
     }
 
     // --- Text output: preview stays inside the pill, only CommitSegment writes to the field ---
@@ -661,7 +666,8 @@ class DictateOverlayService :
         val listening = presentation.confirmAction == OverlayConfirmAction.STOP ||
             presentation.label == OverlayLabel.PROCESSING ||
             presentation.label == OverlayLabel.UPLOADING
-        view.findViewById<View>(R.id.pill_message)?.visibility = if (listening) View.GONE else View.VISIBLE
+        view.findViewById<View>(R.id.pill_message)?.visibility =
+            if (presentation.showMessage) View.VISIBLE else View.GONE
         view.findViewById<OverlayWaveView>(R.id.pill_wave)?.apply {
             visibility = if (listening) View.VISIBLE else View.GONE
             fillColor = toneColor
@@ -727,6 +733,27 @@ class DictateOverlayService :
                 }
                 OverlayConfirmAction.NONE -> null
             })
+        }
+        view.findViewById<ImageButton>(R.id.pill_undo)?.apply {
+            val visible = semantics.secondaryVisible
+            visibility = if (visible) View.VISIBLE else View.GONE
+            if (visible) {
+                contentDescription = getString(semantics.secondaryDescription)
+                setImageResource(semantics.secondaryIcon)
+                setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    // Not every field accepts ACTION_SET_TEXT. Saying "done" when the text is
+                    // still standing there would be the worse failure.
+                    if (editFocusedField(undoLast = true, requireCommitNode = true)) {
+                        lastPreview = ""
+                        applyStatus(UiStatus.Idle)
+                    } else {
+                        applyStatus(UiStatus.Failed(ErrorKind.UNDO_FAILED))
+                    }
+                }
+            } else {
+                setOnClickListener(null)
+            }
         }
     }
 
